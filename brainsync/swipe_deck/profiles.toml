@@ -1,0 +1,219 @@
+# BrainSwipe deck: invented dating profiles for the brain-controlled swipe demo.
+#
+# Every person here is made up. Render the cards with
+#     .venv/bin/python -c "from brainsync.profiles import load_deck, render_deck; render_deck(load_deck(), 'cards')"
+#
+# Each [[profile]] needs name, age (an integer), color (hex accent for the drawn avatar)
+# and 1 to 3 prompts as ["prompt", "answer"] pairs; detail is optional. Keep answers to
+# about 120 characters so they fit on the card without shrinking.
+
+[[profile]]
+name = "Priya"
+age = 29
+color = "#c86b5a"
+detail = "Product designer · Oakland"
+prompts = [
+    ["A shower thought I recently had", "If you microwave a burrito long enough it becomes a different burrito."],
+    ["My simple pleasures", "Farmers market peaches, a fresh notebook, and the first sip of a too-hot chai."],
+    ["We'll get along if", "You have opinions about fonts and are willing to lose arguments about them."],
+]
+
+[[profile]]
+name = "Marcus"
+age = 31
+color = "#5a8bc8"
+detail = "Nurse · San Leandro"
+prompts = [
+    ["Typical Sunday", "Twelve-hour shift recovery nap, then aggressively competitive Mario Kart."],
+    ["The key to my heart is", "Remembering how I take my coffee. (Black. Like my sense of humour after night shifts.)"],
+]
+
+[[profile]]
+name = "Sofia"
+age = 26
+color = "#9b6bc8"
+detail = "PhD student, marine biology · Santa Cruz"
+prompts = [
+    ["I geek out on", "Octopuses. Three hearts, blue blood, and they still text back faster than most men."],
+    ["Two truths and a lie", "I've touched a whale shark. I can't whistle. I've never lost a game of Uno."],
+    ["Together, we could", "Go tide-pooling at 6 a.m. and then get breakfast burritos like we earned them."],
+]
+
+[[profile]]
+name = "Kenji"
+age = 34
+color = "#5aa88b"
+detail = "Sous chef · Mission District"
+prompts = [
+    ["Unusual skills", "I can julienne a carrot in under ten seconds and fold a fitted sheet. Both, sometimes."],
+    ["My most irrational fear", "That someone will ask me to cook for them on a first date. I'll still do it."],
+]
+
+[[profile]]
+name = "Amara"
+age = 27
+color = "#c8a25a"
+detail = "Civil engineer · Berkeley"
+prompts = [
+    ["I'm convinced that", "Every bridge has a personality. The Bay Bridge is a golden retriever."],
+    ["Green flags I look for", "You return your shopping cart. You say thank you to bus drivers."],
+    ["First round is on me if", "You can name a bridge that isn't the Golden Gate."],
+]
+
+[[profile]]
+name = "Diego"
+age = 30
+color = "#c8785a"
+detail = "High school history teacher · Fremont"
+prompts = [
+    ["Dating me is like", "A field trip: there's a permission slip, a packed lunch, and I will count heads."],
+    ["I go crazy for", "Al pastor tacos, obscure Roman emperors, and the sound of rain on a car roof."],
+]
+
+[[profile]]
+name = "Hannah"
+age = 24
+color = "#6b9bc8"
+detail = "Climbing gym route setter · Emeryville"
+prompts = [
+    ["My simple pleasures", "Chalky hands, a good stretch, and a sandwich that has been planned for hours."],
+    ["I bet you can't", "Beat me at thumb wars. I've trained my whole life for this."],
+    ["This year, I really want to", "Learn to make sourdough without naming the starter. I've already failed."],
+]
+
+[[profile]]
+name = "Tavita"
+age = 33
+color = "#5ab0a8"
+detail = "Ferry deckhand · Alameda"
+prompts = [
+    ["Typical Sunday", "Ukulele on the porch, a big family lunch, and a nap that nobody is allowed to interrupt."],
+    ["The way to win me over is", "Wave at the ferry. Every crew member sees it. Every crew member appreciates it."],
+]
+
+[[profile]]
+name = "Leila"
+age = 28
+color = "#b85a8b"
+detail = "Data journalist · Downtown SF"
+prompts = [
+    ["A shower thought I recently had", "Socks are just tiny sleeping bags for feet."],
+    ["I'm looking for", "Someone who reads the footnotes and reports back on the good ones."],
+    ["Don't hate me if I", "Make a chart about our first date. It will be a very nice chart."],
+]
+
+[[profile]]
+name = "Jonah"
+age = 36
+color = "#8b9b5a"
+detail = "Urban beekeeper · Bernal Heights"
+prompts = [
+    ["Unusual skills", "I can tell how a hive is feeling by the hum. Today they're mostly fine."],
+    ["My love language is", "Honey. I will give you an alarming amount of honey."],
+]
+
+[[profile]]
+name = "Mei"
+age = 25
+color = "#c86b8b"
+detail = "Animator · Daly City"
+prompts = [
+    ["I geek out on", "The twelve principles of animation. Squash and stretch changed my life."],
+    ["Two truths and a lie", "I've drawn 4,000 frames of a cat. I hate cats. I own three cats."],
+    ["We'll get along if", "You do the voices when you read a menu out loud."],
+]
+
+[[profile]]
+name = "Andre"
+age = 32
+color = "#5a6bc8"
+detail = "Jazz bassist & bike mechanic · Oakland"
+prompts = [
+    ["The key to my heart is", "Show up to a gig, clap after the bass solo, and pretend you knew it was over."],
+    ["Biggest risk I've taken", "Quitting accounting to play music. My mom has mostly forgiven me."],
+]
+
+[[profile]]
+name = "Nadia"
+age = 35
+color = "#a86bc8"
+detail = "ER doctor · Palo Alto"
+prompts = [
+    ["My most irrational fear", "Geese. I have seen terrible things in the ER and nothing scares me like a goose."],
+    ["I'm looking for", "Someone calm in a crisis who also has strong feelings about which dumpling place is best."],
+    ["My simple pleasures", "Hot showers, cold brew, and a pager that stays quiet."],
+]
+
+[[profile]]
+name = "Ravi"
+age = 27
+color = "#5ac88b"
+detail = "Backend engineer · Sunnyvale"
+prompts = [
+    ["A shower thought I recently had", "Every 'quick sync' is a meeting with low self-esteem."],
+    ["Together, we could", "Find the best samosa in the South Bay. I have a spreadsheet. It has pivot tables."],
+]
+
+[[profile]]
+name = "Camila"
+age = 23
+color = "#c8915a"
+detail = "Dance teacher · Richmond"
+prompts = [
+    ["I bet you can't", "Keep a straight face during my salsa lesson. I'm very serious and very loud."],
+    ["Green flags I look for", "You dance badly in the kitchen without being asked."],
+    ["Typical Sunday", "Teaching a class of eight-year-olds, then lying on the floor for an hour."],
+]
+
+[[profile]]
+name = "Theo"
+age = 29
+color = "#6b8bc8"
+detail = "Park ranger · Marin Headlands"
+prompts = [
+    ["Dating me is like", "A good trail: some uphill, great views, and I'll point out every bird."],
+    ["Unusual skills", "I can identify forty birds by their calls and zero celebrities by their faces."],
+]
+
+[[profile]]
+name = "Imani"
+age = 31
+color = "#c85a6b"
+detail = "Pastry chef · Hayes Valley"
+prompts = [
+    ["The way to win me over is", "Tell me which croissant is your favourite and why. Wrong answers are welcome."],
+    ["I go crazy for", "Laminated dough, thrift-store cardigans, and old soul records on a Saturday morning."],
+    ["First round is on me if", "You can say 'pain au chocolat' without laughing."],
+]
+
+[[profile]]
+name = "Oscar"
+age = 38
+color = "#8bb05a"
+detail = "Community garden organiser · Mission"
+prompts = [
+    ["My simple pleasures", "A ripe tomato eaten over the sink. Nothing else comes close."],
+    ["I'm convinced that", "Zucchini is a conspiracy. You plant one and suddenly you own forty."],
+]
+
+[[profile]]
+name = "Yuna"
+age = 26
+color = "#5a9bb8"
+detail = "UX researcher · Mountain View"
+prompts = [
+    ["Don't hate me if I", "Ask you to think aloud while you order. It's a habit. I'm taking notes."],
+    ["Two truths and a lie", "I've been to 23 countries. I sleep with socks on. I like cilantro."],
+    ["This year, I really want to", "Finally finish a puzzle with more than 1,000 pieces."],
+]
+
+[[profile]]
+name = "Farah"
+age = 30
+color = "#b8785a"
+detail = "Architect · Albany"
+prompts = [
+    ["I geek out on", "Staircases. Show me a good spiral staircase and I'm yours for the afternoon."],
+    ["My love language is", "Sending you photos of interesting windows with no context."],
+    ["We'll get along if", "You think an IKEA trip counts as a date. Because it does."],
+]

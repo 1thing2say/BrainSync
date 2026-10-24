@@ -5,24 +5,32 @@
     python -m brainsync.stimulus -c one_target_15 --no-wait     # single-target trials
     python -m brainsync.stimulus --free --feedback stdin        # live demo: cue box from a decoder
     python -m brainsync.stimulus --free --feedback stdin --hold-still   # still until the first line
+    python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
 
 Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
 flushed right after the flip that shows the event. Once the window is up and its measured
 refresh has passed the check against [display] refresh_hz (or --refresh auto adopted it),
 "measured refresh: <x> Hz" goes to stderr; a refused rate exits with code 2 before that
 line. Space starts, Escape quits.
+
+With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card between
+the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
+lights target k's box (see brainsync.stimulus.feedback).
 """
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import secrets
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 from typing import TextIO
 
-from .config import (DEFAULT_CONFIG, StimulusConfig, config_warnings, load_config, override,
-                     session_trials)
-from .display import (MARKER_CLOCKS, Aborted, MarkerWriter, cued_frames, free_frames, play,
-                      refresh_mismatch)
+from .config import (CARD_ASPECT, DEFAULT_CONFIG, Card, StimulusConfig, config_warnings,
+                     load_config, override, session_trials)
+from .display import (MARKER_CLOCKS, Aborted, MarkerWriter, card_paths, cued_frames,
+                      free_frames, play, refresh_mismatch)
 from .flicker import frame_luminances, frames_per_cycle, phase_pi
 
 
@@ -54,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hold-still", action="store_true",
                    help="with --feedback stdin: show the targets still (no flicker) until "
                         "the first feedback line, e.g. while a decoder calibrates")
+    p.add_argument("--cards", metavar="DIR",
+                   help="free run: show DIR/*.png (sorted by name) as a profile card between "
+                        "the targets; 'card <k>' and 'flash <k>' lines on stdin drive it")
     p.add_argument("--markers", choices=sorted(MARKER_CLOCKS), default="unix",
                    help="clock stamped on stderr event markers, or 'none' to print none "
                         "(default unix)")
@@ -75,7 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _plan_lines(cfg: StimulusConfig, seed: int, free: bool) -> list[str]:
+def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
+                cards: Sequence[Path] = ()) -> list[str]:
     hz = cfg.refresh
     lines = [
         f"config {cfg.name}" + (f" ({cfg.path})" if cfg.path else ""),
@@ -88,6 +100,12 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool) -> list[str]:
         lines.append(f"  target {t.index}  label {t.label!r}  {t.freq:.3f} Hz  phase "
                      f"{phase_pi(t.phase):.2f} pi  {frames_per_cycle(t.freq, hz):.3f} "
                      f"frames/cycle  centre ({x:+.3f}, {y:+.3f})")
+    if cards:
+        c = cfg.card_spec
+        flash = f"flash {c.flash_s:g} s" + (" in the cue colour" if not c.flash_colors else "")
+        lines.append(f"cards: {len(cards)} card(s) from {cards[0].parent}, centred, "
+                     f"{c.height:g} screen heights high ({c.height * CARD_ASPECT:.3f} wide "
+                     f"at 2:3), {flash}")
     if free:
         lines.append("free run: every target flickers until Escape, --seconds or EOF on "
                      "--feedback stdin")
@@ -106,10 +124,11 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool) -> list[str]:
     return lines
 
 
-def print_plan(cfg: StimulusConfig, seed: int, free: bool, out: TextIO | None = None) -> None:
-    """Targets and (for a cued session) the trial order, to stdout."""
+def print_plan(cfg: StimulusConfig, seed: int, free: bool, out: TextIO | None = None,
+               cards: Sequence[Path] = ()) -> None:
+    """Targets, any cards and (for a cued session) the trial order, to stdout."""
     stream = sys.stdout if out is None else out
-    stream.write("\n".join(_plan_lines(cfg, seed, free)) + "\n")
+    stream.write("\n".join(_plan_lines(cfg, seed, free, cards)) + "\n")
 
 
 def _configure(args: argparse.Namespace) -> StimulusConfig:
@@ -136,12 +155,16 @@ def _check_refresh(cfg: StimulusConfig, args: argparse.Namespace,
     return None
 
 
-def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int) -> int:
+def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
+                 cards: Sequence[Path] = ()) -> int:
     from .display import PsychoPyRenderer
     from .feedback import FeedbackReader
 
-    renderer = PsychoPyRenderer(cfg)
+    renderer = PsychoPyRenderer(cfg, cards=cards) if cards else PsychoPyRenderer(cfg)
     try:
+        if cards:
+            print(f"loaded {len(cards)} card(s) from {cards[0].parent}", file=sys.stderr,
+                  flush=True)
         measured = renderer.measure_refresh()
         checked = _check_refresh(cfg, args, measured)
         if checked is None:
@@ -158,13 +181,18 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int) -> in
                 print("aborted before start", file=sys.stderr)
                 return 1
         if args.free:
-            reader = (FeedbackReader(sys.stdin, cfg.n_targets).start()
+            reader = (FeedbackReader(sys.stdin, cfg.n_targets, n_cards=len(cards)).start()
                       if args.feedback == "stdin" else None)
+            # without feedback nothing can swap the card, so card 0 stays up
+            card = (None if not cards else (lambda: 0) if reader is None
+                    else (lambda: reader.card))
             frames = free_frames(cfg, args.seconds,
                                  cue=None if reader is None else (lambda: reader.current),
                                  stop=None if reader is None else (lambda: reader.done),
                                  hold=None if reader is None or not args.hold_still
-                                 else (lambda: not reader.heard))
+                                 else (lambda: not reader.heard),
+                                 card=card,
+                                 flash=None if reader is None else (lambda: reader.flash))
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0
@@ -186,21 +214,27 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--seconds and --feedback need --free")
     if args.hold_still and args.feedback != "stdin":
         p.error("--hold-still needs --free --feedback stdin")
+    if args.cards is not None and not args.free:
+        p.error("--cards needs --free")
     if args.seconds is not None and args.seconds <= 0:
         p.error(f"--seconds must be positive, got {args.seconds}")
     try:
         cfg = _configure(args)
+        cards = card_paths(args.cards) if args.cards is not None else []
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if cards and cfg.card is None:
+        # cards in use: default [card] settings, so the overlap check below covers them
+        cfg = dataclasses.replace(cfg, card=Card())
     for w in config_warnings(cfg):
         print(f"warning: {w}", file=sys.stderr)
     seed = args.seed if args.seed is not None else secrets.randbelow(2**31)
     if args.plan:
-        print_plan(cfg, seed, args.free)
+        print_plan(cfg, seed, args.free, cards=cards)
         return 0
     try:
-        return _run_display(cfg, args, seed)
+        return _run_display(cfg, args, seed, cards)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
