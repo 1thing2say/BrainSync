@@ -67,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "fake_dir())")
     p.add_argument("--hold-cue", action=argparse.BooleanOptionalAction, default=None,
                    help="keep the cue box up through the flicker (default: as the config says)")
+    p.add_argument("--depth", type=float, default=None,
+                   help="flicker modulation depth in (0, 1] (default: as the config says)")
     p.add_argument("--seed", type=int, help="trial order seed (default: random)")
     p.add_argument("--port", default=None, help="serial port (default: auto-detect)")
     p.add_argument("--no-voice", action="store_true", help="no spoken prompts")
@@ -97,6 +99,8 @@ def _check_args(args: argparse.Namespace) -> list[str]:
         bad.append(f"--latency must lie in [0, --stim-s), got {args.latency}")
     if args.warmup < 0:
         bad.append(f"--warmup must be >= 0, got {args.warmup}")
+    if args.depth is not None and not 0.0 < args.depth <= 1.0:
+        bad.append(f"--depth must be in (0, 1], got {args.depth}")
     window = args.stim_s - args.latency
     if args.cue_s + args.rest_s < window - 1e-9:
         bad.append(f"--cue-s + --rest-s = {args.cue_s + args.rest_s:g} s is shorter than the "
@@ -146,6 +150,8 @@ def _stimulus_args(args: argparse.Namespace, blocks: int) -> list[str]:
         out.append("--ignore-refresh")
     if args.hold_cue is not None:
         out.append("--hold-cue" if args.hold_cue else "--no-hold-cue")
+    if args.depth is not None:
+        out += ["--depth", repr(args.depth)]
     if args.seed is not None:
         out += ["--seed", str(args.seed)]
     return out

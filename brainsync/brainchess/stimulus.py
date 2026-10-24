@@ -403,7 +403,7 @@ def frame_values(snap: BoardSnapshot, frame_index: int,
         raise ValueError(f"the board stimulus needs a two-target config, got "
                          f"{cfg.n_targets} target(s) in {cfg.name!r}")
     i = 0 if snap.holding else frame_index
-    lum = frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform)
+    lum = frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform, cfg.depth)
     return square_luminances(snap.groups, lum[0], lum[1]), lum[:2].copy()
 
 
@@ -481,8 +481,8 @@ def plan_lines(cfg: StimulusConfig, flip: bool) -> list[str]:
         f"({style.BOARD_X:+.3f}, {style.BOARD_Y:+.3f}), "
         + ("black at the bottom (h8 bottom left)" if flip
            else "white at the bottom (a1 bottom left)"),
-        f"  {cfg.waveform} flicker, refresh {hz:g} Hz; squares and panels share the "
-        "target frequencies; flickering squares stay grey with a 15 / 17 tag",
+        f"  {cfg.waveform} flicker, depth {cfg.depth:g}, refresh {hz:g} Hz; squares and panels "
+        "share the target frequencies; flickering squares stay grey with a 15 / 17 tag",
     ]
     for t in cfg.targets:
         x, y = t.pos

@@ -112,6 +112,20 @@ def test_stimulus_args_pass_timing_through() -> None:
     stim_parser().parse_args(out + ["--plan"])
 
 
+def test_stimulus_args_pass_depth_through() -> None:
+    plain = record._stimulus_args(record.build_parser().parse_args([]), blocks=1)
+    assert "--depth" not in plain   # the config's depth stands
+    args = record.build_parser().parse_args(["--depth", "0.5"])
+    out = record._stimulus_args(args, blocks=1)
+    assert out[out.index("--depth") + 1] == "0.5"
+    from brainsync.stimulus.__main__ import build_parser as stim_parser
+    assert stim_parser().parse_args(out + ["--plan"]).depth == 0.5
+    for bad in ("0", "1.5"):
+        problems = record._check_args(record.build_parser().parse_args(["--depth", bad]))
+        assert any("--depth must be in (0, 1]" in p for p in problems)
+    assert record._check_args(args) == []
+
+
 def test_stimulus_command_adds_nothing() -> None:
     cmd = launch.stimulus_command(["-c", "two_targets"])
     assert cmd == [sys.executable, "-m", "brainsync.stimulus", "-c", "two_targets"]
@@ -206,26 +220,22 @@ def test_launch_times_out_and_kills(tmp_path: Path) -> None:
         launch.launch_stimulus([], command=_script(code), timeout=0.5, log_dir=tmp_path)
 
 
-def test_speak_silent_prints_only(monkeypatch: pytest.MonkeyPatch,
-                                  capsys: pytest.CaptureFixture) -> None:
+def test_speak_prints_and_hands_over_to_cartesia(monkeypatch: pytest.MonkeyPatch,
+                                                 capsys: pytest.CaptureFixture) -> None:
+    from brainsync import voice
+
     def boom(*a: object, **k: object) -> None:
-        raise AssertionError("say must not run")
+        raise AssertionError("no subprocess may speak")
 
     monkeypatch.setattr(launch.subprocess, "Popen", boom)
+    seen: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(voice, "speak", lambda text, voice_id=None: seen.append((text, voice_id)))
     launch.speak("look at the square", False)
-    assert "[say] look at the square" in capsys.readouterr().err
-    monkeypatch.setattr(launch.shutil, "which", lambda name: None)
-    launch.speak("no say here", True)
-    assert "no say here" in capsys.readouterr().err
-
-
-def test_speak_passes_voice_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
-    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/say")
-    monkeypatch.setattr(launch.subprocess, "Popen", lambda cmd, **k: seen.append(cmd))
-    launch.speak("hello", "Samantha")
-    launch.speak("hi", True)
-    assert seen == [["say", "-v", "Samantha", "hello"], ["say", "hi"]]
+    assert "[speak] look at the square" in capsys.readouterr().err and seen == []
+    launch.speak("hello", True)
+    launch.speak("hi", "a-voice-id")
+    assert seen == [("hello", None), ("hi", "a-voice-id")]
+    assert not hasattr(launch, "shutil")                     # no `say` lookup left
 
 
 FAKE_STIMULUS = """

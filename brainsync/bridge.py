@@ -24,10 +24,12 @@ say bye and end the run, or send a hello at 60 Hz before the real overlay did. C
 that send no Origin (not a browser: the tests, websocat) are let in.
 
 Server -> client:
-    config  {"type": "config", "name", "waveform", "refresh_hz", "refresh_tolerance_hz",
-             "targets": [{"label", "freq", "phase", "x", "y", "size"}]}  on connect; x, y
-            are the square's centre and size its side, in screen heights from the
-            viewport centre with y up (PsychoPy height units); phase in radians
+    config  {"type": "config", "name", "waveform", "depth", "refresh_hz",
+             "refresh_tolerance_hz", "targets": [{"label", "freq", "phase", "x", "y",
+             "size"}]}  on connect; x, y are the square's centre and size its side, in
+            screen heights from the viewport centre with y up (PsychoPy height units);
+            phase in radians; depth in (0, 1] is the modulation depth (luminance
+            0.5 +/- depth/2), absent means 1
     phase   {"type": "phase", "phase": wait|calibrate|run|stop, "flicker": bool,
              "seconds": number|null, "text"}  flicker false: squares still at 0.5;
             stop: hide the squares and show the text
@@ -76,7 +78,7 @@ ORIGINS = re.compile(r"chrome-extension://[a-p]{32}|https?://(127\.0\.0\.1|local
 
 def config_message(cfg: StimulusConfig) -> dict[str, Any]:
     """The "config" message: targets with centre (x, y) and side in screen heights, y up."""
-    return {"type": "config", "name": cfg.name, "waveform": cfg.waveform,
+    return {"type": "config", "name": cfg.name, "waveform": cfg.waveform, "depth": cfg.depth,
             "refresh_hz": cfg.display.refresh_hz,
             "refresh_tolerance_hz": cfg.display.refresh_tolerance_hz,
             "targets": [{"label": t.label, "freq": t.freq, "phase": t.phase,

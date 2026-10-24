@@ -19,7 +19,7 @@ from brainsync.brainchess.trace import Window
 from brainsync.brainchess.stimulus import (BoardSnapshot, BoardState, Command, CommandReader,
                                            arrow_vertices, check_layout, frame_values,
                                            parse_command, square_colors, square_luminances)
-from brainsync.stimulus.config import available_configs, load_config
+from brainsync.stimulus.config import available_configs, load_config, override
 from brainsync.stimulus.flicker import frame_luminances
 
 G0 = "0" * 32 + "1" * 32
@@ -243,6 +243,18 @@ def test_frame_values_hold_and_go():
         frame_values(running, 0, one)
 
 
+def test_frame_values_follow_the_config_depth():
+    cfg = override(load_config("chess"), depth=0.5)
+    running = BoardSnapshot(groups=G0, holding=False)
+    for i in (0, 1, 7, 123):
+        sq, pn = frame_values(running, i, cfg)
+        lum = frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform, 0.5)
+        np.testing.assert_array_equal(pn, lum)
+        np.testing.assert_array_equal(sq[:32], lum[0])
+        assert np.all((pn >= 0.25) & (pn <= 0.75))
+    assert "  sine flicker, depth 0.5, refresh 60 Hz" in "\n".join(bs.plan_lines(cfg, False))
+
+
 def test_arrow_vertices():
     v = arrow_vertices(12, 28)                     # e2 -> e4, straight up
     assert v.shape == (7, 2)
@@ -343,6 +355,7 @@ def test_plan_via_main(capsys):
     assert "'PLAY'" in out and "'BACK'" in out
     assert "clear the board edge by 0.045" in out and "grey with a 15 / 17 tag" in out
     assert "at least 1.474:1" in out
+    assert "sine flicker, depth 1, refresh 60 Hz" in out
     assert "15-25 Hz" in err                              # photosensitivity warning
     assert bs.main(["--plan", "--flip"]) == 0
     assert "black at the bottom (h8 bottom left)" in capsys.readouterr().out
