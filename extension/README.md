@@ -44,8 +44,11 @@ phase again. On any other Instagram page (Home, Messages) the squares are hidden
 scrolls are refused. Only a visible tab where Start was pressed scrolls.
 
 The HUD in the bottom-left corner shows the server connection, the phase and its prompt,
-the measured refresh and dropped frames, and the last scroll result. It never takes
-clicks and stays clear of the video.
+the measured refresh and dropped frames, the last scroll result, and the EEG board:
+"EEG: not connected" (no USB receiver), "connecting…", "connected, waiting for data",
+"connected, receiving data", "no data", "could not connect", or "not used" in `--manual`
+mode. Everything but "receiving data" and "not used" is shown in red. Without a server
+the EEG line reads "unknown". It never takes clicks and stays clear of the video.
 
 To use another address: in the service worker console (chrome://extensions > BrainScroll
 > service worker) run `chrome.storage.local.set({wsUrl: "ws://127.0.0.1:9000"})`.
@@ -81,11 +84,18 @@ the gap there is 0.019 and the outline stays on screen. A layout that does not f
 with no gap logs a warning in the page console.
 
 Scrolling: the feed container is the scrollable ancestor of the reel `<video>` elements
-that snaps on the y axis (else the largest visible one, else the page). It is scrolled
-by one screen, smoothly, and checked 700 ms later: scrollTop moved, or the most visible
-video changed. If not, the worker presses ArrowUp or ArrowDown as a trusted key through
-`chrome.debugger`, and the ack says `debugger`. At the top of the feed an "up" is not
-tried at all (`ok: false`), so the debugger is not attached for nothing.
+that snaps on the y axis (else the largest visible one, else the page). It is scrolled,
+smoothly, so that the reel above or below the one showing takes its place, and it counts
+only when another reel shows within 1.5 s: the URL changed (`/reels/<id>/`) or the most
+visible video is another one. On instagram.com, scrolling one screen height instead
+sometimes snapped back to the same reel and was still reported as a success. If no
+other reel shows, the worker presses ArrowUp or ArrowDown as a trusted key through
+`chrome.debugger`, and the ack says `debugger`. On the first reel an "up" is not tried
+at all (`ok: false`), so the debugger is not attached for nothing.
+
+The tab must be the active tab of a window in front: Chrome marks a covered or
+background tab hidden, and a hidden tab neither flickers nor scrolls (its ack is
+`ok: false`, method `none`).
 
 ## Permissions
 

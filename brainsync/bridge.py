@@ -8,14 +8,14 @@
             ...
 
 The server runs an asyncio loop on a daemon thread, so the decoder loop stays a plain
-blocking loop. Every message is one JSON text frame holding an object with a "type".
-Each client gets the config as soon as it connects, then the
-current phase (a "wait" phase until the decoder sends one), so a browser tab that opens
-or reloads mid-run catches up. Everything sent is broadcast to all clients. A
-{"type": "ping"} goes out every ``ping_s`` (20 s) because Chrome stops an MV3 extension's
-service worker after 30 s without events, and the websockets library's protocol-level
-pings do not reach the extension's code. Malformed or unknown client messages are noted on
-stderr and ignored. websockets (the ``reels`` extra) is imported only by start().
+blocking loop. Every message is one JSON text frame holding an object with a "type". Each
+client gets the config as soon as it connects, then the current phase (a "wait" phase
+until the decoder sends one) and the EEG board's state, so a browser tab that opens or
+reloads mid-run catches up. Everything sent is broadcast to all clients. A {"type":
+"ping"} goes out every ``ping_s`` (20 s) because Chrome stops an MV3 extension's service
+worker after 30 s without events, and the websockets library's protocol-level pings do not
+reach the extension's code. Malformed or unknown client messages are noted on stderr and
+ignored. websockets (the ``reels`` extra) is imported only by start().
 
 Only the extension and pages served from this machine may connect: a handshake whose
 Origin is neither chrome-extension://<id> nor http(s)://127.0.0.1 or localhost (any port)
@@ -34,6 +34,8 @@ Server -> client:
     cue     {"type": "cue", "target": -1|0|1}  box around the committed target (-1: none)
     scroll  {"type": "scroll", "dir": up|down, "id": increasing int}
     status  {"type": "status", "text"}  optional HUD text
+    eeg     {"type": "eeg", "state": unknown|absent|connecting|connected|streaming|no-data|
+             error|unused, "text"}  the EEG board, for the HUD's EEG line
     ping    {"type": "ping"}  every 20 s, ignored by clients
 Client -> server:
     hello    {"type": "hello", "agent", "url", "refresh_hz", "dropped", "accepted": true}
@@ -64,6 +66,8 @@ PORT = 8765
 PING_S = 20.0
 EVENT_TYPES = frozenset({"bye", "scrolled", "frames"})
 PHASES = ("wait", "calibrate", "run", "stop")
+EEG_STATES = ("unknown", "absent", "connecting", "connected", "streaming", "no-data", "error",
+              "unused")
 # Chrome extension ids are 32 letters a-p; the mock page is served by http.server.
 ORIGINS = re.compile(r"chrome-extension://[a-p]{32}|https?://(127\.0\.0\.1|localhost)(:\d+)?")
 
@@ -102,7 +106,15 @@ def status_message(text: str) -> dict[str, Any]:
     return {"type": "status", "text": str(text)}
 
 
+def eeg_message(state: str, text: str = "") -> dict[str, Any]:
+    """The EEG board's state for the overlay's EEG line."""
+    if state not in EEG_STATES:
+        raise ValueError(f"EEG state must be one of {EEG_STATES}, got {state!r}")
+    return {"type": "eeg", "state": state, "text": str(text)}
+
+
 DEFAULT_PHASE = phase_message("wait", False, None, "Waiting for the decoder...")
+DEFAULT_EEG = eeg_message("unknown")
 
 
 def parse_client_message(text: str | bytes) -> dict[str, Any] | None:
@@ -146,6 +158,7 @@ class Bridge:
         self.config = dict(config_message or {"type": "config"})
         self.ping_s = float(ping_s)
         self.phase: dict[str, Any] = dict(DEFAULT_PHASE)
+        self.eeg: dict[str, Any] = dict(DEFAULT_EEG)
         self.ignored = 0            # malformed or unknown client messages
         self._clients: set[ServerConnection] = set()
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -252,14 +265,14 @@ class Bridge:
     # -- outgoing --------------------------------------------------------------------------
 
     def send(self, msg: dict[str, Any]) -> None:
-        """Broadcast one message to every client; a "phase" is also kept for late joiners."""
+        """Broadcast one message to every client; "phase" and "eeg" are also kept for late
+        joiners."""
         if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
             raise ValueError(f"a message must be a dict with a string \"type\", got {msg!r}")
         text = json.dumps(msg)          # fail here, in the caller's thread, if unserialisable
         loop = self._loop
         if loop is None or not self.running:
-            if msg["type"] == "phase":
-                self.phase = dict(msg)
+            self._keep(dict(msg))
             return
         try:
             loop.call_soon_threadsafe(self._send_now, dict(msg), text)
@@ -269,9 +282,14 @@ class Bridge:
     def _send_now(self, msg: dict[str, Any], text: str) -> None:
         from websockets.asyncio.server import broadcast
 
+        self._keep(msg)
+        broadcast(self._clients, text)
+
+    def _keep(self, msg: dict[str, Any]) -> None:
         if msg["type"] == "phase":
             self.phase = msg
-        broadcast(self._clients, text)
+        elif msg["type"] == "eeg":
+            self.eeg = msg
 
     def _broadcast(self, msg: dict[str, Any]) -> None:
         from websockets.asyncio.server import broadcast
@@ -284,10 +302,11 @@ class Bridge:
         from websockets.asyncio.server import broadcast
         from websockets.exceptions import ConnectionClosed
 
-        # config and phase go out and the client joins the broadcast set in one step,
-        # without yielding to the loop, so no message sent meanwhile is missed
+        # config, phase and EEG state go out and the client joins the broadcast set in one
+        # step, without yielding to the loop, so no message sent meanwhile is missed
         broadcast([conn], json.dumps(self.config))
         broadcast([conn], json.dumps(self.phase))
+        broadcast([conn], json.dumps(self.eeg))
         self._clients.add(conn)
         try:
             async for text in conn:

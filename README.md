@@ -381,12 +381,23 @@ The real run (board, Chrome on instagram.com/reels with the extension, 30 s base
 .venv/bin/python -m brainsync.reels
 ```
 
+It looks for the board's USB receiver before anything else. With none plugged in, the
+terminal says "no EEG device connected" (listing the device names it looked for) and the
+overlay shows "No EEG device connected. Plug in the Cerelog X8 USB receiver." It waits
+`--wait-device` (120 s) for the receiver, then exits 1. If the receiver is there but the
+headset does not answer, the overlay says "Could not connect to the EEG board". After
+connecting it waits up to 5 s for the first samples, so a receiver whose headset is
+switched off is reported as "no data" rather than as connected. The overlay's corner
+panel has an EEG line that follows these steps (not connected, connecting, receiving
+data, no data; "not used" in `--manual` mode).
+
 One status line per window goes to stderr. Each scroll and a summary (scrolls, acks,
 the last refresh and drop count) go to stdout. `--log FILE` writes JSON lines with every
 decision, scroll, reset and browser report. Exit codes:
 
 - 0: the run ended on time, Ctrl-C or Escape in the browser.
-- 1: no browser said hello within `--wait-browser` (120 s), the refresh was wrong, the
+- 1: no EEG device was found within `--wait-device` (120 s) or it would not connect,
+  no browser said hello within `--wait-browser` (120 s), the refresh was wrong, the
   port was taken, calibration failed, or the board sent nothing for 5 s.
 - 2: bad arguments or config. `-c two_targets` is refused because its labels are not
   up/down.
@@ -492,7 +503,7 @@ and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11
 `test_extension.py` 12. Without the `reels` extra the 10 browser tests in
 `test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
 checks the flicker fixture against `brainsync.stimulus.flicker`, the manifest and the
-mock page, runs `node --check` on every script and runs the 57 node tests (the flicker
+mock page, runs `node --check` on every script and runs the 65 node tests (the flicker
 port within 1e-9 of the Python luminance, the overlay's geometry, refresh meter and
 protocol state machine, the scroller, and the service worker against a fake `chrome`
 and WebSocket). Node 24 reads `--test` arguments as globs, so

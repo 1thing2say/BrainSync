@@ -507,12 +507,87 @@ test("remaining seconds count down from the phase message", () => {
 
 // ------------------------------------------------------------------ scroller pure parts
 
-test("scroller judges movement on scrollTop or the most visible video", () => {
+test("scroller judges movement on a new reel: URL or most visible video", () => {
   const v1 = {}, v2 = {};
-  assert.ok(S.moved({ top: 0, video: v1 }, { top: 900, video: v1 }));
-  assert.ok(S.moved({ top: 0, video: v1 }, { top: 0, video: v2 }));
-  assert.ok(!S.moved({ top: 0, video: v1 }, { top: 0.5, video: v1 }));
-  assert.ok(!S.moved({ top: null, video: null }, { top: null, video: null }));
+  assert.ok(S.moved({ url: "/reels/a/", video: v1 }, { url: "/reels/b/", video: v1 }));
+  assert.ok(S.moved({ url: "/reels/a/", video: v1 }, { url: "/reels/a/", video: v2 }));
+  // scrolled a little and snapped back to the same reel: not a move (seen on instagram.com)
+  assert.ok(!S.moved({ url: "/reels/a/", video: v1 }, { url: "/reels/a/", video: v1 }));
+  assert.ok(!S.moved({ url: null, video: null }, { url: null, video: null }));
+});
+
+test("scroller neighbour: nearest reel above or below, never an overlapping one", () => {
+  const r = (top) => ({ top, bottom: top + 1000 });
+  const cur = r(0);
+  const rects = [r(-2000), r(-1000), r(300), r(1000), r(2000)];
+  assert.deepEqual(S.neighbour(cur, rects, "down"), r(1000));   // 300 overlaps the current reel
+  assert.deepEqual(S.neighbour(cur, rects, "up"), r(-1000));
+  assert.equal(S.neighbour(cur, [r(1000)], "up"), null);
+  assert.equal(S.neighbour(cur, [], "down"), null);
+});
+
+/** A snap feed of ``n`` reels, each one <video> 1000 px tall; ``snapBack`` undoes scrolls. */
+function fakeFeed(n, { snapBack = false, loaded = n } = {}) {
+  const H = 1000;
+  const loc = { href: "https://www.instagram.com/reels/r0/" };
+  const feed = {
+    scrollTop: 0, clientHeight: H, scrollHeight: n * H, parentElement: null, scrolls: [],
+    contains: () => true,
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: 600, bottom: H }),
+    scrollBy({ top }) {
+      this.scrolls.push(top);
+      if (snapBack) return;
+      this.scrollTop = Math.max(0, Math.min(this.scrollHeight - H, this.scrollTop + top));
+      loc.href = "https://www.instagram.com/reels/r" + Math.round(this.scrollTop / H) + "/";
+    },
+  };
+  const videos = Array.from({ length: loaded }, (_, i) => ({
+    parentElement: feed,
+    getBoundingClientRect: () => ({ left: 0, right: 600, top: i * H - feed.scrollTop,
+                                    bottom: (i + 1) * H - feed.scrollTop }),
+  }));
+  const win = {
+    innerWidth: 1500, innerHeight: H,
+    getComputedStyle: () => ({ overflowY: "scroll", scrollSnapType: "y mandatory" }),
+  };
+  const doc = {
+    location: loc, defaultView: win, scrollingElement: { scrollHeight: H, clientHeight: H },
+    querySelectorAll: () => videos,
+  };
+  return { feed, doc, win, loc };
+}
+
+test("scroll moves exactly one reel and reports the new reel", async () => {
+  const { feed, doc, win, loc } = fakeFeed(5);
+  assert.deepEqual(await S.scroll("down", { doc, win, waitMs: 0 }),
+    { ok: true, method: "container", edge: false });
+  assert.equal(feed.scrollTop, 1000);
+  assert.equal(loc.href, "https://www.instagram.com/reels/r1/");
+  assert.deepEqual(await S.scroll("up", { doc, win, waitMs: 0 }),
+    { ok: true, method: "container", edge: false });
+  assert.equal(feed.scrollTop, 0);
+});
+
+test("up on the first reel is an edge: nothing scrolls, no debugger fallback", async () => {
+  const { feed, doc, win } = fakeFeed(5);
+  feed.scrollTop = 0;
+  assert.deepEqual(await S.scroll("up", { doc, win, waitMs: 0 }),
+    { ok: false, method: "container", edge: true });
+  assert.deepEqual(feed.scrolls, []);
+});
+
+test("a scroll that snaps back to the same reel is not ok", async () => {
+  const { doc, win } = fakeFeed(5, { snapBack: true });
+  const r = await S.scroll("down", { doc, win, waitMs: 0 });
+  assert.equal(r.ok, false);
+  assert.equal(r.edge, false);   // so the content script may try the debugger key
+});
+
+test("down past the last loaded reel scrolls one screen so Instagram loads more", async () => {
+  const { feed, doc, win } = fakeFeed(5, { loaded: 1 });
+  const r = await S.scroll("down", { doc, win, waitMs: 0 });
+  assert.deepEqual(feed.scrolls, [1000]);
+  assert.equal(r.ok, true);   // the URL changed
 });
 
 test("scroller edges and visible area", () => {
@@ -521,4 +596,45 @@ test("scroller edges and visible area", () => {
   assert.ok(S.atEdge({ scrollTop: 8100, clientHeight: 900, scrollHeight: 9000 }, "down"));
   assert.equal(S.visibleArea({ left: -10, top: 0, right: 90, bottom: 50 }, 100, 100), 4500);
   assert.equal(S.visibleArea({ left: 0, top: 200, right: 90, bottom: 250 }, 100, 100), 0);
+});
+
+// ------------------------------------------------------------------ EEG status line
+
+test("eeg messages set the EEG state; bad ones are ignored", () => {
+  const { c, warnings } = controller();
+  assert.equal(c.state.eeg, "unknown");
+  c.setConnection("open");
+  c.handle({ type: "eeg", state: "absent", text: "plug in the Cerelog X8 USB receiver" });
+  assert.equal(c.state.eeg, "absent");
+  assert.equal(c.state.eegText, "plug in the Cerelog X8 USB receiver");
+  c.handle({ type: "eeg", state: "streaming" });
+  assert.equal(c.state.eeg, "streaming");
+  assert.equal(c.state.eegText, "");
+  c.handle({ type: "eeg", state: "happy" });
+  c.handle({ type: "eeg", state: "absent", text: 3 });
+  assert.equal(c.state.eeg, "streaming");
+  assert.equal(warnings.length, 2);
+});
+
+test("losing the server makes the EEG state unknown until the bridge re-sends it", () => {
+  const { c } = controller();
+  c.setConnection("open");
+  c.handle({ type: "eeg", state: "streaming", text: "/dev/cu.usbserial-1, 250 Hz" });
+  c.setConnection("closed");
+  assert.equal(c.state.eeg, "unknown");
+  assert.equal(c.state.eegText, "");
+  c.setConnection("open");
+  c.handle({ type: "eeg", state: "streaming", text: "/dev/cu.usbserial-1, 250 Hz" });
+  assert.equal(c.state.eeg, "streaming");
+});
+
+test("the HUD's EEG line names every state", () => {
+  assert.deepEqual([...O.EEG_STATES], ["unknown", "absent", "connecting", "connected",
+    "streaming", "no-data", "error", "unused"]);
+  assert.equal(O.eegLine({ eeg: "absent", eegText: "plug in the Cerelog X8 USB receiver" }),
+    "EEG: not connected · plug in the Cerelog X8 USB receiver");
+  assert.equal(O.eegLine({ eeg: "streaming", eegText: "/dev/cu.usbserial-1, 250 Hz" }),
+    "EEG: connected, receiving data · /dev/cu.usbserial-1, 250 Hz");
+  assert.equal(O.eegLine({ eeg: "unused", eegText: "manual mode" }), "EEG: not used · manual mode");
+  for (const st of O.EEG_STATES) assert.ok(!O.eegLine({ eeg: st, eegText: "" }).includes("undefined"), st);
 });

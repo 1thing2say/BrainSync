@@ -12,9 +12,10 @@ pytest.importorskip("websockets")
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosed, InvalidStatus  # noqa: E402
 
-from brainsync.bridge import (DEFAULT_PHASE, Bridge, config_message, cue_message,  # noqa: E402
-                              origin_allowed, parse_client_message, phase_message,
-                              scroll_message, status_message)
+from brainsync.bridge import (DEFAULT_EEG, DEFAULT_PHASE, Bridge,  # noqa: E402
+                              config_message, cue_message, eeg_message, origin_allowed,
+                              parse_client_message, phase_message, scroll_message,
+                              status_message)
 from brainsync.stimulus import load_config  # noqa: E402
 
 CONFIG = config_message(load_config("reels"))
@@ -29,6 +30,11 @@ def bridge():
 
 async def recv(ws, timeout: float = 5.0) -> dict:
     return json.loads(await asyncio.wait_for(ws.recv(), timeout))
+
+
+async def joined(ws) -> list[dict]:
+    """The three messages every client gets on connect: config, phase, EEG state."""
+    return [await recv(ws), await recv(ws), await recv(ws)]
 
 
 async def until(cond, timeout: float = 5.0) -> None:
@@ -61,6 +67,11 @@ def test_message_builders():
     assert scroll_message("up", 3) == {"type": "scroll", "dir": "up", "id": 3}
     assert status_message("hi") == {"type": "status", "text": "hi"}
     assert DEFAULT_PHASE["phase"] == "wait" and DEFAULT_PHASE["flicker"] is False
+    assert eeg_message("streaming", "COM3") == {"type": "eeg", "state": "streaming",
+                                                "text": "COM3"}
+    assert DEFAULT_EEG == {"type": "eeg", "state": "unknown", "text": ""}
+    with pytest.raises(ValueError, match="EEG state must be"):
+        eeg_message("happy")
 
 
 def test_parse_client_message(capsys):
@@ -103,8 +114,7 @@ def test_config_then_wait_phase_on_connect(bridge):
 
     async def main():
         async with connect(bridge.url + "/any/path") as ws:
-            assert await recv(ws) == CONFIG
-            assert await recv(ws) == DEFAULT_PHASE
+            assert await joined(ws) == [CONFIG, DEFAULT_PHASE, DEFAULT_EEG]
             await until(lambda: bridge.n_clients == 1)
         await until(lambda: bridge.n_clients == 0)
 
@@ -119,15 +129,42 @@ def test_late_joiner_gets_the_current_phase(bridge):
 
     async def main():
         async with connect(bridge.url) as ws:
-            assert await recv(ws) == CONFIG
-            assert await recv(ws) == calibrate
+            assert await joined(ws) == [CONFIG, calibrate, DEFAULT_EEG]
             bridge.send(run)
             assert await recv(ws) == run
         async with connect(bridge.url) as ws:
-            assert [await recv(ws), await recv(ws)] == [CONFIG, run]
+            assert await joined(ws) == [CONFIG, run, DEFAULT_EEG]
 
     asyncio.run(main())
     assert bridge.phase == run
+
+
+def test_late_joiner_gets_the_current_eeg_state(bridge):
+    bridge.send(eeg_message("absent", "plug in the receiver"))
+    streaming = eeg_message("streaming", "/dev/cu.usbserial-1, 250 Hz")
+
+    async def main():
+        async with connect(bridge.url) as ws:
+            assert (await joined(ws))[2] == eeg_message("absent", "plug in the receiver")
+            bridge.send(streaming)
+            assert await recv(ws) == streaming
+        async with connect(bridge.url) as ws:
+            assert (await joined(ws))[2] == streaming
+
+    asyncio.run(main())
+    assert bridge.eeg == streaming
+
+
+def test_eeg_state_sent_before_start_is_kept():
+    b = Bridge(port=0, config_message=CONFIG)
+    absent = eeg_message("absent")
+    b.send(absent)
+    with b:
+        async def main():
+            async with connect(b.url) as ws:
+                assert (await joined(ws))[2] == absent
+
+        asyncio.run(main())
 
 
 def test_phase_sent_before_start_is_kept():
@@ -137,7 +174,7 @@ def test_phase_sent_before_start_is_kept():
     with b:
         async def main():
             async with connect(b.url) as ws:
-                assert [await recv(ws), await recv(ws)] == [CONFIG, stop]
+                assert await joined(ws) == [CONFIG, stop, DEFAULT_EEG]
         asyncio.run(main())
 
 
@@ -145,8 +182,7 @@ def test_broadcast_reaches_every_client_in_order(bridge):
     async def main():
         async with connect(bridge.url) as a, connect(bridge.url) as b:
             for ws in (a, b):
-                await recv(ws)
-                await recv(ws)
+                await joined(ws)
             await until(lambda: bridge.n_clients == 2)
             sent = [cue_message(0), scroll_message("up", 1), cue_message(-1),
                     status_message("ok")]
@@ -188,8 +224,7 @@ def test_wait_hello_and_latest_hello(bridge):
 def test_malformed_messages_are_ignored_and_the_connection_survives(bridge, capsys):
     async def main():
         async with connect(bridge.url) as ws:
-            await recv(ws)
-            await recv(ws)
+            await joined(ws)
             for bad in ("not json", "[1, 2]", '{"type": 5}', b"\x00binary", '{"type": "dance"}'):
                 await ws.send(bad)
             await ws.send(json.dumps({"type": "scrolled", "id": 1, "ok": True,
@@ -211,8 +246,7 @@ def test_ping_keepalive():
     with Bridge(port=0, config_message=CONFIG, ping_s=0.05) as b:
         async def main():
             async with connect(b.url) as ws:
-                await recv(ws)
-                await recv(ws)
+                await joined(ws)
                 assert await recv(ws) == {"type": "ping"}
         asyncio.run(main())
 
@@ -223,8 +257,7 @@ def test_stop_closes_clients_and_is_idempotent():
 
     async def main():
         async with connect(b.url) as ws:
-            await recv(ws)
-            await recv(ws)
+            await joined(ws)
             await until(lambda: b.n_clients == 1)
             b.send(phase)                       # sent before stop: still delivered
             await asyncio.to_thread(b.stop)

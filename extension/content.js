@@ -13,10 +13,11 @@
  * 5 s when it drops (for example when Chrome stops the service worker); the worker then
  * reports the socket state again and the overlay re-sends its hello on "open".
  *
- * Scroller: BrainScrollScroller.scroll (shared with the mock page). If neither the feed
- * container nor the page moved within 700 ms, and the feed is not already at its end,
- * the worker presses ArrowUp / ArrowDown as a trusted key through chrome.debugger and the
- * ack says method "debugger"; if even that cannot be sent, ok false and method "none".
+ * Scroller: BrainScrollScroller.scroll (shared with the mock page). If no other reel is
+ * showing within 1.5 s (same URL, same most visible video), and the feed is not at an end
+ * (the first reel, for up), the worker presses ArrowUp / ArrowDown as a trusted key
+ * through chrome.debugger and the ack says method "debugger"; if even that cannot be
+ * sent, ok false and method "none".
  */
 (function () {
   "use strict";
@@ -120,8 +121,8 @@
       const before = S.snapshot(target);
       const sent = await transport.trustedKey(dir === "up" ? "ArrowUp" : "ArrowDown");
       if (!sent) return { ok: false, method: "none" };
-      await S.delay(S.VERIFY_MS);
-      return { ok: S.moved(before, S.snapshot(target)), method: "debugger" };
+      return { ok: await S.waitMoved(before, target, undefined, undefined, S.VERIFY_MS),
+               method: "debugger" };
     };
   }
 

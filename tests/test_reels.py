@@ -292,6 +292,7 @@ def test_a_later_hello_gets_its_refresh_checked(ignore, capsys):
 
 class WaitingBridge(FakeBridge):
     url = "ws://fake"
+    running = False
 
     def start(self):
         return self
@@ -388,6 +389,10 @@ async def extension(port: int, refresh_hz: float = 59.97, bye_after: int | None 
         except ConnectionClosed:
             pass
     return got
+
+
+def eeg_states(got: list[dict]) -> list[str]:
+    return [m["state"] for m in got if m["type"] == "eeg"]
 
 
 def phases(got: list[dict]) -> list[tuple[str, bool]]:
@@ -491,6 +496,7 @@ def test_manual_mode_reads_stdin(monkeypatch, capsys):
     assert "3 scrolls (up 2, down 1); ended: quit" in cap.out
     assert "browser acks: 2 ok, 1 failed, 0 unanswered" in cap.out
     assert "windows" not in cap.out                        # nothing decoded
+    assert {"type": "eeg", "state": "unused", "text": "manual mode"} in got
 
 
 @needs_ws
@@ -584,3 +590,158 @@ def test_sigterm_or_sighup_still_tells_the_overlay_to_stop(signame):
     assert "interrupted" in got[-1]["text"]
     assert proc.returncode == 0, err
     assert "ended: interrupted" in out
+
+
+# -- no EEG device --------------------------------------------------------------------------
+
+def test_no_device_says_so_and_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(reels, "detect_serial_port", lambda: "")
+    monkeypatch.setattr(reels, "DEVICE_POLL_S", 0.01)
+    assert reels.main(["--no-browser", "--no-voice", "--wait-device", "0.1"]) == 1
+    err = capsys.readouterr().err
+    assert "no EEG device connected: plug in the Cerelog X8 USB receiver" in err
+    assert "/dev/cu.usbserial-*" in err
+    assert "error: no EEG device connected after 0.1 s" in err
+    assert "connecting to the Cerelog X8" not in err   # BrainFlow is never asked
+
+
+class _DeadBoard:
+    """A CerelogBoard whose receiver is there but the headset does not answer."""
+
+    def __init__(self, serial_port: str, **_: object) -> None:
+        self.serial_port = serial_port
+
+    def open(self) -> None:
+        raise RuntimeError(f"could not start the Cerelog X8 on {self.serial_port}: "
+                           "UNABLE_TO_OPEN_PORT_ERROR:2")
+
+
+@needs_ws
+def test_no_device_is_shown_on_the_overlay_until_plugged_in(monkeypatch, capsys):
+    ports = iter([""] * 10)   # 2 s without a receiver: time for the client to join
+    monkeypatch.setattr(reels, "detect_serial_port", lambda: next(ports, "/dev/cu.usbserial-7"))
+    monkeypatch.setattr(reels, "DEVICE_POLL_S", 0.2)
+    monkeypatch.setattr(reels, "CerelogBoard", _DeadBoard)
+    port = free_port()
+    th, result = start_main(["--no-voice", "--ws-port", str(port), "--wait-device", "20"])
+    got = asyncio.run(extension(port))
+    th.join(30)
+    assert result.get("code") == 1, result
+    waits = [m["text"] for m in got if m.get("phase") == "wait"]
+    assert any("No EEG device connected" in t for t in waits)
+    assert any("/dev/cu.usbserial-7" in t for t in waits)   # "Connecting to the EEG board on"
+    stop = [m for m in got if m.get("phase") == "stop"]
+    assert stop and "Could not connect to the EEG board" in stop[0]["text"]
+    assert not any(m.get("phase") in ("calibrate", "run") for m in got)
+    assert eeg_states(got)[-3:] == ["absent", "connecting", "error"]
+    err = capsys.readouterr().err
+    assert "EEG device found on /dev/cu.usbserial-7" in err
+    assert "error: could not start the Cerelog X8 on /dev/cu.usbserial-7" in err
+
+
+@needs_ws
+def test_no_device_timeout_tells_the_overlay(monkeypatch):
+    monkeypatch.setattr(reels, "detect_serial_port", lambda: "")
+    monkeypatch.setattr(reels, "DEVICE_POLL_S", 0.05)
+    port = free_port()
+    th, result = start_main(["--no-voice", "--ws-port", str(port), "--wait-device", "1"])
+    got = asyncio.run(extension(port))
+    th.join(30)
+    assert result.get("code") == 1, result
+    stop = [m for m in got if m.get("phase") == "stop"]
+    assert stop and stop[0]["text"].startswith("No EEG device connected")
+    assert eeg_states(got)[-1] == "absent"
+
+
+class _QuietBoard:
+    """Opens, then sends ``chunks`` reads of data (None: an empty read) and nothing after."""
+
+    fs = 250.0
+
+    def __init__(self, chunks: list[int | None]) -> None:
+        self.chunks = list(chunks)
+
+    def read(self):
+        import numpy as np
+
+        n = self.chunks.pop(0) if self.chunks else None
+        return np.zeros((8, n or 0)), np.zeros(n or 0)
+
+
+def _recording_link():
+    sent: list[dict] = []
+    bridge = FakeBridge([])
+    bridge.send = sent.append
+    return reels.Link(bridge, reels.JsonLog(None)), sent
+
+
+def test_first_samples_mark_the_eeg_as_receiving_data(monkeypatch, capsys):
+    monkeypatch.setattr(reels, "POLL_S", 0.001)
+    link, sent = _recording_link()
+    reels._await_samples(_QuietBoard([None, None, 25]), link, "/dev/cu.usbserial-1")
+    assert sent == [{"type": "eeg", "state": "streaming",
+                     "text": "/dev/cu.usbserial-1, 250 Hz"}]
+    assert "receiving data" in capsys.readouterr().err
+
+
+def test_a_connected_board_that_sends_nothing_is_no_data(monkeypatch):
+    monkeypatch.setattr(reels, "POLL_S", 0.001)
+    monkeypatch.setattr(reels, "FIRST_DATA_S", 0.05)
+    link, sent = _recording_link()
+    with pytest.raises(RuntimeError, match="connected but sent no data for 0.05 s"):
+        reels._await_samples(_QuietBoard([]), link, "/dev/cu.usbserial-1")
+    assert [m["state"] for m in sent] == ["no-data"]
+    assert "switched on" in link.stop_text
+
+
+class _SilentBoard(_DeadBoard):
+    """Receiver and headset answer the connect, but no samples ever come."""
+
+    fs = 250.0
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def read(self):
+        import numpy as np
+
+        return np.zeros((8, 0)), np.zeros(0)
+
+
+@needs_ws
+def test_silent_board_reports_no_data_on_the_overlay(monkeypatch, capsys):
+    monkeypatch.setattr(reels, "detect_serial_port", lambda: "/dev/cu.usbserial-9")
+    monkeypatch.setattr(reels, "CerelogBoard", _SilentBoard)
+    monkeypatch.setattr(reels, "FIRST_DATA_S", 0.3)
+    port = free_port()
+    th, result = start_main(["--no-voice", "--ws-port", str(port)])
+    got = asyncio.run(extension(port))
+    th.join(30)
+    assert result.get("code") == 1, result
+    # a client that joins late gets only the latest state, so check the order of what came
+    states = eeg_states(got)
+    assert states[-1] == "no-data"
+    assert states == sorted(states, key=["unknown", "connecting", "connected", "no-data"].index)
+    stop = [m for m in got if m.get("phase") == "stop"]
+    assert stop and "sends no data" in stop[0]["text"]
+    assert "sent no data for 0.3 s" in capsys.readouterr().err
+
+
+def test_fake_board_is_reported_as_simulated(capsys):
+    sent: list[dict] = []
+    real_send = reels.Link.send
+
+    def spy(self, msg):
+        sent.append(msg)
+        real_send(self, msg)
+
+    reels.Link.send = spy
+    try:
+        assert reels.main([*HEADLESS, "--seconds", "3", "--calibrate", "5"]) == 0
+    finally:
+        reels.Link.send = real_send
+    capsys.readouterr()
+    assert {"type": "eeg", "state": "streaming", "text": "simulated board (--fake)"} in sent

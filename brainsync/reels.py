@@ -9,11 +9,15 @@ The Chrome extension under extension/ draws two squares over instagram.com/reels
 (config ``reels``). This program decodes the EEG and drives the extension over a
 localhost WebSocket (ws://127.0.0.1:8765, protocol in brainsync/bridge.py).
 
-Sequence: connect to the board, start the WebSocket server and wait (--wait-browser s,
-default 120) for the extension to say hello, which it does once the viewer clicked Start
-on its photosensitivity warning and it measured the display refresh. A refresh more than
-the config's tolerance from 60 Hz stops the run unless --ignore-refresh. Then calibrate
-the rest baseline for --calibrate s (default 30). By default the squares flicker while the
+Sequence: start the WebSocket server and look for the board's USB receiver. Without one
+the terminal and the overlay both say "No EEG device connected" and the program waits
+(--wait-device s, default 120) for it to be plugged in, then exits 1. Connect to the board
+and wait up to 5 s for its first samples; the overlay's EEG line follows each step (not
+connected, connecting, receiving data, no data). Then wait (--wait-browser s, default 120)
+for the extension to say hello, which it does once the viewer clicked Start on its
+photosensitivity warning and it measured the display refresh. A refresh more than the
+config's tolerance from 60 Hz stops the run unless --ignore-refresh. Then calibrate the
+rest baseline for --calibrate s (default 30). By default the squares flicker while the
 viewer watches the reel (--calibrate-on watch), because "not choosing" here means watching
 the video with flicker in the periphery, not a still screen; --calibrate-on still holds
 the squares still instead. Then decode for --seconds (default 600). The cue box follows
@@ -28,9 +32,9 @@ silent for 5 s. SIGTERM (kill, a process manager) and SIGHUP (the terminal windo
 count as Ctrl-C, so on every exit Python lives through the overlay is told to stop; for
 the rest (SIGKILL, a crash) the overlay holds the squares still once its socket closes.
 Exit code 0 for a run that ended by time, Ctrl-C or the viewer (also Escape before
-calibration); 1 when no browser said hello, the refresh was wrong, the port was taken,
-calibration failed or the board stalled; 2 for bad arguments or config; 130 when
-interrupted before decoding started.
+calibration); 1 when no EEG device was found or it would not connect, no browser said
+hello, the refresh was wrong, the port was taken, calibration failed or the board stalled;
+2 for bad arguments or config; 130 when interrupted before decoding started.
 
 --manual needs neither board nor decoder: after the hello it reads stdin lines, u
 scrolls up, d down, q or end of input quits.
@@ -50,9 +54,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from .board import CerelogBoard, FakeBoard
-from .bridge import (HOST, PORT, Bridge, config_message, cue_message, phase_message,
-                     scroll_message)
+from .board import FS, SERIAL_PATTERNS, CerelogBoard, FakeBoard, detect_serial_port
+from .bridge import (HOST, PORT, Bridge, config_message, cue_message, eeg_message,
+                     phase_message, scroll_message)
 from .classify import ABSTAIN, make
 from .demo import CALIBRATE_S, STALL_S, Tally, _channels, _names, _status, run
 from .launch import speak
@@ -63,6 +67,10 @@ from .stimulus import load_config
 from .stimulus.config import StimulusConfig
 
 WAIT_BROWSER_S = 120.0
+WAIT_DEVICE_S = 120.0
+DEVICE_POLL_S = 0.5
+NO_DEVICE = "No EEG device connected. Plug in the Cerelog X8 USB receiver."
+FIRST_DATA_S = 5.0   # after connecting, how long the board may take to send its first samples
 ACK_GRACE_S = 1.0   # after the run, how long to wait for the browser's last scroll acks
 POLL_S = 0.1
 
@@ -105,6 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--channels", type=_channels, default=list(POSTERIOR),
                    help="analysis channels, names or indices (default " + ",".join(POSTERIOR) + ")")
     p.add_argument("--port", default=None, help="serial port (default: auto-detect)")
+    p.add_argument("--wait-device", type=float, default=WAIT_DEVICE_S,
+                   help="seconds to wait for the board's USB receiver to be plugged in "
+                        f"(default {WAIT_DEVICE_S:g})")
     p.add_argument("--verbose", action="store_true", help="show BrainFlow's log messages")
     web = p.add_argument_group("browser")
     web.add_argument("--host", default=HOST, help=f"WebSocket host (default {HOST})")
@@ -140,7 +151,8 @@ def _check(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         p.error("--manual drives the browser by hand; it takes neither --no-browser nor --fake")
     for flag, value in (("--seconds", args.seconds), ("--calibrate", args.calibrate),
                         ("--window", args.window), ("--step", args.step),
-                        ("--switch", args.switch), ("--wait-browser", args.wait_browser)):
+                        ("--switch", args.switch), ("--wait-browser", args.wait_browser),
+                        ("--wait-device", args.wait_device)):
         if not value > 0:
             p.error(f"{flag} must be positive, got {value}")
     if not (math.isfinite(args.cooldown) and args.cooldown >= 0):
@@ -301,13 +313,76 @@ def refresh_problem(hello: dict[str, Any], cfg: StimulusConfig) -> str | None:
     return None
 
 
+def _start_bridge(link: Link) -> None:
+    """Start the WebSocket server once (OSError when the port is taken)."""
+    bridge = link.bridge
+    if bridge is None or bridge.running:
+        return
+    bridge.start()
+    print(f"WebSocket server on {bridge.url}", file=sys.stderr)
+
+
+def _await_device(link: Link, args: argparse.Namespace, voice: bool) -> str:
+    """The board's USB serial port, waiting up to --wait-device s for it to be plugged in.
+
+    Without a receiver BrainFlow only fails after its own search with a driver error, so
+    say plainly in the terminal and on the overlay what is missing. RuntimeError on
+    timeout, ViewerQuit when the viewer pressed Escape meanwhile.
+    """
+    port = detect_serial_port()
+    if port:
+        return port
+    print(f"no EEG device connected: plug in the Cerelog X8 USB receiver (looked for "
+          f"{', '.join(SERIAL_PATTERNS)}); waiting up to {args.wait_device:g} s...",
+          file=sys.stderr)
+    link.send(phase_message("wait", False, None, NO_DEVICE))
+    link.send(eeg_message("absent", "plug in the Cerelog X8 USB receiver"))
+    speak("No EEG device connected.", voice)
+    deadline = time.monotonic() + args.wait_device
+    while not port:
+        if link.poll():
+            raise ViewerQuit
+        if time.monotonic() >= deadline:
+            link.stop_text = ("No EEG device connected. Plug in the Cerelog X8 USB receiver "
+                              "and restart BrainSync.")
+            link.send(eeg_message("absent", f"none found in {args.wait_device:g} s"))
+            raise RuntimeError(f"no EEG device connected after {args.wait_device:g} s")
+        time.sleep(DEVICE_POLL_S)
+        port = detect_serial_port()
+    print(f"EEG device found on {port}", file=sys.stderr)
+    return port
+
+
+def _await_samples(board: Any, link: Link, port: str, timeout: float | None = None) -> None:
+    """Wait for the board's first samples after connecting; RuntimeError if none come.
+
+    A connected receiver with the headset switched off opens fine and then sends nothing,
+    so "connected" is only reported as "receiving data" once samples arrive. The samples
+    read here are dropped; calibration starts from the next read.
+    """
+    timeout = FIRST_DATA_S if timeout is None else timeout
+    deadline = time.monotonic() + timeout
+    while True:
+        X, _ = board.read()
+        if X.shape[1]:
+            break
+        if time.monotonic() >= deadline:
+            link.send(eeg_message("no-data", f"no samples in {timeout:g} s on {port}"))
+            link.stop_text = ("The EEG board is connected but sends no data. Is the headset "
+                              "switched on? Restart BrainSync to try again.")
+            raise RuntimeError(f"the Cerelog X8 on {port} connected but sent no data for "
+                               f"{timeout:g} s; is the headset switched on?")
+        time.sleep(POLL_S)
+    print(f"EEG board connected on {port}, receiving data", file=sys.stderr)
+    link.send(eeg_message("streaming", f"{port}, {board.fs:g} Hz"))
+
+
 def _await_browser(link: Link, args: argparse.Namespace, cfg: StimulusConfig) -> None:
     """Start the server, wait for the hello and check its refresh; RuntimeError on failure,
     ViewerQuit when the viewer pressed Escape first."""
     bridge = link.bridge
     assert bridge is not None
-    bridge.start()
-    print(f"WebSocket server on {bridge.url}", file=sys.stderr)
+    _start_bridge(link)
     link.send(phase_message("wait", False, None,
                             "Click Start on the warning to connect to BrainSync."))
     print(f"waiting up to {args.wait_browser:g} s for the browser: open "
@@ -426,6 +501,8 @@ def _manual(args: argparse.Namespace, cfg: StimulusConfig, link: Link) -> int:
     ended = "not started"
     code = 0
     try:
+        _start_bridge(link)
+        link.send(eeg_message("unused", "manual mode"))
         _await_browser(link, args, cfg)
         link.send(phase_message("run", True, None,
                                 "Manual test: scrolls come from the BrainSync terminal."))
@@ -535,15 +612,16 @@ def _main(argv: list[str] | None) -> int:
     if args.manual:
         return _manual(args, cfg, link)
 
+    # The Cerelog X8 is opened only once its USB receiver is there (see _await_device).
+    board: Any = None
     try:
         if args.fake:
-            board: Any = FakeBoard(cfg.freqs, switch_s=args.switch, seed=args.seed,
-                                   clock=None if args.fast else time.time, ch_names=args.names)
-        else:
-            board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
-        clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
+            board = FakeBoard(cfg.freqs, switch_s=args.switch, seed=args.seed,
+                              clock=None if args.fast else time.time, ch_names=args.names)
+        fs = board.fs if args.fake else FS
+        clf = make(args.classifier, freqs=cfg.freqs, fs=fs, harmonics=args.harmonics,
                    phases=cfg.phases, margin=args.margin, threshold=args.threshold)
-        decoder = Decoder(clf, board.fs, window_s=args.window, step_s=args.step,
+        decoder = Decoder(clf, fs, window_s=args.window, step_s=args.step,
                           votes=args.votes, channels=args.channels, pad_s=args.pad,
                           ch_names=args.names)
     except (ValueError, KeyError, FileNotFoundError, ImportError) as exc:
@@ -554,7 +632,7 @@ def _main(argv: list[str] | None) -> int:
     fast = args.fake and args.fast
     sleep: Callable[[float], None] = board.advance if fast else time.sleep
     clock: Callable[[], float] = (lambda: board.elapsed) if fast else time.monotonic
-    print(f"{'fake board' if args.fake else 'Cerelog X8'} at {board.fs:g} Hz; {clf!r}; "
+    print(f"{'fake board' if args.fake else 'Cerelog X8'} at {fs:g} Hz; {clf!r}; "
           f"channels {','.join(decoder.channel_names)}; window {args.window:g} s, step "
           f"{args.step:g} s, {args.votes} votes; cooldown {args.cooldown:g} s", file=sys.stderr)
     if args.calibrate < CALIBRATE_S:
@@ -571,8 +649,30 @@ def _main(argv: list[str] | None) -> int:
     ended = "not started"
     code = 0
     try:
+        _start_bridge(link)   # first, so the overlay can show a missing device
         if not args.fake:
-            print("connecting to the Cerelog X8 (can take 15 s)...", file=sys.stderr)
+            port = args.port or _await_device(link, args, voice)
+            print(f"connecting to the Cerelog X8 on {port} (can take 15 s)...",
+                  file=sys.stderr)
+            link.send(phase_message("wait", False, None,
+                                    f"Connecting to the EEG board on {port}..."))
+            link.send(eeg_message("connecting", port))
+            board = CerelogBoard(serial_port=port, ch_names=args.names, verbose=args.verbose)
+            try:
+                board.open()
+            except RuntimeError:
+                link.stop_text = ("Could not connect to the EEG board. Is the headset switched "
+                                  "on? Restart BrainSync to try again.")
+                link.send(eeg_message("error", port))
+                raise
+            link.send(eeg_message("connected", port))
+            try:
+                _await_samples(board, link, port)
+            except BaseException:
+                board.close()
+                raise
+        else:
+            link.send(eeg_message("streaming", "simulated board (--fake)"))
         with board:
             if bridge is not None:
                 _await_browser(link, args, cfg)
@@ -582,8 +682,13 @@ def _main(argv: list[str] | None) -> int:
             speak(prompt, voice)
             if args.fake:
                 board.set_target(ABSTAIN)   # the viewer watches the video, not a square
-            cal = calibrate(decoder, board, args.calibrate,
-                            sleep=board.advance if fast else None)
+            try:
+                cal = calibrate(decoder, board, args.calibrate,
+                                sleep=board.advance if fast else None)
+            except ValueError:   # too little data: the board went quiet while calibrating
+                link.send(eeg_message("no-data", "too little data to calibrate"))
+                link.stop_text = "The EEG board stopped sending data during calibration."
+                raise
             if args.fake:
                 board.set_target(None)
             print(f"baseline from {cal.n_windows} windows ({cal.n_rejected} rejected, "
@@ -643,6 +748,7 @@ def _main(argv: list[str] | None) -> int:
             if ended == "board stalled":
                 print(f"error: the board sent nothing for {STALL_S:g} s", file=sys.stderr)
                 link.stop_text = "The EEG board stopped sending data."
+                link.send(eeg_message("no-data", f"nothing for {STALL_S:g} s"))
                 code = 1
             link.drain_acks()
     except ViewerQuit:
@@ -653,7 +759,7 @@ def _main(argv: list[str] | None) -> int:
             code = 130
         else:
             ended = "interrupted"
-    except (ValueError, OSError, RuntimeError) as exc:
+    except (ValueError, OSError, RuntimeError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         ended = "error"
         code = 1

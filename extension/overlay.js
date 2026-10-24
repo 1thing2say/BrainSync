@@ -6,7 +6,7 @@
  *       transport = {send(obj), onMessage(cb), onState(cb)}   // cb(state): connecting|open|closed
  *       scroller  = async (dir) => ({ok, method})             // dir: "up" | "down"
  *
- * The protocol (config, phase, cue, scroll, status, ping from the server; hello, frames,
+ * The protocol (config, phase, cue, scroll, status, eeg, ping from the server; hello, frames,
  * scrolled, bye from here) is the one brainsync/bridge.py serves on ws://127.0.0.1:8765.
  *
  * Timing follows brainsync/stimulus/flicker.py: luminance is a function of the frame
@@ -53,6 +53,14 @@
   });
   const PHASES = Object.freeze(["wait", "calibrate", "run", "stop"]);
   const CONN_STATES = Object.freeze(["connecting", "open", "closed"]);
+  const EEG_STATES = Object.freeze(["unknown", "absent", "connecting", "connected", "streaming",
+    "no-data", "error", "unused"]);
+  // HUD wording per EEG state; streaming and unused are the only states that are not a warning
+  const EEG_LABELS = Object.freeze({
+    unknown: "unknown", absent: "not connected", connecting: "connecting…",
+    connected: "connected, waiting for data", streaming: "connected, receiving data",
+    "no-data": "no data", error: "could not connect", unused: "not used",
+  });
   const SCROLL_METHODS = Object.freeze(["container", "window", "debugger", "none"]);
   const WARMUP_FRAMES = 20;      // unmeasured, as PsychoPyRenderer.measure_refresh
   const REFRESH_FRAMES = 120;    // intervals in the estimate
@@ -248,7 +256,8 @@
 
     const state = {
       conn: "closed", config: DEFAULT_CONFIG, phase: null, flicker: false, seconds: null,
-      text: "", phaseAt: null, cue: -1, status: "", accepted: false, cancelled: false,
+      text: "", phaseAt: null, cue: -1, status: "", eeg: "unknown", eegText: "",
+      accepted: false, cancelled: false,
       quit: false, quitAt: null, refreshHz: null, dropped: 0, helloSent: false, byeSent: false,
       paused: false, lastScroll: null, sent: 0, ignored: 0, version: 0,
     };
@@ -369,7 +378,7 @@
         case "scroll": {
           if (m.dir !== "up" && m.dir !== "down") return ignore("scroll: dir must be up or down");
           if (!Number.isInteger(m.id)) return ignore("scroll: id must be an integer");
-          // One at a time: the scroller waits 700 ms to verify, and two smooth scrolls at
+          // One at a time: the scroller waits up to 1.5 s to verify, and two smooth scrolls at
           // once would land between reels.
           scrollChain = scrollChain.then(() => doScroll(m.dir, m.id));
           return;
@@ -377,6 +386,13 @@
         case "status":
           if (typeof m.text !== "string") return ignore("status: text must be a string");
           state.status = m.text;
+          changed();
+          return;
+        case "eeg":
+          if (EEG_STATES.indexOf(m.state) < 0) return ignore("eeg: unknown state " + JSON.stringify(m.state));
+          if (m.text !== undefined && typeof m.text !== "string") return ignore("eeg: text must be a string");
+          state.eeg = m.state;
+          state.eegText = m.text || "";
           changed();
           return;
         case "ping":
@@ -391,6 +407,9 @@
       if (conn === state.conn) return;
       const wasOpen = state.conn === "open";
       state.conn = conn;
+      // Without a server nothing reports on the EEG board; the bridge re-sends its state
+      // on reconnect.
+      if (conn !== "open") { state.eeg = "unknown"; state.eegText = ""; }
       // Each new socket is a new server connection: it needs its own hello. A bye goes
       // out once per page (maybeBye).
       state.helloSent = false;
@@ -536,6 +555,11 @@
         <button class="start" type="button">Start</button></div>`;
   }
 
+  /** The HUD's EEG line, e.g. "EEG: connected, receiving data · /dev/cu.usbserial-110". */
+  function eegLine(s) {
+    return "EEG: " + (EEG_LABELS[s.eeg] || s.eeg) + (s.eegText ? " · " + s.eegText : "");
+  }
+
   /** Mount the overlay on the page. Returns {controller, destroy}. */
   function create(opts) {
     opts = opts || {};
@@ -551,11 +575,11 @@
     // A shadow root keeps Instagram's CSS off the overlay and the overlay's off Instagram.
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `<style>${CSS}</style><canvas></canvas><div class="banner"></div>
-      <div class="hud"><div class="l1"></div><div class="l2"></div><div class="l3"></div><div class="l4"></div></div>
+      <div class="hud"><div class="l1"></div><div class="l2"></div><div class="l3"></div><div class="l4"></div><div class="l5"></div></div>
       <div class="modal" role="dialog" aria-modal="false"></div>`;
     const canvas = shadow.querySelector("canvas");
     const banner = shadow.querySelector(".banner");
-    const hudLines = [".l1", ".l2", ".l3", ".l4"].map((q) => shadow.querySelector(q));
+    const hudLines = [".l1", ".l2", ".l3", ".l4", ".l5"].map((q) => shadow.querySelector(q));
     const modal = shadow.querySelector(".modal");
     modal.innerHTML = warningHtml(s.config);
     (doc.documentElement || doc.body).appendChild(host);
@@ -651,7 +675,7 @@
       let phase;
       if (s.quit) phase = "stopped (Escape)";
       else if (s.cancelled && !s.accepted) phase = "cancelled: reload the page to start";
-      else if (!s.accepted) phase = "waiting for Start";
+      else if (!s.accepted) phase = "waiting for Start" + (s.text ? ": " + s.text : "");
       else if (s.paused) phase = "paused: not on Reels";
       else if (s.phase === null) phase = "waiting for the server";
       else {
@@ -661,6 +685,7 @@
           (left !== null ? " " + Math.ceil(left) + " s" : "") + (s.text ? ": " + s.text : "");
       }
       setLine(1, phase, false);
+      setLine(4, eegLine(s), s.eeg !== "streaming" && s.eeg !== "unused");
       const ref = s.refreshHz === null ? "refresh measuring…"
         : "refresh " + s.refreshHz.toFixed(2) + " Hz (want " + cfg.refresh_hz + " ± " +
           cfg.refresh_tolerance_hz + ")" + (controller.refreshOff() ? " OFF: set the display to " +
@@ -733,7 +758,7 @@
   const api = Object.freeze({
     DEFAULT_CONFIG, PHASES, WARMUP_FRAMES, REFRESH_FRAMES, FRAMES_EVERY_MS, STILL_LUM,
     CUE_GAP, CUE_LINE, BACKING, squareRect, cueRect, backingRect, cueGap, layoutOverflow, frameIndex, isDropped,
-    median, RefreshMeter, parseMessage, parseConfig, createController, create,
+    EEG_STATES, eegLine, median, RefreshMeter, parseMessage, parseConfig, createController, create,
   });
   root.BrainScrollOverlay = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

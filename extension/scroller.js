@@ -10,17 +10,26 @@
  * contains a <video>. Only ancestors of <video> elements can contain one, so the search
  * walks up from each video instead of styling the whole Instagram DOM. A container with
  * scroll-snap on the y axis wins (desktop Reels snaps one reel per screen), then the
- * largest visible area. The scroll is +/- one clientHeight, smooth, and is checked after
- * 700 ms: scrollTop moved or the most visible <video> changed. Smooth scrolling one
- * screen takes about 300-500 ms in Chrome, so 700 ms leaves room. At the top (up) or the
- * bottom (down) nothing is tried and the result carries edge: true, so the content script
- * does not fall back to a debugger key press that cannot help.
+ * largest visible area.
+ *
+ * One reel is one <video>. The scroll brings the nearest video above (up) or below (down)
+ * the most visible one to where that one is now; the snap then settles on its reel. On
+ * real instagram.com (2026-10-24) scrolling one clientHeight instead sometimes moved the
+ * feed a little and snapped back to the same reel, and that counted as success because
+ * scrollTop had changed. So success is now a different reel: the URL changed (Instagram
+ * puts /reels/<id>/ in it for each reel) or the most visible <video> is another element.
+ * It is polled every 100 ms for up to 1.5 s, because Instagram updates the URL after the
+ * smooth scroll and snap have settled. With no video above (the first reel, up) nothing
+ * is tried and the result carries edge: true, so the content script does not fall back to
+ * a debugger key press that cannot help. With no video below yet (Instagram loads reels
+ * as you go) it scrolls one clientHeight, which makes Instagram load the next one.
  */
 (function (root) {
   "use strict";
 
   const MIN_EXTRA_PX = 50;
-  const VERIFY_MS = 700;
+  const VERIFY_MS = 1500;   // longest wait for the reel to change
+  const POLL_MS = 100;
   const SNAP_Y = /(^|\s)(y|block|both)(\s|$)/;
 
   function visibleArea(rect, vw, vh) {
@@ -79,14 +88,43 @@
     return best;
   }
 
-  /** What "moved" is judged on: the container's scrollTop and the most visible video. */
+  /** What "moved" is judged on: the page URL and the most visible video. */
   function snapshot(target, doc, win) {
-    return { top: target ? target.el.scrollTop : null, video: mostVisibleVideo(doc, win) };
+    doc = doc || root.document;
+    const loc = doc.location || root.location;
+    return { url: loc ? loc.href : null, video: mostVisibleVideo(doc, win) };
   }
 
+  /** True when another reel is showing: a new URL or another most visible video. */
   function moved(before, after) {
-    const scrolled = before.top !== null && after.top !== null && Math.abs(after.top - before.top) >= 1;
-    return scrolled || before.video !== after.video;
+    return (before.url !== after.url) || (before.video !== after.video);
+  }
+
+  /**
+   * The rect of the nearest reel above (dir "up") or below ("down") ``current``, or null.
+   * ``rects`` are the videos' bounding rects; a neighbour's centre must be at least half
+   * the current video's height away, so a video overlapping the current one never counts.
+   */
+  function neighbour(current, rects, dir) {
+    const mid = (r) => (r.top + r.bottom) / 2;
+    const c = mid(current);
+    const min = Math.max(1, (current.bottom - current.top) / 2);
+    let best = null;
+    for (const r of rects) {
+      const d = (mid(r) - c) * (dir === "up" ? -1 : 1);
+      if (d >= min && (best === null || d < best.d)) best = { r, d };
+    }
+    return best ? best.r : null;
+  }
+
+  /** Poll until another reel shows or ``ms`` pass; true when it moved. */
+  async function waitMoved(before, target, doc, win, ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (moved(before, snapshot(target, doc, win))) return true;
+      if (Date.now() >= end) return false;
+      await delay(Math.min(POLL_MS, Math.max(0, end - Date.now())));
+    }
   }
 
   function atEdge(el, dir) {
@@ -110,17 +148,30 @@
     if (dir !== "up" && dir !== "down") throw new RangeError("dir must be up or down, got " + dir);
     const target = find(doc, win);
     if (!target) return { ok: false, method: "none", edge: false };
-    if (atEdge(target.el, dir)) return { ok: false, method: target.method, edge: true };
     const before = snapshot(target, doc, win);
-    const dy = (dir === "up" ? -1 : 1) * target.el.clientHeight;
+    let dy = null;
+    if (before.video) {
+      const cur = before.video.getBoundingClientRect();
+      const rects = [];
+      for (const v of doc.querySelectorAll("video")) {
+        if (v !== before.video && target.el.contains(v)) rects.push(v.getBoundingClientRect());
+      }
+      const next = neighbour(cur, rects, dir);
+      if (next) dy = (next.top + next.bottom) / 2 - (cur.top + cur.bottom) / 2;
+      else if (dir === "up") return { ok: false, method: target.method, edge: true };
+    }
+    if (dy === null) {   // no video to aim at (none showing, or the next one not loaded yet)
+      if (atEdge(target.el, dir)) return { ok: false, method: target.method, edge: true };
+      dy = (dir === "up" ? -1 : 1) * target.el.clientHeight;
+    }
     if (target.method === "window") win.scrollBy({ top: dy, behavior: "smooth" });
     else target.el.scrollBy({ top: dy, behavior: "smooth" });
-    await delay(wait);
-    return { ok: moved(before, snapshot(target, doc, win)), method: target.method, edge: false };
+    const ok = await waitMoved(before, target, doc, win, wait);
+    return { ok, method: target.method, edge: false };
   }
 
   const api = Object.freeze({ VERIFY_MS, candidates, find, mostVisibleVideo, snapshot, moved,
-                              atEdge, visibleArea, delay, scroll });
+                              neighbour, waitMoved, atEdge, visibleArea, delay, scroll });
   root.BrainScrollScroller = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
