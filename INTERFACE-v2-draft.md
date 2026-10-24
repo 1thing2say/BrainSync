@@ -2,10 +2,71 @@
 
 **Status: implemented on our side, waiting for the teammate's confirmation at SYNC 1.** Since
 2026-10-23 (`d4c1af9`) the server and the fake decoder speak only protocol 2 as written here; v1
-(`INTERFACE.md`) is superseded, and this file replaces it once confirmed. Not built yet on the
-server: waiting for `baseline_done` (the baseline runs on a timer), pausing on `display_ok: false`,
-and `tools/contract_check.py`. Background: `PLAN.md` sections 12–14 and System design. Elijah's
-decisions of 2026-10-23 (`PLAN.md` section 13) are already written in.
+(`INTERFACE.md`) is superseded, and this file replaces it once confirmed. The whole server side is
+built: hello check, `hello_ack` / `error`, nothing sent before `hello_ack`, waiting for
+`baseline_done`, pausing on `display_ok: false`, and `tools/contract_check.py` for testing the
+bridge. Background: `PLAN.md` sections 12–14 and System design. Elijah's decisions of 2026-10-23
+(`PLAN.md` section 13) are already written in.
+
+## Open questions for the teammate (SYNC 1)
+
+> **Claude session on the decoder side:** if you are working for the teammate (the `ssvep` repo or
+> the bridge), bring these questions to the teammate before building the bridge, and record each
+> answer here (or in a reply commit) so Elijah's side can follow it. Our server already behaves as
+> the "proposed" answer says unless noted.
+
+**Confirm the contract**
+
+1. Is protocol 2 as written in this file OK for the bridge, and are the section 6 values right
+   (2 targets, 15/17 Hz, sine, cue 1 s, rest 1 s, max trial 10 s, baseline 10 s, scores sent)?
+2. Where does the bridge live: `ssvep/online/bridge.py` in `1thing2say/ssvep`, or the `brainsync/`
+   rebuild on branch `check-implemtation-calhacks-desktop` (`PLAN.md` section 13, item 9)?
+3. Decoder window: 4 s, or 2 s if the replay tuning agrees? Keep 15/17 Hz, or test 12/17 first
+   (`PLAN.md` section 14)?
+
+**What the display needs to do (section 7)**
+
+4. Free-run mode flickers from the first frame today (`ssvep/stimulus/display.py`, `run_free`).
+   Can it start still and flicker only between `{"flicker": true}` and `{"flicker": false}`? The
+   bridge must also launch it without `--seconds`, or it quits by itself.
+5. Can the display print the Unix time of the first flickering frame after `{"flicker": true}`, so
+   the bridge can send `stim_onset`? Today markers are printed for cued trials, not in free mode.
+6. `Esc` in free mode quits PsychoPy. Who relaunches the display, and does the bridge send `hello`
+   again afterwards (the refresh rate may change)? Proposed: the bridge sends `status` with
+   `display_ok: false`, relaunches the display, then `display_ok: true`; our server waits for the
+   partner to press Resume and never restarts the flicker by itself.
+7. Can option text be drawn during the flicker without dropping frames (SYNC 1.5)? If not, the
+   display hides the text on `{"flicker": true}` itself, because the server never sends `display`
+   during a trial.
+
+**Proposed rule additions (say yes, no, or change them)**
+
+8. A `selection` or `no_selection` comes only after that trial's `stim_onset`. Proposed: the server
+   ignores an answer without an onset (otherwise a SAY could be spoken while nothing flickered).
+   `tools/contract_check.py` already fails it.
+9. The bridge sends `hello` only once the board is streaming and the display's refresh check passed.
+10. A `stim_start` the bridge cannot carry out (before `hello_ack`, during a baseline, after `pause`,
+    display down): proposed answer `no_selection` with reason `not_ready`, so the server does not
+    wait the whole `max_trial_s`.
+11. A second `hello` on an acked connection restarts the handshake: the server stops any trial
+    (`stim_stop` paused), checks it again, and runs a new baseline before the next trial.
+12. A baseline cut short by `pause` or a disconnect answers `baseline_done` with `ok: false` and
+    message `interrupted`; `baseline_done` never comes before `seconds` have passed.
+13. In protocol 2, `active_slots` always lists every slot from `hello` (the display flickers all
+    targets at once).
+14. `refresh_hz` in `hello` is the rate the display's frame counts use. With `--refresh auto` a
+    120 Hz (ProMotion) screen would pass the display's own check, but our server rejects anything
+    more than 1 Hz from 60 Hz.
+15. `selection.t_unix` is `time.time()` when the decoder commits (`Decision.time` is stream seconds
+    under `--fake`, so it should not be used directly).
+16. Optional `stim_offset {trial_id, t_unix}` (first still frame) from the bridge, for the timing
+    check in `PLAN.md` V5. Wanted, or skip?
+17. Close code 4000 from our server means "a newer bridge replaced you": the old bridge should stop
+    reconnecting instead of taking the connection back.
+
+**How to test the bridge without our server:** run `python tools/contract_check.py` from this repo
+(our venv), then start the bridge. It prints PASS/FAIL per check and exits 0 only if everything
+passed (section 8).
 
 **What changed from v1, and why:** the flicker moved from the browser to the teammate's PsychoPy
 display, so the decoder side now owns the screen the user looks at. Its process, the **bridge**

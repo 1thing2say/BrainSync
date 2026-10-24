@@ -536,6 +536,9 @@ fullscreen.
 
 ## 13. Open decisions for SYNC 1
 
+**Open questions for the teammate:** listed at the top of `INTERFACE-v2-draft.md` ("Open
+questions for the teammate"), with a note asking the teammate's Claude session to raise them.
+
 **Elijah's decisions (2026-10-23), for the teammate to confirm at SYNC 1.** Already written into
 `INTERFACE-v2-draft.md`; the server is being built to match.
 
