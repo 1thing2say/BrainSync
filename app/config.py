@@ -13,6 +13,7 @@ square wave at a frequency that does not divide the refresh rate is an error her
 from __future__ import annotations
 
 import math
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -27,6 +28,7 @@ CONFIG_DIR = REPO_ROOT / "config"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"
 DEFAULT_INTENTS_PATH = CONFIG_DIR / "intents.yaml"
 DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"
+DEFAULT_ENV_PATH = REPO_ROOT / ".env"  # gitignored; secrets such as CARTESIA_API_KEY
 
 REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
 
@@ -118,7 +120,13 @@ class SpeechConfig(Strict):
     provider: Literal["cartesia", "browser"]
     voice_id: str = ""
     model: str = Field(min_length=1)
+    api_version: str = Field(min_length=1)
+    language: str = Field(min_length=1)
+    format: Literal["mp3", "wav"]
+    sample_rate: Literal[8000, 16000, 22050, 24000, 44100, 48000]
+    bit_rate: Literal[32000, 64000, 96000, 128000, 192000]
     tts_timeout_s: float = Field(gt=0)
+    max_concurrent: int = Field(ge=1)
     tts_rate: float = Field(gt=0)
     stt_mode: Literal["push_to_talk"]
     max_speak_s: float = Field(gt=0)
@@ -413,3 +421,28 @@ __all__ = [
     "load_intents",
     "load_profile",
 ]
+
+
+def load_env(path: str | Path = DEFAULT_ENV_PATH) -> list[str]:
+    """Set ``KEY=VALUE`` lines from a ``.env`` file in ``os.environ``, unless already set there.
+
+    Returns the names that were set, never the values: secrets must not be printed or logged.
+    A missing file is fine (the environment may already hold the keys).
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    names = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.removeprefix("export ").split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            names.append(key)
+    return names

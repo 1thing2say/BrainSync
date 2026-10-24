@@ -114,7 +114,11 @@ class Orchestrator:
         log: EventLog | None = None,
         keyboard_mode: bool = False,
         fake_decoder: bool = False,
+        on_page: Callable[[list[str]], None] | None = None,
+        audio_url: Callable[[str], str | None] | None = None,
     ) -> None:
+        """``on_page(utterances)`` runs whenever a new page of options is set (TTS prefetch);
+        ``audio_url(text)`` returns a ready clip for ``text`` or None (the browser speaks it)."""
         self.cfg = cfg
         self.intents = intents
         self._send_ui_cb = send_ui
@@ -123,6 +127,8 @@ class Orchestrator:
         self.log = log
         self.keyboard_mode = keyboard_mode
         self.fake_decoder = fake_decoder
+        self.on_page = on_page
+        self.audio_url = audio_url
 
         self.mode = cfg.menus.mode
         self.slots = [s.slot for s in cfg.stim.slots]
@@ -464,7 +470,8 @@ class Orchestrator:
     def _speak(self, text: str) -> None:
         self.speaking_id = f"u{next(self._utterance_ids)}"
         self._enter(St.SPEAKING, self.cfg.speech.max_speak_s, text)
-        self._send_ui(Speak(text=text, utterance_id=self.speaking_id))
+        url = self.audio_url(text) if self.audio_url is not None else None
+        self._send_ui(Speak(text=text, utterance_id=self.speaking_id, audio_url=url))
         self._send_ui(Transcript(who="user", text=text))
 
     def _finish_speaking(self) -> None:
@@ -556,6 +563,8 @@ class Orchestrator:
     def _set_list(self, options: OptionList) -> None:
         self.options, self.index = options, 0
         self.page_no += 1
+        if self.on_page is not None:
+            self.on_page([o.utterance for o in options.options])
 
     def status(self) -> UIStatus:
         return UIStatus(

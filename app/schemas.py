@@ -290,11 +290,16 @@ class Highlight(Message):
 
 
 class Speak(Message):
-    """Speak this exact text; reply with tts_done."""
+    """Speak this exact text; reply with tts_done.
+
+    ``audio_url``: a pre-generated Cartesia clip of exactly ``text`` (``/audio/{id}``); without
+    one, or if it fails to play, the page speaks ``text`` with speechSynthesis.
+    """
 
     type: Literal["speak"] = "speak"
     text: str
     utterance_id: str
+    audio_url: str | None = None
 
 
 class State(Message):

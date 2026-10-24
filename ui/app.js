@@ -138,7 +138,7 @@ function renderState(msg) {
 function speakOut(msg) {
   lastSpoken = msg.utterance_id;
   setJudgment("");
-  Speech.speak(msg.text, () => send({ type: "tts_done", utterance_id: msg.utterance_id }));
+  Speech.speak(msg.text, () => send({ type: "tts_done", utterance_id: msg.utterance_id }), msg.audio_url);
 }
 
 function addLine(who, text) {

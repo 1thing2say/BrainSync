@@ -84,13 +84,13 @@ class Rig:
     ``bridge=False`` for a session without one.
     """
 
-    def __init__(self, cfg=CFG, keyboard_mode: bool = False, bridge: bool = True) -> None:
+    def __init__(self, cfg=CFG, keyboard_mode: bool = False, bridge: bool = True, **hooks) -> None:
         self.cfg = cfg
         self.clock = Clock()
         self.ui: list = []
         self.decoder: list = []
         self.o = Orchestrator(cfg, INTENTS, self.ui.append, self.decoder.append, clock=self.clock,
-                              keyboard_mode=keyboard_mode)
+                              keyboard_mode=keyboard_mode, **hooks)
         if bridge:
             self.connect()
 
@@ -396,6 +396,34 @@ def test_say_it_speaks_exactly_the_picked_sentence():
     assert r.last(r.ui, Transcript) == Transcript(who="user", text=HOME[2].utterance)
     r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
     assert r.o.state is St.REST
+
+
+def test_each_new_page_is_handed_to_tts_and_speak_carries_its_clip():
+    pages: list[list[str]] = []
+    ready = {HOME[0].utterance: "/audio/abc"}
+    r = Rig(on_page=pages.append, audio_url=ready.get)
+    assert pages == [[o.utterance for o in HOME]]  # the first page, set at start-up
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    speak = r.last(r.ui, Speak)
+    assert speak.text == HOME[0].utterance and speak.audio_url == "/audio/abc"
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    r.to_trial()
+    assert pages[-1] == [o.utterance for o in HOME]  # after speaking, a new page (home again; cached)
+    r.select(NEXT)  # a new page of 3 -> prefetched as well
+    r.run_out()
+    assert pages[-1] == [o.utterance for o in MORE] == [o.utterance for o in r.o.options.options]
+
+
+def test_speak_without_a_clip_has_no_audio_url():
+    r = Rig(audio_url=lambda text: None)
+    r.pick_and_confirm_screen("s2")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    assert r.last(r.ui, Speak).audio_url is None
 
 
 @pytest.mark.parametrize("ending", ["back", "timeout", "no_selection"])

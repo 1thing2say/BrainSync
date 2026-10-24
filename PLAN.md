@@ -58,6 +58,10 @@ pull requests.
   `INTERFACE-v2-draft.md` (teammate: please read System design, sections 12, 13 and 14, and the
   draft), then Cartesia TTS (V2 items 3–4), V3 (LLM option ranking) and V4 (partner speech
   input).
+- **Cartesia TTS built (2026-10-24):** `app/tts.py` pre-generates each page's 3 clips, the server
+  serves them at `/audio/{id}`, `speech.js` plays them with the `speechSynthesis` fallback. Key from
+  `.env`; without it the server prints "browser speechSynthesis only". Not yet tried against the
+  live API.
 - **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
   mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
   draft describes 4 targets and 2-slot confirm trials.
@@ -284,9 +288,12 @@ BrainSync/
 | `llm.timeout_s` | 4.0 | One retry, then fallback |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
-| `speech.voice_id` | | Cartesia voice id |
+| `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
 | `speech.model` | `sonic-3.5` | Pinned; never `sonic-latest` |
-| `speech.tts_timeout_s` | 2.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it |
+| `speech.api_version` | `2026-03-01` | `Cartesia-Version` header. The API reference (checked 2026-10-24) lists `2026-08-14`; switch if a test synthesis is rejected |
+| `speech.language` / `speech.sample_rate` | `en` / `44100` | WAV `pcm_s16le`, played by a plain `<audio>` element |
+| `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
+| `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
 | `speech.stt_mode` | `push_to_talk` | Mic is off while TTS is speaking |
 | `speech.max_speak_s` | 15.0 | Move on if the page never reports `tts_done` |
