@@ -676,3 +676,37 @@ def test_cli_decodes_a_real_time_board():
     finally:
         code = _stop(proc)
     assert code == 0
+
+
+class _FakeSpeaker:
+    def __init__(self, folder: Path, ok: bool = True) -> None:
+        self.folder, self.ok, self.asked = folder, ok, []
+
+    def clip(self, text, timeout=None):
+        self.asked.append(text)
+        if not self.ok:
+            return None
+        path = self.folder / "clip.wav"
+        path.write_bytes(b"RIFF" + text.encode())
+        return path
+
+
+def test_speech_is_cartesia_through_the_server(deck, cards, tmp_path):
+    fake = _FakeSpeaker(tmp_path)
+    with serving(build_engine(deck, calibrate_s=None), cards) as server:
+        server._speaker = fake
+        status, headers, body = request(server, "GET", "/api/speech?text=Nadia%20liked%20you%20back")
+        assert status == 200 and headers["content-type"] == "audio/wav"
+        assert body == b"RIFFNadia liked you back" and fake.asked == ["Nadia liked you back"]
+        assert request(server, "GET", "/api/speech")[0] == 400
+        assert request(server, "GET", "/api/speech?text=" + "a" * 301)[0] == 400
+        fake.ok = False
+        status, _, body = request(server, "GET", "/api/speech?text=hello")
+        assert status == 503 and b"no voice" in body
+
+
+def test_speech_without_a_voice_is_503(deck, cards):
+    # the suite runs with BRAINSYNC_TTS=off, so the process-wide speaker is None
+    with serving(build_engine(deck, calibrate_s=None), cards) as server:
+        assert server.speaker is None
+        assert request(server, "GET", "/api/speech?text=hello")[0] == 503

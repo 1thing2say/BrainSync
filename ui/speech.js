@@ -7,14 +7,9 @@ const Speech = (() => {
   let voice = null;
   let audio = null;  // the clip playing now, if any
 
-  // Prefer local voices: Chrome's "Google" voices are network voices and fail offline.
+  // The best local English voice (ui/voice_core.js): network voices fail offline.
   function pickVoice() {
-    const voices = window.speechSynthesis ? speechSynthesis.getVoices() : [];
-    const local = voices.filter((v) => v.localService);
-    voice = local.find((v) => v.lang === "en-US")
-      || local.find((v) => v.lang && v.lang.startsWith("en"))
-      || voices.find((v) => v.lang && v.lang.startsWith("en"))
-      || null;
+    voice = VoiceCore.best(window.speechSynthesis ? speechSynthesis.getVoices() : []);
   }
 
   if (window.speechSynthesis) {

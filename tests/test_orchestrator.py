@@ -1439,3 +1439,47 @@ def test_chatter_cannot_starve_the_trials():
                                   "I got tea. Do you want some"])
 def test_is_question_checks_each_sentence(text):
     assert is_question(text)
+
+
+def test_stop_after_a_decoder_loss_stays_stopped_when_the_bridge_returns():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()  # paused by the decoder: would resume by itself on reconnect
+    r.o.on_ui_message(Stop())  # the partner presses STOP while paused
+    r.connect()  # the bridge comes back and its hello passes
+    assert r.o.state is St.PAUSED  # STOP means stopped until Resume (rule 10)
+
+
+# -- keyword-matched fallback lists (config/intents.yaml fallback_match) ----------------------
+
+
+@pytest.mark.parametrize("text, name", [
+    ("How are you?", "feeling"),
+    ("hi sam how are you doing", "feeling"),  # "how are you" beats the greeting
+    ("Sam, are you okay", "feeling"),
+    ("you okay", "feeling"),
+    ("How was your weekend", "how_was"),
+    ("how did the appointment go", "how_was"),
+    ("Hello there", "greeting"),
+    ("good morning", "greeting"),
+    ("What would you like to drink", "open_question"),
+    ("so what do you want for dinner", "open_question"),
+    ("Ana, where should we go", "open_question"),
+    ("Do you want to go outside?", "yes_no"),
+    ("are you hungry", "yes_no"),
+    ("I don't know what to do", "home"),  # "what" in the middle is not a question
+    ("It's raining outside", "home"),
+])
+def test_a_partner_line_gets_its_matching_fallback_list(text, name):
+    assert INTENTS.fallback_for(text, is_question(text)) == name
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text=text, source="typed"))
+    shown = [s.utterance for s in r.last(r.ui, ShowPage).slots if s.role == "option"]
+    assert shown == [o.utterance for o in INTENTS.fallback_lists[name]]
+
+
+def test_every_fallback_rule_shows_a_list_of_known_options():
+    assert INTENTS.fallback_match, "config/intents.yaml has no fallback_match rules"
+    for rule in INTENTS.fallback_match:
+        assert rule.show in INTENTS.fallback_lists
