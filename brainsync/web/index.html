@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>BrainSwipe mock</title>
+<meta name="description" content="BrainSwipe browser mock: swipe invented profiles with simulated SSVEP gaze. Driven by a simulated EEG board; nothing on this page flickers.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='9' width='9' height='9' rx='2' fill='%23d0605a'/%3E%3Crect x='22' y='9' width='9' height='9' rx='2' fill='%235aae6e'/%3E%3Crect x='12' y='5' width='8' height='22' rx='2' fill='%23ecebe6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body data-conn="connecting" data-decoder="true" data-layout="wide">
+<a class="skip" href="#controls-legend">Skip to controls</a>
+
+<header class="top" id="top">
+  <div class="brand">
+    <svg class="brand__logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <rect x="1" y="9" width="9" height="9" rx="2" class="brand__pass"/>
+      <rect x="22" y="9" width="9" height="9" rx="2" class="brand__like"/>
+      <rect x="12" y="5" width="8" height="22" rx="2" class="brand__card"/>
+    </svg>
+    <div class="brand__text">
+      <h1 class="brand__name">BrainSwipe</h1>
+      <p class="brand__note" id="note">Browser mock: simulated EEG board, no flicker. The live demo uses the full-screen stimulus.</p>
+    </div>
+  </div>
+  <div class="top__actions">
+    <p class="conn" role="status">
+      <span class="conn__dot" aria-hidden="true"></span>
+      <span class="conn__text" id="conn-text">connecting&hellip;</span>
+    </p>
+    <p class="voice-hint" id="voice-hint" hidden>Click anywhere to enable the voice</p>
+    <button type="button" class="toggle" id="btn-auto" aria-pressed="false"
+            title="Let the simulated board switch its own gaze every few seconds (A)">
+      <svg class="toggle__svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg> Auto
+    </button>
+    <button type="button" class="toggle" id="btn-mute" aria-pressed="false" title="Mute the spoken swipe lines (M)">
+      <svg class="toggle__svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path class="wave" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path class="cross" d="M16 9l6 6M22 9l-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg> <span id="mute-text">Mute</span>
+    </button>
+  </div>
+</header>
+
+<main class="stage" id="stage">
+  <section class="side side--pass" aria-label="Pass target">
+    <div class="square" id="square-0" data-target="0" data-side="pass">
+      <div class="square__fill" aria-hidden="true"></div>
+      <div class="square__cue" aria-hidden="true"></div>
+      <span class="square__icon" aria-hidden="true">&#x2715;</span>
+      <span class="square__badge" aria-hidden="true">looking</span>
+      <span class="square__settle" aria-hidden="true">settling</span>
+      <div class="square__pips" aria-hidden="true"></div>
+    </div>
+    <div class="side__meta">
+      <button type="button" class="label label--pass" id="label-0" data-target="0"
+              aria-label="Swipe Pass now">
+        <span class="label__icon" aria-hidden="true">&#x2715;</span>
+        <span class="label__text" id="label-text-0">Pass</span>
+      </button>
+      <p class="side__caption"><span id="freq-0">15 Hz</span> &middot; <kbd>&larr;</kbd></p>
+    </div>
+  </section>
+
+  <section class="phone" aria-label="Profile feed">
+    <div class="cards" id="cards">
+      <div class="placeholder" id="placeholder">
+        <div class="placeholder__pulse" aria-hidden="true"></div>
+        <p>connecting&hellip;</p>
+        <p class="placeholder__sub">Start the server with <code>python -m brainsync.swipe_web</code></p>
+      </div>
+    </div>
+    <div class="match" id="match" aria-hidden="true">
+      <p class="match__title">It&rsquo;s a match!</p>
+      <p class="match__name" id="match-name"></p>
+    </div>
+  </section>
+
+  <section class="side side--like" aria-label="Like target">
+    <div class="square" id="square-1" data-target="1" data-side="like">
+      <div class="square__fill" aria-hidden="true"></div>
+      <div class="square__cue" aria-hidden="true"></div>
+      <span class="square__icon" aria-hidden="true">&#x2665;</span>
+      <span class="square__badge" aria-hidden="true">looking</span>
+      <span class="square__settle" aria-hidden="true">settling</span>
+      <div class="square__pips" aria-hidden="true"></div>
+    </div>
+    <div class="side__meta">
+      <button type="button" class="label label--like" id="label-1" data-target="1"
+              aria-label="Swipe Like now">
+        <span class="label__icon" aria-hidden="true">&#x2665;</span>
+        <span class="label__text" id="label-text-1">Like</span>
+      </button>
+      <p class="side__caption"><span id="freq-1">17 Hz</span> &middot; <kbd>&rarr;</kbd></p>
+    </div>
+  </section>
+</main>
+
+<footer class="bottom" id="bottom">
+  <dl class="stats" id="stats">
+    <div class="stat" data-key="swipes"><dt>Swipes</dt><dd id="stat-swipes">0</dd></div>
+    <div class="stat" data-key="rate"><dt>Per min</dt><dd id="stat-rate">&ndash;</dd></div>
+    <div class="stat stat--like" data-key="likes"><dt>Likes</dt><dd id="stat-likes">0</dd></div>
+    <div class="stat stat--pass" data-key="passes"><dt>Passes</dt><dd id="stat-passes">0</dd></div>
+    <div class="stat stat--match" data-key="matches"><dt>Matches</dt><dd id="stat-matches">0</dd></div>
+    <div class="stat stat--muted" data-key="stale"><dt>Stale ignored</dt><dd id="stat-stale">0</dd></div>
+  </dl>
+
+  <div class="readout" id="readout" aria-label="Live decoder readout">
+    <div class="bars">
+      <div class="bar bar--pass">
+        <span class="bar__name" id="bar-name-0">Pass</span>
+        <span class="bar__track"><span class="bar__fill" id="bar-0"></span></span>
+        <span class="bar__val" id="bar-val-0">&ndash;</span>
+      </div>
+      <div class="bar bar--like">
+        <span class="bar__name" id="bar-name-1">Like</span>
+        <span class="bar__track"><span class="bar__fill" id="bar-1"></span></span>
+        <span class="bar__val" id="bar-val-1">&ndash;</span>
+      </div>
+    </div>
+    <p class="readout__line">
+      <span>Simulated gaze <strong id="true-gaze">&ndash;</strong></span>
+      <span>You <strong id="your-gaze">reading the card</strong></span>
+      <span>Swiper <strong id="swiper-state">waiting</strong></span>
+    </p>
+  </div>
+
+  <p class="legend" id="controls-legend">
+    <span class="legend__item legend__gaze">Hover a square (touch: press and hold) or hold <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> to look at it</span>
+    <span class="legend__item">
+      <span class="legend__gaze"><kbd>Shift</kbd>+<kbd>&larr;</kbd>/<kbd>&rarr;</kbd> or click</span><span class="legend__nogaze"><kbd>&larr;</kbd>/<kbd>&rarr;</kbd> or click</span>
+      a label to swipe now
+    </span>
+    <span class="legend__item legend__gaze"><kbd>A</kbd> auto gaze</span>
+    <span class="legend__item"><kbd>M</kbd> mute</span>
+  </p>
+</footer>
+
+<p class="sr-only" id="live" aria-live="polite" aria-atomic="true"></p>
+<noscript><p class="noscript">BrainSwipe needs JavaScript.</p></noscript>
+</body>
+</html>

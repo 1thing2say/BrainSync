@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,13 +30,16 @@ from .classify import ABSTAIN, make
 from .launch import Stimulus, launch_stimulus, speak
 from .online import TUNED, Decision, Decoder, calibrate, threshold_arg
 from .recordings import MONTAGE, POSTERIOR
-from .stimulus import load_config
+from .stimulus import StimulusConfig, load_config
 
 STALL_S = 5.0
 POLL_S = 0.1
 # A 10 s baseline (about 4 independent 1.5 s windows) got the 15-vs-17 Hz rest offset wrong
 # by 0.58 spreads (SD over 40 FakeBoard seeds), more than the 0.5 margin; 30 s gives ~0.33.
 CALIBRATE_S = 30.0
+PROMPTS = ("Keep still and look at the middle of the screen.", "Look at one of the squares.")
+# what build() raises for a bad config, channel or classifier setting, or a missing driver
+BUILD_ERRORS = (ValueError, KeyError, FileNotFoundError, ImportError)
 
 
 def _names(text: str) -> list[str]:
@@ -50,11 +53,15 @@ def _channels(text: str) -> list[str | int]:
     return [int(c) if c.isdigit() else c for c in _names(text)]
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="python -m brainsync.demo", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("-c", "--config", default="two_targets",
-                   help="stimulus config name or .toml path (default two_targets)")
+def add_live_arguments(p: argparse.ArgumentParser, config: str = "two_targets",
+                       seconds: float = 120.0) -> None:
+    """Add the decoder, board and stimulus flags every live app shares to ``p``.
+
+    ``config`` and ``seconds`` are the defaults of -c/--config and --seconds. Check the
+    parsed namespace with check_arguments(); build() and session() read these flags.
+    """
+    p.add_argument("-c", "--config", default=config,
+                   help=f"stimulus config name or .toml path (default {config})")
     p.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
                    help=f"default {TUNED.classifier}")
     p.add_argument("--window", type=float, default=TUNED.window_s,
@@ -74,8 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--harmonics", type=int, default=3, help="template harmonics (default 3)")
     p.add_argument("--calibrate", type=float, default=CALIBRATE_S,
                    help=f"still-screen seconds for the rest baseline (default {CALIBRATE_S:g})")
-    p.add_argument("--seconds", type=float, default=120.0,
-                   help="decoding run length in seconds (default 120)")
+    p.add_argument("--seconds", type=float, default=seconds,
+                   help=f"decoding run length in seconds (default {seconds:g})")
     p.add_argument("--names", type=_names, default=list(MONTAGE),
                    help="comma-separated names of the 8 board channels, in order")
     p.add_argument("--channels", type=_channels, default=list(POSTERIOR),
@@ -94,7 +101,49 @@ def build_parser() -> argparse.ArgumentParser:
                    help="let the stimulus run when its measured refresh is not 60 Hz "
                         "(it refuses by default)")
     p.add_argument("--no-voice", action="store_true", help="no spoken prompts")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="python -m brainsync.demo", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_live_arguments(p)
     return p
+
+
+def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject inconsistent live flags through ``p.error`` (exit code 2)."""
+    if args.fast and not args.fake:
+        p.error("--fast needs --fake")
+    for flag, value in (("--seconds", args.seconds), ("--calibrate", args.calibrate),
+                        ("--window", args.window), ("--step", args.step),
+                        ("--switch", args.switch)):
+        if not value > 0:
+            p.error(f"{flag} must be positive, got {value}")
+    if args.votes < 1:
+        p.error(f"--votes must be >= 1, got {args.votes}")
+    if args.margin < 0 or args.pad < 0:
+        p.error(f"--margin and --pad must be >= 0, got {args.margin}, {args.pad}")
+    if len(args.names) != len(MONTAGE):
+        p.error(f"--names needs {len(MONTAGE)} names, got {len(args.names)}: {args.names}")
+
+
+def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
+    """The stimulus config, the board (not yet connected) and the decoder ``args`` ask for.
+
+    Raises one of BUILD_ERRORS on a bad setting; main() reports it and exits 2.
+    """
+    cfg = load_config(args.config)
+    if args.fake:
+        board: Any = FakeBoard(cfg.freqs, switch_s=args.switch, seed=args.seed,
+                               clock=None if args.fast else time.time, ch_names=args.names)
+    else:
+        board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
+    clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
+               phases=cfg.phases, margin=args.margin, threshold=args.threshold)
+    decoder = Decoder(clf, board.fs, window_s=args.window, step_s=args.step,
+                      votes=args.votes, channels=args.channels, pad_s=args.pad,
+                      ch_names=args.names)
+    return cfg, board, decoder
 
 
 @dataclass
@@ -180,21 +229,28 @@ def _summary(tally: Tally, seconds: float, labels: tuple[str, ...], ended: str) 
     return lines
 
 
-def _stimulus_args(args: argparse.Namespace) -> list[str]:
+def stimulus_args(args: argparse.Namespace, extra: Sequence[str] = ()) -> list[str]:
+    """The stimulus command line for a live run: free-run, feedback on stdin, held still
+    until the first feedback line; ``extra`` is appended (e.g. ["--cards", DIR])."""
     out = ["-c", str(args.config), "--free", "--seconds", f"{args.seconds:g}",
            "--markers", "none", "--feedback", "stdin", "--hold-still", "--no-wait"]
     if args.ignore_refresh:
         out.append("--ignore-refresh")
+    out.extend(str(a) for a in extra)
     return out
 
 
-def _send(stim: Stimulus | None, target: int) -> bool:
-    """Write one feedback line; False when the pipe is gone."""
+_stimulus_args = stimulus_args   # the name tests/test_record.py uses
+
+
+def send(stim: Stimulus | None, line: str | int) -> bool:
+    """Write one feedback line (a target index, -1, or a command such as "card 3");
+    False when the pipe is gone. Without a stimulus there is nothing to fail: True."""
     if stim is None:
         return True
     pipe: Any = stim.proc.stdin
     try:
-        pipe.write(f"{target}\n")
+        pipe.write(f"{line}\n")
         pipe.flush()
     except (BrokenPipeError, OSError, ValueError):
         return False
@@ -213,55 +269,36 @@ def _close(stim: Stimulus | None) -> int | None:
     return stim.finish(timeout=5.0)
 
 
-def _check(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.fast and not args.fake:
-        p.error("--fast needs --fake")
-    for flag, value in (("--seconds", args.seconds), ("--calibrate", args.calibrate),
-                        ("--window", args.window), ("--step", args.step),
-                        ("--switch", args.switch)):
-        if not value > 0:
-            p.error(f"{flag} must be positive, got {value}")
-    if args.votes < 1:
-        p.error(f"--votes must be >= 1, got {args.votes}")
-    if args.margin < 0 or args.pad < 0:
-        p.error(f"--margin and --pad must be >= 0, got {args.margin}, {args.pad}")
-    if len(args.names) != len(MONTAGE):
-        p.error(f"--names needs {len(MONTAGE)} names, got {len(args.names)}: {args.names}")
+def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: Decoder, *,
+            stimulus_args: Sequence[str], on_decision: Callable[[Decision, float], bool],
+            on_flicker: Callable[[Stimulus | None], bool] | None = None,
+            prompts: tuple[str, str] = PROMPTS) -> tuple[str, int]:
+    """One live run of the sequence in this module's docstring; returns (why it ended, exit code).
 
-
-def main(argv: list[str] | None = None) -> int:
-    p = build_parser()
-    args = p.parse_args(argv)
-    _check(p, args)
-    voice = not args.no_voice
-    try:
-        cfg = load_config(args.config)
-        if args.fake:
-            board: Any = FakeBoard(cfg.freqs, switch_s=args.switch, seed=args.seed,
-                                   clock=None if args.fast else time.time, ch_names=args.names)
-        else:
-            board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
-        clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
-                   phases=cfg.phases, margin=args.margin, threshold=args.threshold)
-        decoder = Decoder(clf, board.fs, window_s=args.window, step_s=args.step,
-                          votes=args.votes, channels=args.channels, pad_s=args.pad,
-                          ch_names=args.names)
-    except (ValueError, KeyError, FileNotFoundError, ImportError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    Prints the setup line, connects ``board``, launches the stimulus with ``stimulus_args``
+    (unless --no-stimulus), speaks ``prompts[0]``, fits the rest baseline on the still
+    screen, sends -1 (which starts the flicker), speaks ``prompts[1]`` and decodes for
+    --seconds. ``on_flicker(stim)`` runs once just before decoding (``decoder.n_seen`` is
+    then the first decoded sample), e.g. to send extra feedback lines with send();
+    ``on_decision(d, elapsed)`` gets every decision with its seconds since the flicker
+    started. Either returning False ends the run as "stimulus pipe closed". Status lines
+    and the summary are the caller's; it prints no summary when this returns "not started"
+    (Ctrl-C before decoding, code 130). Code 1: board stalled, an error, or the stimulus
+    exited non-zero. The stimulus is always closed before this returns.
+    """
     labels = cfg.labels
+    voice = not args.no_voice
     fast = args.fake and args.fast
     sleep: Callable[[float], None] = board.advance if fast else time.sleep
     clock: Callable[[], float] = (lambda: board.elapsed) if fast else time.monotonic
-    print(f"{'fake board' if args.fake else 'Cerelog X8'} at {board.fs:g} Hz; {clf!r}; "
-          f"channels {','.join(decoder.channel_names)}; window {args.window:g} s, step "
-          f"{args.step:g} s, {args.votes} votes", file=sys.stderr)
+    print(f"{'fake board' if args.fake else 'Cerelog X8'} at {board.fs:g} Hz; "
+          f"{decoder.classifier!r}; channels {','.join(decoder.channel_names)}; window "
+          f"{args.window:g} s, step {args.step:g} s, {args.votes} votes", file=sys.stderr)
     if args.calibrate < CALIBRATE_S:
         print(f"warning: a {args.calibrate:g} s baseline is noisy; rest decisions may lean "
               f"towards one target (default {CALIBRATE_S:g} s)", file=sys.stderr)
 
     stim: Stimulus | None = None
-    tally = Tally()
     ended = "not started"
     code = 0
     try:
@@ -272,8 +309,8 @@ def main(argv: list[str] | None = None) -> int:
                 # the squares stand still until the first feedback line, so the baseline
                 # is fit on the same still screen the replay tuning used
                 print("starting the stimulus...", file=sys.stderr)
-                stim = launch_stimulus(_stimulus_args(args), stdin=subprocess.PIPE)
-            speak("Keep still and look at the middle of the screen.", voice)
+                stim = launch_stimulus(list(stimulus_args), stdin=subprocess.PIPE)
+            speak(prompts[0], voice)
             if args.fake:
                 board.set_target(ABSTAIN)
             cal = calibrate(decoder, board, args.calibrate,
@@ -290,29 +327,24 @@ def main(argv: list[str] | None = None) -> int:
                 return None
 
             # the first feedback line starts the flicker
-            gone = stimulus_gone() or (None if _send(stim, ABSTAIN) else "stimulus pipe closed")
+            gone = stimulus_gone() or (None if send(stim, ABSTAIN) else "stimulus pipe closed")
             if gone:
                 ended = f"{gone} before the flicker started"
             else:
-                speak("Look at one of the squares.", voice)
+                speak(prompts[1], voice)
                 board.read()  # drop what arrived during the prompt
                 began = decoder.n_seen
                 ended = "started"
 
-                def on_decision(d: Decision) -> bool:
-                    elapsed = (d.end - began) / decoder.fs
-                    truth = board.active_target() if args.fake else None
-                    tally.add(d, elapsed, truth)
-                    print(_status(d, elapsed, labels, truth), file=sys.stderr, flush=True)
-                    if not d.changed:
-                        return True
-                    if d.committed != ABSTAIN:
-                        speak(labels[d.committed], voice)
-                    return _send(stim, d.committed)
+                def timed(d: Decision) -> bool:
+                    return on_decision(d, (d.end - began) / decoder.fs)
 
                 try:
-                    ended = run(decoder, board, args.seconds, on_decision, sleep=sleep,
-                                clock=clock, stop=stimulus_gone)
+                    if on_flicker is not None and not on_flicker(stim):
+                        ended = "feedback failed"
+                    else:
+                        ended = run(decoder, board, args.seconds, timed, sleep=sleep,
+                                    clock=clock, stop=stimulus_gone)
                 except KeyboardInterrupt:
                     ended = "interrupted"
                 if ended == "feedback failed":
@@ -336,6 +368,40 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: the stimulus exited with code {stim_code}; see {stim.log}",
                   file=sys.stderr)
             code = code or 1
+    return ended, code
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = build_parser()
+    args = p.parse_args(argv)
+    check_arguments(p, args)
+    try:
+        cfg, board, decoder = build(args)
+    except BUILD_ERRORS as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    labels = cfg.labels
+    voice = not args.no_voice
+    tally = Tally()
+    stim: Stimulus | None = None
+
+    def on_flicker(started: Stimulus | None) -> bool:
+        nonlocal stim
+        stim = started
+        return True
+
+    def on_decision(d: Decision, elapsed: float) -> bool:
+        truth = board.active_target() if args.fake else None
+        tally.add(d, elapsed, truth)
+        print(_status(d, elapsed, labels, truth), file=sys.stderr, flush=True)
+        if not d.changed:
+            return True
+        if d.committed != ABSTAIN:
+            speak(labels[d.committed], voice)
+        return send(stim, d.committed)
+
+    ended, code = session(args, cfg, board, decoder, stimulus_args=stimulus_args(args),
+                          on_flicker=on_flicker, on_decision=on_decision)
     if ended != "not started":
         print("\n".join(_summary(tally, tally.seconds, labels, ended)))
     return code

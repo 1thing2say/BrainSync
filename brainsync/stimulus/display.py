@@ -1,23 +1,35 @@
 """Frame-locked playback: frame schedules, markers, timing, and the PsychoPy renderer.
 
 A session is a sequence of Frame records (target luminances, which target carries the
-cue box, and the events the frame shows). ``play`` draws each one, flips (which waits
-for vsync), then prints the frame's markers. Everything except PsychoPyRenderer is
-display-free; psychopy is imported only when a window is opened.
+cue box, the events the frame shows, and for BrainSwipe the profile card and the flashed
+target). ``play`` draws each one, flips (which waits for vsync), then prints the frame's
+markers. Everything except PsychoPyRenderer is display-free; psychopy is imported only
+when a window is opened.
+
+The card and the flash never touch a square's fill: the card is its own image stimulus
+and the flash is a thicker, coloured outline box, so the flicker frequencies stay exact.
 """
 from __future__ import annotations
 
 import statistics
+import struct
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol, TextIO
 
 import numpy as np
 
-from .config import StimulusConfig, Trial
+from .config import StimulusConfig, Trial, card_overlap
 from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
+
+# The flash box's line is this many times the cue box's, so a swipe reads at a glance.
+FLASH_LINE_SCALE = 2.0
+LABEL_HEIGHT = 0.045   # screen heights
+LABEL_GAP = 0.03       # between a target's cue box and its label
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 MARKER_CLOCKS: dict[str, Callable[[], float] | None] = {
     "unix": time.time,
@@ -32,12 +44,18 @@ class Aborted(Exception):
 
 @dataclass(frozen=True)
 class Frame:
-    """One display frame. ``trial`` >= 0 marks a flicker frame of that trial."""
+    """One display frame. ``trial`` >= 0 marks a flicker frame of that trial.
+
+    ``card`` is the profile card shown (-1: none) and ``flash`` the target whose box is
+    flashing (-1: none); neither affects ``lum``.
+    """
 
     lum: np.ndarray
     cue: int = -1
     events: tuple[str, ...] = ()
     trial: int = -1
+    card: int = -1
+    flash: int = -1
 
 
 def format_marker(stamp: float, event: str) -> str:
@@ -101,27 +119,44 @@ def cued_frames(cfg: StimulusConfig, trials: list[Trial]) -> Iterator[Frame]:
 def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 cue: Callable[[], int] | None = None,
                 stop: Callable[[], bool] | None = None,
-                hold: Callable[[], bool] | None = None) -> Iterator[Frame]:
+                hold: Callable[[], bool] | None = None,
+                card: Callable[[], int] | None = None,
+                flash: Callable[[], tuple[int, int]] | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
     a still screen for a rest baseline; ``seconds`` counts flicker frames only, and the
     flicker starts from frame 0 so its onset has no jump.
+
+    ``card`` (the card index) and ``flash`` (target, serial) are polled once per frame,
+    still frames included. A serial different from the last one seen (initially 0, as
+    FeedbackReader starts) lights that target's box for [card] flash_s, restarting any
+    flash in progress. Neither changes the luminances.
     """
     r = cfg.refresh
     still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform)
     total = None if seconds is None else n_frames(seconds, r)
+    flash_len = n_frames(cfg.card_spec.flash_s, r)
     holding = hold is not None
+    seen, flashing, left = 0, -1, 0
     i = 0
     while total is None or i < total:
         if stop is not None and stop():
             return
+        shown = card() if card is not None else -1
+        if flash is not None:
+            target, serial = flash()
+            if serial != seen:
+                seen, flashing, left = serial, target, flash_len
+        lit = flashing if left > 0 else -1
+        left = max(0, left - 1)
         if holding and hold():
-            yield Frame(still)
+            yield Frame(still, card=shown, flash=lit)
             continue
         holding = False
         k = cue() if cue is not None else -1
-        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform), cue=k)
+        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform), cue=k,
+                    card=shown, flash=lit)
         i += 1
 
 
@@ -169,7 +204,10 @@ class SessionTiming:
 
 
 class Renderer(Protocol):
-    def draw(self, lum: np.ndarray, cue: int) -> None: ...
+    """``play`` passes ``card`` and ``flash`` only on frames that set them, so a renderer
+    for card-free sessions may take just ``(lum, cue)``."""
+
+    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1) -> None: ...
     def flip(self) -> float: ...
     def escape_pressed(self) -> bool: ...
 
@@ -189,7 +227,10 @@ def play(frames: Iterable[Frame], renderer: Renderer, markers: MarkerWriter,
         for fr in frames:
             if renderer.escape_pressed():
                 raise Aborted
-            renderer.draw(fr.lum, fr.cue)
+            if fr.card >= 0 or fr.flash >= 0:
+                renderer.draw(fr.lum, fr.cue, card=fr.card, flash=fr.flash)
+            else:
+                renderer.draw(fr.lum, fr.cue)
             t = renderer.flip()
             markers.emit(fr.events)
             timing.n_frames += 1
@@ -239,10 +280,46 @@ def layout_overflow(cfg: StimulusConfig, width_px: float, height_px: float) -> s
             f"{2 * half_width:.3f}:1 window ends at +/-{half_width:.3f}; they will be cut off")
 
 
-class PsychoPyRenderer:
-    """Fullscreen PsychoPy window: one grey square per target plus an outline cue box each."""
+def label_pos(cfg: StimulusConfig, k: int) -> tuple[float, float]:
+    """Centre of target ``k``'s label: just below its cue box, never over the square."""
+    x, y = cfg.targets[k].pos
+    return (x, y - cfg.reach - LABEL_GAP - LABEL_HEIGHT / 2.0)
 
-    def __init__(self, cfg: StimulusConfig) -> None:
+
+def card_paths(directory: str | Path) -> list[Path]:
+    """The card images in ``directory``: its *.png files sorted by name (card k is [k])."""
+    d = Path(directory).expanduser()
+    if not d.is_dir():
+        raise ValueError(f"--cards {str(directory)!r} is not a directory")
+    paths = sorted((p for p in d.glob("*.png") if p.is_file()), key=lambda p: p.name)
+    if not paths:
+        raise ValueError(f"--cards {str(directory)!r} has no .png files")
+    return paths
+
+
+def png_size(path: str | Path) -> tuple[int, int]:
+    """(width, height) in pixels from a PNG's IHDR header, without decoding the image."""
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if len(head) < 24 or head[:8] != _PNG_SIGNATURE or head[12:16] != b"IHDR":
+        raise ValueError(f"{path} is not a PNG file")
+    width, height = struct.unpack(">II", head[16:24])
+    if width == 0 or height == 0:
+        raise ValueError(f"{path} has an empty image ({width} x {height})")
+    return width, height
+
+
+class PsychoPyRenderer:
+    """Fullscreen PsychoPy window: one grey square per target plus an outline cue box each.
+
+    With ``cards``, every PNG becomes one ImageStim at init (textures are never loaded in
+    the frame loop), centred, [card] height high and as wide as its own aspect says, and
+    each target's label (Pass, Like) is written under its cue box in its flash colour, so
+    the audience can see what each square does. Labels are static and drawn outside the
+    squares, so they never touch the flicker.
+    """
+
+    def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = ()) -> None:
         from psychopy import event, visual  # lazy: never imported by tests
 
         self.cfg = cfg
@@ -257,27 +334,55 @@ class PsychoPyRenderer:
         side, box = cfg.size, 2.0 * cfg.reach
         self.squares = []
         self.boxes = []
+        self.flashes = []
         for t in cfg.targets:
             self.squares.append(visual.Rect(self.win, size=(side, side), pos=t.pos,
                                             lineColor=None, fillColor=to_psychopy_rgb(0.0)))
             self.boxes.append(visual.Rect(self.win, size=(box, box), pos=t.pos,
                                           fillColor=None, lineColor=cfg.cue_color,
                                           lineWidth=cfg.cue_line_px))
+            self.flashes.append(visual.Rect(self.win, size=(box, box), pos=t.pos,
+                                            fillColor=None, lineColor=cfg.flash_color(t.index),
+                                            lineWidth=cfg.cue_line_px * FLASH_LINE_SCALE))
         problem = layout_overflow(cfg, *self.win.size)
         if problem:
             print(f"warning: {problem}", file=sys.stderr)
+        height = cfg.card_spec.height
+        self.labels = []
+        if cards:
+            for t in cfg.targets:
+                self.labels.append(visual.TextStim(self.win, text=t.label,
+                                                   pos=label_pos(cfg, t.index),
+                                                   height=LABEL_HEIGHT,
+                                                   color=cfg.flash_color(t.index)))
+        self.cards = []
+        for path in cards:
+            w, h = png_size(path)
+            overlap = card_overlap(cfg, aspect=w / h)
+            if overlap:
+                print(f"warning: {Path(path).name}: {overlap}", file=sys.stderr)
+            self.cards.append(visual.ImageStim(self.win, image=str(path), pos=(0.0, 0.0),
+                                               size=(height * w / h, height),
+                                               interpolate=True))
 
     def measure_refresh(self, n: int = 120, warmup: int = 20) -> float:
         """Median-interval rate over ``n`` blank flips, after ``warmup`` unmeasured ones."""
         stamps = [self.win.flip() for _ in range(warmup + n)]
         return median_rate(stamps[warmup:])
 
-    def draw(self, lum: np.ndarray, cue: int) -> None:
+    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1) -> None:
+        # the card goes first so a square drawn over an oversized card keeps its luminance
+        if 0 <= card < len(self.cards):
+            self.cards[card].draw()
         for k, square in enumerate(self.squares):
             square.fillColor = to_psychopy_rgb(lum[k])
             square.draw()
+        for label in self.labels:
+            label.draw()
         if 0 <= cue < len(self.boxes):
             self.boxes[cue].draw()
+        if 0 <= flash < len(self.flashes):
+            self.flashes[flash].draw()
 
     def flip(self) -> float:
         return float(self.win.flip())
@@ -292,7 +397,7 @@ class PsychoPyRenderer:
         self._clear_keys()
         pressed: list[str] = []
         while "space" not in pressed:
-            self.draw(still, -1)
+            self.draw(still, -1, card=0 if self.cards else -1)
             prompt.draw()
             self.win.flip()
             pressed = self._keys(keyList=["space", "escape"])
