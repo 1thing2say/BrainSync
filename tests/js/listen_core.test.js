@@ -116,7 +116,7 @@ test("calling want(true) again while on does nothing", () => {
   assert.equal(rec.made.length, 1);
 });
 
-test("Chrome ending a session restarts it: 250 ms after a healthy one", () => {
+test("Chrome ending a session restarts it at once (100 ms)", () => {
   const { c, L, rec, current } = setup();
   L.want(true, 0);
   c.advance(1);
@@ -124,10 +124,25 @@ test("Chrome ending a session restarts it: 250 ms after a healthy one", () => {
   c.advance(8000); // silence: Chrome ends the session
   current().error("no-speech");
   current().end();
-  c.advance(249);
+  c.advance(99);
   assert.equal(rec.made.length, 1);
   c.advance(1);
   assert.equal(rec.made.length, 2);
+});
+
+test("a silent session ending after 2 s is a normal end, not a quick death", () => {
+  const { c, L, rec, current } = setup();
+  L.want(true, 0);
+  c.advance(1);
+  for (let i = 0; i < 5; i++) {
+    current().fireStart();
+    c.advance(2000);
+    current().error("no-speech");
+    current().end();
+    const count = rec.made.length;
+    c.advance(100);
+    assert.equal(rec.made.length, count + 1); // never backs off: the mic is never closed for long
+  }
 });
 
 test("sessions that die at once back off to 4 s, never give up, one recognizer at a time", () => {
@@ -204,13 +219,30 @@ test("network errors retry forever with 1, 2, 4, 8, 8 s", () => {
   assert.deepEqual(gaps, [1, 2, 4, 8, 8]);
 });
 
-test("words still being recognised when Chrome ends a session are sent", () => {
+test("a sentence spanning a session end becomes one line", () => {
   const { c, L, lines, current } = setup();
   L.want(true, 0);
   c.advance(1);
-  current().say("do you want", { final: false });
+  current().say("would you like");
+  current().end(); // Chrome ends the session mid-sentence
+  c.advance(100);
+  current().say("some coffee");
+  c.advance(1200);
+  assert.deepEqual(lines, ["would you like. some coffee"]);
+});
+
+test("short unconfirmed words at a session end are dropped; a longer run is kept", () => {
+  const { c, L, lines, current } = setup();
+  L.want(true, 0);
+  c.advance(1);
+  current().say("stuff", { final: false });
   current().end();
-  assert.deepEqual(lines, ["do you want"]);
+  c.advance(1300);
+  assert.deepEqual(lines, []); // the old code sent fragments like "stuff" and "it"
+  current().say("do you want some tea", { final: false });
+  current().end();
+  c.advance(1300);
+  assert.deepEqual(lines, ["do you want some tea"]);
 });
 
 test("a monologue is sent after maxLineMs even without a pause", () => {

@@ -7,19 +7,21 @@ const ListenCore = (() => {
   const FILLER = new Set(["um", "uh", "hmm", "mm", "ah", "oh", "er", "erm"]);
   // How the loop behaves (ms). Pinned by the node tests; not venue tuning, so not in config.
   const T = {
-    healthyRestart: 250, // after a session that heard speech or ran a while (Chrome ends on silence)
-    quickFirst: 500, // a session that died at once: back off, doubling...
+    healthyRestart: 100, // after a normal end (Chrome ends sessions on silence): restart at once,
+    //                      or the start of the partner's next sentence is lost
+    quickFirst: 500, // a session that died at once (under healthyAfter): back off, doubling...
     quickMax: 4000, // ...up to this
     networkFirst: 1000, // no network: 1, 2, 4, 8 s, then every 8 s, never giving up
     networkMax: 8000,
     audioCapture: 3000, // no microphone: try again every 3 s (a lapel receiver plugged back in)
-    healthyAfter: 5000, // a session this long counts as healthy
+    healthyAfter: 1000, // a session that ran this long ended normally, not "died at once"
     stallAfter: 60000, // no event at all for this long: abort it and start a new one
     watchdog: 2000, // checks that a session is running or about to
     needsTapAfter: 3000, // no onstart by then: Chrome may want a click first
     graceMs: 3000, // a window ending mid-sentence waits this long for the sentence to finish
   };
   const MIN_CONFIDENCE = 0.3; // Chrome reports 0 when it does not know: those are kept
+  const MIN_CARRY_WORDS = 3; // unconfirmed words this long are kept when a session ends
   const FATAL = { "not-allowed": "denied", "service-not-allowed": "denied",
                   "language-not-supported": "unsupported" };
 
@@ -165,7 +167,12 @@ const ListenCore = (() => {
         detach(r);
         rec = null;
         clear("tap");
-        if (finals.length || interim.trim()) flush(true); // never lose a sentence at a session end
+        // A session end is not the end of the partner's line: confirmed words carry over to the
+        // next session and go out after the usual pause. Unconfirmed words are less accurate and
+        // often cut off, so only a longer run of them is kept.
+        if (words(interim).length >= MIN_CARRY_WORDS) finals.push(interim.trim());
+        interim = "";
+        if (finals.length) setTimer("gap", cfg.gapMs, () => flush(false));
         scheduleRestart();
       };
       rec = r;
