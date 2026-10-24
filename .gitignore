@@ -1,15 +1,40 @@
-/ssvep/
-.DS_Store
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
-.coverage
-htmlcov/
+*.py[cod]
 *.egg-info/
-.venv/
 build/
 dist/
+
+# Environments and secrets (ANTHROPIC_API_KEY lives in the environment, never in the repo)
+.venv/
+venv/
+.env
+.env.*
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Session logs (app/log.py)
+logs/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local ssvep reference copy, local tool state and recordings
+/ssvep/
 .dmux/
-.claude/
 data/*
 !data/README.md
+
+# Claude Code: local instructions and settings (never committed)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
