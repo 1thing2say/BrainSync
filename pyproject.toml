@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brainsync"
+version = "0.1.0"
+description = "Two-target SSVEP brain-computer interface for the Cerelog X8 EEG board"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+display = ["psychopy>=2026.2"]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[tool.setuptools.packages.find]
+include = ["brainsync*"]
+
+[tool.setuptools.package-data]
+brainsync = ["stimulus/configs/*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "realdata: needs recordings under $BRAINSYNC_DATA_DIR; skipped when the files are absent",
+    "slow: takes more than a few seconds",
+]
