@@ -25,17 +25,78 @@ pull requests.
   mirror), plus the V2 server, scan-mode orchestrator and speech out. Try it with
   `python -m app.server --fake-decoder` and open `http://127.0.0.1:8000`.
 - Read the teammate's `ssvep` code (section 12). Three facts shape this plan:
-  1. **2 targets, not 4.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at 83 % on 4 s
-     windows (FBCCA 14/15 at 2 s with the cue held); 3 targets (12/15/17) only reach 66 %; 10 Hz
-     is unusable (alpha).
+  1. **2 targets, not 4.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at 78–86 %
+     single-target, and 64–93 % with both squares flickering (section 14); 3 targets (12/15/17)
+     only reach 61–66 %; 10 Hz is unusable (alpha). **Keep 15/17 for now**; 12/17 is the only
+     alternative worth one test recording (section 14).
   2. **His decoder is continuous, not per trial.** `SlidingDecoder` classifies a 4 s window every
      0.5 s and commits after 3 wins in a row, so a selection takes about 5 s from the start of the
-     flicker. It already produces per-target scores.
+     flicker at best. In the only live run most windows abstained (section 12), so expect longer.
+     It already produces per-target scores.
   3. **The flicker is his PsychoPy display** (`ssvep.stimulus`), already validated on his EEG.
      The browser draws no flicker. Nothing speaks `INTERFACE.md` yet, so a bridge on his side runs
      the decoder and the display and talks to our server.
-- **Next up:** SYNC 1 to settle section 13 (teammate: please read sections 12 and 13), then V3
-  (LLM option ranking) and V4 (partner speech input).
+- Other work in this repo (local worktrees, 2026-10-23):
+  - `check-implemtation-calhacks-desktop`: a clean-room rebuild of the `ssvep` decoder side as a
+    `brainsync/` package (board, recording, CCA/FBCCA, PsychoPy stimulus, `select_freqs`,
+    `score_cued`). Mostly uncommitted; no online decoder or bridge yet. Its re-analysis of the
+    recordings is what section 14 reports.
+  - `custom-operating-brain-seperate`: BrainSyncOS, a Jetson appliance OS (phase 1: base ISO
+    extract/repack only). See section 10.
+- **Next up:** SYNC 1 to settle section 13 and agree `INTERFACE-v2-draft.md` (teammate: please read
+  System design, sections 12, 13 and 14, and the draft), then V3 (LLM option ranking) and V4
+  (partner speech input).
+
+## System design
+
+```
+ Demo Mac (the teammate's; fixed 60 Hz, ProMotion off)
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │  BrainSync server (our venv)         Bridge (their venv)                │
+ │  FastAPI + Orchestrator     ◀─ws─▶   connects board once (~16 s)        │
+ │  (owns all state)  /ws/decoder       SlidingDecoder (4 s / 0.5 s / 3)   │
+ │  menus.py ──https──▶ Claude API      │ stdin: int box + JSON commands   │
+ │  log.py (JSONL)                      ▼          ▲ stderr: onset markers │
+ │        ▲ /ws/ui                     PsychoPy display (full screen)      │
+ │        ▼                             flicker, option text, box, Esc     │
+ │  Chrome partner page                                                    │
+ │  mirror, STOP, TTS out, push-to-talk                                    │
+ └───────────────────────────────────────────────────────────────────────┘
+        Cerelog X8 ──USB serial──▶ Bridge (the only reader of the port)
+```
+
+| Process | Owner | Owns | Talks to |
+| --- | --- | --- | --- |
+| BrainSync server (`app/`) | Elijah | All state: trials, options, what is shown and spoken, the log | Bridge (`/ws/decoder`), partner page (`/ws/ui`), Claude API |
+| Bridge (`ssvep/online/bridge.py`) | Teammate | The board connection, the decoder, the display process | Server (websocket client), display (stdin/stderr) |
+| PsychoPy display (`ssvep.stimulus`) | Teammate | Frame-locked flicker, option text, the box, `Esc` | Bridge only |
+| Chrome partner page (`ui/`) | Elijah | Rendering, TTS, STT, STOP | Server only |
+| Claude API | — | Ranked reply options | Server only (`app/menus.py`) |
+
+The server ↔ bridge contract is `INTERFACE.md` (v1, in force) and `INTERFACE-v2-draft.md` (the
+proposal for SYNC 1, written for this design). The server ↔ browser messages are in section 6.
+
+Design risks to settle:
+
+1. **One screen cannot show both windows.** The flicker must be full screen (the teammate's rule,
+   enforced by PsychoPy), but the partner page needs a visible Chrome window for push-to-talk and
+   STOP. Options: an external monitor for Chrome, with PsychoPy pinned to the built-in panel
+   (`screen = 0`, locked at 60 Hz); or the partner page on a phone (section 10, `server.host:
+   0.0.0.0`; check that the phone browser's speech recognition works). With Chrome, PsychoPy and
+   the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
+2. **The contract is behind the design.** v1 has the browser drawing the flicker and 4 square-wave
+   slots; `app/orchestrator.py` still sends the v1 `hello`. The bridge cannot be built until v2
+   (`INTERFACE-v2-draft.md`) is agreed, so it gates SYNC 2.
+3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
+   a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
+   demo script rehearses switching to it.
+4. **Time per reply.** One SAY is cue 1 s + decode ≥ 5 s + highlight 0.6 s + speech + rest 1 s,
+   about 8–9 s at best. Each NEXT adds about 7 s, and each abstained trial repeats. Ranking quality
+   (V3) and the decoder's abstain rate (section 13, item 10) matter more than any other choice.
+   Showing the decoder's scores on the partner page makes waiting look like progress.
+5. **STOP takes three hops** (Chrome → server → bridge → display stdin). `Esc` on the display is
+   local and immediate, so it is the primary stop, and the bridge turns the flicker off whenever it
+   loses the server (v2 draft, rule 3).
 
 ## 0. Event constraints
 
@@ -64,7 +125,10 @@ The decoder tells us which of **2** targets the user looked at. This side does e
 
 **Scan mode (default).** The LLM returns 4 options ranked by likelihood. The screen shows option 1.
 SAY speaks it; NEXT moves to option 2, and so on. NEXT on the last option asks for new options
-("More options"). With good ranking, most replies take one selection (about 5 s).
+("More options"). With good ranking, most replies take one selection: about 5 s when the decoder
+commits on the first try. The live decoder abstains often today (section 12), so some trials will
+end as "Didn't catch that" and repeat; the teammate's tuning (section 13, item 10) should shorten
+this.
 
 Demo story: a partner asks "Do you want to go outside?", the top option becomes "Yes, let's go
 outside", the user looks at SAY, and the laptop speaks it.
@@ -111,7 +175,8 @@ Two repos. The decoder and display live in `1thing2say/ssvep` (his); this repo i
 BrainSync/
   CLAUDE.md             # local only
   PLAN.md
-  INTERFACE.md
+  INTERFACE.md          # v1, in force
+  INTERFACE-v2-draft.md # proposal for SYNC 1
   pyproject.toml
   config/
     default.yaml        # all tunables (section 5)
@@ -165,10 +230,10 @@ BrainSync/
 | Key | Default | Notes |
 | --- | --- | --- |
 | `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` later for phone or Jetson |
-| `stim.slots` | s1 15 Hz, s2 17 Hz | Mirrors his stimulus config; checked against the decoder's `hello` |
+| `stim.slots` | s1 15 Hz, s2 17 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. 12/17 under test (section 14) |
 | `stim.roles` | s1 `say`, s2 `next` | Which slot does what |
 | `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
-| `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit |
+| `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
 | `stim.rest_s` | 1.0 | Still screen after a trial |
 | `baseline.seconds` | 10.0 | Still screen at start for the decoder's resting baseline |
 | `menus.dynamic` | true | false = fallback lists only |
@@ -330,8 +395,9 @@ panel.
 
 1. Run on his Mac with the real headset, his display and his bridge. Check that the display's onset
    times line up with board timestamps (both Unix time on the same machine).
-2. Agree on final `max_trial_s`, `rest_s` and the decoder's `window_s` (4 s default; 2 s worked
-   14/15 with the cue held, and would cut each selection to about 3 s).
+2. Agree on final `max_trial_s`, `rest_s` and the decoder's `window_s` (4 s default; 2 s scored as
+   well or better in 2 of 3 cued recordings, and would cut each selection to about 3 s), and on
+   the frequency pair (section 14).
 3. Handle decoder or display loss mid-trial: pause, show "Decoder disconnected", resume on
    reconnect (through `BASELINE`).
 4. If the decoder sends scores, enable `confirm_mode: low_score` (*stretch*).
@@ -349,7 +415,14 @@ Take shifts with the teammate. Commit a working state before sleeping.
 
 1. `tools/preflight.py`: decoder connected and `status.ok`, display up (refresh check passed, fixed
    60 Hz, ProMotion off), Chrome partner page open, API key, internet, audio out, mic; prints
-   go/no-go.
+   go/no-go. Headset checklist, from the teammate's sessions:
+   - Headset on at least 20 minutes before recording or demoing; unsettled contacts ruined the
+     first trials of the first two-target recording.
+   - One eyes-closed alpha check (`spectrum_check -t 10`): a posterior 9–10 Hz peak and RMS under
+     20 µV on O1 and O2.
+   - Nothing else reading the board's serial port (a live plot splits the stream).
+   - Allow about 16 s for the board to connect; the "Handshake verification failed" line it logs
+     first is harmless.
 2. One command to start: `python -m app.server` (+ `--fake-decoder`, `--keyboard`).
 3. Demo script: 3–4 partner questions where the right reply is option 1, plus one that needs NEXT.
    Rehearse with the live decoder.
@@ -380,8 +453,12 @@ Take shifts with the teammate. Commit a working state before sleeping.
   network by setting `server.host: 0.0.0.0` and opening `http://<laptop-ip>:8000`.
 - Planned split: the partner page on the partner's phone (mic, transcript, conversation), while the
   laptop runs his display for the user.
-- The decoder could later run on the Jetson Nano and connect to `/ws/decoder` over the network; the
+- The decoder could later run on a Jetson and connect to `/ws/decoder` over the network; the
   contract does not change. The vendored BrainFlow would need Linux ARM builds first.
+- BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
+  so a Jetson boots straight into BrainSync. JetPack 7 supports AGX Thor, AGX Orin and Orin
+  NX/Nano only, not the original Jetson Nano. Only phase 1 (verified base ISO, extract, no-op
+  repack) exists; nothing on the demo path depends on it.
 
 ## 11. Commands
 
@@ -404,25 +481,46 @@ fullscreen.
 
 ## 12. What the teammate's code does (`../ssvep`, read 2026-10-23)
 
+- **Repo state:** the online decoder, demo, classifiers and cued-trial tool are on
+  `feat/spectrum-check`, pushed to PR #6 (commits `afd4dd5`, `1c2081e`, `4f2b048`, `d546dc2`), which
+  is stacked on PR #5 (vendored BrainFlow). The local clone at `../ssvep` predates them (no
+  `online/`): pull before writing the bridge against it.
 - **Board:** `acquisition/board.py`, Cerelog X8, 8 channels at 250 Hz, `read() -> (X µV, t Unix)`.
-  Montage used: Fp1, Fp2, C3, C4, P7, P8, O1, O2; decoding uses the posterior four.
+  Montage used: Fp1, Fp2, C3, C4, P7, P8, O1, O2; decoding uses the posterior four. C3 and C4 do
+  not reach the scalp and float (200+ µV), which degrades the bias loop; tie them to CH1+ or move
+  them to Oz/POz. Scalp electrodes are dry; reference (SRB1, mastoid) and bias are gel pads.
+  Connecting takes about 16 s.
 - **Classifiers:** CCA and FBCCA work (calibration-free, resting baseline subtracted, `margin`
   abstains). PSD, TRCA, eTRCA, itCCA and eCCA are empty stubs.
 - **Live decoder:** `online/decoder.py` `SlidingDecoder`: 4 s window every 0.5 s, filtered 1–100 Hz
   with a 60 Hz notch, commits a target after 3 wins in a row. `Decision` has `scores` per target,
   `raw`, `committed`, `changed`. `calibrate_baseline()` records 10 s of still screen.
-  `reset()` clears the buffer and vote streak.
+  `reset()` clears the buffer and vote streak. On fake data the first commit comes at exactly 5.0 s
+  and a switch shows after about 2.5–3 s. The newest ~0.3 s of each window is bent by the
+  zero-phase filter's edge (known, not fixed).
+- **Live run (2026-10-22, 90 s):** 173 windows, 16 commits, 3–5 s per switch. Scores were
+  ±0.02–0.09 against a 0.02 margin, so the decoder abstained more often than it committed. Not saved
+  or scored; the teammate's verdict was "it worked i think".
 - **Live demo:** `online/demo.py`: baseline, then launches the display with `--free --feedback
   stdin` as a subprocess; each commit is written to its stdin (red box) and spoken with macOS
   `say`. No trials, no websocket. The bridge can follow the same pattern.
 - **Display:** `stimulus/` (PsychoPy): frame-locked sine/square flicker, refresh check that refuses
   to run on a mismatch, photodiode patch, LSL or Unix-time markers, cued / free / sweep modes, `Esc`
-  quits. In free mode, stdin takes only a target index (red box) or `-1`; labels are fixed per
-  config. `two_targets.toml`: 15 and 17 Hz, sine, squares 0.4 screen heights, one screen height
-  apart.
+  quits. In free mode (`--feedback stdin`), stdin takes one integer per line: a target index (red
+  box) or `-1` (clear); end of input stops the run. Non-integer and out-of-range lines are ignored
+  with a note on stderr, so JSON lines (section 13, item 2) are harmless to an unmodified display.
+  A box change logs no marker; the bridge must time-stamp it. Labels are fixed per config.
+  `two_targets.toml`: 15 and 17 Hz, sine, squares 0.4 screen heights, centres one screen height
+  apart. That spacing was never recorded: the 14/15 result used centres 0.7 apart. Always full
+  screen (the teammate's rule: a small window is easy to look away from).
 - **Findings:** 15 vs 17 Hz 83 % (4 s windows); 12/15/17 three-class 66 %; 10 Hz unusable (alpha);
   gaze drifts to the other target after about 2 s unless a cue box stays on the target; ProMotion
-  on = no SSVEP; drawing text every frame can cost frames on slow machines.
+  on = no SSVEP; drawing text every frame can cost frames on slow machines. Re-analysed on
+  2026-10-23 with stricter run selection: section 14. The held cue box fixed gaze drift in cued
+  recordings (last 2 s: 7/20 → 13/20), but scan mode cannot hold a box on a target nobody knows in
+  advance; a fixation mark inside each square, or the 2 s window, has to do that job. Gel or paste
+  on O1/O2 is the biggest remaining gain, ahead of any software change. One verified run dropped 7
+  frames in 160 s (the baseline for SYNC 1.5).
 
 ## 13. Open decisions for SYNC 1
 
@@ -434,21 +532,25 @@ fullscreen.
    prints the Unix time of the first flickering frame after `{"flicker": true}` (`--markers unix`),
    and the bridge sends it to us. *Fallback:* his display in a window (`--windowed`) with our
    partner page's mirror beside it, so the user reads the text in the browser; no change to his
-   display.
+   display. This breaks the teammate's always-full-screen rule and weakens the response, so it is
+   a last resort.
 3. **The bridge** (`ssvep/online/bridge.py`, his repo, about 150 lines). Launches the display as a
    subprocess the way `demo.py` does, connects to `/ws/decoder` and sends `hello` with the slots
    and refresh rate from his config. Relays our display commands to the display's stdin. On
    `baseline` it holds the flicker off and calls `calibrate_baseline`. On `stim_start` it turns the
    flicker on, calls `decoder.reset()`, drops buffered samples and steps the decoder; on the first
    `committed` it sends `selection` with the slot. On `stim_stop` it stops stepping. Reports display
-   `Esc` or exit as a `status` with `ok: false`. Reconnects every 1 s. `--fake` uses `FakeSource`.
+   `Esc` or exit as a `status` with `ok: false`. Reconnects to our server every 1 s; the board
+   itself takes about 16 s to connect, so it connects once at startup, not per reconnect. `--fake`
+   uses `FakeSource`.
 4. **Menu style.** *Recommended: scan* (SAY / NEXT, section 1). *Alternative: pair*: both targets
    carry an option, the LLM's top two side by side, and looking at neither until `max_trial_s`
    shows the next pair. Faster when the answer is in the top two, but a false commit speaks
    something; scan only ever speaks after an explicit SAY. Pair needs per-target text on his
    display.
 5. **`INTERFACE.md` changes.** Flicker ownership moves to his side, so these are more than additive;
-   bump `protocol` to 2:
+   bump `protocol` to 2. Written out in full in `INTERFACE-v2-draft.md` (adds `hello_ack`, `error`,
+   `baseline_done` and `pause` to the list below); once agreed it replaces `INTERFACE.md`:
    - The decoder's `hello` carries `refresh_hz`, `waveform` and `slots` from his config; the server
      replies with an ack and the roles. (v1 had it the other way round.)
    - New server → decoder `display` {text, labels, highlight}, relayed to the display.
@@ -461,5 +563,84 @@ fullscreen.
 6. **Scores.** His `Decision.scores` exist already: send `scores` (and `score` for the chosen slot)
    with each `selection`, and `"score_kind": "fbcca_minus_baseline"` in `hello`. Not probabilities;
    `confirm_mode: low_score` would use a margin threshold he picks.
-7. **Window length.** 4 s (83 %) or 2 s (14/15 with the cue held). Shorter windows make each
-   selection about 3 s instead of 5 s.
+7. **Window length.** 4 s or 2 s. In the three cued 15/17 recordings the best 2 s cell was 13/14,
+   17/19 and 12/17, against 10/14, 14/19 and 14/17 at 3.86 s (section 14). Shorter windows make
+   each selection about 3 s instead of 5 s. *Recommended:* 2 s, if a live check agrees.
+8. **Frequency pair.** Keep 15/17 or test 12/17 (section 14).
+9. **Where the decoder lives.** `../ssvep` (his repo) or the `brainsync/` rebuild on branch
+   `check-implemtation-calhacks-desktop`. The bridge (item 3) has to be written against one of them.
+10. **The teammate's demo-improvement plan** (`../ssvep/.claude/plans/demo-improvements.plan.md`,
+    phases A–E, waiting for the teammate's go as of 2026-10-23). It overlaps this plan:
+    - **A** (save and score each demo run, replay source) and **B** (tune window, votes and margin
+      on replays of the three cued recordings) should set our `window_s` (item 7), `max_trial_s`
+      and the margin. B's own risk note: windows of 2 s or less let alpha leak into 12–17 Hz scores.
+    - **C** (TRCA, calibrated on the user's own trials) only if it beats tuned FBCCA.
+    - **D** (confidence bars) extends the same display stdin as item 2: agree one line format.
+    - **E** ("make the choice do something") is this app; skip it on their side.
+    *Recommended order for them:* A and B first, then items 2 and 3 here, then D.
+
+## 14. Frequency choice (re-analysis 2026-10-23)
+
+Source: `python -m brainsync.select_freqs` and `python -m brainsync.score_cued` (desktop worktree)
+on the recordings in `/Users/school/Documents/ssvep/data/spectrum_checks`. Runs recorded with
+ProMotion on (120 Hz) and the eyes-closed control are left out.
+
+Single target, one frequency per run (CCA against controls at f0 ± 3 Hz):
+
+| Hz | Runs usable / eligible | Verdict |
+| --- | --- | --- |
+| 10 | 0 / 1 | Rejected: the still screen also wins (alpha at rest) |
+| 12 | 1 / 3 | Weak. Two runs phase-lock to the flicker but lose the CCA test to a 9 Hz resting rhythm |
+| 15 | 2 / 2 | Usable |
+| 17 | 1 / 1 | Strongest: 15/17 trials, 13 dB SNR. But only one run |
+
+Pairs, 2-class CCA with a still-window baseline, one ~3.9 s window per trial:
+
+| Pair | All eligible runs | Only runs that passed (optimistic) | Original 3 runs |
+| --- | --- | --- | --- |
+| 15/17 | **78 %** (n=50) | 78 % | 86 % |
+| 12/17 | 75 % (n=73), 82 % balanced | **86 %** (n=35) | 77 % |
+| 12/15 | 65 % | 80 % | 64 % |
+| 12/15/17 | 61 % | 72 % | 66 % |
+
+Both squares flickering (cued 15/17, cue box held, FBCCA / CCA, 14–19 clean trials each):
+64–79 % at 3.86 s, 71–93 % at 2 s, with 30–70 % of decisions abstained at the default margin.
+
+How 15/17 was picked (teammate's session, 2026-10-22), one 4 s window per trial:
+
+| Pair | Accuracy | Still screen favours |
+| --- | --- | --- |
+| 15/17 | 83 % | neither (51 %) |
+| 12/15 | 71 % | 12, 78 % raw |
+| 12/17 | 70 % | 12, 80 % raw |
+
+The 12 Hz template gets a head start from the background that the still-screen baseline only
+partly removes. Frequency was never the cause of the early failures: every run with no response
+was recorded with ProMotion on.
+
+Guidance from the same sessions, for 3 or 4 targets later:
+
+- 11–17 Hz is a plateau: each frequency is expected within 1 dB of 15 Hz (literature response
+  curve over the teammate's measured noise floor). Below 9 Hz and above 20 Hz lose clearly.
+- Avoid harmonic clashes such as 7.5/15 and 10/20.
+- Candidate four-target sets: 12/15/17/20 (the current plan; 20 Hz never measured, though it was
+  the most phase-locked response seen, as the 10 Hz flicker's harmonic), or 11/13/15/17 with sine
+  flicker (no shared harmonics below 45 Hz).
+
+What this means:
+
+- **15/17 stays the default.** It is the best pair on the unbiased pool, and the only pair tested
+  with both squares flickering at once, which is how the demo runs.
+- **12/17 is the only alternative.** It looks better only when runs are picked by their own outcome,
+  or by balanced accuracy on lopsided classes (56 vs 17 trials). 12 Hz sits next to the user's
+  9–10 Hz alpha: before the baseline, the lower template wins about 80 % of still-screen windows.
+  The upside is 5 Hz between targets instead of 2 Hz.
+- **Nothing else has data.** 20 Hz (exactly 3 frames at 60 Hz) was never recorded.
+- **The numbers are noisy.** With 14–19 trials per cued recording, a still-window control reaches
+  79 % in one cell (label-permutation p = 0.18). Gaps under about 10 points are not evidence.
+- **Safety does not change.** 12, 15 and 17 Hz are all in the photosensitive range (rule 10).
+
+**To decide (teammate, before SYNC 3):** one cued two-target recording at 12/17 with the same
+layout and cue box as the 15/17 runs (`cued_trials -c` with a 12/17 copy of `two_targets.toml`,
+about 3 minutes). Switch only if it beats 15/17 by more than 10 points at the chosen window. A
+switch is a config change on both sides: his stimulus config, and `stim.slots` here.
