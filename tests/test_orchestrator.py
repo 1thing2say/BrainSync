@@ -9,16 +9,22 @@ import pytest
 from app.config import load_config, load_intents
 from app.orchestrator import DIDNT_CATCH, MORE_LABEL, Orchestrator, St
 from app.schemas import (
+    PROTOCOL,
+    Baseline,
     DecoderHello,
     DecoderStatus,
+    Display,
+    HelloAck,
     Highlight,
     Key,
     NoSelection,
     PartnerText,
+    Pause,
+    ProtocolError,
     Resume,
     Selection,
-    ServerHello,
     ShowOption,
+    SlotSpec,
     Speak,
     State,
     StimStart,
@@ -33,6 +39,14 @@ from app.schemas import (
 CFG = load_config()
 INTENTS = load_intents()
 SAY, NEXT = "s1", "s2"  # roles in config/default.yaml
+
+
+def bridge_hello(**changes) -> DecoderHello:
+    """A hello that matches config/default.yaml, as the teammate's bridge would send it."""
+    fields = dict(protocol=PROTOCOL, name="bridge", refresh_hz=59.94, waveform="sine",
+                  slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+    fields.update(changes)
+    return DecoderHello(**fields)
 
 
 class Clock:
@@ -82,15 +96,41 @@ class Rig:
         return found[-1]
 
 
-def test_hello_is_answered_with_config_slots():
+def test_matching_hello_gets_hello_ack_with_roles_and_labels():
     r = Rig()
     r.o.on_decoder_connected()
-    r.o.on_decoder_message(DecoderHello(protocol=1, name="test"))
-    hello = r.last(r.decoder, ServerHello)
-    assert [s.slot for s in hello.slots] == ["s1", "s2"]
-    assert [s.freq_hz for s in hello.slots] == [15.0, 17.0]
-    assert hello.waveform == "sine" and hello.refresh_hz == 60
+    r.o.on_decoder_message(bridge_hello())
+    ack = r.last(r.decoder, HelloAck)
+    assert ack.protocol == PROTOCOL
+    assert ack.roles == {"s1": "say", "s2": "next"}
+    assert ack.labels == {"s1": "SAY", "s2": "NEXT"}
     assert r.last(r.ui, UIStatus).decoder_ok
+
+
+@pytest.mark.parametrize("changes, fragment", [
+    ({"refresh_hz": 120.0}, "ProMotion"),
+    ({"waveform": "square"}, "waveform square"),
+    ({"slots": [SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=12.0)]}, "s2 is 12 Hz"),
+    ({"protocol": 1}, "protocol 1"),
+])
+def test_mismatched_hello_gets_error_and_pauses(changes, fragment):
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_connected()
+    r.o.on_decoder_message(bridge_hello(**changes))
+    assert fragment in r.last(r.decoder, ProtocolError).message
+    assert not [m for m in r.decoder if isinstance(m, HelloAck)]
+    assert r.o.state is St.PAUSED
+    assert fragment in r.last(r.ui, State).detail
+    assert not r.last(r.ui, UIStatus).decoder_ok
+
+
+def test_status_cannot_override_a_rejected_hello():
+    r = Rig()
+    r.o.on_decoder_connected()
+    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
+    r.o.on_decoder_message(DecoderStatus(ok=True, board_ok=True, display_ok=True))
+    assert not r.last(r.ui, UIStatus).decoder_ok
 
 
 def test_start_goes_through_baseline_and_cue():
@@ -107,7 +147,7 @@ def test_start_goes_through_baseline_and_cue():
     r.advance(CFG.stim.cue_s)
     assert r.o.state is St.STIMULATING
     start = r.last(r.decoder, StimStart)
-    assert start.trial_id == 1 and start.active_slots == ["s1", "s2"] and start.mode == "live"
+    assert start.trial_id == 1 and start.active_slots == ["s1", "s2"]
     assert r.last(r.ui, Trial).phase == "flicker"
 
 
@@ -193,7 +233,7 @@ def test_no_selection_is_not_caught():
     start = r.to_trial()
     r.o.on_decoder_message(NoSelection(trial_id=start.trial_id, reason="low_signal"))
     assert r.o.state is St.NOT_CAUGHT
-    assert r.last(r.decoder, StimStop).reason == "timeout"  # v1 has no "no_selection" reason
+    assert r.last(r.decoder, StimStop).reason == "no_selection"
 
 
 def test_stale_and_unknown_selections_are_ignored():
@@ -268,8 +308,8 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
 def test_decoder_status_not_ok_is_reported():
     r = Rig()
     r.o.on_decoder_connected()
-    r.o.on_decoder_message(DecoderHello(protocol=1, name="test"))
-    r.o.on_decoder_message(DecoderStatus(ok=False, message="display closed"))
+    r.o.on_decoder_message(bridge_hello())
+    r.o.on_decoder_message(DecoderStatus(ok=False, board_ok=True, display_ok=False, message="Esc"))
     assert not r.last(r.ui, UIStatus).decoder_ok
 
 
@@ -301,15 +341,53 @@ def test_shown_option_never_changes_during_a_trial():
         r.o._send_ui(shown)
 
 
-def test_protocol_2_proposals_only_when_enabled():
+def test_stop_sends_pause_after_stim_stop_and_also_outside_a_trial():
     r = Rig()
     r.to_trial()
-    assert not [m for m in r.decoder if m.type in ("display", "baseline")]
-    r2 = Rig(cfg=CFG.model_copy(update={"protocol": 2}))
-    start = r2.to_trial()
-    assert {m.type for m in r2.decoder} >= {"baseline", "display"}
-    r2.o.on_decoder_message(NoSelection(trial_id=start.trial_id, reason="low_signal"))
-    assert r2.last(r2.decoder, StimStop).reason == "no_selection"
+    r.o.on_ui_message(Stop())
+    assert [type(m) for m in r.decoder[-2:]] == [StimStop, Pause]
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.BASELINE
+    r.o.on_ui_message(Stop())
+    assert isinstance(r.decoder[-1], Pause)
+
+
+def test_baselines_are_numbered():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume())
+    ids = [m.baseline_id for m in r.decoder if isinstance(m, Baseline)]
+    assert ids == [1, 2]
+
+
+def test_display_follows_the_shown_option_and_the_pick():
+    r = Rig()
+    r.to_trial()
+    shown = r.last(r.ui, ShowOption)
+    cue = [m for m in r.decoder if isinstance(m, Display)][-1]
+    assert cue.text == shown.utterance
+    assert cue.labels == {"s1": "SAY", "s2": "NEXT"}
+    assert "highlight" in cue.model_fields_set and cue.highlight is None  # explicit null clears it
+    r.select(SAY)
+    assert r.last(r.decoder, Display).model_fields_set == {"highlight"}
+    assert r.last(r.decoder, Display).highlight == SAY
+
+
+def test_no_display_between_stim_start_and_stim_stop():
+    r = Rig()
+    for _ in range(6):
+        r.to_trial()
+        r.select(NEXT)
+        r.run_out()
+    in_trial = False
+    for m in r.decoder:
+        if isinstance(m, StimStart):
+            in_trial = True
+        elif isinstance(m, StimStop):
+            in_trial = False
+        elif isinstance(m, Display):
+            assert not in_trial, "display sent during a trial"
 
 
 def test_twenty_trials_unattended_never_get_stuck():

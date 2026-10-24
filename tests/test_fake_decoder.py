@@ -11,14 +11,18 @@ import pytest
 from websockets.asyncio.server import ServerConnection, serve
 
 from app.schemas import (
-    PROTOCOL_V1,
+    PROTOCOL,
+    Baseline,
+    BaselineDone,
     DecoderHello,
     DecoderStatus,
+    HelloAck,
     Message,
     NoSelection,
+    Pause,
+    ProtocolError,
     Selection,
-    ServerHello,
-    SlotSpec,
+    StimOnset,
     StimStart,
     StimStop,
     parse_decoder_to_server,
@@ -26,17 +30,23 @@ from app.schemas import (
 )
 from tools.fake_decoder import FakeDecoder, load_script, parse_args
 
-SLOTS = ["s1", "s2", "s3", "s4"]
+SLOTS = ["s1", "s2", "s3", "s4"]  # active_slots the stub sends; the fake answers any
 WAIT = 2.0  # generous upper bound for anything that should happen
 
 
 class StubServer:
-    """Plays the UI server: answers the decoder hello and records everything else it sends."""
+    """Plays the UI server: acks the bridge hello (or rejects it) and records what it sends.
+
+    Answers (selection / no_selection) go to ``received``; onsets and baseline_done are kept apart.
+    """
 
     def __init__(self) -> None:
         self.hellos: asyncio.Queue[DecoderHello] = asyncio.Queue()
         self.received: asyncio.Queue[Message] = asyncio.Queue()
+        self.onsets: list[StimOnset] = []
+        self.baselines: asyncio.Queue[BaselineDone] = asyncio.Queue()
         self.statuses: list[DecoderStatus] = []
+        self.reject_with: str | None = None  # set to send error instead of hello_ack
         self.conn: ServerConnection | None = None
         self.url = ""
 
@@ -45,14 +55,20 @@ class StubServer:
         async for raw in ws:
             msg = parse_decoder_to_server(raw)
             if isinstance(msg, DecoderHello):
-                hello = ServerHello(
-                    protocol=PROTOCOL_V1, refresh_hz=60.0, waveform="square",
-                    slots=[SlotSpec(slot=s, freq_hz=f) for s, f in zip(SLOTS, [15, 12, 10, 8.57])],
-                )
-                await ws.send(to_json(hello))
+                if self.reject_with:
+                    await ws.send(to_json(ProtocolError(message=self.reject_with)))
+                else:
+                    await ws.send(to_json(HelloAck(
+                        protocol=PROTOCOL, roles={"s1": "say", "s2": "next"},
+                        labels={"s1": "SAY", "s2": "NEXT"},
+                    )))
                 await self.hellos.put(msg)
             elif isinstance(msg, DecoderStatus):
                 self.statuses.append(msg)
+            elif isinstance(msg, StimOnset):
+                self.onsets.append(msg)
+            elif isinstance(msg, BaselineDone):
+                await self.baselines.put(msg)
             else:
                 await self.received.put(msg)
 
@@ -65,11 +81,10 @@ class StubServer:
         await self.conn.send(msg)
 
     async def start_trial(self, trial_id: int, active: list[str] | None = None) -> None:
-        await self.send(StimStart(trial_id=trial_id, menu_id="m1", t_unix=1.0,
-                                  active_slots=active or SLOTS))
+        await self.send(StimStart(trial_id=trial_id, active_slots=active or SLOTS))
 
     async def stop_trial(self, trial_id: int, reason: str = "timeout") -> None:
-        await self.send(StimStop(trial_id=trial_id, t_unix=2.0, reason=reason))
+        await self.send(StimStop(trial_id=trial_id, reason=reason))
 
     async def next(self, timeout: float = WAIT) -> Message:
         return await asyncio.wait_for(self.received.get(), timeout)
@@ -124,11 +139,13 @@ async def test_hello_exchange(server: StubServer) -> None:
     task = asyncio.create_task(decoder.run())
     try:
         hello = await asyncio.wait_for(server.hellos.get(), WAIT)
-        assert hello.protocol == 1
+        # A v2 hello from config/default.yaml: the server's check passes.
+        assert hello.protocol == PROTOCOL
         assert hello.name == "fake-decoder"
-        await wait_until(lambda: decoder.server_hello is not None)
-        assert decoder.server_hello.refresh_hz == 60.0
-        assert [s.slot for s in decoder.server_hello.slots] == SLOTS
+        assert hello.refresh_hz == 60.0 and hello.waveform == "sine"
+        assert [(s.slot, s.freq_hz) for s in hello.slots] == [("s1", 15.0), ("s2", 17.0)]
+        await wait_until(lambda: decoder.acked)
+        assert decoder.ack.roles == {"s1": "say", "s2": "next"}
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -137,7 +154,8 @@ async def test_hello_exchange(server: StubServer) -> None:
 async def test_status_is_sent(server: StubServer, start_decoder) -> None:
     await start_decoder("--status-interval", "0.05")
     await wait_until(lambda: len(server.statuses) >= 2)
-    assert server.statuses[0].ok is True
+    status = server.statuses[0]
+    assert status.ok and status.board_ok and status.display_ok
     assert server.statuses[0].message == "fake decoder"
 
 
@@ -323,3 +341,67 @@ async def test_no_reconnect_exits_on_drop(server: StubServer, start_decoder) -> 
     _, task = await start_decoder("--no-reconnect")
     await server.conn.close()
     await asyncio.wait_for(task, WAIT)
+
+
+# ---------------------------------------------------------------------------
+# Protocol 2 behaviour (INTERFACE-v2-draft.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_hello_overrides_for_mismatch_tests(server: StubServer, start_decoder) -> None:
+    decoder, _ = await start_decoder("--refresh-hz", "120", "--slots", "s1=15,s2=12",
+                                     "--waveform", "square")
+    hello = decoder.hello()
+    assert (hello.refresh_hz, hello.waveform) == (120.0, "square")
+    assert [(s.slot, s.freq_hz) for s in hello.slots] == [("s1", 15.0), ("s2", 12.0)]
+
+
+async def test_onset_comes_before_the_answer(server: StubServer, start_decoder) -> None:
+    await start_decoder("--latency", "0.05")
+    await server.start_trial(3, ["s1", "s2"])
+    msg = await server.next()
+    assert isinstance(msg, Selection) and msg.trial_id == 3
+    assert [o.trial_id for o in server.onsets] == [3]
+    assert server.onsets[0].t_unix <= msg.t_unix
+
+
+async def test_baseline_done_echoes_the_id(server: StubServer, start_decoder) -> None:
+    await start_decoder("--baseline-s", "0.02")
+    await server.send(Baseline(baseline_id=7, seconds=10.0))
+    done = await asyncio.wait_for(server.baselines.get(), WAIT)
+    assert (done.baseline_id, done.ok) == (7, True)
+
+
+async def test_baseline_waits_for_the_requested_seconds(server: StubServer, start_decoder) -> None:
+    await start_decoder()
+    await server.send(Baseline(baseline_id=1, seconds=0.3))
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(server.baselines.get(), 0.15)
+    done = await asyncio.wait_for(server.baselines.get(), WAIT)
+    assert done.baseline_id == 1
+
+
+async def test_no_flicker_before_hello_ack(server: StubServer, start_decoder) -> None:
+    server.reject_with = "display refresh is 120 Hz"
+    decoder, _ = await start_decoder("--latency", "0.02")
+    await asyncio.sleep(0.05)
+    assert not decoder.acked
+    await server.start_trial(1, ["s1", "s2"])
+    assert await server.nothing_within(0.2)
+    assert server.onsets == []
+
+
+async def test_pause_cancels_the_pending_answer_and_the_baseline(server: StubServer, start_decoder) -> None:
+    await start_decoder("--latency", "0.2", "--baseline-s", "0.2")
+    await server.start_trial(1, ["s1", "s2"])
+    await server.send(Pause(reason="stop_button"))
+    assert await server.nothing_within(0.4)
+    await server.send(Baseline(baseline_id=2, seconds=1.0))
+    await server.send(Pause(reason="stop_button"))
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(server.baselines.get(), 0.4)
+
+
+async def test_scores_set_score_kind(server: StubServer, start_decoder) -> None:
+    decoder, _ = await start_decoder("--scores")
+    assert decoder.hello().score_kind is not None

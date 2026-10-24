@@ -114,7 +114,6 @@ class SelectionConfig(Strict):
 
 
 class AppConfig(Strict):
-    protocol: int = Field(ge=1)
     server: ServerConfig
     display: DisplayConfig
     stim: StimConfig

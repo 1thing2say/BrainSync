@@ -19,7 +19,7 @@ from app.config import (
     load_intents,
     load_profile,
 )
-from app.schemas import ServerHello, SlotSpec
+from app.schemas import PROTOCOL, DecoderHello, SlotSpec, hello_problems
 
 
 def _raw(path: Path) -> dict[str, Any]:
@@ -49,16 +49,12 @@ def test_default_config_loads() -> None:
     assert cfg.selection.confirm_mode == "never"
 
 
-def test_default_config_builds_server_hello() -> None:
+def test_default_config_accepts_a_matching_bridge_hello() -> None:
     cfg = load_config()
-    hello = ServerHello(
-        protocol=cfg.protocol,
-        refresh_hz=cfg.display.expected_refresh_hz,
-        waveform=cfg.stim.waveform,
-        slots=cfg.stim.slots,
-    )
-    assert all(isinstance(s, SlotSpec) for s in hello.slots)
-    assert hello.model_dump()["slots"][1] == {"slot": "s2", "freq_hz": 17.0, "phase_deg": 0}
+    hello = DecoderHello(protocol=PROTOCOL, name="bridge", refresh_hz=59.94, waveform="sine",
+                         slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+    assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform,
+                          cfg.display.expected_refresh_hz) == []
 
 
 def test_default_intents_load() -> None:

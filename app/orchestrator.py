@@ -4,7 +4,8 @@ the other moves to the next one.
 The orchestrator owns all state. It is driven by events (decoder and browser messages, plus
 ``tick()``), reads time from an injectable clock and sends messages through two callbacks, so tests
 run it without timers, sockets or threads. Option lists come from the fallback lists in
-``config/intents.yaml`` until the LLM menus land (V3).
+``config/intents.yaml`` until the LLM menus land (V3). The decoder side speaks protocol 2
+(INTERFACE-v2-draft.md).
 """
 
 from __future__ import annotations
@@ -18,10 +19,13 @@ from typing import Callable
 from app.config import AppConfig, IntentsConfig
 from app.log import EventLog
 from app.schemas import (
+    PROTOCOL,
     Baseline,
+    BaselineDone,
     DecoderHello,
     DecoderStatus,
     Display,
+    HelloAck,
     Highlight,
     Judgment,
     Key,
@@ -29,9 +33,10 @@ from app.schemas import (
     NoSelection,
     Option,
     PartnerText,
+    Pause,
+    ProtocolError,
     Resume,
     Selection,
-    ServerHello,
     ShowOption,
     Speak,
     State,
@@ -44,6 +49,7 @@ from app.schemas import (
     TTSDone,
     UISlot,
     UIStatus,
+    hello_problems,
 )
 
 Send = Callable[[Message], None]
@@ -118,8 +124,10 @@ class Orchestrator:
         self.last_spoken_id: str | None = None
 
         self.decoder_connected = False
-        self.decoder_ok = False
+        self.decoder_ok = False  # the bridge's hello passed the check (hello_ack sent)
+        self.decoder_error = ""  # why the last hello was rejected
         self.paused_by_decoder = False
+        self.baseline_id = 0
 
     # ------------------------------------------------------------------ events: time
 
@@ -158,6 +166,7 @@ class Orchestrator:
     def on_decoder_disconnected(self) -> None:
         self.decoder_connected = False
         self.decoder_ok = False
+        self.decoder_error = ""
         self._record("decoder_disconnected")
         self._send_status()
         if self.keyboard_mode or self.state in (St.IDLE, St.PAUSED):
@@ -168,13 +177,13 @@ class Orchestrator:
     def on_decoder_message(self, msg: Message) -> None:
         self._record("from_decoder", message=msg)
         if isinstance(msg, DecoderHello):
-            self._send_decoder(self._server_hello())
-            self.decoder_ok = True
-            self._send_status()
+            self._on_hello(msg)
         elif isinstance(msg, DecoderStatus):
-            if msg.ok != self.decoder_ok:
+            if msg.ok != self.decoder_ok and not self.decoder_error:
                 self.decoder_ok = msg.ok
                 self._send_status()
+        elif isinstance(msg, BaselineDone):
+            pass  # logged above; step 3 waits for it instead of the baseline timer
         elif isinstance(msg, Selection):
             self._on_selection(msg.trial_id, msg.slot, source="decoder")
         elif isinstance(msg, NoSelection):
@@ -184,6 +193,28 @@ class Orchestrator:
                 self._record("stale_no_selection", trial_id=msg.trial_id)
         elif isinstance(msg, StimOnset):
             pass  # logged above; onsets are for his offline analysis
+
+    def _on_hello(self, hello: DecoderHello) -> None:
+        """Check the bridge's hello against config: hello_ack, or error and stay paused."""
+        problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
+                                  self.cfg.display.expected_refresh_hz)
+        if problems:
+            self.decoder_ok = False
+            self.decoder_error = "; ".join(problems)
+            self._send_decoder(ProtocolError(message=self.decoder_error))
+            self._send_status()
+            if self.state not in (St.IDLE, St.PAUSED):
+                self._pause(f"Decoder rejected: {self.decoder_error}")
+            return
+        self.decoder_ok = True
+        self.decoder_error = ""
+        last = self.shown is not None and self.shown.index == self.shown.count - 1
+        self._send_decoder(HelloAck(
+            protocol=PROTOCOL,
+            roles=self.roles,
+            labels={slot: self._label(role, last) for slot, role in self.roles.items()},
+        ))
+        self._send_status()
 
     # ---------------------------------------------------------------- events: browser
 
@@ -203,6 +234,7 @@ class Orchestrator:
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
+            self._send_decoder(Pause(reason="stop_button"))
         elif isinstance(msg, PartnerText):
             self._on_partner_text(msg.text)
         elif isinstance(msg, TTSDone):
@@ -245,8 +277,8 @@ class Orchestrator:
         self.paused_by_decoder = False
         self._enter(St.BASELINE, self.cfg.baseline.seconds, "Keep still and look at the screen")
         self._send_ui(Trial(trial_id=self.trial_id, phase="baseline"))
-        if self._proposals_on():
-            self._send_decoder(Baseline(seconds=self.cfg.baseline.seconds, t_unix=self.clock()))
+        self.baseline_id += 1
+        self._send_decoder(Baseline(baseline_id=self.baseline_id, seconds=self.cfg.baseline.seconds))
 
     def _enter_menu_cue(self) -> None:
         if self.pending_list is not None:
@@ -268,8 +300,8 @@ class Orchestrator:
         self._enter(St.MENU_CUE, self.cfg.stim.cue_s)
         self._send_ui(self.shown)
         self._send_ui(Trial(trial_id=self.trial_id + 1, phase="cue"))
-        if self._proposals_on():
-            self._send_decoder(Display(text=option.utterance, labels=[s.label for s in slots]))
+        self._send_decoder(Display(text=option.utterance, labels={s.slot: s.label for s in slots},
+                                   highlight=None))
 
     def _start_trial(self) -> None:
         self.trial_id += 1
@@ -277,20 +309,14 @@ class Orchestrator:
         self.selected_slot = None
         self._enter(St.STIMULATING, self.cfg.stim.max_trial_s)
         self._send_decoder(
-            StimStart(
-                trial_id=self.trial_id,
-                menu_id=self.options.list_id,
-                t_unix=self.clock(),
-                active_slots=list(self.slots),
-                mode="live",
-            )
+            StimStart(trial_id=self.trial_id, active_slots=list(self.slots))
         )
         self._send_ui(Trial(trial_id=self.trial_id, phase="flicker"))
 
     def _stop_trial(self, reason: str) -> None:
         if self.active_trial is None:
             return
-        self._send_decoder(StimStop(trial_id=self.active_trial, t_unix=self.clock(), reason=reason))
+        self._send_decoder(StimStop(trial_id=self.active_trial, reason=reason))
         self.active_trial = None
 
     def _on_selection(self, trial_id: int | None, slot: str, source: str) -> None:
@@ -305,6 +331,7 @@ class Orchestrator:
         self._record("selected", trial_id=trial_id, slot=slot, role=self.roles[slot], source=source)
         self._enter(St.SELECTED, self.cfg.selection.chosen_highlight_s, self.roles[slot])
         self._send_ui(Highlight(slot=slot))
+        self._send_decoder(Display(highlight=slot))
 
     def _after_selected(self) -> None:
         if self.roles[self.selected_slot] == "say":
@@ -340,9 +367,7 @@ class Orchestrator:
         self._enter_rest()
 
     def _not_caught(self, why: str) -> None:
-        # "no_selection" as a stim_stop reason is a protocol-2 proposal; v1 only knows "timeout".
-        reason = "no_selection" if why == "no_selection" and self._proposals_on() else "timeout"
-        self._stop_trial(reason)
+        self._stop_trial(why)  # "no_selection" or "timeout"
         self._record("not_caught", trial_id=self.trial_id, why=why)
         self._enter(St.NOT_CAUGHT, self.cfg.selection.chosen_highlight_s, DIDNT_CATCH)
 
@@ -367,19 +392,8 @@ class Orchestrator:
     def _label(role: str, last_option: bool) -> str:
         return MORE_LABEL if role == "next" and last_option else ROLE_LABELS[role]
 
-    def _proposals_on(self) -> bool:
-        return self.cfg.protocol >= 2
-
-    def _server_hello(self) -> ServerHello:
-        return ServerHello(
-            protocol=self.cfg.protocol,
-            refresh_hz=self.cfg.display.expected_refresh_hz,
-            waveform=self.cfg.stim.waveform,
-            slots=[s.model_dump() for s in self.cfg.stim.slots],
-        )
-
     def status(self) -> UIStatus:
-        # v1 has no separate display health: the bridge reports a dead display as status ok=false.
+        # Step 3 adds the bridge's own board_ok / display_ok here.
         return UIStatus(
             decoder_connected=self.decoder_connected,
             decoder_ok=self.decoder_ok,

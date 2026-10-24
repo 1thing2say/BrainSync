@@ -11,9 +11,11 @@ from fastapi.testclient import TestClient
 from app.config import REPO_ROOT, load_config
 from app.log import read_events
 from app.server import create_app
-from app.schemas import DecoderHello, Selection, to_json
+from app.schemas import PROTOCOL, DecoderHello, Selection, SlotSpec, to_json
 
 BASE = load_config()
+HELLO = DecoderHello(protocol=PROTOCOL, name="test", refresh_hz=60.0, waveform="sine",
+                     slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
 
 
 def fast_config():
@@ -52,17 +54,17 @@ def test_partner_page_is_served(client):
 
 def test_decoder_hello_exchange(client):
     with client.websocket_connect("/ws/decoder") as dec:
-        dec.send_text(to_json(DecoderHello(protocol=1, name="test")))
-        hello = recv_until(dec, "hello")
-    assert [s["freq_hz"] for s in hello["slots"]] == [15.0, 17.0]
-    assert hello["waveform"] == "sine"
+        dec.send_text(to_json(HELLO))
+        ack = recv_until(dec, "hello_ack")
+    assert ack["roles"] == {"s1": "say", "s2": "next"}
+    assert ack["labels"] == {"s1": "SAY", "s2": "NEXT"}
 
 
 def test_full_trial_from_page_and_decoder(client):
     with client.websocket_connect("/ws/ui") as ui, client.websocket_connect("/ws/decoder") as dec:
         recv_until(ui, "status")
-        dec.send_text(to_json(DecoderHello(protocol=1, name="test")))
-        recv_until(dec, "hello")
+        dec.send_text(to_json(HELLO))
+        recv_until(dec, "hello_ack")
         ui.send_text(json.dumps({"type": "resume"}))
         shown = recv_until(ui, "show_option")
         start = recv_until(dec, "stim_start")
@@ -82,8 +84,8 @@ def test_invalid_messages_are_logged_not_fatal(client):
     with client.websocket_connect("/ws/decoder") as dec:
         dec.send_text("not json")
         dec.send_text(json.dumps({"type": "selection", "trial_id": "x"}))
-        dec.send_text(to_json(DecoderHello(protocol=1, name="still alive")))
-        assert recv_until(dec, "hello")["type"] == "hello"
+        dec.send_text(to_json(HELLO))
+        assert recv_until(dec, "hello_ack")["type"] == "hello_ack"
     events = read_events(next(client.log_dir.glob("*.jsonl")))
     assert sum(e["event"] == "invalid_from_decoder" for e in events) == 2
 
@@ -119,8 +121,8 @@ def test_page_reconnect_after_stop_stays_paused(client):
 def test_decoder_disconnect_pauses(client):
     with client.websocket_connect("/ws/ui") as ui:
         with client.websocket_connect("/ws/decoder") as dec:
-            dec.send_text(to_json(DecoderHello(protocol=1, name="test")))
-            recv_until(dec, "hello")
+            dec.send_text(to_json(HELLO))
+            recv_until(dec, "hello_ack")
             ui.send_text(json.dumps({"type": "resume"}))
             recv_until(dec, "stim_start")
         while True:

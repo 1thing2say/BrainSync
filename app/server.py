@@ -192,8 +192,12 @@ def main(argv: list[str] | None = None) -> None:
     fake = None
     if args.fake_decoder:
         # It retries every second until the server is up, so starting it first is fine.
+        # Its hello uses this server's config, so it passes the handshake check.
+        slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
         fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
-                                 "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder"],
+                                 "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
+                                 "--slots", slots, "--waveform", cfg.stim.waveform,
+                                 "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
                                 cwd=REPO_ROOT)
     print(f"partner page: http://{url_host}:{cfg.server.port}", file=sys.stderr)
     try:

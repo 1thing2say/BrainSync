@@ -1,35 +1,48 @@
-"""Message schemas: the INTERFACE.md decoder contract plus the internal browser <-> server messages.
+"""Message schemas: the decoder contract (protocol 2, INTERFACE-v2-draft.md) plus the internal
+browser <-> server messages.
 
-Every message is one JSON object with a ``type`` field. Unknown fields are ignored (INTERFACE.md
-section 1), so every model uses ``extra="ignore"``. NaN and Infinity are rejected in float fields:
-JSON has no way to write them, so they would turn into null and break the round trip.
+Every message is one JSON object with a ``type`` field. Unknown fields are ignored (draft section 1),
+so every model uses ``extra="ignore"``. NaN and Infinity are rejected in float fields: JSON has no
+way to write them, so they would turn into null and break the round trip.
+
+Protocol 1 (``INTERFACE.md``, browser-drawn flicker) is dropped: the bridge owns the display, and
+the server speaks only protocol 2 (PLAN.md section 13, decisions of 2026-10-23).
 
 Sections:
-- INTERFACE.md v1 (agreed): decoder <-> server.
-- Protocol 2 proposals (PLAN.md section 13 item 5, NOT agreed yet): opt-in extras.
+- Decoder (bridge) -> server.
+- Server -> decoder (bridge).
+- The handshake check (``hello_problems``).
 - Internal browser <-> server messages (PLAN.md section 6).
 - Shared menu ``Option`` model and its config-driven validator.
 - Discriminated unions and ``parse_*`` / ``to_json`` helpers, one union per direction
-  ("hello" and "status" exist in more than one direction).
+  ("status" exists in more than one direction).
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Union
+import json
+from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, model_validator
 
-PROTOCOL_V1 = 1
-PROTOCOL_V2_PROPOSED = 2
+PROTOCOL = 2
+# Handshake tolerances (draft section 2): contract values, not tunables.
+FREQ_TOLERANCE_HZ = 0.01
+REFRESH_TOLERANCE_HZ = 1.0
 
 SlotId = Annotated[str, StringConstraints(pattern=r"^s[0-9]+$")]
 Waveform = Literal["sine", "square"]
+Role = Literal["say", "next"]
 
 
 class Message(BaseModel):
     """Base for all messages: unknown fields are ignored, NaN/Infinity floats are rejected."""
 
     model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
+
+    #: True for messages whose left-out fields mean "unchanged": to_json then writes only the
+    #: fields that were set (an explicit None stays as null).
+    partial: ClassVar[bool] = False
 
 
 class SlotSpec(Message):
@@ -41,28 +54,41 @@ class SlotSpec(Message):
 
 
 # ---------------------------------------------------------------------------
-# INTERFACE.md v1: decoder -> server
+# Decoder (bridge) -> server (draft sections 2 and 4)
 # ---------------------------------------------------------------------------
 
 
-class DecoderHello(Message):
-    """Sent by the decoder right after connecting.
+class DecoderParams(Message):
+    """The live decoder's settings, reported in hello for the log."""
 
-    ``refresh_hz``, ``waveform``, ``slots`` and ``score_kind`` are protocol 2 proposals (the decoder
-    owns the display and announces its stimulus config). They are optional, so v1 hellos still parse.
-    """
+    window_s: float = Field(gt=0)
+    step_s: float = Field(gt=0)
+    votes: int = Field(ge=1)
+
+
+class DecoderHello(Message):
+    """Sent by the bridge right after connecting, from its stimulus config and refresh check."""
 
     type: Literal["hello"] = "hello"
     protocol: int
     name: str
-    refresh_hz: float | None = Field(default=None, gt=0)
-    waveform: Waveform | None = None
-    slots: list[SlotSpec] | None = None
-    score_kind: str | None = None
+    refresh_hz: float = Field(gt=0)
+    waveform: Waveform
+    slots: list[SlotSpec] = Field(min_length=1)
+    decoder: DecoderParams | None = None
+    score_kind: str | None = None  # set only if selections carry scores
+
+
+class StimOnset(Message):
+    """Unix time of the display's first flickering frame after stim_start."""
+
+    type: Literal["stim_onset"] = "stim_onset"
+    trial_id: int
+    t_unix: float
 
 
 class Selection(Message):
-    """The decoder's answer for a trial; ``score``/``scores`` are optional."""
+    """The decoder's first commit after stim_start; ``score``/``scores`` are optional."""
 
     type: Literal["selection"] = "selection"
     trial_id: int
@@ -73,92 +99,138 @@ class Selection(Message):
 
 
 class NoSelection(Message):
-    """No clear answer for this trial."""
+    """The decoder gave up on this trial."""
 
     type: Literal["no_selection"] = "no_selection"
     trial_id: int
     reason: str
 
 
-class DecoderStatus(Message):
-    """Signal health from the decoder, any time."""
+class BaselineDone(Message):
+    """The resting baseline for ``baseline_id`` was recorded (or failed, with a message)."""
 
-    type: Literal["status"] = "status"
+    type: Literal["baseline_done"] = "baseline_done"
+    baseline_id: int
     ok: bool
     message: str = ""
 
 
+class DecoderStatus(Message):
+    """Bridge health, about once a second and on every change.
+
+    ``display_ok`` false means the display exited or the user pressed Esc (the flicker is off);
+    ``board_ok`` false is shown as a badge only.
+    """
+
+    type: Literal["status"] = "status"
+    ok: bool
+    board_ok: bool
+    display_ok: bool
+    message: str = ""
+
+
 # ---------------------------------------------------------------------------
-# INTERFACE.md v1: server -> decoder
+# Server -> decoder (bridge) (draft sections 2 and 3)
 # ---------------------------------------------------------------------------
 
 
-class ServerHello(Message):
-    """Server reply to the decoder's hello, with the display and stimulus settings."""
+class HelloAck(Message):
+    """The bridge's hello passed the check: the roles and initial labels per slot."""
 
-    type: Literal["hello"] = "hello"
+    type: Literal["hello_ack"] = "hello_ack"
     protocol: int
-    refresh_hz: float = Field(gt=0)
-    waveform: Waveform
-    slots: list[SlotSpec]
+    roles: dict[SlotId, Role]
+    labels: dict[SlotId, str]
 
 
-class StimStart(Message):
-    """Flicker began (v1), or "start flickering now" (protocol 2 proposal)."""
+class ProtocolError(Message):
+    """The bridge's hello failed the check; the session stays paused."""
 
-    type: Literal["stim_start"] = "stim_start"
-    trial_id: int
-    menu_id: str
-    t_unix: float
-    active_slots: list[SlotId] = Field(min_length=1)
-    cued_slot: SlotId | None = None
-    mode: Literal["live", "calibrate"] = "live"
-
-
-# "no_selection" is a protocol 2 proposal (PLAN.md section 13 item 5), not part of v1.
-StimStopReason = Literal[
-    "selected", "timeout", "context_changed", "paused", "calibration_done", "no_selection"
-]
-
-
-class StimStop(Message):
-    """Flicker ended."""
-
-    type: Literal["stim_stop"] = "stim_stop"
-    trial_id: int
-    t_unix: float
-    reason: StimStopReason
-
-
-# ---------------------------------------------------------------------------
-# Protocol 2 PROPOSALS (PLAN.md section 13 item 5). NOT agreed with the decoder owner yet.
-# Only send these when config enables protocol 2; a v1 decoder will not understand them.
-# ---------------------------------------------------------------------------
-
-
-class Display(Message):
-    """Proposed server -> decoder: text, labels and highlight for the decoder's display."""
-
-    type: Literal["display"] = "display"
-    text: str | None = None
-    labels: list[str] | None = None
-    highlight: SlotId | None = None
+    type: Literal["error"] = "error"
+    message: str
 
 
 class Baseline(Message):
-    """Proposed server -> decoder: hold the flicker off and record a resting baseline."""
+    """Hold the flicker off and record the decoder's resting baseline; answered by baseline_done."""
 
     type: Literal["baseline"] = "baseline"
+    baseline_id: int
     seconds: float = Field(gt=0)
-    t_unix: float | None = None
 
 
-class StimOnset(Message):
-    """Proposed decoder -> server: Unix time of the display's first flickering frame."""
+class Display(Message):
+    """What the user's screen shows. Left-out fields are unchanged; ``highlight: null`` clears it.
 
-    type: Literal["stim_onset"] = "stim_onset"
+    Never sent between stim_start and stim_stop.
+    """
+
+    partial: ClassVar[bool] = True
+
+    type: Literal["display"] = "display"
+    text: str | None = None
+    labels: dict[SlotId, str] | None = None
+    highlight: SlotId | None = None
+
+
+class StimStart(Message):
+    """Start flickering now and start decoding."""
+
+    type: Literal["stim_start"] = "stim_start"
     trial_id: int
-    t_unix: float
+    active_slots: list[SlotId] = Field(min_length=1)
+
+
+StimStopReason = Literal["selected", "no_selection", "timeout", "context_changed", "paused"]
+
+
+class StimStop(Message):
+    """Stop flickering and stop decoding."""
+
+    type: Literal["stim_stop"] = "stim_stop"
+    trial_id: int
+    reason: StimStopReason
+
+
+class Pause(Message):
+    """STOP from the partner page: flicker and decoding off until the next baseline."""
+
+    type: Literal["pause"] = "pause"
+    reason: str
+
+
+# ---------------------------------------------------------------------------
+# Handshake check (draft section 2)
+# ---------------------------------------------------------------------------
+
+
+def hello_problems(
+    hello: DecoderHello,
+    slots: list[SlotSpec],
+    waveform: str,
+    refresh_hz: float,
+) -> list[str]:
+    """Why the bridge's hello does not match our config; an empty list means hello_ack."""
+    problems: list[str] = []
+    if hello.protocol != PROTOCOL:
+        problems.append(f"protocol {hello.protocol}, server speaks {PROTOCOL}")
+    if abs(hello.refresh_hz - refresh_hz) > REFRESH_TOLERANCE_HZ:
+        problems.append(
+            f"display refresh is {hello.refresh_hz:g} Hz, expected {refresh_hz:g} Hz "
+            "(turn ProMotion / variable refresh off)"
+        )
+    if hello.waveform != waveform:
+        problems.append(f"waveform {hello.waveform}, expected {waveform}")
+    theirs = {s.slot: s for s in hello.slots}
+    ours = {s.slot: s for s in slots}
+    if len(theirs) != len(hello.slots):
+        problems.append("duplicate slot ids in hello")
+    if set(theirs) != set(ours):
+        problems.append(f"slots {sorted(theirs)}, expected {sorted(ours)}")
+    for slot_id in sorted(set(theirs) & set(ours)):
+        got, want = theirs[slot_id].freq_hz, ours[slot_id].freq_hz
+        if abs(got - want) > FREQ_TOLERANCE_HZ:
+            problems.append(f"{slot_id} is {got:g} Hz, expected {want:g} Hz")
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +242,7 @@ class UISlot(Message):
     """One on-screen box in the mirror: which slot, what it does, what it says."""
 
     slot: SlotId
-    role: Literal["say", "next"]
+    role: Role
     label: str
 
 
@@ -337,11 +409,11 @@ def validate_option(
 # ---------------------------------------------------------------------------
 
 DecoderToServer = Annotated[
-    Union[DecoderHello, Selection, NoSelection, DecoderStatus, StimOnset],
+    Union[DecoderHello, StimOnset, Selection, NoSelection, BaselineDone, DecoderStatus],
     Field(discriminator="type"),
 ]
 ServerToDecoder = Annotated[
-    Union[ServerHello, StimStart, StimStop, Display, Baseline],
+    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause],
     Field(discriminator="type"),
 ]
 ServerToUI = Annotated[
@@ -386,28 +458,43 @@ def parse_ui_to_server(raw: dict[str, Any] | str | bytes) -> Message:
 
 
 def to_json(model: BaseModel) -> str:
-    """Serialize a message as compact JSON."""
+    """Serialize a message as compact JSON.
+
+    Partial messages (``Display``) carry only the fields that were set, so a left-out field
+    means "unchanged" while an explicit ``None`` is sent as null.
+    """
+    if getattr(model, "partial", False):
+        data = model.model_dump(mode="json", exclude_unset=True)
+        data["type"] = model.type
+        return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     return model.model_dump_json()
 
 
 __all__ = [
-    "PROTOCOL_V1",
-    "PROTOCOL_V2_PROPOSED",
+    "PROTOCOL",
+    "FREQ_TOLERANCE_HZ",
+    "REFRESH_TOLERANCE_HZ",
     "SlotId",
     "Waveform",
+    "Role",
     "Message",
     "SlotSpec",
+    "DecoderParams",
     "DecoderHello",
+    "StimOnset",
     "Selection",
     "NoSelection",
+    "BaselineDone",
     "DecoderStatus",
-    "ServerHello",
+    "HelloAck",
+    "ProtocolError",
+    "Baseline",
+    "Display",
     "StimStart",
     "StimStopReason",
     "StimStop",
-    "Display",
-    "Baseline",
-    "StimOnset",
+    "Pause",
+    "hello_problems",
     "UISlot",
     "ShowOption",
     "Trial",

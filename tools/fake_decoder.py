@@ -1,9 +1,14 @@
-"""Fake SSVEP decoder that speaks INTERFACE.md v1, so the UI side never blocks on the real decoder.
+"""Fake bridge that speaks protocol 2 (INTERFACE-v2-draft.md), so the UI side never blocks on the
+real decoder.
 
-It connects as a websocket client to the server's ``/ws/decoder``, sends ``hello``, and answers each
-``stim_start`` with a ``selection`` (or ``no_selection``) for that trial after ``--latency`` seconds.
-A ``stim_stop`` or a newer ``stim_start`` cancels the pending answer, so a stopped or stale trial is
-never answered (INTERFACE.md section 5, rules 1-2).
+It connects as a websocket client to the server's ``/ws/decoder`` and sends a v2 ``hello`` built
+from ``config/default.yaml`` (slots, waveform, refresh rate), so it passes the server's check unless
+``--refresh-hz`` or ``--slots`` say otherwise. After ``hello_ack`` it answers ``baseline`` with
+``baseline_done``, and each ``stim_start`` with ``stim_onset`` (one frame later) and then a
+``selection`` (or ``no_selection``) after ``--latency`` seconds. A ``stim_stop``, ``pause`` or newer
+``stim_start`` cancels the pending answer, so a stopped or stale trial is never answered. Before
+``hello_ack`` (or after ``error``) it refuses ``stim_start``, as the real bridge keeps its flicker
+off then (draft rule 3).
 
 Modes (pick one):
   --random          pick a random active slot (default); --fail-rate sends no_selection sometimes
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -39,18 +45,23 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from app.config import ConfigError, load_config
+from app.config import AppConfig, ConfigError, load_config
 from app.schemas import (
-    PROTOCOL_V1,
+    PROTOCOL,
     Baseline,
+    BaselineDone,
     DecoderHello,
     DecoderStatus,
     Display,
+    HelloAck,
     Message,
     NoSelection,
+    Pause,
+    ProtocolError,
     Selection,
-    ServerHello,
     SlotId,
+    SlotSpec,
+    StimOnset,
     StimStart,
     StimStop,
     parse_server_to_decoder,
@@ -59,18 +70,33 @@ from app.schemas import (
 
 log = logging.getLogger("fake_decoder")
 
+FALLBACK_SLOTS = "s1=15,s2=17"  # only if config/default.yaml cannot be loaded
 
 
-def default_url() -> str:
-    """The server's /ws/decoder URL from config/default.yaml (server.host / server.port)."""
+def _load_config(path: str | None = None) -> AppConfig | None:
     try:
-        server = load_config().server
+        return load_config(path)
     except ConfigError as exc:
-        log.warning("%s; falling back to 127.0.0.1:8000", exc)
+        log.warning("%s; using built-in defaults", exc)
+        return None
+
+
+def default_url(cfg: AppConfig | None) -> str:
+    """The server's /ws/decoder URL from config (server.host / server.port)."""
+    if cfg is None:
         return "ws://127.0.0.1:8000/ws/decoder"
     # A server listening on all interfaces is still reached locally on 127.0.0.1.
-    host = "127.0.0.1" if server.host == "0.0.0.0" else server.host
-    return f"ws://{host}:{server.port}/ws/decoder"
+    host = "127.0.0.1" if cfg.server.host == "0.0.0.0" else cfg.server.host
+    return f"ws://{host}:{cfg.server.port}/ws/decoder"
+
+
+def parse_slots(text: str) -> list[SlotSpec]:
+    """``"s1=15,s2=17"`` -> slot specs (phase 0)."""
+    try:
+        return [SlotSpec(slot=slot.strip(), freq_hz=float(freq))
+                for slot, freq in (item.split("=") for item in text.split(","))]
+    except (ValueError, ValidationError) as exc:
+        raise argparse.ArgumentTypeError(f"expected s1=15,s2=17, got {text!r}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +151,24 @@ def _fraction(text: str) -> float:
     return value
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="fake_decoder", description="Fake SSVEP decoder speaking INTERFACE.md v1."
+        prog="fake_decoder", description="Fake bridge speaking protocol 2 (INTERFACE-v2-draft.md)."
     )
-    url = default_url()
+    url = default_url(cfg)
+    slots = (",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots) if cfg else FALLBACK_SLOTS)
+    refresh = cfg.display.expected_refresh_hz if cfg else 60.0
+    waveform = cfg.stim.waveform if cfg else "sine"
     parser.add_argument("--url", default=url, help=f"server websocket (default {url}, from config)")
     parser.add_argument("--name", default="fake-decoder", help="name sent in hello")
+    parser.add_argument("--slots", type=parse_slots, default=parse_slots(slots),
+                        help=f"slots in hello, e.g. s1=15,s2=17 (default {slots}, from config)")
+    parser.add_argument("--refresh-hz", type=float, default=refresh,
+                        help=f"refresh rate in hello (default {refresh:g}); 120 simulates ProMotion")
+    parser.add_argument("--waveform", choices=["sine", "square"], default=waveform,
+                        help=f"waveform in hello (default {waveform}, from config)")
+    parser.add_argument("--baseline-s", type=float, default=None,
+                        help="seconds before baseline_done (default: what the server asks for)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--random", dest="mode", action="store_const", const="random",
                       help="pick a random active slot (default)")
@@ -157,9 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None, cfg: AppConfig | None = None) -> argparse.Namespace:
     """Parse arguments and fill in derived fields (mode, max_trials)."""
-    args = build_parser().parse_args(argv)
+    args = build_parser(cfg if cfg is not None else _load_config()).parse_args(argv)
     if args.script:
         args.mode = "script"
     elif args.mode is None:
@@ -188,9 +225,11 @@ class FakeDecoder:
         self.steps = load_script(args.script) if args.mode == "script" else []
         self.step_index = 0
         self.keys: asyncio.Queue[str] = asyncio.Queue()
-        self.server_hello: ServerHello | None = None
+        self.acked = False  # hello_ack received on this connection
+        self.ack: HelloAck | None = None
         self.current_trial: int | None = None
         self.pending: asyncio.Task[None] | None = None
+        self.baseline_task: asyncio.Task[None] | None = None
         self.answered = 0
         self.finished = False
 
@@ -213,8 +252,14 @@ class FakeDecoder:
             log.info("reconnecting in %.1f s", self.args.reconnect_s)
             await asyncio.sleep(self.args.reconnect_s)
 
+    def hello(self) -> DecoderHello:
+        return DecoderHello(protocol=PROTOCOL, name=self.args.name, refresh_hz=self.args.refresh_hz,
+                            waveform=self.args.waveform, slots=self.args.slots,
+                            score_kind="fake" if self.args.scores else None)
+
     async def _session(self, ws: ClientConnection) -> None:
-        await ws.send(to_json(DecoderHello(protocol=PROTOCOL_V1, name=self.args.name)))
+        self.acked = False  # draft rule 3: nothing flickers until this connection is acked
+        await ws.send(to_json(self.hello()))
         status_task = asyncio.create_task(self._send_status(ws))
         try:
             async for raw in ws:
@@ -222,9 +267,10 @@ class FakeDecoder:
         finally:
             status_task.cancel()
             self._cancel_pending()
+            self._cancel_baseline()
 
     async def _send_status(self, ws: ClientConnection) -> None:
-        status = to_json(DecoderStatus(ok=True, message="fake decoder"))
+        status = to_json(DecoderStatus(ok=True, board_ok=True, display_ok=True, message="fake decoder"))
         try:
             while True:
                 await ws.send(status)
@@ -242,31 +288,53 @@ class FakeDecoder:
                         _type_of(raw), exc.errors()[0].get("msg", exc))
             return
 
-        if isinstance(msg, ServerHello):
-            self.server_hello = msg
-            slots = ", ".join(f"{s.slot}={s.freq_hz:g}Hz/{s.phase_deg:g}deg" for s in msg.slots)
-            log.info("server hello: protocol %d, %.1f Hz %s, %s",
-                     msg.protocol, msg.refresh_hz, msg.waveform, slots)
-            if msg.protocol != PROTOCOL_V1:
-                log.warning("server speaks protocol %d, this fake decoder speaks %d",
-                            msg.protocol, PROTOCOL_V1)
+        if isinstance(msg, HelloAck):
+            self.acked, self.ack = True, msg
+            log.info("hello_ack: roles %s, labels %s", msg.roles, msg.labels)
+        elif isinstance(msg, ProtocolError):
+            self.acked = False
+            log.warning("server rejected hello: %s", msg.message)
+        elif isinstance(msg, Baseline):
+            self._on_baseline(ws, msg)
+        elif isinstance(msg, Display):
+            log.info("display: %s", to_json(msg))  # what the PsychoPy display would draw
         elif isinstance(msg, StimStart):
             self._on_stim_start(ws, msg)
         elif isinstance(msg, StimStop):
             self._on_stim_stop(msg)
-        elif isinstance(msg, (Display, Baseline)):
-            # Protocol 2 proposals: a v1 decoder only logs them, so the commands can be checked.
-            log.info("display command (not acted on): %s", to_json(msg))
+        elif isinstance(msg, Pause):
+            log.info("pause (%s): flicker and decoding off", msg.reason)
+            self._cancel_pending()
+            self._cancel_baseline()
+            self.current_trial = None
+
+    def _on_baseline(self, ws: ClientConnection, msg: Baseline) -> None:
+        self._cancel_baseline()
+        seconds = self.args.baseline_s if self.args.baseline_s is not None else msg.seconds
+        log.info("baseline %d: recording %.1f s of still screen", msg.baseline_id, seconds)
+
+        async def record() -> None:
+            await asyncio.sleep(seconds)
+            with contextlib.suppress(ConnectionClosed):
+                await ws.send(to_json(BaselineDone(baseline_id=msg.baseline_id, ok=True)))
+
+        self.baseline_task = asyncio.create_task(record())
+
+    def _cancel_baseline(self) -> None:
+        if self.baseline_task is not None and not self.baseline_task.done():
+            self.baseline_task.cancel()
+        self.baseline_task = None
 
     def _on_stim_start(self, ws: ClientConnection, msg: StimStart) -> None:
+        if not self.acked:
+            log.warning("trial %d: stim_start before hello_ack, flicker stays off", msg.trial_id)
+            return
         if self.pending is not None and not self.pending.done():
             log.info("trial %s superseded by trial %d; its answer is dropped",
                      self.current_trial, msg.trial_id)
         self._cancel_pending()
         self.current_trial = msg.trial_id
-        cue = f", cued {msg.cued_slot}" if msg.cued_slot else ""
-        log.info("trial %d started (%s, active %s%s)",
-                 msg.trial_id, msg.mode, ",".join(msg.active_slots), cue)
+        log.info("trial %d started (active %s)", msg.trial_id, ",".join(msg.active_slots))
         self.pending = asyncio.create_task(self._answer(ws, msg))
 
     def _on_stim_stop(self, msg: StimStop) -> None:
@@ -285,6 +353,12 @@ class FakeDecoder:
     # -- answering --------------------------------------------------------
 
     async def _answer(self, ws: ClientConnection, start: StimStart) -> None:
+        # The display's first flickering frame comes one refresh period after the command.
+        await asyncio.sleep(1.0 / self.args.refresh_hz)
+        try:
+            await ws.send(to_json(StimOnset(trial_id=start.trial_id, t_unix=time.time())))
+        except ConnectionClosed:
+            return
         answer = await self._decide(start)
         if answer is None:
             log.info("trial %d: sending nothing (timeout step)", start.trial_id)

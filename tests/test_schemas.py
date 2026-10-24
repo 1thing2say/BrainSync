@@ -1,69 +1,56 @@
-"""Tests for app/schemas.py: round trips, INTERFACE.md examples, validation and validate_option."""
+"""Tests for app/schemas.py: round trips, the v2 draft's examples, validation, the handshake check
+and validate_option."""
 
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
 from app import schemas as s
+from app.config import REPO_ROOT
+
+SLOTS = [s.SlotSpec(slot="s1", freq_hz=15.0), s.SlotSpec(slot="s2", freq_hz=17.0)]
+
+
+def hello(**changes) -> s.DecoderHello:
+    fields = dict(protocol=2, name="ssvep-fbcca", refresh_hz=59.94, waveform="sine", slots=SLOTS)
+    fields.update(changes)
+    return s.DecoderHello(**fields)
+
 
 # (message, parse helper) for every message type in every direction.
 ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     # decoder -> server
-    (s.DecoderHello(protocol=1, name="ssvep-cca"), s.parse_decoder_to_server),
+    (hello(), s.parse_decoder_to_server),
     (
-        s.DecoderHello(
-            protocol=2,
-            name="ssvep-fbcca",
-            refresh_hz=60.0,
-            waveform="sine",
-            slots=[s.SlotSpec(slot="s1", freq_hz=15.0), s.SlotSpec(slot="s2", freq_hz=17.0)],
-            score_kind="fbcca_minus_baseline",
-        ),
+        hello(decoder=s.DecoderParams(window_s=4.0, step_s=0.5, votes=3), score_kind="fbcca_minus_baseline"),
         s.parse_decoder_to_server,
     ),
-    (s.Selection(trial_id=1, slot="s2", t_unix=1761268204.9), s.parse_decoder_to_server),
+    (s.StimOnset(trial_id=4, t_unix=12.25), s.parse_decoder_to_server),
+    (s.Selection(trial_id=1, slot="s2", t_unix=1792809206.53), s.parse_decoder_to_server),
     (
-        s.Selection(
-            trial_id=1, slot="s1", t_unix=1.5, score=0.7, scores={"s1": 0.7, "s2": 0.2}
-        ),
+        s.Selection(trial_id=1, slot="s1", t_unix=1.5, score=0.041, scores={"s1": 0.041, "s2": 0.008}),
         s.parse_decoder_to_server,
     ),
     (s.NoSelection(trial_id=3, reason="low_signal"), s.parse_decoder_to_server),
-    (s.DecoderStatus(ok=False, message="O1 off"), s.parse_decoder_to_server),
-    (s.StimOnset(trial_id=4, t_unix=12.25), s.parse_decoder_to_server),
+    (s.BaselineDone(baseline_id=3, ok=False, message="O1 off"), s.parse_decoder_to_server),
+    (s.DecoderStatus(ok=False, board_ok=True, display_ok=False, message="Esc"), s.parse_decoder_to_server),
     # server -> decoder
     (
-        s.ServerHello(
-            protocol=1,
-            refresh_hz=60.0,
-            waveform="square",
-            slots=[s.SlotSpec(slot="s1", freq_hz=15.0, phase_deg=90)],
-        ),
+        s.HelloAck(protocol=2, roles={"s1": "say", "s2": "next"}, labels={"s1": "SAY", "s2": "NEXT"}),
         s.parse_server_to_decoder,
     ),
-    (
-        s.StimStart(trial_id=5, menu_id="m1", t_unix=2.0, active_slots=["s1", "s2"]),
-        s.parse_server_to_decoder,
-    ),
-    (
-        s.StimStart(
-            trial_id=6,
-            menu_id="m1",
-            t_unix=2.0,
-            active_slots=["s1"],
-            cued_slot="s1",
-            mode="calibrate",
-        ),
-        s.parse_server_to_decoder,
-    ),
-    (s.StimStop(trial_id=5, t_unix=3.0, reason="timeout"), s.parse_server_to_decoder),
-    (s.StimStop(trial_id=5, t_unix=3.0, reason="no_selection"), s.parse_server_to_decoder),
-    (s.Display(text="I'm thirsty", labels=["SAY", "NEXT"], highlight="s1"), s.parse_server_to_decoder),
+    (s.ProtocolError(message="display refresh is 120 Hz"), s.parse_server_to_decoder),
+    (s.Baseline(baseline_id=1, seconds=10.0), s.parse_server_to_decoder),
+    (s.Display(text="I'm thirsty", labels={"s1": "SAY", "s2": "NEXT"}, highlight=None), s.parse_server_to_decoder),
+    (s.Display(highlight="s1"), s.parse_server_to_decoder),
     (s.Display(), s.parse_server_to_decoder),
-    (s.Baseline(seconds=10.0, t_unix=5.0), s.parse_server_to_decoder),
+    (s.StimStart(trial_id=5, active_slots=["s1", "s2"]), s.parse_server_to_decoder),
+    (s.StimStop(trial_id=5, reason="no_selection"), s.parse_server_to_decoder),
+    (s.Pause(reason="stop_button"), s.parse_server_to_decoder),
     # server -> browser
     (
         s.ShowOption(
@@ -117,90 +104,46 @@ def test_to_json_is_compact() -> None:
     assert " " not in s.to_json(s.Key(key="1"))
 
 
-# INTERFACE.md examples, copied verbatim.
-INTERFACE_EXAMPLES: list[tuple[str, object, type]] = [
-    ('{"type": "hello", "protocol": 1, "name": "ssvep-cca"}', s.parse_decoder_to_server, s.DecoderHello),
-    (
-        """{"type": "hello", "protocol": 1,
- "refresh_hz": 60.0,
- "waveform": "square",
- "slots": [
-   {"slot": "s1", "freq_hz": 15.0, "phase_deg": 0},
-   {"slot": "s2", "freq_hz": 12.0, "phase_deg": 0},
-   {"slot": "s3", "freq_hz": 10.0, "phase_deg": 0},
-   {"slot": "s4", "freq_hz": 8.57, "phase_deg": 0}]}""",
-        s.parse_server_to_decoder,
-        s.ServerHello,
-    ),
-    (
-        """{"type": "stim_start", "trial_id": 42, "menu_id": "m17",
- "t_unix": 1761268201.512,
- "active_slots": ["s1", "s2", "s3", "s4"],
- "cued_slot": null, "mode": "live"}""",
-        s.parse_server_to_decoder,
-        s.StimStart,
-    ),
-    (
-        """{"type": "stim_stop", "trial_id": 42, "t_unix": 1761268204.930,
- "reason": "selected"}""",
-        s.parse_server_to_decoder,
-        s.StimStop,
-    ),
-    (
-        '{"type": "selection", "trial_id": 42, "slot": "s2", "t_unix": 1761268204.900}',
-        s.parse_decoder_to_server,
-        s.Selection,
-    ),
-    (
-        '{"type": "no_selection", "trial_id": 42, "reason": "low_signal"}',
-        s.parse_decoder_to_server,
-        s.NoSelection,
-    ),
-    (
-        '{"type": "status", "ok": true, "message": "8/8 channels ok"}',
-        s.parse_decoder_to_server,
-        s.DecoderStatus,
-    ),
-]
+def test_display_sends_only_the_fields_that_were_set() -> None:
+    assert json.loads(s.to_json(s.Display(highlight=None))) == {"type": "display", "highlight": None}
+    assert json.loads(s.to_json(s.Display(text="Hi"))) == {"type": "display", "text": "Hi"}
+    assert json.loads(s.to_json(s.Display())) == {"type": "display"}
+    # A parsed display keeps exactly the fields it arrived with.
+    raw = '{"type": "display", "labels": {"s1": "SAY", "s2": "MORE"}}'
+    assert json.loads(s.to_json(s.parse_server_to_decoder(raw))) == json.loads(raw)
 
 
-@pytest.mark.parametrize(("raw", "parse", "cls"), INTERFACE_EXAMPLES, ids=lambda v: getattr(v, "__name__", ""))
-def test_interface_examples_parse(raw: str, parse, cls: type) -> None:
-    msg = parse(raw)
-    assert isinstance(msg, cls)
-    # Every field in the example survives the parse with the same value.
+# Every JSON example in the v2 draft, read from the document itself so the tests follow it.
+DRAFT = (REPO_ROOT / "INTERFACE-v2-draft.md").read_text()
+DRAFT_EXAMPLES = re.findall(r"```json\n(.*?)```", DRAFT, re.S)
+DECODER_TYPES = {"hello", "stim_onset", "selection", "no_selection", "baseline_done", "status"}
+
+
+def test_draft_has_all_its_examples() -> None:
+    types = [json.loads(raw)["type"] for raw in DRAFT_EXAMPLES]
+    assert len(types) == 12
+    assert set(types) == DECODER_TYPES | {
+        "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause"
+    }
+
+
+@pytest.mark.parametrize("raw", DRAFT_EXAMPLES, ids=lambda raw: json.loads(raw)["type"])
+def test_draft_examples_parse(raw: str) -> None:
     expected = json.loads(raw)
-    assert msg.model_dump(include=set(expected)) == expected
+    direction = expected["type"] in DECODER_TYPES
+    msg = (s.parse_decoder_to_server if direction else s.parse_server_to_decoder)(raw)
+    # Every field in the example survives the parse with the same value.
+    assert msg.model_dump(mode="json", include=set(expected)) == expected
 
 
-def test_interface_example_values() -> None:
-    start = s.parse_server_to_decoder(INTERFACE_EXAMPLES[2][0])
-    assert start.trial_id == 42
-    assert start.active_slots == ["s1", "s2", "s3", "s4"]
-    assert start.cued_slot is None
-    hello = s.parse_server_to_decoder(INTERFACE_EXAMPLES[1][0])
-    assert [sl.freq_hz for sl in hello.slots] == [15.0, 12.0, 10.0, 8.57]
+def test_inline_error_example_parses() -> None:
+    raw = re.search(r'`(\{"type": "error"[^`]*)`', DRAFT).group(1)
+    assert isinstance(s.parse_server_to_decoder(raw), s.ProtocolError)
 
 
 def test_selection_without_scores() -> None:
-    sel = s.parse_decoder_to_server(
-        {"type": "selection", "trial_id": 42, "slot": "s2", "t_unix": 1761268204.9}
-    )
+    sel = s.parse_decoder_to_server({"type": "selection", "trial_id": 42, "slot": "s2", "t_unix": 1.0})
     assert sel.score is None and sel.scores is None
-
-
-def test_selection_with_scores_from_interface_example() -> None:
-    raw = {
-        "type": "selection",
-        "trial_id": 42,
-        "slot": "s2",
-        "t_unix": 1761268204.9,
-        "score": 0.71,
-        "scores": {"s1": 0.31, "s2": 0.71, "s3": 0.22, "s4": 0.18},
-    }
-    sel = s.parse_decoder_to_server(raw)
-    assert sel.score == 0.71
-    assert sel.scores == {"s1": 0.31, "s2": 0.71, "s3": 0.22, "s4": 0.18}
 
 
 def test_unknown_fields_are_ignored() -> None:
@@ -214,11 +157,9 @@ def test_unknown_fields_are_ignored() -> None:
     assert isinstance(s.parse_ui_to_server({"type": "stop", "why": "x"}), s.Stop)
 
 
-def test_hello_and_status_resolve_per_direction() -> None:
-    assert isinstance(
-        s.parse_decoder_to_server({"type": "hello", "protocol": 1, "name": "x"}), s.DecoderHello
-    )
-    assert isinstance(s.parse_decoder_to_server({"type": "status", "ok": True}), s.DecoderStatus)
+def test_status_resolves_per_direction() -> None:
+    bridge = {"type": "status", "ok": True, "board_ok": True, "display_ok": True}
+    assert isinstance(s.parse_decoder_to_server(bridge), s.DecoderStatus)
     ui_status = {
         "type": "status",
         "decoder_connected": False,
@@ -231,6 +172,9 @@ def test_hello_and_status_resolve_per_direction() -> None:
     assert isinstance(s.parse_server_to_ui(ui_status), s.UIStatus)
 
 
+V2_HELLO = {"type": "hello", "protocol": 2, "name": "x", "refresh_hz": 60.0, "waveform": "sine",
+            "slots": [{"slot": "s1", "freq_hz": 15.0}]}
+
 INVALID_CASES: list[tuple[object, object]] = [
     # bad slot ids
     (s.parse_decoder_to_server, {"type": "selection", "trial_id": 1, "slot": "x1", "t_unix": 1.0}),
@@ -241,37 +185,33 @@ INVALID_CASES: list[tuple[object, object]] = [
         {"type": "selection", "trial_id": 1, "slot": "s1", "t_unix": 1.0, "scores": {"bad": 0.1}},
     ),
     (s.parse_server_to_ui, {"type": "highlight", "slot": "left"}),
+    (s.parse_server_to_decoder, {"type": "display", "labels": {"left": "SAY"}}),
+    (s.parse_server_to_decoder, {"type": "hello_ack", "protocol": 2, "roles": {"s1": "talk"}, "labels": {}}),
     # wrong types
     (s.parse_decoder_to_server, {"type": "selection", "trial_id": "abc", "slot": "s1", "t_unix": 1.0}),
-    (s.parse_decoder_to_server, {"type": "status", "ok": "maybe"}),
+    (s.parse_decoder_to_server, {"type": "status", "ok": "maybe", "board_ok": True, "display_ok": True}),
     (s.parse_ui_to_server, {"type": "judgment", "utterance_id": "u1", "correct": "dunno"}),
+    (s.parse_server_to_decoder, {"type": "display", "labels": ["SAY", "NEXT"]}),  # labels are per slot in v2
     # missing required fields
     (s.parse_decoder_to_server, {"type": "selection", "trial_id": 1, "slot": "s1"}),
-    (s.parse_decoder_to_server, {"type": "hello", "protocol": 1}),
-    (s.parse_server_to_decoder, {"type": "stim_stop", "trial_id": 1, "t_unix": 1.0}),
-    (s.parse_server_to_decoder, {"type": "hello", "protocol": 1, "refresh_hz": 60.0, "waveform": "square"}),
-    # empty active_slots
-    (
-        s.parse_server_to_decoder,
-        {"type": "stim_start", "trial_id": 1, "menu_id": "m", "t_unix": 1.0, "active_slots": []},
-    ),
+    (s.parse_decoder_to_server, {"type": "hello", "protocol": 2, "name": "v1-style hello"}),
+    (s.parse_decoder_to_server, {"type": "status", "ok": True}),  # v1 status: no board_ok/display_ok
+    (s.parse_decoder_to_server, {"type": "baseline_done", "ok": True}),
+    (s.parse_server_to_decoder, {"type": "stim_stop", "trial_id": 1}),
+    (s.parse_server_to_decoder, {"type": "baseline", "seconds": 10.0}),
+    (s.parse_server_to_decoder, {"type": "pause"}),
+    # empty lists
+    (s.parse_server_to_decoder, {"type": "stim_start", "trial_id": 1, "active_slots": []}),
+    (s.parse_decoder_to_server, {**V2_HELLO, "slots": []}),
     # bad enum values
-    (s.parse_server_to_decoder, {"type": "stim_stop", "trial_id": 1, "t_unix": 1.0, "reason": "bored"}),
-    (
-        s.parse_server_to_decoder,
-        {"type": "hello", "protocol": 1, "refresh_hz": 60.0, "waveform": "sampled_sinusoid", "slots": []},
-    ),
-    (
-        s.parse_server_to_decoder,
-        {"type": "stim_start", "trial_id": 1, "menu_id": "m", "t_unix": 1.0, "active_slots": ["s1"], "mode": "x"},
-    ),
+    (s.parse_server_to_decoder, {"type": "stim_stop", "trial_id": 1, "reason": "bored"}),
+    (s.parse_server_to_decoder, {"type": "stim_stop", "trial_id": 1, "reason": "calibration_done"}),
+    (s.parse_decoder_to_server, {**V2_HELLO, "waveform": "sampled_sinusoid"}),
     (s.parse_ui_to_server, {"type": "partner_text", "text": "hi", "source": "telepathy"}),
     # constraints
-    (s.parse_server_to_decoder, {"type": "baseline", "seconds": 0}),
-    (
-        s.parse_server_to_decoder,
-        {"type": "hello", "protocol": 1, "refresh_hz": 60.0, "waveform": "sine", "slots": [{"slot": "s1", "freq_hz": 0}]},
-    ),
+    (s.parse_server_to_decoder, {"type": "baseline", "baseline_id": 1, "seconds": 0}),
+    (s.parse_decoder_to_server, {**V2_HELLO, "slots": [{"slot": "s1", "freq_hz": 0}]}),
+    (s.parse_decoder_to_server, {**V2_HELLO, "decoder": {"window_s": 4.0, "step_s": 0.5, "votes": 0}}),
     (s.parse_ui_to_server, {"type": "partner_text", "text": "", "source": "typed"}),
     (s.parse_ui_to_server, {"type": "partner_text", "text": "   ", "source": "stt"}),
     # NaN / Infinity floats (JSON cannot carry them; they would serialize as null)
@@ -281,12 +221,9 @@ INVALID_CASES: list[tuple[object, object]] = [
         s.parse_decoder_to_server,
         {"type": "selection", "trial_id": 1, "slot": "s1", "t_unix": 1.0, "scores": {"s1": float("nan")}},
     ),
-    (
-        s.parse_server_to_decoder,
-        '{"type":"hello","protocol":1,"refresh_hz":60.0,"waveform":"square","slots":[{"slot":"s1","freq_hz":Infinity}]}',
-    ),
-    (s.parse_server_to_decoder, {"type": "hello", "protocol": 1, "refresh_hz": float("inf"), "waveform": "square", "slots": []}),
-    (s.parse_server_to_decoder, {"type": "baseline", "seconds": float("inf")}),
+    (s.parse_decoder_to_server, {**V2_HELLO, "refresh_hz": float("inf")}),
+    (s.parse_decoder_to_server, '{"type":"stim_onset","trial_id":1,"t_unix":Infinity}'),
+    (s.parse_server_to_decoder, {"type": "baseline", "baseline_id": 1, "seconds": float("inf")}),
     # show_option: index must be < count, slots must not be empty
     (
         s.parse_server_to_ui,
@@ -308,7 +245,9 @@ INVALID_CASES: list[tuple[object, object]] = [
     ),
     # wrong direction / unknown type / no type
     (s.parse_ui_to_server, {"type": "speak", "text": "hi", "utterance_id": "u1"}),
-    (s.parse_decoder_to_server, {"type": "stim_start", "trial_id": 1, "menu_id": "m", "t_unix": 1.0, "active_slots": ["s1"]}),
+    (s.parse_decoder_to_server, {"type": "stim_start", "trial_id": 1, "active_slots": ["s1"]}),
+    (s.parse_server_to_decoder, {"type": "baseline_done", "baseline_id": 1, "ok": True}),
+    (s.parse_server_to_decoder, V2_HELLO),
     (s.parse_decoder_to_server, {"type": "nope"}),
     (s.parse_decoder_to_server, {"trial_id": 1}),
     # not JSON
@@ -328,8 +267,44 @@ def test_partner_text_is_stripped() -> None:
 
 
 def test_protocol_constants() -> None:
-    assert s.PROTOCOL_V1 == 1
-    assert s.PROTOCOL_V2_PROPOSED == 2
+    assert s.PROTOCOL == 2
+    assert not hasattr(s, "PROTOCOL_V1")
+    assert not hasattr(s, "ServerHello")
+
+
+# ---------------------------------------------------------------------------
+# hello_problems: the server's handshake check (draft section 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("changes", "expect"),
+    [
+        ({}, []),
+        ({"refresh_hz": 60.9}, []),  # within 1 Hz
+        ({"slots": [s.SlotSpec(slot="s1", freq_hz=15.009), s.SlotSpec(slot="s2", freq_hz=16.991)]}, []),
+        ({"slots": [s.SlotSpec(slot="s2", freq_hz=17.0), s.SlotSpec(slot="s1", freq_hz=15.0)]}, []),  # order
+        ({"protocol": 1}, ["protocol 1"]),
+        ({"refresh_hz": 120.0}, ["refresh is 120 Hz, expected 60 Hz (turn ProMotion"]),
+        ({"refresh_hz": 58.9}, ["refresh is 58.9 Hz"]),
+        ({"waveform": "square"}, ["waveform square"]),
+        ({"slots": [s.SlotSpec(slot="s1", freq_hz=15.0)]}, ["slots ['s1']"]),
+        ({"slots": [*SLOTS, s.SlotSpec(slot="s3", freq_hz=12.0)]}, ["slots ['s1', 's2', 's3']"]),
+        ({"slots": [s.SlotSpec(slot="s1", freq_hz=15.0), s.SlotSpec(slot="s2", freq_hz=12.0)]}, ["s2 is 12 Hz"]),
+        ({"slots": [s.SlotSpec(slot="s1", freq_hz=15.02), s.SlotSpec(slot="s2", freq_hz=17.0)]}, ["s1 is 15.02 Hz"]),
+        ({"slots": [SLOTS[0], SLOTS[0], SLOTS[1]]}, ["duplicate slot ids"]),
+    ],
+)
+def test_hello_problems(changes: dict, expect: list[str]) -> None:
+    problems = s.hello_problems(hello(**changes), SLOTS, "sine", 60.0)
+    assert len(problems) == len(expect), problems
+    for problem, fragment in zip(problems, expect):
+        assert fragment in problem
+
+
+def test_hello_problems_reports_everything_at_once() -> None:
+    bad = hello(protocol=1, refresh_hz=120.0, waveform="square")
+    assert len(s.hello_problems(bad, SLOTS, "sine", 60.0)) == 3
 
 
 @pytest.mark.parametrize(

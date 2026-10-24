@@ -1,17 +1,15 @@
 # BCI Voice: every tunable number for the voice + UI side (PLAN.md section 5).
 # Loaded and validated by app/config.py; unknown keys are an error, so typos fail loudly.
 
-protocol: 1                    # INTERFACE.md protocol version sent in the server hello
-
 server:
   host: 127.0.0.1              # 0.0.0.0 later for a phone or the Jetson
   port: 8000
 
 display:
-  expected_refresh_hz: 60      # used in the v1 server hello until the decoder reports its measured rate
+  expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
 
 stim:
-  # Mirrors the teammate's stimulus config (ssvep two_targets.toml); checked against the decoder's hello.
+  # Mirrors the teammate's stimulus config (ssvep two_targets.toml); the bridge's hello must match.
   slots:
     - {slot: s1, freq_hz: 15.0, phase_deg: 0}
     - {slot: s2, freq_hz: 17.0, phase_deg: 0}

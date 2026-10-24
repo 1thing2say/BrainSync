@@ -1,4 +1,4 @@
-"""V0 cross-checks: the config files, schemas and fake decoder agree with each other and PLAN.md."""
+"""Cross-checks: the config files, schemas and fake decoder agree with each other and PLAN.md."""
 
 from __future__ import annotations
 
@@ -12,16 +12,17 @@ from websockets.asyncio.server import ServerConnection, serve
 import tools.fake_decoder as fake_decoder
 from app.config import REPO_ROOT, load_config, load_intents
 from app.schemas import (
-    PROTOCOL_V1,
+    PROTOCOL,
     DecoderHello,
     DecoderStatus,
     Display,
+    HelloAck,
     Option,
     Selection,
-    ServerHello,
+    StimOnset,
     StimStart,
+    hello_problems,
     parse_decoder_to_server,
-    parse_server_to_decoder,
     to_json,
     validate_option,
 )
@@ -30,22 +31,12 @@ from tools.fake_decoder import FakeDecoder, load_script, parse_args
 WAIT = 2.0
 
 
-def server_hello_from_config() -> ServerHello:
+def test_fake_decoder_hello_passes_the_server_check() -> None:
     cfg = load_config()
-    return ServerHello(
-        protocol=cfg.protocol,
-        refresh_hz=cfg.display.expected_refresh_hz,
-        waveform=cfg.stim.waveform,
-        slots=cfg.stim.slots,
-    )
-
-
-def test_config_builds_v1_server_hello_that_round_trips() -> None:
-    cfg = load_config()
-    hello = server_hello_from_config()
-    assert hello.protocol == PROTOCOL_V1
-    # Compare dumps: config slots are SlotConfig instances, parsed ones are SlotSpec.
-    assert parse_server_to_decoder(to_json(hello)).model_dump() == hello.model_dump()
+    hello = FakeDecoder(parse_args([]), stdin=None).hello()
+    assert hello.protocol == PROTOCOL
+    assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform,
+                          cfg.display.expected_refresh_hz) == []
     assert [s.slot for s in hello.slots] == list(cfg.stim.roles)
 
 
@@ -84,20 +75,20 @@ def test_fake_decoder_builds_messages_only_through_schemas() -> None:
     assert "json.dumps" not in source
 
 
-async def test_fake_decoder_against_config_hello(tmp_path: Path) -> None:
-    """A stub server sends the config hello; the fake decoder answers a trial with a config slot."""
+async def test_fake_decoder_against_a_v2_stub(tmp_path: Path) -> None:
+    """A stub server acks the fake's hello; the fake reports the onset and answers with a config slot."""
     cfg = load_config()
     slots = list(cfg.stim.roles)
     received: asyncio.Queue = asyncio.Queue()
+    ack = HelloAck(protocol=PROTOCOL, roles=cfg.stim.roles, labels={"s1": "SAY", "s2": "NEXT"})
 
     async def handler(ws: ServerConnection) -> None:
         async for raw in ws:
             msg = parse_decoder_to_server(raw)
             if isinstance(msg, DecoderHello):
-                await ws.send(to_json(server_hello_from_config()))
-                await ws.send(to_json(Display(text="Yes, let's go outside", labels=["SAY", "NEXT"])))
-                await ws.send(to_json(StimStart(trial_id=1, menu_id="m1", t_unix=1.0,
-                                                active_slots=slots)))
+                await ws.send(to_json(ack))
+                await ws.send(to_json(Display(text="Yes, let's go outside", labels={"s1": "SAY", "s2": "NEXT"})))
+                await ws.send(to_json(StimStart(trial_id=1, active_slots=slots)))
             elif not isinstance(msg, DecoderStatus):
                 await received.put(msg)
 
@@ -107,8 +98,10 @@ async def test_fake_decoder_against_config_hello(tmp_path: Path) -> None:
                            "--once", "--no-reconnect", "--seed", "1"])
         decoder = FakeDecoder(args, stdin=None)
         await asyncio.wait_for(decoder.run(), WAIT)
+        onset = await asyncio.wait_for(received.get(), WAIT)
         answer = await asyncio.wait_for(received.get(), WAIT)
 
-    assert decoder.server_hello.model_dump() == server_hello_from_config().model_dump()
+    assert decoder.ack == ack
+    assert isinstance(onset, StimOnset) and onset.trial_id == 1
     assert isinstance(answer, Selection)
     assert answer.trial_id == 1 and answer.slot in slots
