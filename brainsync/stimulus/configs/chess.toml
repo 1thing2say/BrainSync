@@ -1,0 +1,40 @@
+# BrainChess board stimulus (python -m brainsync.brainchess.stimulus). The two targets are
+# the side panels used for the promotion and PLAY/BACK confirm steps; the board squares in
+# between flicker at the same two frequencies, so a decoder trained on either works for both.
+# 15 and 17 Hz are the only pair that separated reliably on the user's dry-electrode EEG
+# (Cerelog X8, 60 Hz display, 2026-10-22). Sine flicker, because 17 Hz does not divide 60.
+# The board is 0.9 screen heights tall (x within +/-0.45), so the panels sit just outside it:
+# centres at +/-0.59, inner edges at +/-0.47, outer edges (cue box included) at +/-0.734,
+# inside the 0.75 half-width of a 1.5:1 screen. No cue box: the game draws its own feedback.
+name = "chess"
+
+[targets]
+freqs = [15.0, 17.0]   # Hz
+phases_pi = [0.0, 0.0] # multiples of pi
+labels = ["PLAY", "BACK"]
+
+[layout]
+rows = 1
+cols = 2
+size = 0.24     # panel side, screen heights
+spacing = 1.18  # centre to centre, screen heights: one panel either side of the board
+
+[stimulus]
+waveform = "sine"
+hold_cue = false
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+# unused by the board stimulus (the game drives it over stdin); kept valid so the stock
+# stimulus can still run a cued session on the panels with -c chess
+blocks = 10
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true
