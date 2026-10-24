@@ -275,6 +275,139 @@ margin. 30 s brings that to about 0.33. Ctrl-C or Escape ends the run. Ctrl-C du
 calibration ends the program before any decoding (exit code 130). A stimulus that
 crashes or refuses the display makes the demo exit with code 1.
 
+## Phase 4: Instagram Reels
+
+`brainsync.reels` scrolls Instagram Reels in Chrome with the same decoder. The BrainScroll
+extension (`extension/`, details in `extension/README.md`) draws two squares to the right
+of the reel on instagram.com/reels: the top one, "up", at 15 Hz goes to the previous reel,
+the bottom one, "down", at 17 Hz to the next (config `reels`: squares 0.3 high at
+x = 0.55, y = +/-0.325 screen heights, so they stay clear of the 9:16 video). Python is a
+WebSocket server on `ws://127.0.0.1:8765`. It sends the layout, the phase (wait,
+calibrate, run, stop), the cue box and each scroll. The extension answers with a hello
+(after Start on its photosensitivity warning and a refresh measurement over 120 frames),
+a frame report every 5 s, an ack per scroll and `bye` on Escape. The protocol is written
+out in `brainsync/bridge.py`. Only the extension and pages served from this machine may
+connect (the handshake's Origin is checked), so another web page cannot end the run or
+fake a hello. Each tab has its own socket, so a tab that opens or reloads mid-run gets
+the config and the current phase. After a reconnect the overlay greets the new socket
+again without a second Start. Every connection gets every scroll, but only a visible tab
+on Reels where Start was pressed moves the feed; the others ack `ok: false`, and Python
+counts one ack per scroll id. Escape in any tab ends the run, also before calibration
+(exit 0, "viewer quit").
+
+Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
+
+- A new commit fires one scroll in that target's direction. Abstentions never fire, and
+  watching the video abstains.
+- Every decision for 1.5 s after a scroll is ignored (`--cooldown`).
+- The first decision after the cooldown resets only the decoder's votes, not its sample
+  buffer. Refilling the buffer (1.5 s window + 2 s pad) would blind it for 3.5 s.
+  Someone who keeps looking at one square commits it again after 4 more agreeing
+  windows, so it scrolls about every 1.5 + 1.0 = 2.5 s. At 250 Hz a step is 62 samples
+  (0.248 s), so the reset falls on the 7th decision and the measured period is 2.73 s.
+- After a reset a commit counts only once 4 decisions have arrived. One board read can
+  produce several decisions, and a sooner commit was voted before the reset.
+
+The rest baseline is calibrated while the viewer watches the reel with the squares
+flickering in the periphery (`--calibrate-on watch`, the default). Here "not choosing"
+means watching the video, not a still screen. `--calibrate-on still` holds the squares
+still instead, as phase 3 does. This choice, the closer spacing below and the whole
+Reels setup are untested on real EEG. Only the fake board and the mock page have run
+it.
+
+Setup: install the `reels` extra (websockets). Load `extension/` unpacked at
+`chrome://extensions` (Developer mode, Chrome 116 or newer). Put Chrome in full screen
+(ctrl-cmd-F), because sizes are in screen heights and the overlay takes the window height
+as the screen. Set the display to 60 Hz as in the hardware rules. The run stops if the
+browser's measured refresh is more than 1 Hz off, unless you pass `--ignore-refresh`.
+Either way the overlay holds its squares still while its own refresh is off, because
+they would flicker at the wrong frequencies, and a later hello at the wrong refresh
+(another tab, a reload) prints a warning.
+
+```bash
+.venv/bin/python -m pip install -e ".[reels]"
+```
+
+Without a browser or board (about 1.3 s, virtual time):
+
+```bash
+.venv/bin/python -m brainsync.reels --fake --fast --no-browser --no-voice --seconds 30
+```
+
+It decodes 107 windows (1% abstained) and scrolls 10 times: down at 4.24, 6.97 and
+9.70 s, up at 12.43, 15.16 and 17.88 s, then down 4 times from 21.60 s. The repeats sit
+2.73 s apart. The committed target matches the true one on 62% of windows, against 84%
+for `brainsync.demo`, because every reset clears the committed target for about 1 s.
+
+On the mock Reels page (no Instagram login), in two terminals:
+
+```bash
+.venv/bin/python -m http.server -d extension 8000 --bind 127.0.0.1
+.venv/bin/python -m brainsync.reels --fake --no-voice --seconds 60 --calibrate 10
+# open http://127.0.0.1:8000/test/reels_mock.html and press Start
+```
+
+Measured on 2026-10-24 in headless Chrome 156 on this Mac:
+
+- The hello arrived with a 60.00 Hz refresh (59.99 Hz in a second run). The old median
+  estimate read 59.88 Hz here, because Chrome rounds rAF timestamps to 100 us and the
+  60 Hz intervals come out as 16.6 or 16.7 ms; the overlay now takes the mean of the
+  intervals near the median, and the frame reports said 60.04 Hz.
+- The HUD showed 10 s of calibrate (flicker), then run.
+- The 15 Hz square took only the values 0, 127, 128 and 255, the four levels of a 15 Hz
+  sine at 60 Hz. The 17 Hz square took 31.
+- In 45.4 s of decoding there were 15 scrolls. 12 were acked ok and moved the mock feed
+  by one reel each. The other 3 were "up" at the top of the feed: they were acked
+  `ok: false` and nothing was tried.
+- 11 frame reports arrived. The overlay counted 12 dropped frames in about 55 s of
+  flicker.
+- Escape sent `bye`, and Python ended with "viewer quit" and exit code 0.
+
+`--manual` needs neither board nor decoder: after the hello, stdin lines `u` and `d`
+scroll and `q` quits. That is how to check the extension on the real site:
+
+```bash
+.venv/bin/python -m brainsync.reels --manual
+```
+
+On the mock page, `d`, `d`, `u` moved the feed from reel 1 to 3 and back to 2, with 3 of
+3 acks ok. A second `--manual` run started straight after got its hello from the same
+tab without another Start.
+
+The real run (board, Chrome on instagram.com/reels with the extension, 30 s baseline,
+600 s of decoding):
+
+```bash
+.venv/bin/python -m brainsync.reels
+```
+
+One status line per window goes to stderr. Each scroll and a summary (scrolls, acks,
+the last refresh and drop count) go to stdout. `--log FILE` writes JSON lines with every
+decision, scroll, reset and browser report. Exit codes:
+
+- 0: the run ended on time, Ctrl-C or Escape in the browser.
+- 1: no browser said hello within `--wait-browser` (120 s), the refresh was wrong, the
+  port was taken, calibration failed, or the board sent nothing for 5 s.
+- 2: bad arguments or config. `-c two_targets` is refused because its labels are not
+  up/down.
+- 130: Ctrl-C before decoding started.
+
+The overlay is told to stop on every exit Python lives through: normal ends, errors,
+Ctrl-C, and SIGTERM and SIGHUP (closing the terminal window), which count as Ctrl-C. For
+the rest (SIGKILL, a crash) the overlay holds the squares still as soon as its socket
+closes, until a server sends a flickering phase again. Both were checked on the mock
+page: `kill -TERM` mid-run delivered the stop phase and Python ended with "interrupted",
+exit 0; after `kill -9` the squares stood still and no more frame reports went out.
+Escape during calibration stops the flicker at once, but Python ends the run only when
+the baseline is finished.
+
+Caveat on spacing: the Reels squares are 0.3 high and 0.65 screen heights apart, against
+0.4 high and 1.0 apart in phase 2 and 3. No session has measured the response or the
+crosstalk at that spacing. Before trusting it, record a cued session in the Reels layout
+and score it (`brainsync.record -c reels`, then `brainsync.score_cued`). The cue box fits at
+`cue_scale = 1.1` (1.2 would reach 0.505 screen heights, past the top edge). The extension
+narrows the box's gap from 0.03 to 0.019 there for the same reason.
+
 ## Recording and electrode check
 
 Preview a session without opening a window:
@@ -338,16 +471,32 @@ quits.
 | `brainsync/online.py` | Ring buffer, sliding-window decoder, calibration, replay and tuning grid |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
+| `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |
+| `brainsync/bridge.py` | Localhost WebSocket server for the browser overlay, and its protocol |
+| `brainsync/reels.py` | Phase 4 Instagram Reels run (also `--manual` and `--no-browser`) |
+| `extension/` | BrainScroll Chrome extension: overlay, flicker, scroller, mock Reels page |
 
 ## Tests
 
 ```bash
 env -u BRAINSYNC_DATA_DIR .venv/bin/python -m pytest -q
 BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data .venv/bin/python -m pytest -q
+node --test extension/test/*.test.mjs
 ```
 
-Without data: 420 passed, 9 skipped (the real-data tests skip themselves), about 33 s.
-With the data: 429 passed, about 45 s. No test opens a window or touches the board.
+Without data: 523 passed, 9 skipped (the real-data tests skip themselves), 60 to 85 s.
+With the data: 532 passed. No test opens a window or touches the board.
+Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19 (a real server on a
+free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
+and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11 and
+`test_extension.py` 12. Without the `reels` extra the 10 browser tests in
+`test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
+checks the flicker fixture against `brainsync.stimulus.flicker`, the manifest and the
+mock page, runs `node --check` on every script and runs the 57 node tests (the flicker
+port within 1e-9 of the Python luminance, the overlay's geometry, refresh meter and
+protocol state machine, the scroller, and the service worker against a fake `chrome`
+and WebSocket). Node 24 reads `--test` arguments as globs, so
+pass the files, not the folder. The node tests are skipped when node is not installed.
 The filter tests check passband gain within 2% at 12, 15, 17 and 30 Hz, stopband gain
 under 0.05 at 1, 2, 90 and 110 Hz, zero lag, and a 60 Hz notch deeper than -40 dB. The
 real-data tests hold the Nakanishi and cued-session numbers above to minimum thresholds,
