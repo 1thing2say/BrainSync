@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # phase2-checks.sh - the in-container halves of tests/test_phase2.sh (builder only).
 #
-# Usage: scripts/builder.sh run tests/phase2-checks.sh CHECK
+# Usage: scripts/builder.sh run tests/phase2-checks.sh CHECK [ISO_NAME]
+#   (ISO_NAME: build/out/ISO_NAME.iso, default the product name)
 #   grub         render-grub.py: each default target, verbatim vendor kernel
 #                lines, timeout, grub-script-check, rejects a vendor file
 #                missing an install entry
@@ -17,20 +18,28 @@
 #                compressor/block/mkfs time. (Compared in Python: GNU diff -r
 #                randomly reports identical 0:0 overlayfs whiteouts as different.)
 #   hook         hook.sh from the built ISO against NVIDIA's real target base
-#                layer (ubuntu-server-minimal.squashfs), curtin via chroot shim
-#   hook-fail    hook.sh fails the install when a step fails or there is no target
+#                layer (ubuntu-server-minimal.squashfs) in the state NVIDIA's
+#                late-commands leave it (vendor groups, OOBE default target,
+#                openssh-server from the pool), curtin via chroot shim, a fake
+#                Orin Nano device tree: release, issue, hostname, account
+#                (SSH key only, passwordless sudo), sshd config, OOBE skipped,
+#                NVIDIA's default users removed; re-run is idempotent
+#   hook-password  the same with a console password hash: password set, sudo
+#                asks for it
+#   hook-fail    hook.sh fails the install when a step fails, when the build
+#                has no login at all, and when there is no target
 # Work happens in /scratch (tmpfs); nothing is written to build/ except reads.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
 load_config
 load_product_config
 require_container
-[ "$#" = 1 ] || die "usage: phase2-checks.sh CHECK (see --help)"
+[ "$#" = 1 ] || [ "$#" = 2 ] || die "usage: phase2-checks.sh CHECK [ISO_NAME] (see --help)"
 case "$1" in -h|--help) usage_from_header; exit 0 ;; esac
 
 S="$BRAINSYNCOS_ROOT/scripts"
 BASE="$(resolve_base_iso)"
-NAME="$(product_iso_name)"
+NAME="${2:-$(product_iso_name)}"
 OUT="$OUT_DIR/$NAME.iso"
 LAYER="casper/$AUTOINSTALL_LAYER"
 W=/scratch/p2
@@ -198,25 +207,115 @@ c_layer() {
     echo "superblock: $(grep -E '^(Compression|Block size|Creation)' "$W/s.b" | tr '\n' ';')"
 }
 
-# setup_target: NVIDIA's target base layer unpacked at $W/target, and the
-# payload from the built ISO at $W/iso/brainsyncos (read-only, as on /cdrom).
+# setup_target: NVIDIA's target base layer unpacked at $W/target, brought to
+# the state NVIDIA's late-commands leave it in before our hook runs (vendor
+# groups, OOBE as default target, openssh-server from the ISO pool with host
+# keys, NVIDIA's nvpmodel link), plus a fake Orin Nano device tree at $W/dt and
+# the payload from the built ISO at $W/iso/brainsyncos (read-only, as on /cdrom).
 setup_target() {
     need_out
+    local t="$W/target" deb g
     iso_get "$OUT" /brainsyncos "$W/iso/brainsyncos"
     iso_get "$BASE" /casper/ubuntu-server-minimal.squashfs "$W/target.squashfs"
-    unsquashfs -q -no-progress -d "$W/target" "$W/target.squashfs" > /dev/null
+    unsquashfs -q -no-progress -d "$t" "$W/target.squashfs" > /dev/null
     rm -f "$W/target.squashfs"
-    [ -f "$W/target/etc/os-release" ] || die "target layer has no /etc/os-release"
+    [ -f "$t/etc/os-release" ] || die "target layer has no /etc/os-release"
+    # openssh-server and the dependency the OS layers lack (libwrap0), from the pool.
+    for deb in o/openssh/openssh-client_9.6p1-3ubuntu13.18 o/openssh/openssh-server_9.6p1-3ubuntu13.18 \
+               o/openssh/openssh-sftp-server_9.6p1-3ubuntu13.18 t/tcp-wrappers/libwrap0_7.6.q-33; do
+        iso_get "$BASE" "/pool/main/${deb}_arm64.deb" "$W/pkg.deb"
+        dpkg-deb -x "$W/pkg.deb" "$t"
+    done
+    # What openssh-server's postinst does on the real install.
+    cp "$t/usr/share/openssh/sshd_config" "$t/etc/ssh/sshd_config"
+    in_target "$t" ssh-keygen -A > /dev/null
+    in_target "$t" useradd --system --no-create-home -d /run/sshd -s /usr/sbin/nologin sshd
+    in_target "$t" groupadd -f weston-launch
+    for g in i2c gpio crypto trusty debug render; do in_target "$t" groupadd -rf "$g"; done
+    mkdir -p "$t/etc/systemd/system/nv-oobe.target.wants" "$t/etc/systemd/system/multi-user.target.wants" "$t/etc/nv"
+    ln -sf /lib/systemd/system/nv-oobe.target "$t/etc/systemd/system/nv-oobe.target"
+    ln -sf nv-oobe.target "$t/etc/systemd/system/default.target"
+    ln -sf /lib/systemd/system/nv-oobe.service "$t/etc/systemd/system/nv-oobe.target.wants/nv-oobe.service"
+    ln -sf /etc/systemd/system/nvpmodel.service "$t/etc/systemd/system/multi-user.target.wants/nvpmodel.service"
+    touch "$t/etc/nv/nvautoconfig"
+    mkdir -p "$W/dt"
+    printf 'NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\0' > "$W/dt/model"
+    printf '1421224ABC123456\0' > "$W/dt/serial-number"
+}
+
+in_target() {  # in_target TARGET CMD...: run CMD in TARGET via the curtin shim
+    local t="$1"; shift
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- "$@"
 }
 
 run_hook() {  # run_hook PAYLOAD_DIR TARGET -> hook's exit code
     PATH="$BRAINSYNCOS_ROOT/tests/shims:$PATH" TARGET_MOUNT_POINT="$2" BSOS_HOOK_LOG="$W/live.log" \
-        bash "$1/hook.sh"
+        BSOS_DT_DIR="$W/dt" bash "$1/hook.sh"
+}
+
+# payload_copy DIR: a writable copy of the ISO payload to tamper with.
+payload_copy() {
+    cp -R "$W/iso/brainsyncos" "$1"
+    chmod -R u+w "$1"
+}
+
+# check_identity TARGET MODE: Phase 2.5 results; MODE keys or password.
+check_identity() {
+    local t="$1" mode="$2" u="$BRAINSYNC_USER" host shadow g groups home
+    host="$HOSTNAME_PREFIX-123456"
+    [ "$(cat "$t/etc/hostname")" = "$host" ] || die "hostname is $(cat "$t/etc/hostname"), want $host"
+    [ "$(grep -c '^127\.0\.1\.1[[:space:]]' "$t/etc/hosts")" = 1 ] || die "/etc/hosts needs exactly one 127.0.1.1 line"
+    grep -qxP "127\.0\.1\.1\t$host" "$t/etc/hosts" || die "/etc/hosts lacks 127.0.1.1 $host"
+    grep -qx 'preserve_hostname: true' "$t/etc/cloud/cloud.cfg.d/99-brainsyncos.cfg" || die "cloud-init may reset the hostname"
+    echo "hostname: $host"
+
+    in_target "$t" id "$u" > /dev/null || die "user $u missing"
+    groups="$(in_target "$t" id -nG "$u")"
+    for g in sudo dialout video render audio gpio i2c weston-launch; do
+        printf ' %s ' "$groups" | grep -q " $g " || die "$u is not in group $g ($groups)"
+    done
+    ! in_target "$t" id nvidia > /dev/null 2>&1 || die "NVIDIA default user nvidia still exists"
+    ! in_target "$t" id ubuntu > /dev/null 2>&1 || die "NVIDIA default user ubuntu still exists"
+    shadow="$(grep "^$u:" "$t/etc/shadow" | cut -d: -f2)"
+    home="$(grep "^$u:" "$t/etc/passwd" | cut -d: -f6)"
+    if [ "$mode" = keys ]; then
+        [ "$shadow" = '!' ] || die "password of $u is not locked: $shadow"
+        [ -f "$t/etc/sudoers.d/90-brainsyncos" ] || die "no passwordless sudo for $u"
+        [ "$(stat -c %a "$t/etc/sudoers.d/90-brainsyncos")" = 440 ] || die "sudoers drop-in mode"
+        in_target "$t" visudo -cf /etc/sudoers.d/90-brainsyncos
+        cmp "$W/iso/brainsyncos/config/authorized_keys" "$t$home/.ssh/authorized_keys" || die "authorized_keys not installed"
+        # stat inside the target: owner names come from the target's passwd.
+        [ "$(in_target "$t" stat -c '%a %U' "$home/.ssh/authorized_keys")" = "600 $u" ] || die "authorized_keys mode/owner"
+        [ "$(in_target "$t" stat -c '%a %U' "$home/.ssh")" = "700 $u" ] || die ".ssh mode/owner"
+    else
+        [ "$shadow" = "$(cat "$W/password.hash")" ] || die "password hash of $u not set: $shadow"
+        [ ! -e "$t/etc/sudoers.d/90-brainsyncos" ] || die "passwordless sudo although a password is set"
+    fi
+    grep -qx yes "$t$home/.config/gnome-initial-setup-done" || die "gnome-initial-setup not marked done"
+    echo "account: $u ($groups), $mode"
+
+    grep -qx "AllowUsers $u" "$t/etc/ssh/sshd_config.d/10-brainsyncos.conf" || die "sshd drop-in missing"
+    grep -qx 'PasswordAuthentication no' "$t/etc/ssh/sshd_config.d/10-brainsyncos.conf" || die "sshd allows passwords"
+    [ -L "$t/etc/systemd/system/sockets.target.wants/ssh.socket" ] || die "ssh.socket not enabled"
+    grep -q '40-ssh.sh: sshd config OK' "$t/var/log/brainsyncos/install.log" || die "sshd -t did not run"
+    echo "ssh: key-only, ssh.socket enabled, sshd -t OK"
+
+    [ "$(readlink "$t/etc/systemd/system/default.target")" = /lib/systemd/system/graphical.target ] \
+        || die "default target is $(readlink "$t/etc/systemd/system/default.target")"
+    [ ! -e "$t/etc/systemd/system/nv-oobe.target" ] && [ ! -L "$t/etc/systemd/system/nv-oobe.target" ] \
+        && [ ! -e "$t/etc/systemd/system/nv-oobe.target.wants" ] && [ ! -e "$t/etc/nv/nvautoconfig" ] \
+        || die "OOBE leftovers remain"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/nvpmodel.service" ] || die "nvpmodel link was removed"
+    echo "oobe: skipped, default graphical.target, nvpmodel still wanted"
+
+    [ "$(stat -c %a "$t/opt/brainsyncos/installer/config")" = 700 ] || die "installed credentials dir is not root-only"
+    grep -qx 'BSOS_SERIAL=1421224ABC123456' "$t/opt/brainsyncos/installer/device.env" || die "device.env lacks the serial"
 }
 
 c_hook() {
     setup_target
     local t="$W/target" rel
+    in_target "$t" useradd -m -s /bin/bash nvidia   # as NVIDIA's nooemconfig path would
     run_hook "$W/iso/brainsyncos" "$t"
     rel="$t/etc/brainsyncos-release"
     cat "$rel"
@@ -229,24 +328,41 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (2 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (6 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
+    check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.
     run_hook "$W/iso/brainsyncos" "$t" > /dev/null
     [ "$(grep -c '^BrainSyncOS ' "$t/etc/issue")" = 1 ] || die "/etc/issue gained a second BrainSyncOS line on re-run"
-    echo "hook: release, issue, payload and log installed; re-run is idempotent"
+    check_identity "$t" keys > /dev/null
+    echo "hook: release, issue, identity, payload and log installed; re-run is idempotent"
+}
+
+c_hook_password() {
+    setup_target
+    local p="$W/pw"
+    payload_copy "$p"
+    openssl passwd -6 -salt bsoscheck correct-horse > "$W/password.hash"
+    cp "$W/password.hash" "$p/config/password.hash"
+    run_hook "$p" "$W/target"
+    check_identity "$W/target" password
 }
 
 c_hook_fail() {
     setup_target
-    local rc bad="$W/bad"
-    cp -R "$W/iso/brainsyncos" "$bad"
-    chmod -R u+w "$bad"
-    printf '#!/bin/bash\necho failing on purpose; exit 3\n' > "$bad/install.d/50-fail.sh"
+    local rc bad="$W/bad" nologin="$W/nologin"
+    payload_copy "$bad"
+    printf '#!/bin/bash\necho failing on purpose; exit 3\n' > "$bad/install.d/90-fail.sh"
     set +e; run_hook "$bad" "$W/target" > "$W/fail.out" 2>&1; rc=$?; set -e
-    [ "$rc" != 0 ] || die "hook succeeded although 50-fail.sh failed"
+    [ "$rc" != 0 ] || die "hook succeeded although 90-fail.sh failed"
     grep -q 'failing on purpose' "$W/target/var/log/brainsyncos/install.log" || die "failure not logged on the target"
     tail -1 "$W/target/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit [1-9][0-9]*' || die "target log lacks the exit line"
     echo "failing step: hook rc=$rc, logged on the target"
+    payload_copy "$nologin"
+    rm -f "$nologin/config/authorized_keys" "$nologin/config/password.hash"
+    set +e; run_hook "$nologin" "$W/target" > "$W/nologin.out" 2>&1; rc=$?; set -e
+    [ "$rc" != 0 ] || die "hook succeeded without any login for the account"
+    grep 'no SSH keys and no password' "$W/nologin.out"
     mkdir -p "$W/empty-target"
     set +e; run_hook "$W/iso/brainsyncos" "$W/empty-target" > "$W/notarget.out" 2>&1; rc=$?; set -e
     [ "$rc" != 0 ] || die "hook succeeded without an installed system"
@@ -260,6 +376,7 @@ case "$1" in
     contents) c_contents ;;
     layer) c_layer ;;
     hook) c_hook ;;
+    hook-password) c_hook_password ;;
     hook-fail) c_hook_fail ;;
     *) die "unknown check: $1 (see --help)" ;;
 esac

@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 # build-iso.sh - build the BrainSyncOS installer ISO (builder only).
 #
-# Usage: scripts/builder.sh run scripts/build-iso.sh [--build-id ID]
+# Usage: scripts/builder.sh run scripts/build-iso.sh [--build-id ID] [--name NAME]
+#            [--authorized-keys FILE] [--password-hash FILE]
 #
-# Output: build/out/brainsyncos-VERSION-BOARD.iso (+ .iso.sha256,
-# .manifest.txt with the sha256 of every file BrainSyncOS adds or replaces,
-# .xorriso.log). Staged files stay in build/stage/ for inspection.
+# Output: build/out/NAME.iso, NAME defaulting to brainsyncos-VERSION-BOARD
+# (+ .iso.sha256, .manifest.txt with the sha256 of every file BrainSyncOS adds
+# or replaces, .xorriso.log). Staged files stay in build/stage/ for inspection.
+#
+# Logins for the appliance account (BRAINSYNC_USER), at least one required:
+#   --authorized-keys FILE  SSH public keys (default config/authorized_keys)
+#   --password-hash FILE    console password hash (default
+#                           config/brainsync-password.hash; make one with
+#                           scripts/make-password-hash.sh)
+# Both end up on the ISO, readable by anyone holding the stick: public keys
+# and a salted hash, never a private key or a plain password.
 #
 # Every build starts from the pinned base ISO, never from build/iso-root:
 #  1. verify the base ISO and its boot bytes (config/base-iso.env pins)
@@ -28,19 +37,43 @@ load_config
 load_product_config
 
 build_id="${BSOS_GIT_REV:-unknown}"
+name="$(product_iso_name)"
+keys_file="$BRAINSYNCOS_ROOT/config/authorized_keys"
+hash_file="$BRAINSYNCOS_ROOT/config/brainsync-password.hash"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --build-id) build_id="${2:?--build-id needs a value}"; shift 2 ;;
+        --name) name="${2:?--name needs a value}"; shift 2 ;;
+        --authorized-keys) keys_file="${2:?--authorized-keys needs a file}"; shift 2 ;;
+        --password-hash) hash_file="${2:?--password-hash needs a file}"; shift 2 ;;
         -h|--help) usage_from_header; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
 printf '%s\n' "$build_id" | grep -Eq '^[A-Za-z0-9._+-]+$' || die "invalid build id: $build_id"
+case "$name" in */*|.*|'') die "invalid --name: $name" ;; esac
 require_container
-require_cmd xorriso unsquashfs mksquashfs python3 grub-script-check md5sum sha256sum sfdisk truncate
+require_cmd xorriso unsquashfs mksquashfs python3 grub-script-check md5sum sha256sum sfdisk truncate ssh-keygen
 [ -d /scratch ] && [ -w /scratch ] || die "/scratch (tmpfs) is missing; run this through scripts/builder.sh run"
 
-name="$(product_iso_name)"
+# --- logins for BRAINSYNC_USER ------------------------------------------------
+have_keys=0
+have_hash=0
+if [ -s "$keys_file" ]; then
+    ! grep -q 'PRIVATE KEY' "$keys_file" || die "$keys_file contains a PRIVATE key; use the .pub file"
+    ssh-keygen -l -f "$keys_file" > /dev/null 2>&1 || die "$keys_file is not a valid authorized_keys file"
+    have_keys=1
+    log "SSH keys for $BRAINSYNC_USER: $(ssh-keygen -l -f "$keys_file" | wc -l | tr -d ' ') from ${keys_file#$BRAINSYNCOS_ROOT/}"
+fi
+if [ -s "$hash_file" ]; then
+    [ "$(grep -c . "$hash_file")" = 1 ] && grep -Eqx '\$(6|5|y)\$[A-Za-z0-9./$]+' "$hash_file" \
+        || die "$hash_file is not a single crypt(3) hash line (\$6\$..., \$y\$...); make one with scripts/make-password-hash.sh"
+    have_hash=1
+    log "console password for $BRAINSYNC_USER: hash from ${hash_file#$BRAINSYNCOS_ROOT/}"
+fi
+[ "$have_keys" = 1 ] || [ "$have_hash" = 1 ] \
+    || die "no way to log in: add SSH public keys to config/authorized_keys and/or run scripts/make-password-hash.sh"
+
 layer="casper/$AUTOINSTALL_LAYER"
 
 iso="$(resolve_base_iso)"
@@ -120,6 +153,13 @@ UBUNTU_RELEASE=$UBUNTU_RELEASE
 BASE_ISO_NAME=$BASE_ISO_NAME
 BASE_ISO_SHA256=$BASE_ISO_SHA256
 EOF
+cat > "$STAGE_DIR/brainsyncos/settings.env" <<EOF
+BRAINSYNC_USER=$BRAINSYNC_USER
+HOSTNAME_PREFIX=$HOSTNAME_PREFIX
+EOF
+mkdir -p "$STAGE_DIR/brainsyncos/config"
+[ "$have_keys" = 0 ] || grep -v '^[[:space:]]*$' "$keys_file" > "$STAGE_DIR/brainsyncos/config/authorized_keys"
+[ "$have_hash" = 0 ] || cp "$hash_file" "$STAGE_DIR/brainsyncos/config/password.hash"
 
 python3 "$BRAINSYNCOS_ROOT/scripts/render-grub.py" "$work/vendor/grub.cfg" "$STAGE_DIR/boot/grub/grub.cfg" \
     --version "$BRAINSYNCOS_VERSION" --build-id "$build_id" \

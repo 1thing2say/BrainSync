@@ -7,13 +7,15 @@
 # /cdrom/brainsyncos and the installed system is mounted at
 # $TARGET_MOUNT_POINT (default /target).
 #
-# It copies the payload to /opt/brainsyncos/installer on the target, then runs
-# every install.d/NN-*.sh inside the target (curtin in-target), in order, with
-# BSOS_INSTALL_DIR set. Any failure fails the installation: a half-installed
-# BrainSyncOS is worse than an installer error on screen.
+# It copies the payload to /opt/brainsyncos/installer on the target, records
+# the board (device tree model and serial number) in device.env there, then
+# runs every install.d/NN-*.sh inside the target (curtin in-target), in order,
+# with BSOS_INSTALL_DIR set. Any failure fails the installation: a
+# half-installed BrainSyncOS is worse than an installer error on screen.
 # Log: /var/log/brainsyncos/install.log, in the live system and on the target.
 #
-# Test overrides: BSOS_HOOK_SRC (payload dir), BSOS_HOOK_LOG (live log file).
+# Test overrides: BSOS_HOOK_SRC (payload dir), BSOS_HOOK_LOG (live log file),
+# BSOS_DT_DIR (device tree, default /sys/firmware/devicetree/base).
 
 set -euo pipefail
 
@@ -51,17 +53,22 @@ echo "hook.sh: BrainSyncOS install hook, payload $src, target $target"
 [ -s "$src/release" ] || { echo "hook.sh: missing $src/release" >&2; exit 1; }
 cat "$src/release"
 
-model="$(tr -d '\0' < /sys/firmware/devicetree/base/model 2>/dev/null || echo unknown)"
+dt="${BSOS_DT_DIR:-/sys/firmware/devicetree/base}"
+model="$(tr -d '\0' < "$dt/model" 2>/dev/null || echo unknown)"
+serial="$(tr -d '\0' < "$dt/serial-number" 2>/dev/null | tr -cd 'A-Za-z0-9' || true)"
 case "$model" in
-    "NVIDIA Jetson Orin Nano"*) echo "hook.sh: board: $model" ;;
+    "NVIDIA Jetson Orin Nano"*) echo "hook.sh: board: $model, serial ${serial:-unknown}" ;;
     *) echo "hook.sh: WARNING: BrainSyncOS is built for Jetson Orin Nano; this board is: $model" ;;
 esac
 
 rm -rf "${target:?}$dest"
 mkdir -p "$target$dest"
 cp -R "$src/." "$target$dest/"
+printf 'BSOS_DT_MODEL=%q\nBSOS_SERIAL=%q\n' "$model" "$serial" > "$target$dest/device.env"
 chown -R root:root "$target$dest"
 chmod -R u+rwX,go+rX,go-w "$target$dest"
+# Login credentials: readable by root only on the installed system.
+[ ! -d "$target$dest/config" ] || chmod -R go-rwx "$target$dest/config"
 
 n=0
 for script in "$target$dest"/install.d/[0-9][0-9]-*.sh; do

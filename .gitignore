@@ -6,3 +6,7 @@ brainsyncos/**/*.iso
 # transcript snippets. Never commit.
 .claude/
 .dmux/
+
+# BrainSyncOS login credentials baked into a build (user-specific, never commit)
+brainsyncos/config/authorized_keys
+brainsyncos/config/brainsync-password.hash

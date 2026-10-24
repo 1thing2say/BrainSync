@@ -22,11 +22,17 @@ Phase 2 builds the first BrainSyncOS installer ISO for the **Jetson Orin
 Nano** (`scripts/build-iso.sh`):
 - a BrainSyncOS boot menu (NVMe / microSD / USB), with NVIDIA's kernel command lines unchanged
 - a BrainSync install hook in NVIDIA's autoinstall, which runs `/brainsyncos/install.d/*.sh` inside the freshly installed system
-- two install steps so far: `/etc/brainsyncos-release` and a BrainSyncOS line on the console login screen
+- install steps for `/etc/brainsyncos-release` and a BrainSyncOS line on the console login screen
 - a macOS USB writer (`scripts/write-usb.sh`)
 
-Phase 2 is still only the plumbing. NVIDIA's first-boot setup (OOBE) still
-runs, and BrainSync itself is not installed yet; those are Phases 3 and 4.
+Phase 2.5 gives the installed device its appliance identity, so it boots
+without NVIDIA's first-boot setup (OOBE):
+- hostname `brainsync-<serial suffix>`, reachable as `brainsync-<suffix>.local`
+- a `brainsync` account whose logins come from the build: SSH keys and/or a console password
+- key-only SSH
+- NVIDIA's OOBE skipped
+
+BrainSync itself is not installed yet; that is Phases 3 and 4.
 
 ## Base image (user-supplied)
 
@@ -95,8 +101,13 @@ When committing, add only `brainsyncos/` and `.gitignore`. The root
 cd brainsyncos
 export BASE_ISO=/path/to/jetsoninstaller-r39.2.1-2026-08-07-18-30-47-arm64.iso
 
+# Logins for the brainsync account (at least one; both files are gitignored):
+ssh-keygen -t ed25519                                 # if you have no key yet (~/.ssh/id_ed25519.pub)
+cp ~/.ssh/id_ed25519.pub config/authorized_keys       # SSH key(s), one per line
+scripts/make-password-hash.sh                         # optional console password -> config/brainsync-password.hash
+
 scripts/builder.sh run scripts/build-iso.sh          # -> build/out/brainsyncos-0.1.0-orin-nano.iso (~1 min)
-tests/test_phase2.sh                                  # builds it and runs 12 checks (~70 s; --reuse skips the build)
+tests/test_phase2.sh                                  # builds a separate test ISO with a throwaway key, 15 checks (~3 min)
 
 scripts/write-usb.sh                                  # list external disks
 scripts/write-usb.sh build/out/brainsyncos-0.1.0-orin-nano.iso /dev/diskN   # ERASES diskN
@@ -108,6 +119,8 @@ Product settings live in `config/brainsyncos.env`:
 - `HOOKED_AUTOINSTALL`: which NVIDIA autoinstall files get the hook
 - `INSTALL_TARGET_DEFAULT`: `nvme`, `microsd` or `usb`, the boot-menu entry listed first
 - `GRUB_TIMEOUT`
+- `BRAINSYNC_USER`: the appliance account, default `brainsync`
+- `HOSTNAME_PREFIX`: default `brainsync`
 
 `GRUB_TIMEOUT=-1` (the default) waits at the boot menu for a key press, as NVIDIA's ISO does. A value of 0 or more makes the stick install unattended. Booting it then **erases the default disk with nobody at the keyboard**, so only set it for flashing several units in a row.
 
@@ -122,12 +135,14 @@ The build id comes from the git revision of `brainsyncos/`, with `-dirty` append
    2. Plug in the stick and power on. Press **Esc** at the NVIDIA logo, then pick the USB stick in the UEFI boot manager.
 4. **Pick the entry** for your disk: **Install BrainSyncOS … on NVMe SSD** or **… on microSD card**. The install erases that disk.
 5. **When the installer offers the firmware capsule update, press `Y` within about 30 s.** Skipping it breaks the install (NVIDIA known issue 6266271). The board reboots twice for the capsule, then the install continues for about 15 minutes. The second phase shows `BrainSyncOS - installing the BrainSync layer` just before `Step 13/13`.
-6. **First boot.** NVIDIA's OOBE asks for a user name and password, as stock JetPack does. Remove the stick when it is done.
+6. **First boot.** Remove the stick. There is no OOBE: the board boots to the GNOME login screen with the `brainsync` account. Log in at the console with the console password if you built one, or over Ethernet with SSH: `ssh brainsync@brainsync-<last 6 of the serial>.local`. The console login screen (HDMI text console or serial) shows `BrainSyncOS 0.1.0 (build …)` and, on Ubuntu's line, the hostname. Otherwise find the board's IP in your router's DHCP list.
 7. **Check the install:**
 
    ```sh
    cat /etc/brainsyncos-release            # VERSION, BUILD_ID, BASE_ISO_SHA256, INSTALLED=...
-   head -1 /etc/issue                      # BrainSyncOS 0.1.0 (build ...)
+   hostname                                # brainsync-xxxxxx
+   id                                      # brainsync, in sudo dialout video render gpio i2c ...
+   systemctl get-default                   # graphical.target (not nv-oobe.target)
    cat /var/log/brainsyncos/install.log    # ends with "hook.sh: exit 0"
    cat /etc/nv_tegra_release               # R39 (release), REVISION: 2.1
    ```
@@ -160,6 +175,7 @@ brainsyncos/
     render-grub.py           BrainSyncOS boot menu from NVIDIA's grub.cfg
     merge-md5sums.py         md5sum.txt = vendor entries + staged files
     write-usb.sh             macOS: guarded dd of an ISO to an external disk
+    make-password-hash.sh    console password hash for the brainsync account
   tests/
     testlib.sh               PASS/FAIL check runner
     test_phase1.sh           end-to-end Phase-1 test
@@ -268,14 +284,39 @@ NVIDIA's built-in `oem-iso-cfg` hook was also rejected. It runs `/cdrom/oemdata/
 
 Any failing step fails the installation. It warns, but does not stop, if the board is not an Orin Nano.
 
-**Tested without hardware** (`tests/test_phase2.sh`, 12 checks):
+## Appliance identity (Phase 2.5)
+
+Four more `install.d` steps run after `00-release.sh` and `10-issue.sh`. `hook.sh` first records the board's device-tree model and serial number in `device.env`; `build-iso.sh` stages `settings.env` and the logins in `/brainsyncos/config/`. On the installed system that directory is readable by root only.
+
+| Step | What it does |
+|---|---|
+| `20-hostname.sh` | `HOSTNAME_PREFIX-<last 6 of the serial>` in `/etc/hostname` and `/etc/hosts`. A cloud-init drop-in (`preserve_hostname: true`) keeps first boot from renaming it. |
+| `30-user.sh` | Creates `BRAINSYNC_USER` in NVIDIA's hardware groups plus `dialout` (the EEG board). It installs the SSH keys and, if built, the console password hash. Without a password the account is locked for password logins and gets passwordless sudo, checked with `visudo`. With one, sudo asks for it. It deletes NVIDIA's `nvidia`/`ubuntu` users, which have known passwords, if the `nooemconfig` path created them. It marks GNOME's first-login wizard done. |
+| `40-ssh.sh` | sshd drop-in: no root login, no passwords, `AllowUsers brainsync`. Enables `ssh.socket` and checks the result with `sshd -t`. |
+| `50-skip-oobe.sh` | `default.target` → `graphical.target`. Removes the `nv-oobe.target` links and `/etc/nv/nvautoconfig`. `nvpmodel`, `nvpower` and `nvfancontrol` stay enabled, because their packages also link them into `multi-user.target.wants`. |
+
+**What skipping OOBE skips:** NVIDIA's OOBE (`nv-oobe.sh`) only switches to `graphical.target`; GNOME Initial Setup then creates the user and shows **NVIDIA's Jetson software license**. A BrainSyncOS install never shows that license. Read it (`/usr/share/doc/nvidia-l4t-oobe/` on the device) and decide for yourself that you accept it, as you would on first boot of stock JetPack. Also not configured: Wi-Fi (Ethernet works out of the box; use `nmcli` over SSH), keyboard layout, time zone (UTC).
+
+**Logins on the ISO:** `build-iso.sh` rejects:
+- private keys, and `authorized_keys` files that `ssh-keygen -l` cannot read
+- password files that are not a single crypt hash
+- builds with no login at all
+
+Public keys and the salted hash are readable by anyone holding the USB stick, so treat the stick like the device.
+
+**Tested without hardware** (`tests/test_phase2.sh`, 15 checks):
 - **Generators:** the config validation, both generators against NVIDIA's real files including their failure modes, and the md5 merge identity.
 - **The built ISO:**
   - its boot structure against the base: El Torito, GPT, ESP bytes, and every ISO9660/Joliet name unchanged with +6 added
   - every staged file
   - all 2463 untouched `md5sum.txt` entries
   - read-only, root-owned payload modes
-- **The hook:** run from the built ISO against NVIDIA's real target base layer (`ubuntu-server-minimal.squashfs`), with `curtin in-target` simulated by `chroot`. That covers success, re-running, a failing step and a missing target.
+- **The hook:** run from the built ISO against NVIDIA's real target base layer (`ubuntu-server-minimal.squashfs`).
+  - The target is first brought to the state NVIDIA's late-commands leave it in: vendor groups, OOBE as the default target, and `openssh-server` + `libwrap0` from the ISO pool, with what their postinst does.
+  - A fake Orin Nano device tree supplies the model and serial.
+  - `curtin in-target` is a shim that, like curtin, bind-mounts `/dev`, `/proc` and `/sys` and chroots.
+  - It covers: success including the whole identity (hostname, groups, locked password + sudoers, key file modes, sshd config with `sshd -t`, OOBE links, NVIDIA's default user removed), a re-run, the console-password variant, a failing step, a build without logins, and a missing target.
+- **Login checks:** `build-iso.sh` refuses missing, private and malformed credentials. The test build uses a throwaway key and its own `phase2-test.iso`, which is deleted afterwards, so your real ISO is never touched.
 
 **Not tested yet:**
 - the real subiquity/curtin run on a Jetson
@@ -313,12 +354,10 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
 
 ## Roadmap
 
-- **Phase 2: install hook. Done (see above).** Waiting on a hardware install on an Orin Nano.
-- **Phase 2.5: appliance identity** (more `install.d/` steps):
-  - a `brainsync` user with no default password, plus an SSH key from the build config
-  - skip NVIDIA's OOBE (`CHANGE_DOOEMCONFIG` path) without its `nvidia`/`ubuntu` users, which get known passwords
-  - hostname
-  - drop the desktop extras the kiosk does not need
+- **Phase 2: install hook. Done (see above).**
+- **Phase 2.5: appliance identity. Done (see above).** Phases 2 and 2.5 are waiting on a hardware install on an Orin Nano.
+  - Moved to Phase 4: dropping desktop extras. The kiosk session will replace GNOME, and removing packages now risks breaking NVIDIA's dependencies.
+  - Open: Wi-Fi provisioning at build time.
 - **Phase 3: BrainSync payload.**
   - Build these in an arm64 chroot of the target layers:
     - the `ssvep` package

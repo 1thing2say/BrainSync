@@ -8,7 +8,8 @@
 #   scripts/builder.sh image            print the image reference
 #   scripts/builder.sh clean [--all]    delete build/out (--all: all of build/)
 #
-# Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro),
+# Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
+# only when the ISO is found; commands that do not need it run without),
 # a 3 GiB tmpfs at /scratch (squashfs work; with CAP_SYS_ADMIN for xattrs).
 # BSOS_GIT_REV carries the host's git revision (build id) into the container.
 # The ISO is $BASE_ISO if set, else ~/Downloads/$BASE_ISO_NAME; symlinks are
@@ -62,12 +63,15 @@ ensure_image() {
 cmd_run() {
     require_cmd docker
     [ "$#" -gt 0 ] || die "usage: builder.sh run CMD [ARG...]"
-    local iso iso_dir iso_base io_flags=""
+    local iso iso_flags="" io_flags=""
     # Mount the real file's directory, so a symlinked $BASE_ISO cannot dangle.
-    iso="$(resolve_base_iso)"
-    iso="$(real_path "$iso")"
-    iso_dir="$(dirname "$iso")"
-    iso_base="$(basename "$iso")"
+    # Without the ISO the container still runs (e.g. make-password-hash.sh);
+    # steps that need it fail inside with "base ISO not found at /in/...".
+    if iso="$(resolve_base_iso 2>/dev/null)"; then
+        iso="$(real_path "$iso")"
+        case "$iso" in *' '*) die "the base ISO path must not contain spaces: $iso" ;; esac
+        iso_flags="-v $(dirname "$iso"):/in:ro -e BASE_ISO=/in/$(basename "$iso")"
+    fi
     ensure_image
     # -t only for a real terminal; -i only when input is piped in, so a job
     # whose output is redirected does not hold on to the controlling TTY.
@@ -85,10 +89,9 @@ cmd_run() {
         --cap-add SYS_ADMIN \
         --tmpfs /scratch:rw,exec,size=3g \
         -v "$BRAINSYNCOS_ROOT:/work" \
-        -v "$iso_dir:/in:ro" \
+        $iso_flags \
         -e BRAINSYNCOS_IN_CONTAINER=1 \
         -e BRAINSYNCOS_ROOT=/work \
-        -e BASE_ISO="/in/$iso_base" \
         -e BSOS_GIT_REV="$(host_git_rev)" \
         -w /work \
         "$(image_ref)" "$@"

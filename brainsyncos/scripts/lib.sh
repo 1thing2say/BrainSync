@@ -38,7 +38,7 @@ CASPER_LAYERFS_PATH AUTOINSTALL_LAYER KERNEL_LAYER_MANIFEST BOOT_TARGETS
 BUILDER_IMAGE_NAME BUILDER_PLATFORM MIN_FREE_GB"
 
 BSOS_PRODUCT_REQUIRED_KEYS="BRAINSYNCOS_VERSION TARGET_BOARD HOOKED_AUTOINSTALL
-INSTALL_TARGET_DEFAULT GRUB_TIMEOUT"
+INSTALL_TARGET_DEFAULT GRUB_TIMEOUT BRAINSYNC_USER HOSTNAME_PREFIX"
 
 # load_env_file FILE KEYS: source FILE after checking every line is plain
 # KEY=value (so it stays usable as a docker --env-file and sourcing it cannot
@@ -76,6 +76,14 @@ load_product_config() {
     esac
     printf '%s\n' "$GRUB_TIMEOUT" | grep -Eq '^(-1|[0-9]+)$' \
         || die "GRUB_TIMEOUT must be -1 or a number of seconds, got $GRUB_TIMEOUT"
+    printf '%s\n' "$BRAINSYNC_USER" | grep -Eq '^[a-z_][a-z0-9_-]{0,30}$' \
+        || die "BRAINSYNC_USER must be a valid Linux user name, got $BRAINSYNC_USER"
+    case "$BRAINSYNC_USER" in
+        root|nvidia|ubuntu) die "BRAINSYNC_USER must not be $BRAINSYNC_USER" ;;
+    esac
+    # Leaves room for "-" and a 6-character serial suffix within 63 characters.
+    printf '%s\n' "$HOSTNAME_PREFIX" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,54}[a-z0-9])?$' \
+        || die "HOSTNAME_PREFIX must be lowercase letters, digits and inner hyphens, got $HOSTNAME_PREFIX"
 }
 
 # product_iso_name: basename (no .iso) of the build-iso.sh output, e.g.

@@ -16,7 +16,7 @@ RUN apt-get update \
       cpio zstd lz4 xz-utils initramfs-tools-core \
       rsync file bsdextrautils gnupg \
       python3 python3-yaml \
-      grub-common \
+      grub-common openssh-client openssl \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /usr/share/brainsyncos \
  && dpkg-query -W -f '${Package} ${Version}\n' > /usr/share/brainsyncos/builder-packages.txt

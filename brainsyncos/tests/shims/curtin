@@ -1,7 +1,8 @@
 #!/bin/sh
-# curtin shim for tests: implements only `curtin in-target [--target=DIR] -- CMD...`,
-# as chroot into DIR (default $TARGET_MOUNT_POINT). Real curtin also bind-mounts
-# /dev, /proc and /sys, which BrainSyncOS install steps must not depend on.
+# curtin shim for tests: implements only `curtin in-target [--target=DIR] -- CMD...`
+# (DIR defaults to $TARGET_MOUNT_POINT). Like real curtin it bind-mounts /dev,
+# /proc and /sys into DIR, here in a private mount namespace (unshare -m, needs
+# CAP_SYS_ADMIN) so the mounts vanish with the command, then chroots into DIR.
 set -eu
 [ "${1:-}" = in-target ] || { echo "curtin shim: only 'in-target' is supported" >&2; exit 2; }
 shift
@@ -11,4 +12,7 @@ case "${1:-}" in
 esac
 [ "${1:-}" = -- ] && shift
 [ -n "$target" ] || { echo "curtin shim: no target" >&2; exit 2; }
-exec chroot "$target" "$@"
+exec unshare -m sh -c '
+    t="$1"; shift
+    for m in dev proc sys; do mkdir -p "$t/$m"; mount --bind "/$m" "$t/$m"; done
+    exec chroot "$t" "$@"' sh "$target" "$@"
