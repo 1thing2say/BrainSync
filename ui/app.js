@@ -53,6 +53,7 @@ function handle(msg) {
     case "trial": renderPhase(msg.phase); break;
     case "highlight": markPicked(msg.slot); break;
     case "speak": speakOut(msg); break;
+    case "listen": listenFor(msg); break;
     case "state": renderState(msg); break;
     case "transcript": addLine(msg.who, msg.text); break;
     case "status": renderStatus(msg); break;
@@ -139,8 +140,46 @@ function renderState(msg) {
 function speakOut(msg) {
   lastSpoken = msg.utterance_id;
   setJudgment("");
-  Speech.speak(msg.text, () => send({ type: "tts_done", utterance_id: msg.utterance_id }), msg.audio_url);
+  speaking = true;
+  Listener.stop("speaking");  // never listen while the laptop talks
+  Listener.heardSpoken(msg.text);
+  Speech.speak(msg.text, () => {
+    speaking = false;
+    send({ type: "tts_done", utterance_id: msg.utterance_id });
+  }, msg.audio_url);
 }
+
+// --- listening to the partner (hands-free: the server says when it is their turn) -----------
+
+let speaking = false;  // a reply is playing: the mic stays off
+let listenWindow = 10;  // seconds, from /api/config
+
+function listenFor(msg) {
+  if (msg.seconds > 0 && accepted && !speaking) Listener.start(msg.seconds, msg.delay_s);
+  else if (msg.seconds === 0) Listener.stop(msg.reason);
+}
+
+const LISTEN_TEXT = {
+  listening: "Listening…",
+  sent: "Heard:",
+  timeout: "Not listening. Tap Listen to speak.",
+  stopped: "Not listening. Tap Listen to speak.",
+  speaking: "Mic off while the reply plays.",
+  paused: "Mic off (paused).",
+  denied: "Microphone blocked: allow it in Chrome's address bar, or type below.",
+  nomic: "No microphone found: plug one in, or type below.",
+  offline: "Speech recognition needs internet: type below instead.",
+  unsupported: "No speech recognition in this browser (use Chrome): type below.",
+  error: "Speech recognition failed: tap Listen to try again, or type below.",
+};
+
+Listener.onLine((text) => send({ type: "partner_text", text, source: "stt" }));
+Listener.onUpdate((state, text) => {
+  const line = $("listen-status");
+  line.textContent = `${LISTEN_TEXT[state] || ""}${text ? ` “${text}”` : ""}`;
+  line.classList.toggle("on", state === "listening");
+  $("ptt").textContent = state === "listening" ? "Listening…" : "Listen";
+});
 
 function addLine(who, text) {
   const li = document.createElement("li");
@@ -203,6 +242,10 @@ $("stop").addEventListener("click", () => {
 });
 $("resume").addEventListener("click", () => { if (accepted) send({ type: "resume" }); });
 $("take-over").addEventListener("click", connect);
+$("ptt").addEventListener("click", () => {
+  if (Listener.listening) Listener.stop("stopped");
+  else if (!speaking) Listener.start(listenWindow);
+});
 $("correct").addEventListener("click", () => judge("c"));
 $("wrong").addEventListener("click", () => judge("w"));
 
@@ -224,7 +267,10 @@ document.addEventListener("keydown", (ev) => {
 
 fetch("/api/config")
   .then((r) => r.json())
-  .then((c) => Speech.setRate(c.tts_rate))
+  .then((c) => {
+    Speech.setRate(c.tts_rate);
+    if (c.listen_window_s) listenWindow = c.listen_window_s;
+  })
   .catch(() => {});
 setJudgment("");
 setConnected(false);

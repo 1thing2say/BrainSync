@@ -66,7 +66,9 @@ def test_partner_page_is_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "BCI Voice" in r.text
     assert client.get("/app.js").status_code == 200
-    assert client.get("/api/config").json() == {"tts_rate": BASE.speech.tts_rate, "keyboard_mode": False}
+    assert client.get("/api/config").json() == {
+        "tts_rate": BASE.speech.tts_rate, "keyboard_mode": False,
+        "stt_mode": "turn", "listen_window_s": BASE.speech.listen_window_s}
 
 
 def test_decoder_hello_exchange(client):

@@ -1118,3 +1118,106 @@ def test_unattended_with_a_flaky_llm_and_partner_lines_at_any_moment(cfg):
     starts = [m.trial_id for m in r.decoder if isinstance(m, StimStart)]
     stops = [m.trial_id for m in r.decoder if isinstance(m, StimStop)]
     assert starts == sorted(set(starts)) and stops == starts[: len(stops)]
+
+
+# ---------------------------------------------------------------------------
+# V4: hands-free listening on the partner's turn; only questions interrupt a selection
+# ---------------------------------------------------------------------------
+
+from app.orchestrator import is_question  # noqa: E402
+from app.schemas import Listen  # noqa: E402
+
+
+def listens(r: Rig) -> list[Listen]:
+    return [m for m in r.ui if isinstance(m, Listen)]
+
+
+def test_the_mic_opens_at_the_start_and_after_each_spoken_reply_and_never_while_speaking():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    assert listens(r)[-1] == Listen(seconds=CFG.speech.listen_window_s, delay_s=0.0, reason="start")
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()  # SELECTED -> SPEAKING
+    assert r.o.state is St.SPEAKING
+    off, speak = listens(r)[-1], r.last(r.ui, Speak)
+    assert off.seconds == 0 and off.reason == "speaking"
+    assert r.ui.index(off) < r.ui.index(speak)  # the mic is off before the reply starts
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    on = listens(r)[-1]
+    assert on.reason == "turn" and on.seconds == CFG.speech.listen_window_s
+    assert on.delay_s == CFG.speech.stt_tail_s  # a short tail, so it never hears itself
+
+
+def test_pause_closes_the_mic():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(Stop())
+    assert listens(r)[-1].seconds == 0 and listens(r)[-1].reason == "paused"
+
+
+def test_push_to_talk_mode_never_opens_the_mic_by_itself():
+    cfg = CFG.model_copy(update={"speech": CFG.speech.model_copy(update={"stt_mode": "push_to_talk"})})
+    r = Rig(cfg)
+    r.o.on_ui_message(Resume())
+    assert all(m.seconds == 0 for m in listens(r))
+
+
+def test_a_spoken_remark_during_a_selection_waits_for_the_next_cue():
+    r = Rig()
+    r.to_trial()
+    trial = r.o.active_trial
+    r.o.on_ui_message(PartnerText(text="I just got back from the store", source="stt"))
+    assert r.o.state is St.STIMULATING and r.o.active_trial == trial  # the selection goes on
+    assert not any(isinstance(m, StimStop) for m in r.decoder)
+    assert r.last(r.ui, Transcript) == Transcript(who="partner", text="I just got back from the store")
+    r.select("s2")  # the user finishes the pick on the old page
+    r.run_out()
+    assert r.last(r.ui, ShowPage).mode == "confirm"  # their pick is kept
+    r.to_trial()
+    r.select(BACK)
+    r.run_out()  # back to a page: now the new replies (here the home fallback) are shown
+    r.run_out()
+    assert r.last(r.ui, ShowPage).mode == "page"
+
+
+@pytest.mark.parametrize("text, source", [
+    ("are you hungry", "stt"),  # a spoken question (no "?")
+    ("Do you want some tea", "stt"),
+    ("I just got back from the store", "typed"),  # typing is deliberate: always interrupts
+])
+def test_a_question_or_typed_text_interrupts_the_selection(text, source):
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text=text, source=source))
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.o.state is St.MENU_CUE
+
+
+def test_a_spoken_question_gets_the_yes_no_fallback():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="do you want to go outside", source="stt"))
+    shown = [s.utterance for s in r.last(r.ui, ShowPage).slots if s.role == "option"]
+    assert shown == [o.utterance for o in YES_NO]
+
+
+@pytest.mark.parametrize("text, question", [
+    ("Do you want to go outside?", True),
+    ("are you hungry", True),
+    ("how was your weekend", True),
+    ("so, are you cold", True),  # filler first
+    ("Sam, do you want tea", True),  # a name first
+    ("Ana, are you cold", True),
+    ("Ana is here", False),
+    ("you okay", True),
+    ("Didn't you like it", True),
+    ("I brought you some tea", False),
+    ("It's raining outside", False),
+    ("Good to see you", False),
+    ("um", False),
+    ("", False),
+])
+def test_is_question(text, question):
+    assert is_question(text) is question

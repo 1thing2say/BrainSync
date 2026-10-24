@@ -302,6 +302,20 @@ class Speak(Message):
     audio_url: str | None = None
 
 
+class Listen(Message):
+    """Listen to the partner now (``seconds`` > 0), after ``delay_s``, or stop (``seconds`` 0).
+
+    Sent when it is the partner's turn (the session starts, a reply was just spoken) and when the
+    page must not listen (a reply is being spoken, the session paused), so nobody has to press
+    anything and the app never hears itself.
+    """
+
+    type: Literal["listen"] = "listen"
+    seconds: float = Field(ge=0)
+    delay_s: float = Field(default=0.0, ge=0)
+    reason: Literal["start", "turn", "speaking", "paused"]
+
+
 class State(Message):
     """Orchestrator state name for display."""
 
@@ -442,7 +456,7 @@ ServerToDecoder = Annotated[
 ShowPage.model_rebuild()
 
 ServerToUI = Annotated[
-    Union[ShowPage, Trial, Highlight, Speak, State, Transcript, UIStatus],
+    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus],
     Field(discriminator="type"),
 ]
 UIToServer = Annotated[
@@ -525,6 +539,7 @@ __all__ = [
     "Trial",
     "Highlight",
     "Speak",
+    "Listen",
     "State",
     "Transcript",
     "UIStatus",

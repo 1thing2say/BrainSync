@@ -68,6 +68,17 @@ pull requests.
   `llm.timeout_s` (4 s), then shows the fixed list; a later page is dropped. The page after a
   spoken reply is the fixed home list. A failed "More options" falls back to the fixed "more"
   list. Needs `ANTHROPIC_API_KEY` in `.env`; the log summary (latency, option-1 rate) is V6.
+  The server opens the Claude connection at start and keeps it open (a free `models.retrieve`
+  every `llm.keepalive_s` while idle, and right after a failed page), so a page does not pay
+  DNS + TCP + TLS inside the 4 s; `llm_failed` logs `ms`. On 2026-10-24 every page timed out on
+  congested venue Wi-Fi (1-4 s ping, TLS setup 3-9 s): no code change fixes that, see V6 preflight.
+- **V4 partner listening (2026-10-24, branch `feat/partner-listening`):** hands-free, no keys. The
+  server sends `listen` when it is the partner's turn (the session starts, a reply was spoken) and
+  closes the mic while a reply plays; Chrome's recognition joins the partner's sentences into one
+  line, drops filler and echoes of the reply. A spoken remark during a selection waits for the
+  next cue; a spoken question (detected by its first word, since speech-to-text adds no "?") or
+  typed text interrupts. A big Listen button stays for other moments. Needs a manual check in
+  Chrome (recognition needs internet and mic permission).
 - **User profile and plain replies (2026-10-24, branch `feat/personality-profile`):** replies say
   only basic things (the main answers to a question; profile facts only when asked about) in the
   user's own voice. `/profile.html` edits the user's facts and a personality map (formality,
@@ -299,6 +310,7 @@ BrainSync/
 | `menus.utterance_max_words` | 14 | |
 | `llm.model` | `claude-haiku-5-5` | |
 | `llm.timeout_s` | 4.0 | One retry, then fallback |
+| `llm.keepalive_s` | 20.0 | While idle, a free API call this often keeps the connection open; 0 = off |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
 | `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
@@ -308,7 +320,8 @@ BrainSync/
 | `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
 | `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
-| `speech.stt_mode` | `push_to_talk` | Mic is off while TTS is speaking |
+| `speech.stt_mode` | `turn` | Hands-free: the mic opens by itself on the partner's turn (session start, after each spoken reply) and is off while a reply plays; `push_to_talk` = only the Listen button |
+| `speech.listen_window_s` / `speech.stt_tail_s` | 10.0 / 0.5 | How long it listens on the partner's turn; the wait after a reply ends before listening |
 | `speech.max_speak_s` | 15.0 | Move on if the page never reports `tts_done` |
 | `selection.confirm_mode` | `always` | `never` / `always` / `low_score` (needs decoder scores). `always` in page mode, so a wrong pick is never spoken; `never` in list mode |
 | `selection.chosen_highlight_s` | 0.6 | Show which target was picked |

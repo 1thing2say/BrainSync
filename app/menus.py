@@ -16,11 +16,18 @@ problems named, and a transient error once, within ``llm.timeout_s`` in all.
 
 The API key comes from the environment (``ANTHROPIC_API_KEY``, loaded from ``.env`` by the
 server's ``main``) and is never logged.
+
+``start()`` (server lifespan) opens the connection to the API at once and keeps it open with a
+cheap call (``models.retrieve``, no tokens) every ``llm.keepalive_s`` while idle, and right after a
+failed page (a call cut off by the time limit closes its connection). A page then skips DNS, TCP
+and TLS: three round trips, 1-2 s on a good network and 3-9 s on the congested venue Wi-Fi of
+2026-10-24, all of it inside ``llm.timeout_s``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -40,6 +47,7 @@ PERMANENT_STATUS = {400, 401, 403, 404}
 
 Done = Callable[[int, "list[Option] | None"], None]
 Create = Callable[..., Awaitable[Any]]
+Warm = Callable[[], Awaitable[Any]]
 
 
 class MenuMaker:
@@ -54,25 +62,44 @@ class MenuMaker:
         api_key: str | None,
         log: EventLog | None = None,
         create: Create | None = None,
+        warm: Warm | None = None,
     ) -> None:
-        """``create`` replaces ``AsyncAnthropic().messages.create`` (tests)."""
+        """``create`` replaces ``AsyncAnthropic().messages.create`` and ``warm`` the keep-alive
+        call (tests). Without ``warm`` nothing is kept open."""
         self.menus = menus
         self.llm = llm
         self.intents = intents
         self.profile = profile
         self.log = log
         self._create = create
+        self._warm = warm
+        self._client: Any = None
         if create is None and api_key:
             # Imported only here: the SDK has thousands of files, and from a venv on /mnt/c (WSL)
             # importing it takes about 2 minutes, which tests and keyless runs should not pay.
             import anthropic
+            import httpx2  # the SDK's HTTP library, installed with it
 
+            # httpx closes a connection after 5 s idle; keep it open between keep-alive calls.
+            keep = llm.keepalive_s
+            http = anthropic.DefaultAsyncHttpxClient(limits=httpx2.Limits(
+                max_connections=10, max_keepalive_connections=2,
+                keepalive_expiry=2 * keep if keep else 5.0))
             # Our own retry and time limit apply, so the SDK's are turned off.
-            client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=llm.timeout_s)
+            client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=llm.timeout_s,
+                                              http_client=http)
+            self._client = client
             self._create = client.messages.create
+            # More time than a page gets: on a slow network the connection still opens, for the next.
+            warm_timeout = max(keep, llm.timeout_s)
+            self._warm = lambda: client.models.retrieve(llm.model, timeout=warm_timeout)
         self.system = system_prompt(profile, intents, menus)
         self.tool = reply_tool(intents, menus)
         self._tasks: set[asyncio.Task[None]] = set()
+        self._keeper: asyncio.Task[None] | None = None
+        self._rewarm = asyncio.Event()  # set after a failed page: open a new connection now
+        self._busy = 0  # page calls in flight (a keep-alive call then would open a second connection)
+        self._warm_ok: bool | None = None
 
     @property
     def enabled(self) -> bool:
@@ -108,16 +135,60 @@ class MenuMaker:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def start(self) -> None:
+        """Open the API connection now and keep it open (server lifespan; needs a running loop)."""
+        if self.enabled and self._warm is not None and self.llm.keepalive_s > 0 and not self._keeper:
+            self._keeper = asyncio.get_running_loop().create_task(self._keep_warm())
+
     async def stop(self) -> None:
-        for task in list(self._tasks):
+        tasks = list(self._tasks) + ([self._keeper] if self._keeper else [])
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._keeper = None
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
+    async def _keep_warm(self) -> None:
+        while True:
+            # Cleared before the call, so a page that fails during it still asks for a rewarm.
+            self._rewarm.clear()
+            if not self._busy:
+                await self.warm()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._rewarm.wait(), self.llm.keepalive_s)
+
+    async def warm(self) -> bool:
+        """One keep-alive call. Logs the first result and every change, not each call."""
+        started = time.monotonic()
+        fields: dict[str, object] = {}
+        try:
+            await self._warm()
+        except Exception as exc:  # never fatal: the page calls report their own failures
+            fields = {"reason": type(exc).__name__, "status": getattr(exc, "status_code", None)}
+        ok = not fields
+        if ok != self._warm_ok:
+            self._log("llm_warm" if ok else "llm_warm_failed",
+                      ms=round((time.monotonic() - started) * 1000), **fields)
+        self._warm_ok = ok
+        return ok
 
     async def _run(self, req: PageRequest, done: Done) -> None:
         done(req.request_id, await self.make_page(req))
 
     async def make_page(self, req: PageRequest) -> list[Option] | None:
         """The ranked options for ``req``, or None (fall back to the fixed list)."""
+        self._busy += 1
+        try:
+            options = await self._make_page(req)
+        finally:
+            self._busy -= 1
+        if options is None:
+            self._rewarm.set()  # a call cut off by the time limit closed its connection
+        return options
+
+    async def _make_page(self, req: PageRequest) -> list[Option] | None:
         self._log("llm_request", request_id=req.request_id, reason=req.reason,
                   partner_last=req.partner_last)
         loop = asyncio.get_running_loop()
@@ -131,12 +202,14 @@ class MenuMaker:
             try:
                 msg = await asyncio.wait_for(self._create(**self.params(req, feedback)), remaining)
             except TimeoutError:
-                self._log("llm_failed", request_id=req.request_id, reason="timeout", attempt=attempt)
+                self._log("llm_failed", request_id=req.request_id, reason="timeout", attempt=attempt,
+                          ms=round((time.monotonic() - started) * 1000))
                 return None  # no time left for a retry
             except Exception as exc:  # the SDK's APIStatusError carries .status_code
                 status = getattr(exc, "status_code", None)
                 self._log("llm_failed", request_id=req.request_id, reason=type(exc).__name__,
-                          status=status, attempt=attempt)
+                          status=status, attempt=attempt,
+                          ms=round((time.monotonic() - started) * 1000))
                 # A TypeError is an SDK too old for these parameters: a retry cannot fix it either.
                 if status in PERMANENT_STATUS or isinstance(exc, TypeError):
                     return None

@@ -36,6 +36,7 @@ from app.schemas import (
     Highlight,
     Judgment,
     Key,
+    Listen,
     Message,
     NoSelection,
     Option,
@@ -67,6 +68,14 @@ HOME_LIST = "home"
 QUESTION_LIST = "yes_no"
 MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
 LLM_LIST = "llm"  # name of a page the LLM wrote
+# How a spoken line starts when it is a question (speech-to-text adds no "?").
+QUESTION_STARTS = {
+    "who", "what", "when", "where", "why", "how", "which", "whose", "whom", "do", "does", "did",
+    "are", "is", "was", "were", "am", "can", "could", "would", "will", "should", "shall", "have",
+    "has", "had", "may", "might", "must", "want", "wanna", "you", "any", "anything", "shouldn't",
+    "don't", "doesn't", "didn't", "aren't", "isn't", "won't", "wouldn't", "can't", "couldn't",
+}
+FILLER = {"so", "um", "uh", "hey", "hi", "ok", "okay", "well", "oh", "and", "but"}
 FINDING_REPLIES = "Finding replies"
 NEXT_PAGE_LABEL = "More options"
 SAY_IT, BACK = "Say it", "Back"
@@ -336,12 +345,13 @@ class Orchestrator:
                     self._send_state(problem)  # stay put; the page shows why
                 else:
                     self._enter_baseline()
+                    self._listen(True, "start")  # the partner may speak first
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
             self._send_decoder(Pause(reason="stop_button"))
         elif isinstance(msg, PartnerText):
-            self._on_partner_text(msg.text)
+            self._on_partner_text(msg.text, msg.source)
         elif isinstance(msg, TTSDone):
             if self.state is St.SPEAKING and msg.utterance_id == self.speaking_id:
                 self._finish_speaking()
@@ -360,14 +370,20 @@ class Orchestrator:
         elif key in ("c", "w") and self.last_spoken_id is not None:
             self._record("judgment", utterance_id=self.last_spoken_id, correct=key == "c")
 
-    def _on_partner_text(self, text: str) -> None:
+    def _on_partner_text(self, text: str, source: str = "typed") -> None:
         self._send_ui(Transcript(who="partner", text=text))
         self.conversation.partner_said(text)
-        name = QUESTION_LIST if text.rstrip().endswith("?") else HOME_LIST
+        question = is_question(text)
+        name = QUESTION_LIST if question else HOME_LIST
         self.pending_list = self._fallback(name)  # shown if the LLM's page does not come in time
         self.more_in_a_row = 0
         self._ask_llm("partner")
-        if self.state in TRIAL_STATES:
+        if self.state in TRIAL_STATES and source == "stt" and not question:
+            # A spoken remark (not a question) never throws away a selection in progress: its
+            # replies are prepared now and shown at the next cue. Typed text is deliberate, and a
+            # question needs an answer, so both interrupt.
+            self._record("partner_text_queued", trial_id=self.active_trial)
+        elif self.state in TRIAL_STATES:
             self._stop_trial("context_changed")
             self.picked = None
             self._enter_menu_cue()
@@ -544,7 +560,17 @@ class Orchestrator:
         self.pending_list = self._fallback(name)  # if the LLM's new page does not come in time
         self._ask_llm("more")
 
+    def _listen(self, on: bool, reason: str) -> None:
+        """Tell the partner page to listen (the partner's turn) or to stop (rule: never hear
+        itself). Only in ``turn`` mode; in ``push_to_talk`` the partner opens the mic by hand."""
+        speech = self.cfg.speech
+        if speech.stt_mode != "turn" and on:
+            return
+        self._send_ui(Listen(seconds=speech.listen_window_s if on else 0.0,
+                             delay_s=speech.stt_tail_s if reason == "turn" else 0.0, reason=reason))
+
     def _speak(self, text: str) -> None:
+        self._listen(False, "speaking")
         self.speaking_id = f"u{next(self._utterance_ids)}"
         utterances = [o.utterance for o in self.options.options]
         # Rank 1 = the option the LLM (or the fallback list) put first; for the log summary.
@@ -562,6 +588,7 @@ class Orchestrator:
         if self.pending_list is None:
             self.pending_list = self._fallback(HOME_LIST)  # V3: the LLM's next page
         self._enter_rest()
+        self._listen(True, "turn")  # the partner usually answers now
 
     def _not_caught(self, why: str) -> None:
         confirming = self.state is St.CONFIRMING
@@ -577,6 +604,7 @@ class Orchestrator:
         self._send_ui(Trial(trial_id=self.trial_id, phase="rest"))
 
     def _pause(self, detail: str) -> None:
+        self._listen(False, "paused")
         self._stop_trial("paused")
         self.picked = None
         self.expected_baseline = None
@@ -690,3 +718,16 @@ class Orchestrator:
     def _record(self, event: str, **fields: object) -> None:
         if self.log is not None:
             self.log.log(event, state=self.state.value, **fields)
+
+
+def is_question(text: str) -> bool:
+    """A question, typed or spoken. Speech-to-text adds no "?", so the first word decides too."""
+    if "?" in text:
+        return True
+    raw = text.split()
+    if len(raw) > 1 and raw[0].endswith(","):  # a name first: "Ana, do you want tea"
+        raw = raw[1:]
+    words = [w for w in (r.strip(".,!;:").lower() for r in raw) if w]
+    while words and words[0] in FILLER:  # "So, are you hungry"
+        words.pop(0)
+    return bool(words) and words[0] in QUESTION_STARTS

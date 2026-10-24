@@ -215,6 +215,96 @@ async def test_a_slow_answer_times_out_within_llm_timeout(event_log):
     assert llm_events(event_log)[-1]["reason"] == "timeout"
 
 
+async def test_a_failed_call_logs_how_long_it_ran(event_log):
+    fake = FakeClaude(reply(GOOD), delay=1.0)
+    await maker(fake, event_log, timeout_s=0.2).make_page(request())
+    assert 150 <= llm_events(event_log)[-1]["ms"] < 600
+
+
+class FakeWarm:
+    """Stands in for the keep-alive call (``models.retrieve``); fails while ``fail`` is set."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.fail = False
+
+    async def __call__(self):
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("offline")
+
+
+def warm_maker(fake, warm, event_log=None, keepalive_s: float = 0.1, timeout_s: float = 4.0):
+    return MenuMaker(CFG.menus, CFG.llm.model_copy(update={"timeout_s": timeout_s,
+                                                          "keepalive_s": keepalive_s}),
+                     INTENTS, PROFILE, api_key=None, log=event_log, create=fake, warm=warm)
+
+
+async def test_start_opens_the_connection_at_once_and_keeps_it_open(event_log):
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD)), warm, event_log, keepalive_s=0.1)
+    await m.start()
+    await asyncio.sleep(0.02)
+    assert warm.calls == 1  # before any partner line
+    await asyncio.sleep(0.25)
+    assert warm.calls >= 3
+    await m.stop()
+    calls = warm.calls
+    await asyncio.sleep(0.15)
+    assert warm.calls == calls  # stopped
+    assert [e["event"] for e in llm_events(event_log)] == ["llm_warm"]  # logged once, not per call
+
+
+async def test_a_failed_page_reopens_the_connection_at_once():
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD), delay=1.0), warm, keepalive_s=60.0, timeout_s=0.1)
+    await m.start()
+    await asyncio.sleep(0.02)
+    assert warm.calls == 1
+    assert await m.make_page(request()) is None  # cut off by the time limit
+    await asyncio.sleep(0.02)
+    assert warm.calls == 2  # not 60 s later
+    await m.stop()
+
+
+async def test_no_keep_alive_call_while_a_page_call_is_in_flight():
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD), delay=0.3), warm, keepalive_s=0.05)
+    await m.start()
+    await asyncio.sleep(0.02)
+    page = asyncio.create_task(m.make_page(request()))
+    await asyncio.sleep(0.01)
+    calls = warm.calls
+    await asyncio.sleep(0.2)
+    assert warm.calls == calls
+    assert await page is not None
+    await m.stop()
+
+
+async def test_a_failing_keep_alive_is_logged_on_change_and_never_stops(event_log):
+    warm = FakeWarm()
+    warm.fail = True
+    m = warm_maker(FakeClaude(reply(GOOD)), warm, event_log, keepalive_s=0.05)
+    await m.start()
+    await asyncio.sleep(0.12)
+    warm.fail = False
+    await asyncio.sleep(0.1)
+    await m.stop()
+    events = llm_events(event_log)
+    assert [e["event"] for e in events] == ["llm_warm_failed", "llm_warm"]
+    assert events[0]["reason"] == "ConnectionError" and warm.calls >= 4
+
+
+async def test_no_keep_alive_when_off_or_without_claude():
+    warm = FakeWarm()
+    for m in (warm_maker(FakeClaude(reply(GOOD)), warm, keepalive_s=0.0),
+              MenuMaker(CFG.menus, CFG.llm, INTENTS, PROFILE, api_key=None, warm=warm)):
+        await m.start()
+        await asyncio.sleep(0.02)
+        await m.stop()
+    assert warm.calls == 0
+
+
 async def test_a_connection_error_is_retried():
     fake = FakeClaude(ConnectionError("offline"), reply(GOOD))
     assert await maker(fake).make_page(request()) is not None

@@ -91,6 +91,8 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     (s.Trial(trial_id=7, phase="flicker"), s.parse_server_to_ui),
     (s.Highlight(slot="s2"), s.parse_server_to_ui),
     (s.Speak(text="Yes, let's go outside.", utterance_id="u1"), s.parse_server_to_ui),
+    (s.Listen(seconds=10.0, delay_s=0.5, reason="turn"), s.parse_server_to_ui),
+    (s.Listen(seconds=0.0, reason="speaking"), s.parse_server_to_ui),
     (s.State(name="MENU_CUE"), s.parse_server_to_ui),
     (s.Transcript(who="partner", text="Do you want to go outside?"), s.parse_server_to_ui),
     (

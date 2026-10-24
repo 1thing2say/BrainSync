@@ -154,6 +154,7 @@ def create_app(
         task = asyncio.create_task(ticker())
         event_log.log("server_start", keyboard_mode=keyboard_mode, fake_decoder=fake_decoder)
         await tts.start()  # also fetches the first page, set before the loop ran
+        await menus.start()  # opens the Claude connection before the first partner line
         try:
             yield
         finally:
@@ -174,7 +175,8 @@ def create_app(
     @app.get("/api/config")
     def page_config() -> dict:
         """The few settings the partner page needs."""
-        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode}
+        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
+                "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s}
 
     # -- the user's profile (ui/profile.html) ---------------------------------------------
 

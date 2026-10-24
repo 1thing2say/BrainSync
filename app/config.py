@@ -111,6 +111,7 @@ class MenusConfig(Strict):
 class LLMConfig(Strict):
     model: str = Field(min_length=1)
     timeout_s: float = Field(gt=0)
+    keepalive_s: float = Field(default=20.0, ge=0)  # 0: no keep-alive calls
 
 
 class ContextConfig(Strict):
@@ -129,7 +130,9 @@ class SpeechConfig(Strict):
     tts_timeout_s: float = Field(gt=0)
     max_concurrent: int = Field(ge=1)
     tts_rate: float = Field(gt=0)
-    stt_mode: Literal["push_to_talk"]
+    stt_mode: Literal["turn", "push_to_talk"]  # turn: listen on the partner's turn, hands-free
+    listen_window_s: float = Field(gt=0)  # how long the mic stays open on the partner's turn
+    stt_tail_s: float = Field(ge=0)  # wait after a reply ends before listening (no echo)
     max_speak_s: float = Field(gt=0)
 
 

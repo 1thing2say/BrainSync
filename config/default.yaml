@@ -46,6 +46,7 @@ menus:
 llm:
   model: claude-haiku-5-5
   timeout_s: 4.0               # one retry, then fallback list
+  keepalive_s: 20.0            # while idle, a free API call this often keeps the connection open; 0 = off
 
 context:
   history_turns: 8             # partner + user turns sent to the LLM
@@ -65,7 +66,11 @@ speech:
                                # took 1-3 s per request (2026-10-24), so 2 s timed every clip out.
   max_concurrent: 2            # Cartesia plan limit (HTTP 429 concurrency_limited above it)
   tts_rate: 1.0                # speechSynthesis fallback only
-  stt_mode: push_to_talk       # mic is off while TTS is speaking
+  stt_mode: turn               # turn: the mic opens by itself on the partner's turn (start of the
+                               # session, after each spoken reply), off while a reply plays;
+                               # push_to_talk: only when the partner taps Listen
+  listen_window_s: 10.0        # how long it listens on the partner's turn
+  stt_tail_s: 0.5              # wait after a reply ends before listening, so it never hears itself
   max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
 
 selection:
