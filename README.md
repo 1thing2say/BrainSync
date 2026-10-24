@@ -318,6 +318,58 @@ Stimulus configs: `two_targets` (the demo pair) and `one_target_12`, `one_target
 `one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
 quits.
 
+## Predicted-brain heatmap (optional, Reels demo)
+
+A side panel for the Reels demo that shows what Meta's TRIBE v2 predicts an average brain's
+fMRI response to the reel on screen would be. It is decoration: computed offline for our own
+clips, never fed to the decoder, and labelled "Not your EEG" in the panel and on every frame.
+TRIBE v2 is CC BY-NC 4.0 (non-commercial use only, credit Meta). Only use clips you own.
+
+TRIBE needs its own venv: torch < 2.7 and Python 3.11+, on the arm64 Homebrew Python (the
+Rosetta `/usr/local/bin/python3*` cannot install that torch). About 1.5 GB for the venv and
+7 GB of models (TRIBE 0.7, V-JEPA2 ViT-g 4.1, w2v-BERT 2.3), all deletable:
+
+```bash
+/opt/homebrew/bin/python3.11 -m venv .venv-tribe
+.venv-tribe/bin/pip install --no-cache-dir \
+    "tribev2 @ git+https://github.com/facebookresearch/tribev2@af58661791a351a448a489042a28f6c37e1c14b7" \
+    nilearn pytest
+.venv-tribe/bin/pip install --no-cache-dir --no-deps -e .
+# predict defaults HF_HOME to .tribe-cache/hf (git-ignored) and caps MPS memory so it fails
+# instead of swapping; set either variable yourself to override
+.venv-tribe/bin/python -m brainsync.heatmap predict beach.mp4 --clip-id beach   # auto: cuda, mps, cpu
+.venv-tribe/bin/python -m brainsync.heatmap render beach --video beach.mp4
+python3 -m http.server -d extension 8000    # http://127.0.0.1:8000/heatmap/demo.html
+```
+
+Only video and audio are used: the text path needs the gated Llama-3.2-3B and WhisperX, and
+TRIBE drops it by itself when there are no words (it was trained with modality dropout). No
+Hugging Face token is needed.
+
+Measured on the M4 (24 GB) on 2026-10-24, 5 s test clip:
+
+| Device | Predict time | Per second of video | Matches CPU fp32 |
+|---|---|---|---|
+| CPU, fp32 | 1030 s | ~206 s | reference |
+| MPS, fp16, chunked attention | 316 s | ~63 s | r = 1.000 every second, 0.1% relative error |
+
+Two fixes in `predict.py` make MPS work. torch 2.6's MPS attention builds the whole
+8192 x 8192 score matrix for V-JEPA2 (a 6 GB allocation that pushed the Mac into swap), so
+attention runs in exact 1024-query chunks. And neuralset's per-pass stack of 41 hidden
+layers stayed on the GPU (5.9 to 13.8 GB in three passes, then the process died), so each
+pass moves to the CPU and the GPU cache is emptied. Both apply on CUDA too.
+
+Jetson Orin Nano 8 GB (not yet tried): one fp16 V-JEPA2 pass needed 5.2 GB of GPU memory on
+the Mac. That is tight next to the OS on 8 GB of shared memory, so run predict there with
+nothing else open, or keep predicting on the Mac and copy `extension/heatmap/clips/` over.
+The panel itself is static files and runs anywhere Chrome does.
+
+The panel (`extension/heatmap/`, see its README) sits in the left margin, mirroring the
+squares, refuses any layout within 0.05 screen heights of a square, the reel column or the
+HUD, does no per-frame work, and keeps its backdrop up for reels without a prediction so the
+scene does not change after calibration. Still to measure on the headset: decoder
+accuracy and dropped frames with the panel on versus off.
+
 ## Module map
 
 | Module | Role |
@@ -338,6 +390,7 @@ quits.
 | `brainsync/online.py` | Ring buffer, sliding-window decoder, calibration, replay and tuning grid |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
+| `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 
 ## Tests
 

@@ -31,6 +31,11 @@ def nakanishi_dir() -> Path:
     return data_dir() / "nakanishi2015"
 
 
+def heatmaps_dir() -> Path:
+    """TRIBE v2 predictions per demo clip, written by brainsync.heatmap predict."""
+    return data_dir() / "heatmaps"
+
+
 def unwritable_reason(directory: Path) -> str:
     """'' when a file can be created in ``directory`` (created if missing), else why not."""
     try:
