@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "BrainScroll",
+  "version": "0.1.0",
+  "description": "Scroll Instagram Reels by looking at one of two flickering squares (SSVEP), driven by the BrainSync decoder on ws://127.0.0.1:8765.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["flicker.js", "scroller.js", "overlay.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["debugger", "storage"],
+  "host_permissions": ["https://www.instagram.com/*"]
+}

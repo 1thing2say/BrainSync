@@ -1,0 +1,1478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>BrainChess</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&family=Michroma&family=Noto+Sans+Symbols+2&display=swap">
+<style>
+/* Layout: an EEG bench. The board is the stimulus screen, flanked by its two side targets;
+   the instrument column beside it holds the rig settings and the session log; a trace strip
+   (O1 O2 P7 P8 plus decoder windows) runs under the board like a recorder's paper. */
+:root {
+  /* palette: chart paper, recorder ink, the two stimulus traces, the event marker */
+  --paper: #ECEFEA;
+  --ink: #1B2228;
+  --trace15: #AD530A;
+  --trace17: #1E5DA6;
+  --marker: #B42A22;
+  --sage: #A7B2AB;
+  /* derived neutrals, biased toward the paper's green-grey */
+  --surface: #F6F7F3;
+  --ink-2: #56626A;
+  --rule: #C6CEC8;
+  --grid: #DCE2DC;
+  --sq-light: #DDE2DA;
+  --sq-dark: #A7B2AB;
+  --on-accent: #FFFFFF;
+  /* pieces keep the same fill and outline in both themes, as on the real stimulus */
+  --pc-white: #FBFBF7;
+  --pc-black: #161A1D;
+  /* group tints differ in lightness too (15 Hz light, 17 Hz dark), not only in hue */
+  --mix15: 25%; --mix15d: 33%;
+  --mix17: 70%; --mix17d: 78%;
+
+  --f-display: "Michroma", "Eurostile", "Bank Gothic", "Arial Narrow", sans-serif;
+  --f-body: "Atkinson Hyperlegible", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --f-pieces: "Noto Sans Symbols 2", "DejaVu Sans", "Segoe UI Symbol", "Apple Symbols", sans-serif;
+
+  --step--1: 0.8125rem;
+  --step-0: 1rem;
+  --step-1: 1.1875rem;
+  --step-2: 1.5rem;
+  --radius: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #11191D;
+    --ink: #E1E7E3;
+    --trace15: #F0984A;
+    --trace17: #74A9EC;
+    --marker: #F06A5F;
+    --sage: #3A474D;
+    --surface: #172227;
+    --ink-2: #93A1A6;
+    --rule: #2C3940;
+    --grid: #1D292E;
+    --sq-light: #4A585E;
+    --sq-dark: #2F3B41;
+    --on-accent: #10171A;
+    --mix15: 65%; --mix15d: 73%;
+    --mix17: 25%; --mix17d: 33%;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #11191D;
+  --ink: #E1E7E3;
+  --trace15: #F0984A;
+  --trace17: #74A9EC;
+  --marker: #F06A5F;
+  --sage: #3A474D;
+  --surface: #172227;
+  --ink-2: #93A1A6;
+  --rule: #2C3940;
+  --grid: #1D292E;
+  --sq-light: #4A585E;
+  --sq-dark: #2F3B41;
+  --on-accent: #10171A;
+  --mix15: 65%; --mix15d: 73%;
+  --mix17: 25%; --mix17d: 33%;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 var(--step-0)/1.5 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 48px;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 1200px; margin: 0 auto; display: grid; gap: 20px; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--marker); outline-offset: 2px; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.label {
+  font-family: var(--f-mono); font-size: 0.6875rem; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2);
+}
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---------- header ---------- */
+.top {
+  display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between;
+  gap: 12px 24px; border-bottom: 1px solid var(--rule); padding-bottom: 14px;
+}
+.brand { display: grid; gap: 4px; min-width: 0; }
+.brand h1 {
+  margin: 0; font: 400 clamp(1.35rem, 4.2vw, 1.9rem)/1.1 var(--f-display);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.brand h1 .hz { color: var(--trace15); }
+.brand h1 .hz + .hz { color: var(--trace17); }
+.brand p { margin: 0; color: var(--ink-2); max-width: 60ch; text-wrap: pretty; }
+.top-right { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.electrodes { display: flex; gap: 6px; align-items: baseline; font: 500 0.6875rem/1 var(--f-mono); color: var(--ink-2); }
+.electrodes b { font-weight: 500; color: var(--ink); letter-spacing: 0.04em; }
+
+/* segmented radio groups */
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--surface); }
+.seg label { position: relative; display: block; }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg span {
+  display: block; padding: 6px 11px; font: 500 var(--step--1)/1.2 var(--f-mono);
+  border-right: 1px solid var(--rule); cursor: pointer; white-space: nowrap;
+}
+.seg label:last-child span { border-right: 0; }
+.seg input:checked + span { background: var(--ink); color: var(--paper); }
+.seg input:focus-visible + span { outline: 2px solid var(--marker); outline-offset: 2px; position: relative; z-index: 1; }
+.seg input:disabled + span { opacity: 0.45; cursor: not-allowed; }
+
+/* ---------- main bench ---------- */
+.bench { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 1060px) { .bench { grid-template-columns: minmax(0, 1fr) 330px; } }
+.stage { display: grid; gap: 12px; min-width: 0; }
+
+/* prompt bar */
+.promptbar {
+  position: relative;
+  display: grid; gap: 8px; padding: 12px 14px; background: var(--surface);
+  border: 1px solid var(--rule); border-radius: var(--radius);
+}
+.steps { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+.steps li { list-style: none; }
+.steps { margin: 0; padding: 0; }
+.steps li { font: 500 0.6875rem/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.steps li::before { content: ""; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 50%; }
+.steps li.done { color: var(--ink); }
+.steps li.done::before { background: var(--ink-2); border-color: var(--ink-2); }
+.steps li.now { color: var(--ink); }
+.steps li.now::before { background: var(--marker); border-color: var(--marker); }
+.steps li.skip { opacity: 0.4; text-decoration: line-through; }
+.steps .clock { margin-left: auto; letter-spacing: 0.02em; text-transform: none; }
+.steps .clock::before { display: none; }
+.prompt-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.flash-row { position: absolute; top: 8px; right: 10px; z-index: 6; pointer-events: none; justify-content: flex-end; }
+.howto { margin: 0; font-size: var(--step--1); color: var(--ink-2); }
+.howto b { color: var(--ink); font-weight: 700; }
+.over-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.over-actions .hint { color: var(--ink); }
+.prompt { margin: 0; font: 700 var(--step-2)/1.2 var(--f-body); text-wrap: balance; min-width: 0; }
+.meters { display: flex; gap: 12px; align-items: center; }
+.meters .vcount { font: 500 var(--step--1)/1 var(--f-mono); color: var(--ink-2); min-width: 7ch; }
+.meter { display: flex; align-items: center; gap: 6px; font: 500 var(--step--1)/1 var(--f-mono); }
+.meter .pips { display: flex; gap: 3px; }
+.meter .pips i { width: 9px; height: 9px; border: 1.5px solid var(--c); display: block; }
+.meter[data-t="0"] { --c: var(--trace15); }
+.meter[data-t="1"] { --c: var(--trace17); }
+.meter[data-t="1"] .pips i { border-radius: 50%; }
+.meter .pips i.on { background: var(--c); }
+.flash {
+  font: 600 var(--step--1)/1.2 var(--f-mono); padding: 3px 8px; border-radius: var(--radius);
+  background: var(--ink); color: var(--paper); justify-self: start; box-shadow: 0 0 0 3px var(--surface);
+}
+.flash[data-t="0"] { background: var(--trace15); color: var(--on-accent); }
+.flash[data-t="1"] { background: var(--trace17); color: var(--on-accent); }
+.flash.wrong::after { content: "  not where you looked"; font-weight: 400; }
+.badge-auto { font: 500 0.6875rem/1 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; border: 1px dashed var(--ink-2); padding: 4px 6px; color: var(--ink-2); }
+
+/* arena: target 0 panel, board, target 1 panel */
+.arena {
+  display: grid; gap: 12px; align-items: center; justify-content: center;
+  grid-template-columns: 96px minmax(0, min(560px, max(320px, calc(100vh - 290px)))) 96px;
+  grid-template-columns: 96px minmax(0, min(560px, max(320px, calc(100svh - 290px)))) 96px;
+  grid-template-areas: "p0 board p1";
+  --l0: 50%; --l1: 50%;
+}
+.board-wrap { grid-area: board; display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-rows: auto 16px; min-width: 0; }
+.panel[data-t="0"] { grid-area: p0; }
+.panel[data-t="1"] { grid-area: p1; }
+@media (max-width: 720px) {
+  .arena { grid-template-columns: 1fr 1fr; grid-template-areas: "board board" "p0 p1"; }
+}
+.ranks { display: grid; grid-template-rows: repeat(8, 1fr); }
+.files { grid-column: 2; display: grid; grid-template-columns: repeat(8, 1fr); }
+.ranks span, .files span { font: 500 0.6875rem/1 var(--f-mono); color: var(--ink-2); display: grid; place-items: center; }
+
+.board {
+  position: relative; aspect-ratio: 1; width: 100%; max-width: 100%;
+  display: grid; grid-template-rows: repeat(8, 1fr);
+  border: 1px solid var(--ink); container-type: inline-size;
+  touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+.board:focus-visible { outline: 3px solid var(--marker); outline-offset: 3px; }
+.row { display: grid; grid-template-columns: repeat(8, 1fr); }
+.cell { position: relative; overflow: hidden; display: grid; place-items: center; background: var(--sq-light); }
+.cell.dk { background: var(--sq-dark); }
+.cell.last { box-shadow: inset 0 0 0 100cqw color-mix(in srgb, var(--marker) 16%, transparent); }
+
+/* safe view: tint + hatch, a slow pulse, a corner tag */
+.cell.g0 { background: color-mix(in srgb, var(--trace15) var(--mix15), var(--sq-light)); }
+.cell.g0.dk { background: color-mix(in srgb, var(--trace15) var(--mix15d), var(--sq-dark)); }
+.cell.g1 { background: color-mix(in srgb, var(--trace17) var(--mix17), var(--sq-light)); }
+.cell.g1.dk { background: color-mix(in srgb, var(--trace17) var(--mix17d), var(--sq-dark)); }
+.cell.g0::before, .cell.g1::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-color: transparent;
+  animation: tintpulse 2.4s ease-in-out infinite;
+}
+.cell.g0::before { --pc: var(--trace15); background-image: repeating-linear-gradient(45deg, var(--trace15) 0 2px, transparent 2px 9px); }
+.cell.g1::before { --pc: var(--trace17); background-image: radial-gradient(circle, var(--trace17) 1.6px, transparent 2px); background-size: 8px 8px; }
+/* a slow (0.42 Hz) tint swell under a pattern that stays at full strength */
+@keyframes tintpulse { 0%, 100% { background-color: transparent; } 50% { background-color: color-mix(in srgb, var(--pc) 30%, transparent); } }
+.tag {
+  position: absolute; top: 2px; right: 2px; font: 600 max(9px, 2.1cqw)/1 var(--f-mono);
+  padding: 2px 3px; color: var(--on-accent); pointer-events: none; z-index: 2;
+}
+/* shape coding as on the vote meters: square tag for 15 Hz, round tag for 17 Hz */
+.cell.g0 .tag { background: var(--trace15); border-radius: 0; }
+.cell.g1 .tag { background: var(--trace17); border-radius: 999px; padding-inline: 4px; }
+.cell.sel { box-shadow: inset 0 0 0 max(3px, 0.8cqw) var(--ink); }
+.cell.check { box-shadow: inset 0 0 0 max(3px, 0.8cqw) var(--marker), inset 0 0 0 calc(max(3px, 0.8cqw) + 2px) var(--surface); }
+.cell.sel.check { box-shadow: inset 0 0 0 max(3px, 0.8cqw) var(--marker), inset 0 0 0 calc(max(3px, 0.8cqw) * 2) var(--ink); }
+.cell.check .piece::after {
+  content: "+"; position: absolute; left: -0.1em; bottom: -0.15em; font: 700 0.42em/1 var(--f-mono);
+  color: var(--on-accent); background: var(--marker); padding: 0.05em 0.18em; -webkit-text-stroke: 0;
+}
+.cell.lost::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  animation: lose 0.7s ease-out forwards;
+}
+.cell.lost[data-was="0"]::before { background: var(--trace15); }
+.cell.lost[data-was="1"]::before { background: var(--trace17); }
+@keyframes lose { from { opacity: 0.75; } to { opacity: 0; } }
+.cell.won { animation: won 0.55s ease-out; }
+@keyframes won { from { filter: brightness(1.25) saturate(1.2); } to { filter: none; } }
+
+/* real flicker: grey luminance driven per frame */
+.arena.real .cell.g0 { background: hsl(0 0% var(--l0)); }
+.arena.real .cell.g1 { background: hsl(0 0% var(--l1)); }
+.arena.real .cell.g0::before, .arena.real .cell.g1::before { display: none; }
+
+.piece {
+  position: relative; z-index: 1; font: 400 9.4cqw/1 var(--f-pieces);
+  -webkit-text-stroke: 0.075em var(--pc-black); paint-order: stroke fill;
+  color: var(--pc-white); pointer-events: none; transform: translateY(-2%);
+}
+.piece.b { color: var(--pc-black); -webkit-text-stroke-color: var(--pc-white); }
+
+/* gaze reticle with vote ring */
+/* --v: agreeing fresh windows / 4 (colour); --d: how far the first fresh window is
+   after the last screen change (grey), so a dwell shows progress before any vote */
+.cell.gaze::after {
+  content: ""; position: absolute; inset: 9%; border-radius: 50%; pointer-events: none; z-index: 3;
+  border: 2px dashed var(--ink);
+  background: conic-gradient(var(--vc, var(--ink)) calc(var(--v, 0) * 1turn), color-mix(in srgb, var(--ink) 30%, transparent) 0 calc(var(--d, 0) * 1turn), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 58%, #000 60%);
+  mask: radial-gradient(circle, transparent 58%, #000 60%);
+}
+.cell.gaze.auto::after { border-style: dotted; }
+
+.arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 4; }
+
+
+/* side targets */
+.panel {
+  position: relative; aspect-ratio: 1 / 1.35; max-width: 100%; min-height: 110px;
+  border: 1px dashed var(--ink-2); border-radius: var(--radius); background: transparent;
+  display: grid; place-items: center; align-content: center; gap: 6px; padding: 8px 4px; text-align: center;
+  color: var(--ink-2); user-select: none; -webkit-user-select: none; touch-action: manipulation;
+}
+@media (max-width: 720px) { .panel { aspect-ratio: auto; min-height: 96px; } }
+.panel .plabel { font: 400 var(--step--1)/1.25 var(--f-display); letter-spacing: 0.05em; text-transform: uppercase; overflow-wrap: anywhere; white-space: pre-line; }
+.panel .plabel.multi { font-size: 0.6875rem; line-height: 1.45; }
+.panel .phz { font: 600 0.6875rem/1 var(--f-mono); padding: 2px 4px; border-radius: 2px; }
+.panel[data-t="0"] .phz { color: var(--trace15); border: 1px solid currentColor; }
+.panel[data-t="1"] .phz { color: var(--trace17); border: 1px solid currentColor; border-radius: 999px; }
+.panel:not(.active) .plabel, .panel:not(.active) .phz { opacity: 0.7; }
+.panel .ring { display: none; }
+.panel.gaze .ring {
+  display: block; position: absolute; inset: -6px; border-radius: 6px; pointer-events: none; z-index: 3;
+  border: 2px dashed var(--ink); padding: 3px;
+  background: conic-gradient(from -45deg, var(--vc, var(--ink)) calc(var(--v, 0) * 1turn), color-mix(in srgb, var(--ink) 30%, transparent) 0 calc(var(--d, 0) * 1turn), transparent 0);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.panel.active { color: var(--ink); border-width: 2px; border-style: solid; }
+.panel.active[data-t="0"] { border-color: var(--trace15); background: color-mix(in srgb, var(--trace15) 26%, var(--surface)); }
+.panel.active[data-t="1"] { border-color: var(--trace17); background: color-mix(in srgb, var(--trace17) 26%, var(--surface)); }
+.panel.active::before { content: ""; position: absolute; inset: 0; pointer-events: none; background-color: transparent; animation: tintpulse 2.4s ease-in-out infinite; }
+.panel.active[data-t="0"]::before { --pc: var(--trace15); background-image: repeating-linear-gradient(45deg, color-mix(in srgb, var(--trace15) 45%, transparent) 0 2px, transparent 2px 10px); }
+.panel.active[data-t="1"]::before { --pc: var(--trace17); background-image: radial-gradient(circle, color-mix(in srgb, var(--trace17) 55%, transparent) 1.5px, transparent 2px); background-size: 9px 9px; }
+.panel.active .plabel, .panel.active .pnote { position: relative; z-index: 1; background: var(--surface); padding: 2px 5px; border-radius: 2px; color: var(--ink); }
+.panel.active .phz { position: relative; z-index: 1; }
+.panel.active .phz { color: var(--on-accent); }
+.panel.active[data-t="0"] .phz { background: var(--trace15); }
+.panel.active[data-t="1"] .phz { background: var(--trace17); }
+.arena.real .panel.active[data-t="0"] { background: hsl(0 0% var(--l0)); }
+.arena.real .panel.active[data-t="1"] { background: hsl(0 0% var(--l1)); }
+.arena.real .panel.active::before { display: none; }
+.panel .pnote { font: 400 0.6875rem/1.2 var(--f-mono); color: var(--ink-2); }
+.panel.lost::after { content: ""; position: absolute; inset: 0; background: var(--paper); animation: lose 0.7s ease-out forwards; }
+
+/* ---------- instrument strip ---------- */
+.strip { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 10px 12px 8px; display: grid; gap: 6px; min-width: 0; }
+.strip-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font: 400 0.6875rem/1.3 var(--f-mono); color: var(--ink-2); }
+.legend i { display: inline-block; width: 10px; height: 10px; vertical-align: -1px; margin-right: 4px; }
+.legend .k15 { background: var(--trace15); }
+.legend .k17 { background: var(--trace17); border-radius: 50%; }
+.legend .kna { height: 3px; background: var(--ink-2); vertical-align: 2px; }
+.legend .kst { background: var(--ink-2); opacity: 0.3; }
+#trace { width: 100%; height: 150px; display: block; }
+.strip-tools { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.btn.small { padding: 3px 8px; font-size: 0.6875rem; }
+
+/* ---------- side column ---------- */
+.side { display: grid; gap: 16px; min-width: 0; }
+@media (min-width: 720px) and (max-width: 1059px) { .side { grid-template-columns: 1fr 1fr; } .side .moves-box { grid-column: 1 / -1; } }
+.box { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px; display: grid; gap: 14px; min-width: 0; align-content: start; }
+.box h2 { margin: 0; font: 400 0.8125rem/1.2 var(--f-display); letter-spacing: 0.08em; text-transform: uppercase; }
+.ctl { display: grid; gap: 6px; }
+.ctl-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 10px; }
+.hint { margin: 0; font-size: var(--step--1); color: var(--ink-2); }
+input[type="range"] { width: 100%; accent-color: var(--ink); }
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { width: 38px; height: 22px; border: 1px solid var(--ink-2); border-radius: 11px; position: relative; background: var(--paper); flex: none; }
+.switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink-2); transition: transform 0.15s; }
+.switch input:checked + .track { background: var(--ink); border-color: var(--ink); }
+.switch input:checked + .track::after { transform: translateX(16px); background: var(--paper); }
+.switch input:focus-visible + .track { outline: 2px solid var(--marker); outline-offset: 2px; }
+.btn {
+  border: 1px solid var(--ink); background: transparent; padding: 7px 12px; border-radius: var(--radius);
+  font: 600 var(--step--1)/1.2 var(--f-mono); cursor: pointer;
+}
+.btn:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.btn.solid { background: var(--ink); color: var(--paper); }
+.btn.warn { background: var(--marker); border-color: var(--marker); color: var(--on-accent); }
+.confirm-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.warning {
+  border: 2px solid var(--marker); padding: 12px; display: grid; gap: 10px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--marker) 8%, var(--surface));
+}
+.warning p { margin: 0; font-size: var(--step--1); }
+.warning strong { color: var(--marker); }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 0; }
+.stats div { display: grid; gap: 2px; min-width: 0; }
+.stats dt { font: 500 0.6875rem/1.2 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
+.stats dd { margin: 0; font: 500 var(--step-1)/1.2 var(--f-mono); font-variant-numeric: tabular-nums; }
+.stats dd small { font-size: var(--step--1); color: var(--ink-2); font-weight: 400; }
+.moves { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: 2.4em 1fr 1fr; gap: 2px 8px; font: 400 var(--step--1)/1.6 var(--f-mono); max-height: 220px; overflow-y: auto; }
+.moves .n { color: var(--ink-2); }
+.moves .cur { color: var(--marker); font-weight: 600; }
+.moves-empty { font-size: var(--step--1); color: var(--ink-2); margin: 0; }
+
+/* stop button fixed to the bottom edge while real flicker runs */
+.stopbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; justify-content: center;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  pointer-events: none;
+}
+.stopbar .btn { pointer-events: auto; font-size: var(--step-0); padding: 10px 18px; box-shadow: 0 2px 10px rgb(0 0 0 / 0.25); }
+
+/* ---------- how it works ---------- */
+.how { display: grid; gap: 18px; border-top: 1px solid var(--rule); padding-top: 22px; }
+.how h2 { margin: 0; font: 400 var(--step-1)/1.2 var(--f-display); letter-spacing: 0.06em; text-transform: uppercase; }
+.how-grid { display: grid; gap: 18px 32px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.how p { margin: 0; max-width: 62ch; text-wrap: pretty; }
+.how h3 { margin: 0 0 4px; font: 700 var(--step-0)/1.3 var(--f-body); }
+.timing { display: grid; gap: 6px; min-width: 0; }
+.tbar { display: flex; height: 34px; border: 1px solid var(--ink); font: 500 0.6875rem/1 var(--f-mono); }
+.tbar > div { display: grid; place-items: center; border-right: 1px solid var(--ink); overflow: hidden; white-space: nowrap; }
+.tbar > div:last-child { border-right: 0; }
+.tbar .settle { flex: 0.5; background: repeating-linear-gradient(-45deg, var(--grid) 0 3px, transparent 3px 7px); }
+.tbar .win { flex: 1.5; background: color-mix(in srgb, var(--trace15) 30%, var(--surface)); }
+.tbar .hop { flex: 0.25; background: color-mix(in srgb, var(--trace15) 55%, var(--surface)); }
+.tscale { position: relative; height: 12px; font: 400 0.6875rem/1 var(--f-mono); color: var(--ink-2); }
+.tscale span { position: absolute; top: 0; left: calc(var(--at) / 2.75 * 100%); transform: translateX(-50%); white-space: nowrap; }
+.tscale span:first-child { transform: none; }
+.tscale span:last-child { transform: translateX(-100%); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 10px; margin: 0; }
+.facts div { border-left: 2px solid var(--rule); padding-left: 10px; }
+.facts dt { font: 500 0.6875rem/1.2 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
+.facts dd { margin: 2px 0 0; font: 500 var(--step-1)/1.2 var(--f-mono); }
+.honest { border: 1px dashed var(--ink-2); padding: 12px 14px; border-radius: var(--radius); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cell.g0::before, .cell.g1::before, .panel.active::before { animation: none; }
+  .cell.lost::before, .panel.lost::after { display: none; }
+  .cell.won { animation: none; }
+  .switch .track::after { transition: none; }
+}
+@media (max-width: 480px) {
+  .prompt { font-size: var(--step-1); }
+  .arena { gap: 8px; }
+  /* narrow cells: the number would cover piece heads, keep only its shape */
+  .tag { font-size: 0; width: 8px; height: 8px; padding: 0; top: 3px; right: 3px; }
+  .cell.g1 .tag { padding: 0; }
+  /* the pick chip covers the whole step row for its 2.2 s instead of half the clock */
+  .steps .clock { display: none; }
+  .flash-row { left: 8px; right: 8px; top: 6px; justify-content: flex-start; background: var(--surface); }
+  .flash-row:not(:has(.flash:not([hidden]))) { display: none; }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>BrainChess <span class="hz mono" aria-hidden="true">15</span><span class="hz mono" aria-hidden="true">/17</span></h1>
+      <p>Play chess with your eyes. The pieces you can move flicker at two rates, and an EEG headset reads which one you watch. Here your pointer stands in for your eyes.</p>
+    </div>
+    <div class="top-right">
+      <div class="electrodes">
+        <span>Electrodes</span><b>O1</b><b>O2</b><b>P7</b><b>P8</b>
+      </div>
+      <div class="seg" role="radiogroup" aria-label="Theme">
+        <label><input type="radio" name="theme" id="theme-sys" value="system" checked><span>Auto</span></label>
+        <label><input type="radio" name="theme" id="theme-light" value="light"><span>Light</span></label>
+        <label><input type="radio" name="theme" id="theme-dark" value="dark"><span>Dark</span></label>
+      </div>
+    </div>
+  </header>
+
+  <main class="bench">
+    <section class="stage" aria-label="Board">
+      <div class="promptbar">
+        <ol class="steps" id="steps">
+          <li data-s="piece">Piece</li>
+          <li data-s="dest">Square</li>
+          <li data-s="promo">Promote</li>
+          <li data-s="confirm">Confirm</li>
+          <li class="clock mono" id="clock">t 0.0 s</li>
+        </ol>
+        <div class="prompt-row">
+          <p class="prompt" id="prompt">Look at the piece you want to move</p>
+          <div class="meters" id="meters" role="group" aria-label="Decoder votes">
+            <span class="label" title="Agreeing decoder windows in a row. Four make a pick.">Votes</span>
+            <div class="meter" data-t="0" aria-hidden="true"><span>15 Hz</span><span class="pips"><i></i><i></i><i></i><i></i></span></div>
+            <div class="meter" data-t="1" aria-hidden="true"><span>17 Hz</span><span class="pips"><i></i><i></i><i></i><i></i></span></div>
+            <span class="vcount" id="vcount">0 of 4</span>
+          </div>
+          <div class="over-actions" id="over" hidden>
+            <span class="hint" id="over-sub"></span>
+            <button class="btn solid" type="button" id="over-new">New game</button>
+          </div>
+        </div>
+        <p class="howto" id="howto"><b>Rest your pointer on a piece</b> (tap it on a touch screen). No clicking: your pointer stands in for your eyes.</p>
+        <div class="prompt-row flash-row">
+          <span class="flash" id="flash" hidden></span>
+        </div>
+      </div>
+
+      <div class="arena" id="arena">
+        <div class="panel" data-t="0" id="panel0" tabindex="0" role="group" aria-roledescription="gaze target" aria-label="Left target, 15 Hz">
+          <span class="ring"></span>
+          <span class="plabel" id="plabel0">PLAY</span>
+          <span class="phz">15 Hz</span>
+          <span class="pnote" id="pnote0">used after you pick a move</span>
+        </div>
+        <div class="board-wrap">
+          <div class="ranks" id="ranks" aria-hidden="true"></div>
+          <div class="board" id="board" role="grid" tabindex="0" aria-label="Chess board. Arrow keys move your gaze." aria-describedby="prompt">
+            <svg class="arrows" id="arrows" viewBox="0 0 8 8" aria-hidden="true">
+              <defs>
+                <marker id="head" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="3.2" markerHeight="3.2" orient="auto-start-reverse">
+                  <path d="M0 0 L10 5 L0 10 z" fill="context-stroke"></path>
+                </marker>
+              </defs>
+              <line id="arrow" x1="0" y1="0" x2="0" y2="0" stroke-width="0.16" stroke-linecap="round" marker-end="url(#head)" visibility="hidden"></line>
+            </svg>
+          </div>
+          <div class="files" id="files" aria-hidden="true"></div>
+        </div>
+        <div class="panel" data-t="1" id="panel1" tabindex="0" role="group" aria-roledescription="gaze target" aria-label="Right target, 17 Hz">
+          <span class="ring"></span>
+          <span class="plabel" id="plabel1">BACK</span>
+          <span class="phz">17 Hz</span>
+          <span class="pnote" id="pnote1">used after you pick a move</span>
+        </div>
+      </div>
+
+      <div class="strip">
+        <div class="strip-head">
+          <div class="strip-tools">
+            <span class="label">EEG, last 6 s · decoder windows</span>
+            <button class="btn small" type="button" id="trace-pause" aria-pressed="false">Pause trace</button>
+          </div>
+          <div class="legend">
+            <span><i class="k15"></i>15 Hz</span>
+            <span><i class="k17"></i>17 Hz</span>
+            <span><i class="kna"></i>no answer</span>
+            <span><i class="kst"></i>too early (stale)</span>
+          </div>
+        </div>
+        <canvas id="trace" aria-label="Simulated EEG traces and decoder windows"></canvas>
+      </div>
+    </section>
+
+    <aside class="side" aria-label="Settings and log">
+      <section class="box" aria-labelledby="h-rig">
+        <h2 id="h-rig">Rig</h2>
+        <div class="ctl">
+          <div class="ctl-row">
+            <label class="label" for="acc">Decoder accuracy</label>
+            <output class="mono" id="acc-out" for="acc">96%</output>
+          </div>
+          <input type="range" id="acc" min="40" max="98" step="1" value="96">
+          <p class="hint" id="acc-hint">Each window names your group 96% of the time, the other group 1%, and gives no answer 3%.</p>
+        </div>
+        <div class="ctl">
+          <span class="label" id="speed-l">Speed</span>
+          <div class="seg" role="radiogroup" aria-labelledby="speed-l">
+            <label><input type="radio" name="speed" id="speed-1" value="1" checked><span>1x</span></label>
+            <label><input type="radio" name="speed" id="speed-2" value="2"><span>2x</span></label>
+            <label><input type="radio" name="speed" id="speed-4" value="4"><span>4x</span></label>
+          </div>
+        </div>
+        <div class="ctl">
+          <label class="switch" for="auto">
+            <input type="checkbox" id="auto" role="switch">
+            <span class="track"></span>
+            <span>Autoplay my side</span>
+          </label>
+          <p class="hint">A simulated player picks a move and looks at it. Turn it off to use your pointer.</p>
+        </div>
+        <div class="ctl">
+          <span class="label" id="view-l">Board view</span>
+          <div class="seg" role="radiogroup" aria-labelledby="view-l">
+            <label><input type="radio" name="view" id="view-safe" value="safe" checked><span>Safe view</span></label>
+            <label><input type="radio" name="view" id="view-real" value="real"><span>Real flicker</span></label>
+          </div>
+          <p class="hint" id="view-hint">Safe view shows each group as a tint with a slow pulse. Nothing flashes.</p>
+          <div class="warning" id="warn" hidden>
+            <p><strong>Flashing at 15 and 17 Hz.</strong> Flicker in this range can trigger seizures in people with photosensitive epilepsy. Do not turn it on if you or anyone watching has that risk.</p>
+            <p>The page first measures how many frames per second your screen draws and sets the flicker from that. If the screen is too slow or too uneven for 15 and 17 Hz, flicker stays off.</p>
+            <p id="warn-status" hidden></p>
+            <p>Press Escape or the Stop button at any time to stop it.</p>
+            <div class="confirm-row">
+              <button class="btn warn" type="button" id="warn-yes">Show real flicker</button>
+              <button class="btn" type="button" id="warn-no">Keep safe view</button>
+            </div>
+          </div>
+        </div>
+        <div class="ctl">
+          <span class="label" id="side-l">You play</span>
+          <div class="ctl-row">
+            <div class="seg" role="radiogroup" aria-labelledby="side-l">
+              <label><input type="radio" name="side" id="side-w" value="w" checked><span>White</span></label>
+              <label><input type="radio" name="side" id="side-b" value="b"><span>Black</span></label>
+            </div>
+            <button class="btn" type="button" id="newgame">New game</button>
+          </div>
+          <div class="confirm-row" id="new-confirm" hidden>
+            <span class="hint" id="new-q">Start a new game as White?</span>
+            <button class="btn solid" type="button" id="new-yes">Start</button>
+            <button class="btn" type="button" id="new-no">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="box" aria-labelledby="h-log">
+        <h2 id="h-log">Session</h2>
+        <p class="hint">Simulated on this page. These numbers come from the accuracy slider, not from EEG, so compare them with the measured figures under How it works only loosely.</p>
+        <dl class="stats">
+          <div><dt>Picks this move</dt><dd id="s-picks">0</dd></div>
+          <div><dt>Picks per move</dt><dd id="s-ppm">–</dd></div>
+          <div><dt>Seconds per move</dt><dd id="s-spm">–</dd></div>
+          <div><dt>BACKs</dt><dd id="s-backs">0</dd></div>
+          <div><dt>Wrong picks</dt><dd id="s-wrong">0 <small>of 0</small></dd></div>
+          <div><dt>Moves played</dt><dd id="s-moves">0</dd></div>
+        </dl>
+      </section>
+
+      <section class="box moves-box" aria-labelledby="h-moves">
+        <h2 id="h-moves">Moves</h2>
+        <ol class="moves" id="moves" aria-label="Move list"></ol>
+        <p class="moves-empty" id="moves-empty">No moves yet.</p>
+      </section>
+    </aside>
+  </main>
+
+  <section class="how" aria-labelledby="h-how">
+    <h2 id="h-how">How it works</h2>
+    <div class="how-grid">
+      <div>
+        <h3>Two frequencies, one cut</h3>
+        <p>Only two flicker rates work reliably for this player: 15 Hz and 17 Hz. Every piece you can move flickers at one of them. A straight line between two files or two ranks splits the pieces into a 15 Hz group and a 17 Hz group, so the likely moves weigh about the same on each side.</p>
+      </div>
+      <div>
+        <h3>Keep looking, the board narrows</h3>
+        <p>You keep your eyes on your piece. When the decoder names its group, the other group stops flickering and the rest split again. Once one piece is left, the same happens for its destination. Then you confirm: PLAY on the left at 15 Hz, BACK on the right at 17 Hz. BACK starts the move over.</p>
+      </div>
+      <div class="timing">
+        <h3>The fastest pick takes 2.75 s</h3>
+        <p>The decoder reads 1.5 s windows every 0.25 s. A window counts only if it starts 0.5 s after the board changed. Four agreeing windows in a row make a pick.</p>
+        <div class="tbar" aria-label="Timeline: 0.5 s settle, a 1.5 s window, then three 0.25 s steps">
+          <div class="settle">settle</div>
+          <div class="win">first window 1.5 s</div>
+          <div class="hop" title="0.25 s step, vote 2">2</div>
+          <div class="hop" title="0.25 s step, vote 3">3</div>
+          <div class="hop" title="0.25 s step, vote 4">4</div>
+        </div>
+        <div class="tscale" aria-hidden="true"><span style="--at: 0">0 s</span><span style="--at: 0.5">0.5</span><span style="--at: 2">2.0</span><span style="--at: 2.75">2.75 s</span></div>
+        <p class="hint">The first fresh window is vote 1. Each 0.25 s step adds a window, and votes 2, 3 and 4 make the pick.</p>
+      </div>
+    </div>
+    <dl class="facts">
+      <div><dt>Picks per move</dt><dd>about 5.2–5.6</dd></div>
+      <div><dt>Time per move</dt><dd>about 16 s</dd></div>
+      <div><dt>Wrong picks (EEG replays)</dt><dd>about 5%</dd></div>
+      <div><dt>Median to a correct pick (EEG replays)</dt><dd>1.2–2.1 s</dd></div>
+    </dl>
+    <p class="hint">Picks and time per move come from simulated games against the real decoder settings, confirm step included. Wrong picks and the median time to a correct pick come from replays of real EEG recordings, where the decoder also often gives no answer at all. The replay timing is the decoder's own vote on recorded EEG, not timed from a screen change through the 0.5 s settle gate, so it is not comparable with the 2.75 s minimum above.</p>
+    <p class="honest">No EEG runs in your browser. The decoder on this page is simulated: each window names the group you point at as often as the accuracy slider says. Real flicker counts screen frames and uses the refresh rate it measures before it starts. Browser frame timing has not been checked for EEG use.</p>
+  </section>
+
+  <div class="visually-hidden" aria-live="polite" id="live"></div>
+  <div class="stopbar" id="stopbar" hidden>
+    <button class="btn warn" type="button" id="stop">Stop flicker (Esc)</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="core.js"></script>
+<script>
+(function () {
+  "use strict";
+  var C = window.BrainChessCore;
+  var promptEl = document.getElementById("prompt");
+  if (!C || typeof window.Chess !== "function") {
+    promptEl.textContent = "The game engine did not load. Reload the page to try again.";
+    return;
+  }
+  var ABSTAIN = C.ABSTAIN === undefined ? -1 : C.ABSTAIN;
+
+  /* ---------- constants ---------- */
+  var STEP = 0.25, WINDOW = 1.5, VOTES = 4, SETTLE = 0.5;
+  // game.py: the opponent replies as soon as the user's move is played; only the
+  // still board after its reply lasts hold_s = 2.0 s
+  var HOLD_OPP = 2.0;
+  var START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+  var FREQ = [15, 17];
+  var GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+  var NAME = { k: "king", q: "queen", r: "rook", b: "bishop", n: "knight", p: "pawn" };
+  var STAGES = ["piece", "dest", "promo", "confirm"];
+  var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  /* ---------- DOM ---------- */
+  var $ = function (id) { return document.getElementById(id); };
+  var boardEl = $("board"), arenaEl = $("arena");
+  var panelEl = [$("panel0"), $("panel1")];
+  var cells = [], rows = [];
+  for (var r = 0; r < 8; r++) {
+    var row = document.createElement("div");
+    row.className = "row"; row.setAttribute("role", "row");
+    boardEl.appendChild(row);
+    rows.push(row);
+  }
+  for (var i = 0; i < 64; i++) {
+    var c = document.createElement("div");
+    c.setAttribute("role", "gridcell");
+    c.dataset.sq = String(i);
+    c.innerHTML = '<span class="piece" aria-hidden="true"></span><span class="tag" aria-hidden="true" hidden></span>';
+    cells.push(c);
+  }
+
+  /* ---------- state ---------- */
+  var S = {
+    chess: null, userColor: "w", selector: null, weights: null,
+    phase: "user",            // user | opp | over
+    phaseUntil: 0, t: 0, frame: 0,
+    speed: 1, auto: false, real: false,
+    decoder: null, ticks: [], lastFire: null,
+    gaze: null, gazeSrc: null, cursor: 12,
+    intended: null, intendedFor: null,
+    lastMove: null, arrowMove: null,
+    turnStart: 0, turnPicks: 0,
+    moves: [], backs: 0, wrong: 0, picksTotal: 0,
+    lost: null, lostUntil: 0,
+    flashUntil: 0, wonUntil: 0,
+    posSeen: new Map(),       // positionKey -> times reached (threefold, as game.py)
+    stagesSeen: [],           // selector stages entered in this attempt (for the step row)
+    youSan: null, oppSan: null,
+    flickerHz: 60, measuring: null, tracePaused: false
+  };
+  var rngDecoder = C.mulberry32(20261024), rngOpp = C.mulberry32(7), rngAuto = C.mulberry32(42);
+
+  function sqName(i) { return C.sqName ? C.sqName(i) : String.fromCharCode(97 + (i % 8)) + ((i >> 3) + 1); }
+  function sqIndex(n) { return C.sqIndex ? C.sqIndex(n) : (n.charCodeAt(0) - 97) + 8 * (parseInt(n[1], 10) - 1); }
+  function flip() { return S.userColor === "b"; }
+
+  function accParams() {
+    var p = Number($("acc").value) / 100;
+    var w = Math.round((1 - p) * 0.3 * 1000) / 1000;
+    return { pCorrect: p, pWrong: w, pStray: 0.2 };
+  }
+  function makeDecoder() {
+    var a = accParams();
+    S.decoder = new C.MockDecoder({ step: STEP, window: WINDOW, votes: VOTES, cooldown: SETTLE,
+      pCorrect: a.pCorrect, pWrong: a.pWrong, pStray: a.pStray, rng: rngDecoder });
+    S.decoder.screenChanged(S.t);
+  }
+
+  /* ---------- board geometry ---------- */
+  function layoutBoard() {
+    var f = flip();
+    for (var vr = 0; vr < 8; vr++) {
+      rows[vr].textContent = "";
+      for (var vc = 0; vc < 8; vc++) {
+        var sq = f ? (vr * 8 + (7 - vc)) : ((7 - vr) * 8 + vc);
+        var cell = cells[sq];
+        cell.className = "cell" + (((sq % 8) + (sq >> 3)) % 2 === 0 ? " dk" : "");
+        cell.id = "sq-" + sqName(sq);
+        rows[vr].appendChild(cell);
+      }
+    }
+    var ranks = $("ranks"), files = $("files");
+    ranks.textContent = ""; files.textContent = "";
+    for (var k = 0; k < 8; k++) {
+      var rs = document.createElement("span"); rs.textContent = f ? String(k + 1) : String(8 - k); ranks.appendChild(rs);
+      var fs = document.createElement("span"); fs.textContent = "abcdefgh"[f ? 7 - k : k]; files.appendChild(fs);
+    }
+  }
+  function visual(sq) { var f = flip(); var file = sq % 8, rank = sq >> 3; return f ? { c: 7 - file, r: rank } : { c: file, r: 7 - rank }; }
+  function fromVisual(c, r) { return flip() ? (r * 8 + (7 - c)) : ((7 - r) * 8 + c); }
+
+  /* ---------- game flow ---------- */
+  function newGame(color, fen) {
+    S.chess = fen ? new Chess(fen) : new Chess();
+    S.userColor = color;
+    S.moves = []; S.backs = 0; S.wrong = 0; S.picksTotal = 0;
+    S.lastMove = null; S.arrowMove = null; S.selector = null;
+    S.intended = null; S.intendedFor = null;
+    S.youSan = null; S.oppSan = null; S.stagesSeen = [];
+    // nothing from the previous game's last pick carries over
+    S.lost = null; S.lostUntil = 0; S.wonUntil = 0; S.flashUntil = 0;
+    $("flash").hidden = true;
+    S.turnPicks = 0; S.turnStart = S.t;
+    S.posSeen = new Map(); notePosition();
+    S.cursor = color === "w" ? sqIndex("e2") : sqIndex("e7");
+    pendingSide = color;
+    $("new-confirm").hidden = true;
+    $("side-" + color).checked = true;
+    layoutBoard();
+    $("over").hidden = true;
+    if (S.chess.turn() === S.userColor) startUserTurn(); else opponentMove();
+    renderAll();
+  }
+
+  function notePosition() {
+    var k = C.positionKey(S.chess);
+    S.posSeen.set(k, (S.posSeen.get(k) || 0) + 1);
+  }
+  function outcome() { return C.gameOutcome(S.chess, S.posSeen); }
+
+  function startUserTurn() {
+    if (outcome()) { endGame(); return; }
+    var scores = C.heuristicScores(S.chess);
+    S.weights = C.toWeights(scores, {});
+    S.selector = new C.MoveSelector(S.chess, S.weights, { confirm: true });
+    S.phase = "user";
+    S.turnStart = S.t; S.turnPicks = 0;
+    S.arrowMove = null;
+    S.intended = null; S.intendedFor = null;
+    S.stagesSeen = [S.selector.stage];
+    if (S.selector.stage === "done") { playUserMove(S.selector.move); return; }
+    S.decoder.screenChanged(S.t);
+    announce((S.chess.in_check() ? "Check. " : "") + S.selector.prompt());
+  }
+
+  function uciToMove(u) { var m = { from: u.slice(0, 2), to: u.slice(2, 4) }; if (u.length > 4) m.promotion = u[4]; return m; }
+
+  function playUserMove(uci) {
+    var mv = S.chess.move(uciToMove(uci));
+    if (!mv) { startUserTurn(); return; }
+    notePosition();
+    S.moves.push({ san: mv.san, picks: S.turnPicks, secs: S.t - S.turnStart });
+    S.lastMove = [sqIndex(mv.from), sqIndex(mv.to)];
+    S.arrowMove = S.lastMove;
+    S.selector = null;
+    S.youSan = mv.san;
+    S.decoder.screenChanged(S.t);
+    if (outcome()) { endGame("You play " + mv.san + ". "); return; }
+    opponentMove("You play " + mv.san + ". ");
+  }
+
+  function opponentMove(prefix) {
+    var uci = C.opponentReply(S.chess, rngOpp);
+    var mv = uci ? S.chess.move(uciToMove(uci)) : null;
+    if (!mv) { endGame(); return; }
+    notePosition();
+    S.lastMove = [sqIndex(mv.from), sqIndex(mv.to)];
+    S.arrowMove = S.lastMove;
+    S.oppSan = mv.san;
+    S.phase = "opp"; S.phaseUntil = S.t + HOLD_OPP;
+    S.decoder.screenChanged(S.t);
+    var said = (prefix || "") + (mv.color === "w" ? "White" : "Black") + " plays " + mv.san;
+    if (outcome()) { endGame(said + ". "); return; }
+    announce(said);
+  }
+
+  function resultText() {
+    var o = outcome();
+    var t = o ? o.termination : "";
+    if (t === "checkmate") {
+      var winner = o.winner === "w" ? "White" : "Black";
+      return { head: "Checkmate", sub: winner + " wins. " + (o.winner === S.userColor ? "You won with your eyes." : "The engine won this one.") };
+    }
+    if (t === "stalemate") return { head: "Stalemate", sub: "The game is a draw." };
+    if (t === "threefold_repetition") return { head: "Draw", sub: "The same position came up three times." };
+    if (t === "insufficient_material") return { head: "Draw", sub: "Neither side has enough pieces to mate." };
+    if (t === "fifty_moves") return { head: "Draw", sub: "Fifty moves without a capture or pawn move." };
+    return { head: "Game over", sub: "" };
+  }
+  function endGame(prefix) {
+    S.phase = "over"; S.selector = null;
+    var r = resultText();
+    $("over-sub").textContent = r.sub;
+    $("over").hidden = false;
+    announce((prefix || "") + r.head + ". " + r.sub);
+  }
+
+  /* ---------- gaze ---------- */
+  function autoGaze() {
+    var sel = S.selector;
+    if (S.phase !== "user" || !sel) return null;
+    if (S.intendedFor !== sel) {
+      S.intendedFor = sel;
+      var copy = new Chess(S.chess.fen());
+      S.intended = C.opponentReply(copy, rngAuto);
+    }
+    var u = S.intended;
+    if (sel.stage === "confirm") return { kind: "panel", t: sel.targetFor(u) };
+    // the intended move, or once a wrong pick ruled it out, the heaviest move still
+    // reachable (ties in python-chess move order), as game.py SimulatedUser
+    u = C.userMove(sel, u);
+    if (!u) return null;
+    var t = sel.targetFor(u);
+    if (sel.stage === "promo") return { kind: "panel", t: t };
+    return { kind: "sq", i: sqIndex(sel.stage === "piece" ? u.slice(0, 2) : u.slice(2, 4)) };
+  }
+  function currentGaze() { return S.auto ? autoGaze() : S.gaze; }
+  function gazeTarget(g) {
+    var sel = S.selector;
+    if (!g || S.phase !== "user" || !sel) return null;
+    if (g.kind === "sq") {
+      if (sel.stage !== "piece" && sel.stage !== "dest") return null;
+      var s = sel.sideOf(g.i);
+      return s === 0 || s === 1 ? s : null;
+    }
+    return (sel.stage === "confirm" || sel.stage === "promo") ? g.t : null;
+  }
+  function setGaze(g, src) {
+    S.gaze = g; S.gazeSrc = g ? src : null;
+    renderGaze();
+  }
+
+  /* ---------- picks ---------- */
+  function onPick(target, intendedTarget) {
+    var sel = S.selector;
+    var prevGroups = sel.groups(), stage = sel.stage;
+    var isBack = stage === "confirm" && target === 1;
+    var wrong = intendedTarget !== null && intendedTarget !== target;
+    sel.choose(target);
+    if (isBack) S.stagesSeen = [];
+    if (S.stagesSeen.indexOf(sel.stage) < 0) S.stagesSeen.push(sel.stage);
+    S.turnPicks++; S.picksTotal++;
+    if (wrong) S.wrong++;
+    if (isBack) S.backs++;
+    // the losing group goes still and fades
+    var lost = [];
+    if (stage === "piece" || stage === "dest") {
+      for (var k = 0; k < 64; k++) if (prevGroups[k] === String(1 - target)) lost.push(k);
+    }
+    S.lost = { squares: lost, was: 1 - target, panel: (stage === "confirm" || stage === "promo") ? 1 - target : null };
+    S.lostUntil = performance.now() + 700;
+    S.wonUntil = performance.now() + 550;
+    S.wonTarget = target;
+    var flash = $("flash");
+    flash.hidden = false;
+    flash.dataset.t = String(target);
+    flash.className = "flash" + (wrong ? " wrong" : "");
+    flash.textContent = isBack ? "BACK picked, 17 Hz" : (stage === "confirm" ? "PLAY picked, 15 Hz" : "Picked the " + FREQ[target] + " Hz group");
+    S.flashUntil = performance.now() + 2200; S.flashIsHint = false;
+    if (sel.stage === "done") { playUserMove(sel.move); renderAll(); return; }
+    S.decoder.screenChanged(S.t);
+    announce((isBack ? "Back. Start the move again. " : FREQ[target] + " hertz. ") + (S.chess.in_check() ? "Check. " : "") + sel.prompt());
+    renderAll();
+  }
+
+  /* ---------- rendering ---------- */
+  var lastAnnounce = "";
+  function announce(text) {
+    if (text === lastAnnounce) text += " ";
+    lastAnnounce = text;
+    $("live").textContent = text;
+  }
+
+  function renderBoard() {
+    var sel = S.phase === "user" ? S.selector : null;
+    var groups = sel ? sel.groups() : null;
+    var board = S.chess.board();
+    var now = performance.now();
+    var lost = S.lost && now < S.lostUntil ? S.lost : null;
+    var lostSet = lost ? new Set(lost.squares) : null;
+    var won = now < S.wonUntil;
+    var inCheck = S.chess.in_check(), mated = inCheck && S.chess.in_checkmate(), toMove = S.chess.turn();
+    for (var sq = 0; sq < 64; sq++) {
+      var cell = cells[sq];
+      var p = board[7 - (sq >> 3)][sq % 8];
+      var g = groups ? groups[sq] : ".";
+      var cls = "cell";
+      if (((sq % 8) + (sq >> 3)) % 2 === 0) cls += " dk";
+      if (g === "0") cls += " g0"; else if (g === "1") cls += " g1"; else if (g === "s") cls += " sel";
+      if (lostSet && lostSet.has(sq) && g === ".") cls += " lost";
+      if (won && (g === "0" || g === "1")) cls += " won";
+      if (S.lastMove && (sq === S.lastMove[0] || sq === S.lastMove[1]) && g === ".") cls += " last";
+      var checked = inCheck && p && p.type === "k" && p.color === toMove;
+      if (checked) cls += " check";
+      cell.className = cls;
+      if (lost) cell.dataset.was = String(lost.was);
+      var pe = cell.firstChild, tag = cell.lastChild;
+      var glyph = p ? GLYPH[p.type] + "︎" : "";
+      if (pe.textContent !== glyph) pe.textContent = glyph;
+      pe.className = "piece" + (p && p.color === "b" ? " b" : "");
+      if (g === "0" || g === "1") { tag.hidden = false; tag.textContent = g === "0" ? "15" : "17"; } else tag.hidden = true;
+      var label = sqName(sq) + (p ? ", " + (p.color === "w" ? "white " : "black ") + NAME[p.type] : ", empty");
+      if (g === "0" || g === "1") label += ", " + FREQ[+g] + " hertz group";
+      if (g === "s") label += ", selected";
+      if (checked) label += mated ? ", checkmated" : ", in check";
+      cell.setAttribute("aria-label", label);
+    }
+    // className was rebuilt: put the reticle back on the gazed square
+    renderGaze();
+    // arrow
+    var ar = sel ? sel.arrow() : S.arrowMove;
+    var line = $("arrow");
+    if (ar) {
+      var a = visual(ar[0]), b = visual(ar[1]);
+      var x1 = a.c + 0.5, y1 = a.r + 0.5, x2 = b.c + 0.5, y2 = b.r + 0.5;
+      var dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+      line.setAttribute("x1", x1 + dx / len * 0.18); line.setAttribute("y1", y1 + dy / len * 0.18);
+      line.setAttribute("x2", x2 - dx / len * 0.32); line.setAttribute("y2", y2 - dy / len * 0.32);
+      line.setAttribute("stroke", sel ? "var(--ink)" : "var(--marker)");
+      line.setAttribute("stroke-opacity", "0.85");
+      line.setAttribute("stroke-dasharray", sel ? "0.22 0.14" : "none");
+      line.setAttribute("visibility", "visible");
+    } else line.setAttribute("visibility", "hidden");
+  }
+
+  function renderPanels() {
+    var sel = S.phase === "user" ? S.selector : null;
+    var labels = sel ? sel.panels() : null;
+    var now = performance.now();
+    var lost = S.lost && now < S.lostUntil ? S.lost : null;
+    for (var t = 0; t < 2; t++) {
+      var pe = panelEl[t];
+      var active = !!labels;
+      pe.classList.toggle("active", active);
+      pe.classList.toggle("lost", !!(lost && lost.panel === t));
+      var pl = $("plabel" + t), txt = active ? labels[t] : (t === 0 ? "PLAY" : "BACK");
+      // promotion groups like "Rook / Bishop / Knight": one piece name per line
+      pl.textContent = txt.split(" / ").join("\n");
+      pl.classList.toggle("multi", txt.indexOf(" / ") >= 0);
+      var note = active ? (sel.stage === "confirm" ? (t === 0 ? "play the move" : "start over") : "promote") : "used after you pick a move";
+      $("pnote" + t).textContent = note;
+      pe.setAttribute("aria-label", (active ? labels[t] : (t === 0 ? "PLAY" : "BACK")) + ", " + FREQ[t] + " hertz target, " + (active ? "look here to choose" : "not a target yet, used after you pick a move"));
+    }
+  }
+
+  function renderPrompt() {
+    var sel = S.phase === "user" ? S.selector : null, text;
+    if (sel) text = (S.chess.in_check() ? "Check. " : "") + sel.prompt();
+    else if (S.phase === "opp") text = (S.youSan ? "You played " + S.youSan + ". " : "") + (S.userColor === "w" ? "Black" : "White") + " played " + S.oppSan;
+    else if (S.phase === "over") text = resultText().head;
+    else text = "";
+    if (promptEl.textContent !== text) promptEl.textContent = text;
+    $("meters").hidden = S.phase === "over";
+    var cur = sel ? STAGES.indexOf(sel.stage) : (S.phase === "opp" && S.stagesSeen.length ? 4 : -1);
+    var items = $("steps").querySelectorAll("li[data-s]");
+    for (var k = 0; k < items.length; k++) {
+      var li = items[k];
+      // a stage the selector skipped (one piece, one square, no promotion) is struck out
+      li.className = k < cur ? (S.stagesSeen.indexOf(STAGES[k]) >= 0 ? "done" : "skip") : (k === cur ? "now" : "");
+      li.removeAttribute("aria-current");
+      if (k === cur) li.setAttribute("aria-current", "step");
+    }
+    var how = S.auto
+      ? "<b>Autoplay is looking for you.</b> Turn it off under Rig to use your pointer."
+      : "<b>Rest your pointer on a piece</b> (tap it on a touch screen). No clicking: your pointer stands in for your eyes.";
+    if ($("howto").innerHTML !== how) $("howto").innerHTML = how;
+    $("howto").hidden = S.phase === "over";
+  }
+
+  function renderStats() {
+    $("s-picks").textContent = S.phase === "user" ? String(S.turnPicks) : (S.moves.length ? String(S.moves[S.moves.length - 1].picks) : "0");
+    var n = S.moves.length;
+    var picks = S.moves.reduce(function (a, m) { return a + m.picks; }, 0);
+    var secs = S.moves.reduce(function (a, m) { return a + m.secs; }, 0);
+    $("s-ppm").textContent = n ? (picks / n).toFixed(1) : "–";
+    $("s-spm").innerHTML = n ? (secs / n).toFixed(1) + " <small>s</small>" : "–";
+    $("s-backs").textContent = String(S.backs);
+    $("s-wrong").innerHTML = S.wrong + " <small>of " + S.picksTotal + "</small>";
+    $("s-moves").textContent = String(n);
+    var hist = S.chess.history();
+    var ol = $("moves");
+    ol.textContent = "";
+    for (var k = 0; k < hist.length; k += 2) {
+      var num = document.createElement("li"); num.className = "n"; num.textContent = (k / 2 + 1) + ".";
+      var w = document.createElement("li"); w.textContent = hist[k];
+      var b = document.createElement("li"); b.textContent = hist[k + 1] || "";
+      if (k === hist.length - 1) w.className = "cur";
+      if (k + 1 === hist.length - 1) b.className = "cur";
+      ol.appendChild(num); ol.appendChild(w); ol.appendChild(b);
+    }
+    $("moves-empty").hidden = hist.length > 0;
+    ol.scrollTop = ol.scrollHeight;
+  }
+
+  var gazeCell = null, gazePanel = null;
+  function renderGaze() {
+    var g = currentGaze();
+    var cell = g && g.kind === "sq" ? cells[g.i] : null;
+    // a side panel is a target only at the confirm and promotion steps
+    var panelsLive = S.phase === "user" && S.selector && S.selector.panels();
+    var panel = g && g.kind === "panel" && panelsLive ? panelEl[g.t] : null;
+    if (gazeCell && gazeCell !== cell) { gazeCell.classList.remove("gaze", "auto"); gazeCell.style.removeProperty("--v"); }
+    if (gazePanel && gazePanel !== panel) { gazePanel.classList.remove("gaze"); gazePanel.style.removeProperty("--v"); }
+    if (cell) { cell.classList.add("gaze"); cell.classList.toggle("auto", S.auto); }
+    if (panel) panel.classList.add("gaze");
+    gazeCell = cell; gazePanel = panel;
+    boardEl.setAttribute("aria-activedescendant", "sq-" + sqName(S.cursor));
+  }
+
+  function renderVotes() {
+    var d = S.decoder;
+    var pending = d.pending, streak = S.phase === "user" ? (d.streak || 0) : 0;
+    var meters = document.querySelectorAll(".meter");
+    for (var t = 0; t < 2; t++) {
+      var pips = meters[t].querySelectorAll("i");
+      var n = pending === t ? streak : 0;
+      for (var k = 0; k < pips.length; k++) pips[k].classList.toggle("on", k < n);
+    }
+    var vc = streak > 0 && (pending === 0 || pending === 1) ? streak + " of " + VOTES + ", " + FREQ[pending] + " Hz" : "0 of " + VOTES;
+    var vcEl = $("vcount");
+    if (vcEl.textContent !== vc) vcEl.textContent = vc;
+    var g = currentGaze(), gt = gazeTarget(g);
+    var el = gazeCell || gazePanel;
+    if (el) {
+      var v = gt !== null && pending === gt ? Math.min(streak, VOTES) / VOTES : 0;
+      // dwell: how far we are from the screen change to the end of the first fresh window
+      var dw = 0;
+      if (S.phase === "user" && gt !== null) {
+        var span = d.firstFreshEnd - d.switchT;
+        dw = span > 0 ? Math.max(0, Math.min(1, (S.t - d.switchT) / span)) : 1;
+      }
+      el.style.setProperty("--v", String(v));
+      el.style.setProperty("--d", dw.toFixed(3));
+      el.style.setProperty("--vc", gt === 1 ? "var(--trace17)" : "var(--trace15)");
+    }
+  }
+
+  function renderAll() {
+    renderBoard(); renderPanels(); renderPrompt(); renderStats(); renderGaze(); renderVotes();
+  }
+
+  /* ---------- trace strip (canvas) ---------- */
+  var canvas = $("trace"), ctx = canvas.getContext("2d");
+  var SPAN = 6, FS = 100, NBUF = SPAN * FS + 4;
+  var CH = ["O1", "O2", "P7", "P8"], AMP = [1.0, 0.95, 0.55, 0.5];
+  var buf = CH.map(function () { return new Float32Array(NBUF); });
+  var bufT = new Float64Array(NBUF), bufHead = 0, bufCount = 0, nextSample = -SPAN;
+  var noiseRng = C.mulberry32(99), noiseState = [0, 0, 0, 0];
+  var colors = {};
+  function readColors() {
+    var cs = getComputedStyle(document.documentElement);
+    ["--ink", "--ink-2", "--trace15", "--trace17", "--marker", "--grid", "--rule", "--surface"].forEach(function (k) { colors[k] = cs.getPropertyValue(k).trim(); });
+  }
+  function sampleUntil(t, freq) {
+    while (nextSample <= t) {
+      var ts = nextSample;
+      for (var ch = 0; ch < 4; ch++) {
+        var n = (noiseRng() + noiseRng() + noiseRng() - 1.5);
+        noiseState[ch] = noiseState[ch] * 0.82 + n * 0.55;
+        var alpha = 0.35 * Math.sin(2 * Math.PI * 10.2 * ts + ch) * (0.6 + 0.4 * Math.sin(0.7 * ts + ch * 1.3));
+        var ss = freq ? 0.75 * AMP[ch] * Math.sin(2 * Math.PI * freq * ts + ch * 0.6) : 0;
+        buf[ch][bufHead] = noiseState[ch] + alpha + ss;
+      }
+      bufT[bufHead] = ts;
+      bufHead = (bufHead + 1) % NBUF; bufCount = Math.min(bufCount + 1, NBUF);
+      nextSample += 1 / FS;
+    }
+  }
+  var cw = 0, chh = 0;
+  function sizeCanvas() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var rect = canvas.getBoundingClientRect();
+    cw = Math.max(1, Math.round(rect.width)); chh = Math.max(1, Math.round(rect.height));
+    canvas.width = Math.round(cw * dpr); canvas.height = Math.round(chh * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function drawTrace() {
+    if (!cw) return;
+    var W = cw, H = chh, left = 30, right = 6;
+    var plotW = W - left - right;
+    var tickTop = H - 30, tickH = 22;
+    var laneH = (tickTop - 8) / 4;
+    ctx.clearRect(0, 0, W, H);
+    var t1 = S.t, t0 = t1 - SPAN;
+    var xOf = function (t) { return left + (t - t0) / SPAN * plotW; };
+    // grid: one line per second, like recorder paper
+    ctx.strokeStyle = colors["--grid"]; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var s = Math.ceil(t0); s <= t1; s++) { var x = Math.round(xOf(s)) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, tickTop + tickH); }
+    ctx.stroke();
+    ctx.font = "500 10px " + getComputedStyle(document.body).getPropertyValue("--f-mono");
+    ctx.textBaseline = "middle";
+    for (var ch = 0; ch < 4; ch++) {
+      var mid = 4 + laneH * (ch + 0.5);
+      ctx.fillStyle = colors["--ink-2"]; ctx.fillText(CH[ch], 2, mid);
+      ctx.strokeStyle = colors["--ink"]; ctx.lineWidth = 1;
+      ctx.beginPath();
+      var started = false;
+      for (var k = 0; k < bufCount; k++) {
+        var idx = (bufHead - bufCount + k + NBUF) % NBUF;
+        var tt = bufT[idx]; if (tt < t0) continue;
+        var x2 = xOf(tt), y = mid - buf[ch][idx] * laneH * 0.22;
+        if (!started) { ctx.moveTo(x2, y); started = true; } else ctx.lineTo(x2, y);
+      }
+      ctx.stroke();
+    }
+    // decoder windows, one tick per 0.25 s window, placed at the window's end
+    ctx.fillStyle = colors["--ink-2"]; ctx.fillText("win", 2, tickTop + tickH / 2);
+    var tw = Math.max(2, plotW * STEP / SPAN - 2);
+    for (var j = 0; j < S.ticks.length; j++) {
+      var ev = S.ticks[j];
+      if (ev.t < t0) continue;
+      var xe = xOf(ev.t) - tw;
+      ctx.globalAlpha = ev.fresh ? 1 : 0.3;
+      if (ev.raw === 0 || ev.raw === 1) {
+        ctx.fillStyle = ev.raw === 0 ? colors["--trace15"] : colors["--trace17"];
+        if (ev.raw === 0) ctx.fillRect(xe, tickTop, tw, tickH);
+        else { ctx.fillRect(xe, tickTop + 4, tw, tickH - 4); }
+      } else {
+        ctx.fillStyle = colors["--ink-2"]; ctx.fillRect(xe, tickTop + tickH / 2 - 1, tw, 2);
+      }
+      ctx.globalAlpha = 1;
+      if (ev.fire) {
+        ctx.fillStyle = colors["--marker"];
+        ctx.beginPath(); var xm = xe + tw / 2; ctx.moveTo(xm - 5, H); ctx.lineTo(xm + 5, H); ctx.lineTo(xm, H - 7); ctx.fill();
+      }
+    }
+  }
+
+  /* ---------- main loop ---------- */
+  var lastNow = null, lastTraceDraw = 0;
+  function firedTarget(ev) {
+    var f = ev.fired;
+    if (f === 0 || f === 1) return f;
+    if (f === true && (ev.raw === 0 || ev.raw === 1)) return ev.raw;
+    return null;
+  }
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (document.hidden) { lastNow = null; if (S.measuring) S.measuring.last = null; return; }
+    if (S.measuring) measureFrame(now);
+    if (lastNow === null) lastNow = now;
+    var dt = Math.min((now - lastNow) / 1000, 0.1);
+    lastNow = now;
+    S.frame++;
+    S.t += dt * S.speed;
+
+    // the still board after the opponent's reply
+    if (S.phase === "opp" && S.t >= S.phaseUntil) { startUserTurn(); renderAll(); }
+
+    var g = currentGaze();
+    var gt = gazeTarget(g);
+    if (S.auto) renderGaze();
+    var events = S.decoder.advance(S.t, S.phase === "user" ? gt : null) || [];
+    for (var k = 0; k < events.length; k++) {
+      var ev = events[k];
+      var fire = S.phase === "user" ? firedTarget(ev) : null;
+      S.ticks.push({ t: ev.t, raw: ev.raw, fresh: ev.fresh, fire: fire !== null });
+      if (fire !== null) { onPick(fire, gt); break; }
+    }
+    while (S.ticks.length > 60) S.ticks.shift();
+
+    sampleUntil(S.t, S.phase === "user" && gt !== null ? FREQ[gt] : 0);
+
+    // real flicker, frame-indexed at the refresh rate measured before it started
+    if (S.real) {
+      var holding = S.phase !== "user";
+      for (var t = 0; t < 2; t++) {
+        var lum = holding ? 0.5 : 0.5 * (1 + Math.sin(2 * Math.PI * FREQ[t] * S.frame / S.flickerHz));
+        arenaEl.style.setProperty("--l" + t, (lum * 100).toFixed(1) + "%");
+      }
+    }
+
+    var pnow = performance.now();
+    if (S.lost && pnow >= S.lostUntil) { S.lost = null; renderBoard(); renderPanels(); }
+    if (S.wonUntil && pnow >= S.wonUntil) { S.wonUntil = 0; renderBoard(); }
+    if (S.flashUntil && pnow >= S.flashUntil) { S.flashUntil = 0; $("flash").hidden = true; }
+
+    $("clock").textContent = "t " + S.t.toFixed(1) + " s";
+    renderVotes();
+    if (S.phase === "user") $("s-picks").textContent = String(S.turnPicks);
+    // reduced motion: the strip steps once a second instead of scrolling; it can be paused
+    var traceEvery = reduceMotion.matches ? 1000 : 0;
+    if (!S.tracePaused && pnow - lastTraceDraw >= traceEvery) { lastTraceDraw = pnow; drawTrace(); }
+  }
+
+  /* ---------- input: pointer as gaze ---------- */
+  function targetFromEl(el) {
+    var cell = el && el.closest ? el.closest(".cell") : null;
+    if (cell && boardEl.contains(cell)) return { kind: "sq", i: Number(cell.dataset.sq) };
+    var panel = el && el.closest ? el.closest(".panel") : null;
+    if (panel) return { kind: "panel", t: Number(panel.dataset.t) };
+    return null;
+  }
+  arenaEl.addEventListener("pointerover", function (e) {
+    if (e.pointerType === "touch") return;
+    var g = targetFromEl(e.target);
+    if (g) { if (g.kind === "sq") S.cursor = g.i; setGaze(g, "pointer"); }
+  });
+  arenaEl.addEventListener("pointerleave", function (e) {
+    if (e.pointerType === "touch") return;
+    if (S.gazeSrc === "pointer") setGaze(null, null);
+  });
+  arenaEl.addEventListener("pointerdown", function (e) {
+    if (e.pointerType !== "touch" && e.pointerType !== "pen") return;
+    var g = targetFromEl(e.target);
+    if (g) { if (g.kind === "sq") S.cursor = g.i; setGaze(g, "touch"); }
+  });
+  document.addEventListener("pointerdown", function (e) {
+    if (e.pointerType === "touch" && S.gazeSrc === "touch" && !arenaEl.contains(e.target)) setGaze(null, null);
+  });
+  // a mouse click does nothing here: say so, unless a pick's feedback is showing
+  arenaEl.addEventListener("pointerdown", function (e) {
+    if (e.pointerType !== "mouse" || !targetFromEl(e.target) || S.auto) return;
+    var now = performance.now();
+    if (S.flashUntil && now < S.flashUntil && !S.flashIsHint) return;
+    var flash = $("flash");
+    flash.hidden = false; flash.dataset.t = ""; flash.className = "flash";
+    flash.textContent = "Just look, no need to click";
+    S.flashUntil = now + 2200; S.flashIsHint = true;
+  });
+
+  /* ---------- input: keyboard gaze ---------- */
+  boardEl.addEventListener("focus", function () { setGaze({ kind: "sq", i: S.cursor }, "key"); });
+  boardEl.addEventListener("blur", function () { if (S.gazeSrc === "key") setGaze(null, null); });
+  boardEl.addEventListener("keydown", function (e) {
+    var v = visual(S.cursor), c = v.c, r = v.r;
+    if (e.key === "ArrowLeft") { if (c === 0) { e.preventDefault(); panelEl[0].focus(); return; } c--; }
+    else if (e.key === "ArrowRight") { if (c === 7) { e.preventDefault(); panelEl[1].focus(); return; } c++; }
+    else if (e.key === "ArrowUp") r = Math.max(0, r - 1);
+    else if (e.key === "ArrowDown") r = Math.min(7, r + 1);
+    else if (e.key === "Home") c = 0;
+    else if (e.key === "End") c = 7;
+    else return;
+    e.preventDefault();
+    S.cursor = fromVisual(c, r);
+    setGaze({ kind: "sq", i: S.cursor }, "key");
+  });
+  panelEl.forEach(function (pe, t) {
+    pe.addEventListener("focus", function () { setGaze({ kind: "panel", t: t }, "key"); });
+    pe.addEventListener("blur", function () { if (S.gazeSrc === "key") setGaze(null, null); });
+    pe.addEventListener("keydown", function (e) {
+      if ((t === 0 && e.key === "ArrowRight") || (t === 1 && e.key === "ArrowLeft")) {
+        e.preventDefault();
+        var v = visual(S.cursor);
+        S.cursor = fromVisual(t === 0 ? 0 : 7, v.r);
+        boardEl.focus();
+      }
+    });
+  });
+
+  /* ---------- controls ---------- */
+  function updateAcc() {
+    var a = accParams();
+    var pct = Math.round(a.pCorrect * 100), wr = Math.round(a.pWrong * 100);
+    $("acc-out").textContent = pct + "%";
+    $("acc-hint").textContent = "Each window names your group " + pct + "% of the time, the other group " + wr + "%, and gives no answer " + (100 - pct - wr) + "%.";
+    if (S.decoder) { S.decoder.pCorrect = a.pCorrect; S.decoder.pWrong = a.pWrong; S.decoder.pStray = a.pStray; }
+  }
+  $("acc").addEventListener("input", updateAcc);
+  document.querySelectorAll('input[name="speed"]').forEach(function (el) {
+    el.addEventListener("change", function () { S.speed = Number(el.value); });
+  });
+  $("auto").addEventListener("change", function () {
+    S.auto = $("auto").checked;
+    S.intendedFor = null;
+    renderPrompt(); renderGaze();
+    announce(S.auto ? "Autoplay on. The page plays your side." : "Autoplay off. Point at a square to look at it.");
+  });
+
+  // board view: safe by default, real flicker only after the warning
+  var viewSafe = $("view-safe"), viewReal = $("view-real");
+  function focusInStopOrWarn(a) {
+    return !a || a === document.body || $("stopbar").contains(a) || $("warn").contains(a);
+  }
+  function resetWarn() {
+    $("warn-status").hidden = true; $("warn-status").textContent = "";
+    $("warn-yes").disabled = false;
+  }
+  function setReal(on, restoreFocus) {
+    var active = document.activeElement;
+    S.measuring = null;
+    S.real = on;
+    arenaEl.classList.toggle("real", on);
+    $("stopbar").hidden = !on;
+    $("warn").hidden = true;
+    resetWarn();
+    viewSafe.checked = !on; viewReal.checked = on;
+    $("view-hint").textContent = on
+      ? "Real flicker is on: 15 and 17 Hz, counted in frames of your screen, measured at " + S.flickerHz + " frames per second."
+      : "Safe view shows each group as a tint with a slow pulse. Nothing flashes.";
+    if (!on) { arenaEl.style.removeProperty("--l0"); arenaEl.style.removeProperty("--l1"); }
+    // Stop, Escape and Keep safe view leave keyboard focus on the view switch, not on <body>
+    if (!on && restoreFocus && focusInStopOrWarn(active)) viewSafe.focus();
+  }
+  // after the warning is accepted: time ~40 frames, then flicker at the measured rate,
+  // or refuse when the screen is too slow or too uneven for 17 Hz
+  var MEASURE_FRAMES = 40;
+  function measureFrame(now) {
+    var m = S.measuring;
+    if (m.last !== null) m.dts.push(now - m.last);
+    m.last = now;
+    if (m.dts.length < MEASURE_FRAMES) return;
+    var sorted = m.dts.slice().sort(function (a, b) { return a - b; });
+    var med = sorted[sorted.length >> 1];
+    var hz = med > 0 ? 1000 / med : 0;
+    var uneven = m.dts.filter(function (x) { return Math.abs(x - med) > 0.25 * med; }).length / m.dts.length;
+    S.measuring = null;
+    if (reduceMotion.matches) return;
+    if (hz < 45 || uneven > 0.2) {
+      $("warn-yes").disabled = false;
+      $("warn-status").hidden = false;
+      $("warn-status").textContent = "Real flicker stays off. Your screen drew about " + Math.round(hz) + " frames per second" +
+        (uneven > 0.2 ? ", unevenly" : "") + ", which cannot show 15 and 17 Hz cleanly.";
+      announce($("warn-status").textContent);
+      return;
+    }
+    S.flickerHz = Math.round(hz);
+    setReal(true);
+    announce("Real flicker on, at " + S.flickerHz + " frames per second. Press Escape to stop.");
+  }
+  function applyReduceMotion() {
+    viewReal.disabled = reduceMotion.matches;
+    if (reduceMotion.matches) {
+      var active = document.activeElement, inWarn = $("warn").contains(active);
+      S.measuring = null;
+      if (S.real) setReal(false);
+      $("warn").hidden = true; resetWarn();
+      viewSafe.checked = true;
+      if (inWarn) viewSafe.focus();
+      $("view-hint").textContent = "Real flicker is off because your device asks for reduced motion.";
+    }
+  }
+  viewReal.addEventListener("change", function () {
+    if (!viewReal.checked || reduceMotion.matches) return;
+    viewSafe.checked = true;
+    resetWarn();
+    $("warn").hidden = false;
+    $("warn-no").focus();
+  });
+  viewSafe.addEventListener("change", function () { if (viewSafe.checked) setReal(false); });
+  $("warn-yes").addEventListener("click", function () {
+    if (reduceMotion.matches || S.measuring) return;
+    S.measuring = { dts: [], last: null };
+    $("warn-yes").disabled = true;
+    $("warn-status").hidden = false;
+    $("warn-status").textContent = "Measuring your screen's frame rate…";
+  });
+  $("warn-no").addEventListener("click", function () { setReal(false); viewSafe.focus(); });
+  $("stop").addEventListener("click", function () { setReal(false, true); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && (S.real || S.measuring || !$("warn").hidden)) setReal(false, true); });
+  $("trace-pause").addEventListener("click", function () {
+    S.tracePaused = !S.tracePaused;
+    $("trace-pause").setAttribute("aria-pressed", String(S.tracePaused));
+    $("trace-pause").textContent = S.tracePaused ? "Resume trace" : "Pause trace";
+    if (!S.tracePaused) drawTrace();
+  });
+  if (reduceMotion.addEventListener) reduceMotion.addEventListener("change", applyReduceMotion);
+
+  // new game and side, with an in-page confirmation once a game is under way
+  var pendingSide = "w";
+  function gameStarted() {
+    return S.phase === "over" || S.picksTotal > 0 || S.chess.history().length > 0 || S.chess.fen() !== START_FEN;
+  }
+  function askNew(side) {
+    pendingSide = side;
+    if (!gameStarted()) { newGame(side); return; }
+    $("new-q").textContent = "Start a new game as " + (side === "w" ? "White" : "Black") + "?";
+    $("new-confirm").hidden = false;
+    $("new-yes").focus();
+  }
+  $("newgame").addEventListener("click", function () { askNew(document.querySelector('input[name="side"]:checked').value); });
+  document.querySelectorAll('input[name="side"]').forEach(function (el) {
+    el.addEventListener("change", function () { askNew(el.value); });
+  });
+  $("new-yes").addEventListener("click", function () { $("new-confirm").hidden = true; newGame(pendingSide); });
+  $("new-no").addEventListener("click", function () {
+    $("new-confirm").hidden = true;
+    pendingSide = S.userColor;
+    var cur = S.userColor === "w" ? $("side-w") : $("side-b");
+    cur.checked = true;
+  });
+  // the result's New game follows the side picker, so the radio and the game agree
+  $("over-new").addEventListener("click", function () {
+    newGame(document.querySelector('input[name="side"]:checked').value);
+    boardEl.focus();
+  });
+
+  // theme: follows the system unless the viewer picks one
+  document.querySelectorAll('input[name="theme"]').forEach(function (el) {
+    el.addEventListener("change", function () {
+      if (el.value === "system") document.documentElement.removeAttribute("data-theme");
+      else document.documentElement.setAttribute("data-theme", el.value);
+      readColors();
+    });
+  });
+  var dark = window.matchMedia("(prefers-color-scheme: dark)");
+  if (dark.addEventListener) dark.addEventListener("change", readColors);
+
+  /* ---------- boot ---------- */
+  readColors();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(readColors);
+  sizeCanvas();
+  if (window.ResizeObserver) new ResizeObserver(function () { sizeCanvas(); drawTrace(); }).observe(canvas);
+  applyReduceMotion();
+  updateAcc();
+  makeDecoder();
+  newGame("w");
+  // warm the trace so the first frame shows a strip of signal
+  sampleUntil(0, 0);
+  // test hook: inspect state, or start from a position with the side to move as the player
+  window.__brainchess = {
+    state: S,
+    pick: function (target) { if (S.phase === "user" && S.selector) onPick(target, null); },
+    loadFen: function (fen) {
+      var ch = new Chess();
+      if (!ch.load(fen)) return false;
+      newGame(ch.turn(), ch.fen());
+      return true;
+    }
+  };
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
