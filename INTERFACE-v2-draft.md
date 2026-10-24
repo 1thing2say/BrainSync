@@ -1,8 +1,9 @@
 # BCI Voice — Decoder ↔ UI Interface (v2 DRAFT)
 
 **Status: proposal, not agreed.** `INTERFACE.md` (v1) stays the contract until the teammate agrees
-at SYNC 1; then this file replaces it and `protocol` becomes 2. Background: `PLAN.md` sections 12–14
-and System design.
+at SYNC 1; then this file replaces it and `protocol` becomes 2. v1 is then dropped: the server
+speaks only protocol 2. Background: `PLAN.md` sections 12–14 and System design. Elijah's decisions
+of 2026-10-23 (`PLAN.md` section 13) are already written in.
 
 **What changed from v1, and why:** the flicker moved from the browser to the teammate's PsychoPy
 display, so the decoder side now owns the screen the user looks at. Its process, the **bridge**
@@ -55,10 +56,18 @@ Server → bridge, in reply:
  "labels": {"s1": "SAY", "s2": "NEXT"}}
 ```
 
-The server checks the bridge's slots against `stim.slots` in `config/default.yaml` (same ids and
-frequencies within 0.01 Hz). On a mismatch or a different `protocol` it sends
-`{"type": "error", "message": "..."}` instead of `hello_ack`, keeps the connection open, and stays
-in keyboard mode. The bridge may send `hello` again after fixing its config.
+The server checks the bridge's `hello` against `config/default.yaml`:
+
+- `protocol` is 2;
+- the slots have the same ids as `stim.slots`, with frequencies within 0.01 Hz;
+- `waveform` equals `stim.waveform`;
+- `refresh_hz` is within 1 Hz of `display.expected_refresh_hz` (60). A 120 Hz or variable-refresh
+  (ProMotion) screen fails here, because every flicker frequency would be wrong.
+
+On any failure it sends `{"type": "error", "message": "..."}` instead of `hello_ack`, keeps the
+connection open, and the session stays paused: nothing flickers, and the partner page shows the
+message. There is no automatic keyboard fallback. The bridge may send `hello` again after fixing
+its config.
 
 ## 3. Server → bridge
 
@@ -88,14 +97,11 @@ The bridge answers with `baseline_done` (section 4). Sent after `hello_ack` and 
 **`stim_start`**: start flickering now and start decoding.
 
 ```json
-{"type": "stim_start", "trial_id": 42, "active_slots": ["s1", "s2"],
- "mode": "live", "cued_slot": null}
+{"type": "stim_start", "trial_id": 42, "active_slots": ["s1", "s2"]}
 ```
 
 - The bridge turns the flicker on, calls `decoder.reset()`, drops samples read before this
   message, and steps the decoder until `stim_stop`.
-- `mode`: `"live"` or `"calibrate"` (labelled data; `cued_slot` is the slot the user was told to
-  look at, and the display draws the box on it for the whole trial).
 
 **`stim_stop`**: stop flickering and stop decoding.
 
@@ -103,7 +109,7 @@ The bridge answers with `baseline_done` (section 4). Sent after `hello_ack` and 
 {"type": "stim_stop", "trial_id": 42, "reason": "selected"}
 ```
 
-`reason`: `selected`, `no_selection`, `timeout`, `context_changed`, `paused`, `calibration_done`.
+`reason`: `selected`, `no_selection`, `timeout`, `context_changed`, `paused`.
 
 **`pause`**: STOP from the partner page. Flicker off at once, decoding off, until the next
 `baseline`.
@@ -111,6 +117,9 @@ The bridge answers with `baseline_done` (section 4). Sent after `hello_ack` and 
 ```json
 {"type": "pause", "reason": "stop_button"}
 ```
+
+STOP during a trial sends `stim_stop` (reason `paused`) and then `pause`; outside a trial it sends
+`pause` only.
 
 ## 4. Bridge → server
 
@@ -155,6 +164,7 @@ after the user is ready.
 
 `display_ok: false` means the display exited or the user pressed `Esc`. The flicker is then off;
 the server pauses and waits for `display_ok: true` before sending `baseline` again.
+`board_ok: false` is shown as a badge on the partner page; the session keeps running.
 
 ## 5. Rules
 
@@ -167,9 +177,7 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 4. If nothing arrives by `max_trial_s` after `stim_start`, the server ends the trial
    (`stim_stop`, reason `timeout`).
 5. The display text never changes during a trial (`display` is never sent then).
-6. In calibration mode the server never speaks anything; selections are logged and used for a
-   running accuracy.
-7. Only the bridge reads the board's serial port.
+6. Only the bridge reads the board's serial port.
 
 ## 6. Agreed values (fill in at SYNC 1)
 
@@ -208,5 +216,8 @@ Proposed additions, one JSON object per line, alongside the integers:
 
 - Our side without the bridge: `python tools/fake_decoder.py --random` (or `--keyboard`). It must
   speak v2: send `hello` first, answer `baseline` with `baseline_done`, send `stim_onset`.
-- The bridge without our server: `python tools/contract_check.py` flags schema errors in what the
-  bridge sends. `python -m ssvep.online.bridge --fake` uses `FakeSource` instead of the headset.
+- The bridge without our server: `python tools/contract_check.py` is a stand-in server on
+  `:8000/ws/decoder`. Start it, then the bridge (`python -m ssvep.online.bridge --fake` uses
+  `FakeSource` instead of the headset). It runs a handshake, a baseline and a few trials, checks
+  every message the bridge sends against the v2 schemas and the rules above, and prints pass or
+  fail per message. Passing it is the SYNC 2 gate.

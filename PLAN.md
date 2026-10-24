@@ -524,6 +524,26 @@ fullscreen.
 
 ## 13. Open decisions for SYNC 1
 
+**Elijah's decisions (2026-10-23), for the teammate to confirm at SYNC 1.** Already written into
+`INTERFACE-v2-draft.md`; the server is being built to match.
+
+- **Drop v1.** After SYNC 1 the server speaks only protocol 2; the fake decoder and tests move to v2
+  in the same change.
+- **Handshake error → pause.** A `hello` that fails the check gets `error`, and the session stays
+  paused (no automatic keyboard fallback). The operator fixes the bridge or restarts with
+  `--keyboard`.
+- **Refresh or waveform mismatch is an error.** A `hello` whose `refresh_hz` is more than 1 Hz from
+  `display.expected_refresh_hz` (for example 120 Hz with ProMotion on) or whose `waveform` differs
+  from `stim.waveform` is rejected like a slot mismatch: nothing flickers, and the partner page shows
+  why.
+- **No calibration mode.** `mode`, `cued_slot`, `calibration_done` and the calibration rule are
+  removed; the teammate records labelled data with his own `cued_trials` tool.
+- **`board_ok: false` → badge only.** The partner page shows it; the session keeps running.
+  (`display_ok: false` still pauses, because the flicker is then off.)
+- **`tools/contract_check.py` is a stand-in server.** It listens on `:8000/ws/decoder`, runs a
+  handshake, a baseline and a few trials against the bridge, checks every message against the v2
+  schemas and the rules, and prints pass/fail per message. Passing it is the SYNC 2 gate.
+
 1. **Flicker: settled.** His PsychoPy display draws the targets; the browser draws no flicker.
 2. **Getting the option text onto his display.** *Recommended:* extend his free-run feedback so
    stdin also takes JSON lines next to the existing target index: `{"text": "..."}` (option text
