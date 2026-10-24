@@ -43,16 +43,9 @@ The check prints `250` (plus a `pkg_resources` deprecation warning, which is har
 The fork's native libraries are macOS arm64 only.
 
 ## Data
-
-The tools read data in place from one root folder, `$BRAINSYNC_DATA_DIR`. It defaults
-to `<repo>/data` in this checkout (`~/brainsync_data` for a non-editable install). The
-existing data lives elsewhere:
-
 ```bash
 export BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data
 ```
-
-The commands below assume this export. Under the root:
 
 - `spectrum_checks/*_trials.npz`: single-target sessions (one flicker frequency each).
 - `spectrum_checks/*_cued.npz`: two-target cued sessions (15 and 17 Hz).
