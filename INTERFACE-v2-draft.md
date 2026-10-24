@@ -18,14 +18,13 @@ bridge. Background: `PLAN.md` sections 12–14 and System design. Elijah's decis
 **Confirm the contract**
 
 1. Is protocol 2 as written in this file OK for the bridge, and are the section 6 values right
-   (4 targets at 15/17/20/12 Hz in page mode, 2 at 15/17 Hz as the list-mode fallback, sine, cue
+   (4 targets at 13/15/17/11 Hz in page mode, as in your `four_diamond.toml`, 2 at 15/17 Hz as the list-mode fallback, sine, cue
    1 s, rest 1 s, max trial 10 s, baseline 10 s, scores sent)?
 2. Where does the bridge live: `ssvep/online/bridge.py` in `1thing2say/ssvep`, or the `brainsync/`
    rebuild on branch `check-implemtation-calhacks-desktop` (`PLAN.md` section 13, item 9)?
 3. Decoder window: 4 s, or 2 s if the replay tuning agrees? Can you run the 4-target gate
-   recording (12/15/17/20 Hz in the diamond, `PLAN.md` section 14) first? Its result decides page
-   mode or the list-mode fallback. Your existing `four_targets.toml` is the 2x2 pipeline test at
-   8/10/12/15 Hz, so the page-mode config needs another name (for example `page_targets.toml`).
+   recording (13/15/17/11 Hz in the diamond of your `four_diamond.toml`, `PLAN.md` section 14)
+   first? Its result decides page mode or the list-mode fallback.
 
 **What the display needs to do (section 7)**
 
@@ -87,7 +86,7 @@ what is shown and when trials start and stop; the bridge does it and reports bac
 | Text on the user's screen | browser | `display` message, drawn by PsychoPy |
 | Resting baseline | not in the contract | `baseline` / `baseline_done` |
 | STOP | — | `pause`; flicker off until the next `baseline` |
-| Targets | 4, square, 15/12/10/8.57 Hz | 4, sine, 15/17/20/12 Hz in page mode; 2 (15/17 Hz) in list mode (section 6) |
+| Targets | 4, square, 15/12/10/8.57 Hz | 4, sine, 13/15/17/11 Hz in page mode; 2 (15/17 Hz) in list mode (section 6) |
 | Active targets per trial | all | all on a page; 2 on the confirm screen (`active_slots`) |
 
 ## 1. Connection
@@ -109,10 +108,10 @@ display's refresh check:
  "refresh_hz": 59.94,
  "waveform": "sine",
  "slots": [
-   {"slot": "s1", "freq_hz": 15.0, "phase_deg": 0},
-   {"slot": "s2", "freq_hz": 17.0, "phase_deg": 0},
-   {"slot": "s3", "freq_hz": 20.0, "phase_deg": 0},
-   {"slot": "s4", "freq_hz": 12.0, "phase_deg": 0}],
+   {"slot": "s1", "freq_hz": 13.0, "phase_deg": 0},
+   {"slot": "s2", "freq_hz": 15.0, "phase_deg": 0},
+   {"slot": "s3", "freq_hz": 17.0, "phase_deg": 0},
+   {"slot": "s4", "freq_hz": 11.0, "phase_deg": 0}],
  "decoder": {"window_s": 4.0, "step_s": 0.5, "votes": 3},
  "score_kind": "fbcca_minus_baseline"}
 ```
@@ -273,7 +272,7 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 | Question | Proposed | Decoder owner's answer |
 | --- | --- | --- |
 | Number of targets | 4 in page mode (s1–s3 options, s4 NEXT; confirm: s1 Say it, s4 Back); 2 in list mode (SAY, NEXT), if the 4-target gate fails | |
-| Frequencies | s1 15, s2 17, s3 20, s4 12 Hz (NEXT on 12 Hz); list mode 15 / 17 Hz (`PLAN.md` section 14) | |
+| Frequencies | s1 13, s2 15, s3 17, s4 11 Hz (NEXT on 11 Hz; your `four_diamond.toml`); list mode 15 / 17 Hz (`PLAN.md` section 14) | |
 | Layout | diamond: s1 top, s2 left, s3 right, s4 bottom; fixation mark in each square, sentence beside it | |
 | Waveform | sine (17 Hz does not divide 60) | |
 | Decoder window | 4 s now; 2 s if the replay tuning agrees | |

@@ -144,7 +144,7 @@ async def test_hello_exchange(server: StubServer) -> None:
         assert hello.name == "fake-decoder"
         assert hello.refresh_hz == 60.0 and hello.waveform == "sine"
         assert [(s.slot, s.freq_hz) for s in hello.slots] == [
-            ("s1", 15.0), ("s2", 17.0), ("s3", 20.0), ("s4", 12.0)]
+            ("s1", 13.0), ("s2", 15.0), ("s3", 17.0), ("s4", 11.0)]
         await wait_until(lambda: decoder.acked)
         assert decoder.ack.roles["s4"] == "next"
     finally:
