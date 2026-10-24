@@ -1,5 +1,5 @@
 // Speech output: the server's pre-generated Cartesia clip when there is one, otherwise the
-// browser's speechSynthesis with a local voice (works offline). Speech input arrives in V4.
+// browser's speechSynthesis with a local voice (works offline). Speech input: Listener, below.
 "use strict";
 
 const Speech = (() => {
@@ -71,3 +71,12 @@ const Speech = (() => {
     },
   };
 })();
+
+// Speech input: the partner's speech, through ui/listen_core.js (the loop, the echo check and
+// the line joining live there, tested with node). The server says when to listen.
+const Listener = ListenCore.createListener({
+  Recognition: window.SpeechRecognition || window.webkitSpeechRecognition,
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (id) => window.clearTimeout(id),
+  now: () => Date.now(),
+});

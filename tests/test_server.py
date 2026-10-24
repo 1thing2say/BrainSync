@@ -66,7 +66,17 @@ def test_partner_page_is_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "BCI Voice" in r.text
     assert client.get("/app.js").status_code == 200
-    assert client.get("/api/config").json() == {"tts_rate": BASE.speech.tts_rate, "keyboard_mode": False}
+    assert client.get("/api/config").json() == {
+        "tts_rate": BASE.speech.tts_rate, "keyboard_mode": False,
+        "stt_mode": "always", "listen_window_s": BASE.speech.listen_window_s,
+        "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
+        "stt_echo_s": BASE.speech.stt_echo_s}
+
+
+def test_a_connecting_page_gets_the_mic_state(kb_client):
+    with kb_client.websocket_connect("/ws/ui") as ui:
+        listen = recv_until(ui, "listen")
+    assert listen["reason"] == "reconnect" and listen["until_stopped"] is False  # idle: mic off
 
 
 def test_decoder_hello_exchange(client):
@@ -248,3 +258,93 @@ def test_a_replacing_bridge_pauses_the_trial_then_resumes_after_its_hello(client
             recv_until(new, "hello_ack")
             answer_baseline(new)  # the new bridge gets a fresh baseline before any trial
             assert recv_until(new, "stim_start")["trial_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The profile page's API (/api/profile)
+# ---------------------------------------------------------------------------
+
+ANA = {"name": "Ana", "about": "Ana lives in Fresno.", "likes": ["salsa music"],
+       "personality": {"formality": "formal", "length": "medium"}}
+
+
+@pytest.fixture
+def profile_client(tmp_path):
+    fake = FakeClaude(reply(GOOD))
+    path = tmp_path / "profiles" / "user.yaml"
+    app = create_app(fast_config(), keyboard_mode=True, log_dir=tmp_path, llm_create=fake,
+                     profile_path=path)
+    with TestClient(app) as c:
+        c.profile_path, c.fake, c.log_dir = path, fake, tmp_path
+        yield c
+
+
+def test_profile_starts_as_the_demo_persona(profile_client):
+    state = profile_client.get("/api/profile").json()
+    assert state["source"] == "demo" and state["editable"] and state["llm"]
+    assert state["profile"]["name"] == "Sam Rivera"
+
+
+def test_saving_a_profile_writes_it_and_uses_it_for_the_next_page(profile_client):
+    state = profile_client.put("/api/profile", json=ANA).json()
+    assert state["source"] == "user" and state["profile"]["name"] == "Ana"
+    assert state["profile"]["fictional"] is False
+    assert "name: Ana" in profile_client.profile_path.read_text(encoding="utf-8")
+    assert "for Ana," in profile_client.app.state.menus.system
+    # Only which fields changed is logged, never what they say.
+    log_text = next(profile_client.log_dir.glob("*.jsonl")).read_text(encoding="utf-8")
+    assert "profile_saved" in log_text and "Fresno" not in log_text and "salsa" not in log_text
+
+
+def test_a_saved_profile_is_loaded_on_the_next_start(profile_client, tmp_path):
+    profile_client.put("/api/profile", json=ANA)
+    app = create_app(fast_config(), log_dir=tmp_path, profile_path=profile_client.profile_path)
+    assert app.state.profile_source == "user" and app.state.menus.profile.name == "Ana"
+
+
+def test_an_invalid_profile_is_rejected_with_the_problems(profile_client):
+    r = profile_client.put("/api/profile", json={"name": "", "personality": {"humour": "sarcastic"}})
+    assert r.status_code == 422
+    problems = r.json()["detail"]["problems"]
+    assert any(p.startswith("name") for p in problems)
+    assert any("humour" in p for p in problems)
+    assert not profile_client.profile_path.exists()
+
+
+def test_reset_goes_back_to_the_demo_persona(profile_client):
+    profile_client.put("/api/profile", json=ANA)
+    state = profile_client.delete("/api/profile").json()
+    assert state["source"] == "demo" and state["profile"]["name"] == "Sam Rivera"
+    assert not profile_client.profile_path.exists()
+    assert "for Sam," in profile_client.app.state.menus.system
+
+
+def test_preview_writes_replies_with_the_unsaved_profile(profile_client):
+    r = profile_client.post("/api/profile/preview",
+                            json={"profile": ANA, "partner_text": "How was your weekend?"})
+    assert r.status_code == 200 and len(r.json()["options"]) == 3
+    assert "for Ana," in profile_client.fake.calls[-1]["system"]
+    assert profile_client.get("/api/profile").json()["source"] == "demo"  # nothing saved
+
+
+def test_an_invalid_saved_profile_falls_back_to_the_demo_persona(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text("name: ''\nabout: secret detail\n", encoding="utf-8")
+    app = create_app(fast_config(), log_dir=tmp_path, profile_path=path)
+    assert app.state.profile_source == "demo" and app.state.menus.profile.name == "Sam Rivera"
+    log_text = next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8")
+    assert "profile_invalid" in log_text and "secret detail" not in log_text
+
+
+def test_without_a_profile_path_the_profile_is_read_only(client):
+    assert client.get("/api/profile").json()["editable"] is False
+    assert client.put("/api/profile", json=ANA).status_code == 403
+    assert client.delete("/api/profile").status_code == 403
+    assert client.post("/api/profile/preview", json={"profile": ANA, "partner_text": "Hi"}).status_code == 409
+
+
+def test_profile_page_is_served(client):
+    r = client.get("/profile.html")
+    assert r.status_code == 200 and "How they talk" in r.text
+    assert client.get("/profile.js").status_code == 200
+    assert 'href="/profile.html"' in client.get("/").text

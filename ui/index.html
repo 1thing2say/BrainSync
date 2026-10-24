@@ -16,6 +16,8 @@
         epilepsy or flicker sensitivity should look at it.</p>
       <p><kbd>Esc</kbd> on the flicker display or <strong>Stop</strong> here turns the flicker off
         immediately.</p>
+      <p>While the session runs, the microphone listens to the conversation partner and Chrome
+        sends the speech to Google to turn it into text. Press <strong>Mute</strong> any time.</p>
       <button id="accept" class="primary">I understand, start</button>
     </div>
   </div>
@@ -62,7 +64,11 @@
                aria-label="Partner says">
         <button type="submit">Send</button>
       </form>
-      <button id="ptt" class="ptt" disabled title="Push-to-talk arrives in V4">Hold to talk</button>
+      <div class="mic-controls">
+        <button id="mute" class="mute" aria-pressed="false" title="Stop listening (nothing is heard or sent)">Mute</button>
+        <button id="ptt" class="ptt" title="Start the mic again now">Restart mic</button>
+      </div>
+      <p id="listen-status" class="hint listen-status" role="status" aria-live="polite"></p>
 
       <div class="judgment" aria-label="Mark the last spoken reply">
         <span>Last reply:</span>
@@ -72,9 +78,11 @@
       </div>
 
       <p class="hint" id="hint"></p>
+      <a href="/profile.html" class="profile-link">Edit the user's profile</a>
     </aside>
   </main>
 
+  <script src="listen_core.js"></script>
   <script src="speech.js"></script>
   <script src="app.js"></script>
 </body>

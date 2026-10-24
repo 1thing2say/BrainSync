@@ -21,6 +21,9 @@ htmlcov/
 # Session logs (app/log.py)
 logs/
 
+# A real user's profile (personal data): stays on this computer, never committed
+profiles/
+
 # Editors and OS
 .vscode/
 .idea/

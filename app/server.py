@@ -25,21 +25,25 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.config import (
     REPO_ROOT,
+    USER_PROFILE_PATH,
     AppConfig,
+    ConfigError,
     IntentsConfig,
     Profile,
     load_config,
     load_env,
     load_intents,
     load_profile,
+    load_user_profile,
+    save_user_profile,
 )
 from app.log import DEFAULT_LOG_DIR, EventLog
 from app.menus import Create, MenuMaker
@@ -101,11 +105,14 @@ def create_app(
     anthropic_api_key: str | None = None,
     llm_create: Create | None = None,
     profile: Profile | None = None,
+    profile_path: str | Path | None = None,
 ) -> FastAPI:
     """Build the app. Without ``cartesia_api_key`` every reply uses the browser voice, and without
     ``anthropic_api_key`` (or ``llm_create``) every page is a fixed list (tests).
     ``tts_transport`` replaces the network for Cartesia requests (an ``httpx`` transport);
-    ``llm_create`` replaces ``AsyncAnthropic().messages.create``."""
+    ``llm_create`` replaces ``AsyncAnthropic().messages.create``.
+    ``profile_path`` is where the user's own profile is loaded from and saved to (``main`` passes
+    profiles/user.yaml); without it the profile page is read-only and the demo persona is used."""
     cfg = cfg or load_config()
     intents = intents or load_intents(
         option_count=cfg.menus.option_count,
@@ -116,7 +123,17 @@ def create_app(
     hub = Hub()
     event_log = EventLog(log_dir, clock=clock)
     tts = CartesiaTTS(cfg.speech, cartesia_api_key, log=event_log, transport=tts_transport)
-    menus = MenuMaker(cfg.menus, cfg.llm, intents, profile or load_profile(), anthropic_api_key,
+    demo = load_profile()
+    source = "demo"
+    if profile is None and profile_path is not None:
+        try:
+            profile = load_user_profile(profile_path)
+        except ConfigError as exc:  # field names and reasons only, never the profile's contents
+            event_log.log("profile_invalid", problems=exc.problems)
+        source = "user" if profile is not None else "demo"
+    elif profile is not None:
+        source = "given"
+    menus = MenuMaker(cfg.menus, cfg.llm, intents, profile or demo, anthropic_api_key,
                       log=event_log, create=llm_create)
 
     def request_page(req) -> None:
@@ -137,6 +154,7 @@ def create_app(
         task = asyncio.create_task(ticker())
         event_log.log("server_start", keyboard_mode=keyboard_mode, fake_decoder=fake_decoder)
         await tts.start()  # also fetches the first page, set before the loop ran
+        await menus.start()  # opens the Claude connection before the first partner line
         try:
             yield
         finally:
@@ -152,11 +170,69 @@ def create_app(
     app.state.event_log = event_log
     app.state.tts = tts
     app.state.menus = menus
+    app.state.profile_source = source
 
     @app.get("/api/config")
     def page_config() -> dict:
         """The few settings the partner page needs."""
-        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode}
+        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
+                "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
+                "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
+                "stt_echo_s": cfg.speech.stt_echo_s}
+
+    # -- the user's profile (ui/profile.html) ---------------------------------------------
+
+    def profile_state() -> dict:
+        return {"profile": menus.profile.model_dump(), "source": app.state.profile_source,
+                "editable": profile_path is not None, "llm": menus.enabled,
+                "llm_off_reason": menus.why_disabled}
+
+    def parse_profile(raw: Any) -> Profile:
+        try:
+            # A saved profile is the user's own, never the fictional persona.
+            return Profile.model_validate({**(raw or {}), "fictional": False, "note": ""})
+        except ValidationError as exc:
+            problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+            raise HTTPException(status_code=422, detail={"problems": problems}) from exc
+
+    @app.get("/api/profile")
+    def get_profile() -> dict:
+        return profile_state()
+
+    @app.put("/api/profile")
+    def put_profile(raw: dict = Body(...)) -> dict:
+        if profile_path is None:
+            raise HTTPException(status_code=403, detail="profile saving is off (no profile path)")
+        new = parse_profile(raw)
+        old = menus.profile.model_dump()
+        changed = [k for k, v in new.model_dump().items() if old.get(k) != v]
+        save_user_profile(new, profile_path)
+        menus.set_profile(new)
+        app.state.profile_source = "user"
+        event_log.log("profile_saved", changed=changed)  # which fields, never their contents
+        return profile_state()
+
+    @app.delete("/api/profile")
+    def delete_profile() -> dict:
+        """Back to the demo persona (removes the saved file)."""
+        if profile_path is None:
+            raise HTTPException(status_code=403, detail="profile saving is off (no profile path)")
+        Path(profile_path).unlink(missing_ok=True)
+        menus.set_profile(demo)
+        app.state.profile_source = "demo"
+        event_log.log("profile_reset")
+        return profile_state()
+
+    @app.post("/api/profile/preview")
+    async def preview_profile(raw: dict = Body(...)) -> dict:
+        """Three sample replies to ``partner_text`` written with ``profile`` (not saved)."""
+        if not menus.enabled:
+            raise HTTPException(status_code=409, detail=f"Claude is off: {menus.why_disabled}")
+        text = str(raw.get("partner_text") or "").strip()[:200]
+        if not text:
+            raise HTTPException(status_code=422, detail={"problems": ["partner_text: empty"]})
+        options = await menus.preview(parse_profile(raw.get("profile")), text, clock())
+        return {"options": None if options is None else [o.model_dump() for o in options]}
 
     @app.get(AUDIO_ROUTE + "/{clip_id}")
     def audio(clip_id: str) -> Response:
@@ -242,13 +318,16 @@ def main(argv: list[str] | None = None) -> None:
     load_env()  # API keys from the gitignored .env, unless already in the environment
     app = create_app(cfg, keyboard_mode=args.keyboard, fake_decoder=args.fake_decoder,
                      cartesia_api_key=os.environ.get("CARTESIA_API_KEY"),
-                     anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                     anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                     profile_path=USER_PROFILE_PATH)
     tts, menus = app.state.tts, app.state.menus
     voice = (f"Cartesia {cfg.speech.model}" if tts.enabled
              else f"browser speechSynthesis only ({tts.why_disabled})")
     replies = (f"Claude {cfg.llm.model}" if menus.enabled
                else f"fixed lists only ({menus.why_disabled})")
-    print(f"voice: {voice}\nreplies: {replies}", file=sys.stderr)
+    who = ("your profile (profiles/user.yaml)" if app.state.profile_source == "user"
+           else "the demo persona (edit at /profile.html)")
+    print(f"voice: {voice}\nreplies: {replies}\nprofile: {who}", file=sys.stderr)
     host = cfg.server.host
     url_host = "127.0.0.1" if host == "0.0.0.0" else host
     fake = None
