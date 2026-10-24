@@ -61,7 +61,7 @@ def test_headless_fake_run_returns_zero_and_follows_the_board(capsys):
     # first decision after window + pad (1.5 + 2 s), then one per 0.25 s step
     assert len(status) == pytest.approx((30 - 3.5) / 0.25 + 1, abs=2)
     assert status[0].strip().startswith("3.50 s")
-    assert "[say] Keep still" in cap.err
+    assert "[speak] Keep still" in cap.err
     # FakeBoard switches every 10 s and starts the run on target 1 (after 30 s calibration)
     assert commits_from(cap.out)[:3] == ["17", "15", "17"]
     hit = int(cap.out.split("true one on ")[1].split("%")[0])
@@ -71,7 +71,7 @@ def test_headless_fake_run_returns_zero_and_follows_the_board(capsys):
 def test_spoken_labels_follow_commits(capsys):
     assert demo.main([*HEADLESS, "--seconds", "15"]) == 0
     cap = capsys.readouterr()
-    said = [ln[6:] for ln in cap.err.splitlines() if ln.startswith("[say] ")]
+    said = [ln[8:] for ln in cap.err.splitlines() if ln.startswith("[speak] ")]
     assert said[:2] == ["Keep still and look at the middle of the screen.",
                         "Look at one of the squares."]
     assert said[2:] == [c for c in commits_from(cap.out) if c != "none"]

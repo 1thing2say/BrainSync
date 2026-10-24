@@ -75,3 +75,9 @@ def nakanishi_root() -> Path:
 @pytest.fixture
 def rng() -> np.random.Generator:
     return np.random.default_rng(1234)
+
+
+@pytest.fixture(autouse=True)
+def _no_spoken_prompts(monkeypatch):
+    """No test reaches Cartesia or plays audio: brainsync.voice stays silent."""
+    monkeypatch.setenv("BRAINSYNC_TTS", "off")

@@ -58,6 +58,7 @@ from .prior import Engine, find_stockfish
 STIMULUS_MODULE = "brainsync.brainchess.stimulus"
 DEFAULT_CONFIG = "chess"
 STILL_PROMPT = "Keep still and look at the middle of the board"
+FIRST_PROMPT = "Look at the piece you want to move."
 # the simulated user's engine seed is offset from --seed so it does not mirror the opponent
 USER_SEED_OFFSET = 1000
 
@@ -309,6 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     def say(text: str) -> None:
         speak(text, voice)
 
+    if voice:
+        # the fixed prompts, synthesised while the board connects (cached on disk after)
+        from .. import voice as tts
+        tts.prefetch([STILL_PROMPT + ".", FIRST_PROMPT, "Back", "Only one move"])
+
     try:
         position = chess.Board(args.fen) if args.fen else chess.Board()
     except ValueError as exc:
@@ -415,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                     eeg.read()   # drop what arrived during the prompt
                     began = decoder.n_seen
                     ended = "started"
-                    say("Look at the piece you want to move.")
+                    say(FIRST_PROMPT)
                     session.start()
 
                     def on_decision(d: Decision) -> None:
