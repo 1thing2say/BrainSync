@@ -1,0 +1,34 @@
+# Allowed intents for LLM options, plus fallback option lists used when the LLM is slow,
+# down or returns something invalid. Each fallback list has exactly menus.option_count options,
+# ranked most likely first, written in the first person as the user.
+
+# "yes" and "no" are quoted: unquoted, YAML reads them as booleans.
+intents:
+  - {id: "yes", description: "Agree or accept"}
+  - {id: "no", description: "Decline or disagree"}
+  - {id: maybe, description: "Unsure or undecided"}
+  - {id: later, description: "Not now, maybe later"}
+  - {id: greeting, description: "Hello, goodbye or small talk"}
+  - {id: need, description: "Ask for something I need"}
+  - {id: feeling, description: "Say how I feel"}
+  - {id: comfort, description: "Physical comfort: position, temperature, pain"}
+  - {id: activity, description: "Suggest or respond to an activity"}
+  - {id: food_drink, description: "Food or drink"}
+  - {id: social, description: "People, conversation and company"}
+  - {id: thanks, description: "Thank someone"}
+  - {id: repeat, description: "Ask the partner to repeat or explain"}
+
+fallback_lists:
+  # Default list when there is no question to answer.
+  home:
+    - {label: "I'm good", utterance: "I'm doing well, thanks for asking.", intent_id: feeling}
+    - {label: "Need help", utterance: "Could you help me with something, please?", intent_id: need}
+    - {label: "Drink", utterance: "Could I have something to drink, please?", intent_id: food_drink}
+    - {label: "Thank you", utterance: "Thank you, I really appreciate it.", intent_id: thanks}
+
+  # Used when the partner's last line ends with "?".
+  yes_no:
+    - {label: "Yes", utterance: "Yes, please.", intent_id: "yes"}
+    - {label: "No", utterance: "No, thank you.", intent_id: "no"}
+    - {label: "Maybe", utterance: "Maybe, let me think about it.", intent_id: maybe}
+    - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}

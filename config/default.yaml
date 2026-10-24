@@ -1,0 +1,49 @@
+# BCI Voice: every tunable number for the voice + UI side (PLAN.md section 5).
+# Loaded and validated by app/config.py; unknown keys are an error, so typos fail loudly.
+
+protocol: 1                    # INTERFACE.md protocol version sent in the server hello
+
+server:
+  host: 127.0.0.1              # 0.0.0.0 later for a phone or the Jetson
+  port: 8000
+
+display:
+  expected_refresh_hz: 60      # used in the v1 server hello until the decoder reports its measured rate
+
+stim:
+  # Mirrors the teammate's stimulus config (ssvep two_targets.toml); checked against the decoder's hello.
+  slots:
+    - {slot: s1, freq_hz: 15.0, phase_deg: 0}
+    - {slot: s2, freq_hz: 17.0, phase_deg: 0}
+  roles:                       # which slot does what: exactly one say and one next
+    s1: say
+    s2: next
+  waveform: sine               # sine or square; 17 Hz does not divide 60 Hz, so square is rejected
+  cue_s: 1.0                   # option shown, no flicker, before each trial
+  max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (decoder needs about 5 s)
+  rest_s: 1.0                  # still screen after a trial
+
+baseline:
+  seconds: 10.0                # still screen at start for the decoder's resting baseline
+
+menus:
+  dynamic: true                # false = fallback lists from intents.yaml only
+  option_count: 4              # ranked options per list, most likely first
+  label_max_chars: 18
+  label_max_words: 3
+  utterance_max_words: 14
+
+llm:
+  model: claude-haiku-5-5
+  timeout_s: 4.0               # one retry, then fallback list
+
+context:
+  history_turns: 8             # partner + user turns sent to the LLM
+
+speech:
+  tts_rate: 1.0                # speechSynthesis rate
+  stt_mode: push_to_talk       # mic is off while TTS is speaking
+
+selection:
+  confirm_mode: never          # never / always / low_score (low_score needs decoder scores)
+  chosen_highlight_s: 0.6      # how long the picked target stays highlighted

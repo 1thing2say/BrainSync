@@ -1,0 +1,24 @@
+# FICTIONAL demo persona. Sam Rivera and everyone listed here are invented for the demo;
+# any resemblance to real people is coincidental. Only facts here (or in the conversation)
+# may appear in LLM options.
+
+fictional: true
+note: "Invented persona for the Cal Hacks demo. Not a real person."
+name: Sam Rivera
+about: "Sam is 34, lives in Oakland and uses a brain-computer interface to talk."
+likes:
+  - jazz records
+  - the Golden State Warriors
+  - iced coffee
+  - walks by the lake
+dislikes:
+  - loud rooms
+  - cold soup
+people:
+  - {name: Maya, relation: "sister"}
+  - {name: Leo, relation: "best friend"}
+  - {name: Priya, relation: "caregiver"}
+routines:
+  - "Coffee and the news in the morning"
+  - "A walk outside after lunch when the weather is nice"
+  - "Calls Maya on Sunday evenings"
