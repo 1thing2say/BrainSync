@@ -206,26 +206,22 @@ def test_launch_times_out_and_kills(tmp_path: Path) -> None:
         launch.launch_stimulus([], command=_script(code), timeout=0.5, log_dir=tmp_path)
 
 
-def test_speak_silent_prints_only(monkeypatch: pytest.MonkeyPatch,
-                                  capsys: pytest.CaptureFixture) -> None:
+def test_speak_prints_and_hands_over_to_cartesia(monkeypatch: pytest.MonkeyPatch,
+                                                 capsys: pytest.CaptureFixture) -> None:
+    from brainsync import voice
+
     def boom(*a: object, **k: object) -> None:
-        raise AssertionError("say must not run")
+        raise AssertionError("no subprocess may speak")
 
     monkeypatch.setattr(launch.subprocess, "Popen", boom)
+    seen: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(voice, "speak", lambda text, voice_id=None: seen.append((text, voice_id)))
     launch.speak("look at the square", False)
-    assert "[say] look at the square" in capsys.readouterr().err
-    monkeypatch.setattr(launch.shutil, "which", lambda name: None)
-    launch.speak("no say here", True)
-    assert "no say here" in capsys.readouterr().err
-
-
-def test_speak_passes_voice_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
-    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/say")
-    monkeypatch.setattr(launch.subprocess, "Popen", lambda cmd, **k: seen.append(cmd))
-    launch.speak("hello", "Samantha")
-    launch.speak("hi", True)
-    assert seen == [["say", "-v", "Samantha", "hello"], ["say", "hi"]]
+    assert "[speak] look at the square" in capsys.readouterr().err and seen == []
+    launch.speak("hello", True)
+    launch.speak("hi", "a-voice-id")
+    assert seen == [("hello", None), ("hi", "a-voice-id")]
+    assert not hasattr(launch, "shutil")                     # no `say` lookup left
 
 
 FAKE_STIMULUS = """

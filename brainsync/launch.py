@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -94,15 +93,14 @@ def launch_stimulus(args: Sequence[str], stdin: int | IO | None = None, timeout:
 
 
 def speak(text: str, voice: bool | str = True) -> None:
-    """Print ``text`` to stderr and say it aloud with macOS ``say`` when available.
+    """Print ``text`` to stderr and say it aloud with Cartesia text-to-speech.
 
-    ``voice`` False stays silent; a string picks the ``say`` voice.
+    Returns at once; prompts play one after another (see brainsync.voice). ``voice``
+    False stays silent; a string picks the Cartesia voice id.
     """
-    print(f"[say] {text}", file=sys.stderr, flush=True)
-    if voice is False or not shutil.which("say"):
+    print(f"[speak] {text}", file=sys.stderr, flush=True)
+    if voice is False:
         return
-    cmd = ["say"] + (["-v", voice] if isinstance(voice, str) and voice else []) + [text]
-    try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as exc:
-        print(f"warning: could not run say: {exc}", file=sys.stderr)
+    from . import voice as tts   # lazy: apps that never speak skip the import
+
+    tts.speak(text, voice if isinstance(voice, str) and voice else None)

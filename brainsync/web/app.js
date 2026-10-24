@@ -25,6 +25,7 @@ const ui = {
   sentGaze: null,       // last gaze the server acknowledged (or we asked for)
   gazeChain: Promise.resolve(),
   muted: loadMuted(),
+  voice: null,          // the Audio playing the latest voice line (Cartesia, via the server)
   lastSwipes: 0,
   firstSwipeT: null,    // performance clock (s) of the first swipe this page saw
   firstCount: 1,
@@ -255,13 +256,14 @@ function showMatch(name) {
 // ---------------------------------------------------------------- speech
 
 function say(text) {
-  if (ui.muted || !text || !("speechSynthesis" in window)) return;
+  // Cartesia, through the server (/api/speech keeps the key off the page). The newest
+  // swipe wins: a line still playing stops, so speech never queues a backlog.
+  if (ui.muted || !text) return;
   try {
-    window.speechSynthesis.cancel();   // the newest swipe wins; never queue a backlog
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05;
-    window.speechSynthesis.speak(u);
-  } catch { /* no voices: the banner and live region still say it */ }
+    if (ui.voice) ui.voice.pause();
+    ui.voice = new Audio(`/api/speech?text=${encodeURIComponent(text)}`);
+    ui.voice.play().catch(() => { /* no voice: the banner and live region still say it */ });
+  } catch { /* no audio element: the banner and live region still say it */ }
 }
 
 function renderMute() {
@@ -273,7 +275,7 @@ function renderMute() {
 
 function updateVoiceHint() {
   const act = navigator.userActivation;
-  const needs = !ui.muted && "speechSynthesis" in window && act && !act.hasBeenActive;
+  const needs = !ui.muted && act && !act.hasBeenActive;   // audio waits for a first gesture
   $("voice-hint").hidden = !needs;
 }
 
@@ -526,7 +528,7 @@ function toggleAuto() {
 function toggleMute() {
   ui.muted = !ui.muted;
   saveMuted(ui.muted);
-  if (ui.muted && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  if (ui.muted && ui.voice) ui.voice.pause();
   renderMute();
 }
 

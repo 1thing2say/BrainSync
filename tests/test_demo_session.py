@@ -152,7 +152,7 @@ def test_session_hands_each_decision_and_its_time_to_the_caller(capsys):
     assert seen[0][1] == pytest.approx(3.5)            # window + pad after the flicker began
     assert seen[-1][1] == pytest.approx(10.0, abs=0.3)
     err = capsys.readouterr().err
-    said = [ln[6:] for ln in err.splitlines() if ln.startswith("[say] ")]
+    said = [ln[8:] for ln in err.splitlines() if ln.startswith("[speak] ")]
     assert said == ["Hold still.", "Start swiping."]
     assert "baseline from" in err
     assert " committed " not in err                    # status lines are the caller's
