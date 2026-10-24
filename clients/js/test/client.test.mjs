@@ -261,7 +261,9 @@ test("onset: default wall clock uses performance.timeOrigin", () => {
 });
 
 test("luminance equals flicker.js frame by frame, and the Python fixture", () => {
-  for (const c of FIXTURE.cases) {
+  // Protocol v3 has no modulation depth: FlickerState always draws the full flicker, so only
+  // the fixture's depth-1 cases apply (a case without a depth predates the knob).
+  for (const c of FIXTURE.cases.filter((c) => (c.depth ?? 1) === 1)) {
     const s = liveState();
     s.handle({ ...WELCOME, waveform: c.waveform, refresh_hz: c.refresh });
     const target = { freq: c.freq, phase: c.phase };
