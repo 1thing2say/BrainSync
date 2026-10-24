@@ -12,9 +12,18 @@ frame draws the latest state, so a slow or chatty game never stalls the flicker)
                            's' selected (static amber highlight)
     pieces <path>          RGBA PNG of the pieces layer, board sized (see render.py)
     arrow <from> <to>      arrow between two square indices; 'arrow none' clears it
-    panels <l0>|<l1>       side panels flickering as targets 0 (left) and 1 (right) with
-                           these labels; 'panels none' hides them
-    text <message>         caption above the board; 'text' alone clears it
+    panels <l0>|<l1>       PLAY / BACK panels flickering as targets 0 (left) and 1 (right)
+                           under these labels; 'panels none' leaves them idle
+    text <message>         the prompt in the side column; 'text' alone clears it
+    stage <name>           the step lit in the stage row: piece, dest, promo, confirm or none
+    votes <t> <n> <of>     vote meter: n of ``of`` fresh windows agree on target t (0, 1 or
+                           '-' for none yet)
+    lanes <a,b,...>        names of the EEG lanes in the trace strip (1..8; resets it)
+    eeg <t> <dt> <v...>    trace samples dt s apart, the last at stream time t, row-major
+                           with one value per lane in each row
+    window <t> <r> <f> <p> one decoder window ending at stream time t: named target r (0, 1
+                           or '-'), f 1 when the gate counted it (0: too early or board
+                           still), p 1 when it fired a pick
     hold                   every flicker stands still at its frame-0 luminance
     go                     flicker runs
 
@@ -27,43 +36,57 @@ The flicker frame counter starts at the first ``go`` and then counts every displ
 frame, held or not, so the flicker phase stays locked to the display from then on.
 Optional markers ("go", "hold", "groups:<64 chars>") go to stderr after the flip that
 shows the change. Nothing here imports psychopy until a window is opened.
+
+The look follows the browser mockup (see style.py): the board on the left, a column on
+the right with the title, stage row, prompt, vote meters, the PLAY / BACK panels and the
+trace strip of EEG lanes and decoder windows. Flickering squares stay grey (full
+luminance swing) and carry a "15" / "17" tag. Everything that never changes is drawn
+once into one cached image, and text is only re-laid out when the game changes it (at a
+screen change, when the gate ignores windows anyway), so the frame loop stays cheap.
 """
 from __future__ import annotations
 
 import argparse
 import io
+import math
 import os
 import sys
 import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, NoReturn, TextIO
+from typing import Any, BinaryIO, NoReturn, TextIO
 
 import numpy as np
 
+from . import style
 from ..stimulus.__main__ import _check_refresh, _refresh_arg
 from ..stimulus.config import StimulusConfig, config_warnings, load_config, override
-from ..stimulus.display import (MARKER_CLOCKS, MarkerWriter, SessionTiming, layout_overflow,
-                                median_rate)
+from ..stimulus.display import MARKER_CLOCKS, MarkerWriter, SessionTiming, median_rate
 from ..stimulus.flicker import (dropped_frames, frame_luminances, frames_per_cycle, phase_pi,
                                 to_psychopy_rgb)
-from .render import BOARD_SIZE, SQUARE_SIZE, square_center
+from .render import BOARD_SIZE, SQUARE_SIZE, grid_cell, square_center
+from .trace import MAX_LANES, TraceBuffer, TraceView, Window, lane_points, window_marks
 
 DEFAULT_CONFIG = "chess"
 N_SQUARES = 64
 GROUP_CHARS = frozenset(".01s")
 PLAIN_GROUPS = "." * N_SQUARES
-LIGHT_LUM = 0.32      # plain light squares: low contrast, so the flicker stands out
-DARK_LUM = 0.22       # plain dark squares (a1 is dark)
-SELECTED_LUM = 0.6    # 's' squares, tinted amber by square_colors
-AMBER_TINT = np.array([1.5, 1.0, 0.25])   # per-channel gain on SELECTED_LUM, clipped to 1
-ARROW_RGB = (-0.4, 0.7, -0.2)             # PsychoPy rgb, a green that reads on grey
-ARROW_OPACITY = 0.85
-CAPTION_Y = (BOARD_SIZE / 2 + 0.5) / 2    # midway between the board's top and the screen's
-CAPTION_HEIGHT = 0.032
-LABEL_HEIGHT = 0.04
-VERBS = ("groups", "pieces", "arrow", "panels", "text", "hold", "go")
+LIGHT_LUM = 0.32      # luminance array value of plain light squares (drawn in SQ_LIGHT)
+DARK_LUM = 0.22       # and of plain dark ones (a1 is dark; drawn in SQ_DARK)
+SELECTED_LUM = 0.6    # 's' squares (drawn in SELECTED)
+ARROW_OPACITY = 0.8
+STAGE_NAMES = ("piece", "dest", "promo", "confirm", "none")
+ABSTAIN = -1
+NO_VOTES = (ABSTAIN, 0, 4)
+TRACE_EVERY = 3       # frames between trace geometry updates (20 Hz at 60 Hz)
+MAX_WINDOWS = 40      # decoder window ticks the strip can show (6 s at 0.25 s is 24)
+MAX_MARKS = 8         # pick markers
+FPS_EVERY_S = 0.5     # how often the frame-rate readout is re-laid out (text costs ~1-4 ms)
+FPS_SPAN_S = 1.0      # the readout averages the frames shown over this long
+VERBS = ("groups", "pieces", "arrow", "panels", "text", "stage", "votes", "lanes", "eeg",
+         "window", "hold", "go")
 
 
 # -- protocol -------------------------------------------------------------------------------
@@ -71,11 +94,12 @@ VERBS = ("groups", "pieces", "arrow", "panels", "text", "hold", "go")
 @dataclass(frozen=True)
 class Command:
     """One parsed stdin line. ``value`` by verb: groups -> str (64 chars), pieces -> Path,
-    arrow -> (from, to) or None, panels -> (label0, label1) or None, text -> str,
-    hold/go -> None."""
+    arrow -> (from, to) or None, panels -> (label0, label1) or None, text/stage -> str,
+    votes -> (target, n, of), lanes -> tuple of names, eeg -> (t, dt, values),
+    window -> trace.Window, hold/go -> None."""
 
     verb: str
-    value: str | Path | tuple[int, int] | tuple[str, str] | None = None
+    value: Any = None
 
 
 def check_groups(groups: str) -> str:
@@ -97,6 +121,38 @@ def _square_arg(text: str) -> int:
     if not 0 <= sq < N_SQUARES:
         raise ValueError(f"square {sq} out of range 0..63")
     return sq
+
+
+def _target_arg(text: str) -> int:
+    if text not in ("0", "1", "-"):
+        raise ValueError(f"target must be 0, 1 or '-', got {text!r}")
+    return ABSTAIN if text == "-" else int(text)
+
+
+def _flag_arg(text: str) -> bool:
+    if text not in ("0", "1"):
+        raise ValueError(f"flag must be 0 or 1, got {text!r}")
+    return text == "1"
+
+
+def _number(text: str, what: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise ValueError(f"{what} must be a number, got {text!r}") from None
+    if not math.isfinite(x):
+        raise ValueError(f"{what} must be finite, got {text!r}")
+    return x
+
+
+def _count(text: str, what: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError(f"{what} must be an integer, got {text!r}") from None
+    if n < 0:
+        raise ValueError(f"{what} must be >= 0, got {n}")
+    return n
 
 
 def parse_command(line: str) -> Command:
@@ -131,6 +187,38 @@ def parse_command(line: str) -> Command:
         return Command("panels", (labels[0].strip(), labels[1].strip()))
     if verb == "text":
         return Command("text", rest)
+    if verb == "stage":
+        if rest not in STAGE_NAMES:
+            raise ValueError(f"stage must be one of {', '.join(STAGE_NAMES)}, got {rest!r}")
+        return Command("stage", rest)
+    if verb == "votes":
+        parts = rest.split()
+        if len(parts) != 3:
+            raise ValueError(f"votes needs '<target> <n> <of>', got {rest!r}")
+        target, n, of = _target_arg(parts[0]), _count(parts[1], "n"), _count(parts[2], "of")
+        if not 1 <= of <= 16 or n > of:
+            raise ValueError(f"votes needs 0 <= n <= of and 1 <= of <= 16, got {n} of {of}")
+        return Command("votes", (target, n, of))
+    if verb == "lanes":
+        names = tuple(n.strip() for n in rest.split(","))
+        if not rest or not all(names) or len(names) > MAX_LANES:
+            raise ValueError(f"lanes needs 1..{MAX_LANES} comma-separated names, got {rest!r}")
+        return Command("lanes", names)
+    if verb == "eeg":
+        parts = rest.split()
+        if len(parts) < 3:
+            raise ValueError("eeg needs '<t> <dt> <values...>'")
+        t, dt = _number(parts[0], "t"), _number(parts[1], "dt")
+        if dt <= 0:
+            raise ValueError(f"dt must be > 0, got {dt}")
+        values = np.array([_number(p, "value") for p in parts[2:]])
+        return Command("eeg", (t, dt, values))
+    if verb == "window":
+        parts = rest.split()
+        if len(parts) != 4:
+            raise ValueError(f"window needs '<t> <target> <fresh> <fired>', got {rest!r}")
+        return Command("window", Window(_number(parts[0], "t"), _target_arg(parts[1]),
+                                        _flag_arg(parts[2]), _flag_arg(parts[3])))
     if verb in ("hold", "go"):
         if rest:
             raise ValueError(f"{verb} takes no arguments, got {rest!r}")
@@ -140,8 +228,9 @@ def parse_command(line: str) -> Command:
 
 @dataclass(frozen=True)
 class BoardSnapshot:
-    """What one frame shows. ``pieces_version`` counts pieces commands, so a PNG rewritten
-    under the same path is reloaded too."""
+    """What one frame shows (the trace strip's data lives in BoardState.trace).
+    ``pieces_version`` counts pieces commands, so a PNG rewritten under the same path is
+    reloaded too."""
 
     groups: str = PLAIN_GROUPS
     pieces: Path | None = None
@@ -149,17 +238,31 @@ class BoardSnapshot:
     arrow: tuple[int, int] | None = None
     panels: tuple[str, str] | None = None
     text: str = ""
+    stage: str = "none"
+    votes: tuple[int, int, int] = NO_VOTES
+    lanes: tuple[str, ...] = ()
     holding: bool = True
 
 
 class BoardState:
-    """The latest board state, written by the reader thread and read once per frame."""
+    """The latest board state, written by the reader thread and read once per frame.
 
-    def __init__(self) -> None:
+    Trace samples and decoder windows go to ``trace`` (its own lock) instead of the
+    snapshot, so taking a snapshot never copies them.
+    """
+
+    def __init__(self, trace: TraceBuffer | None = None) -> None:
         self._lock = threading.Lock()
         self._snap = BoardSnapshot()
+        self.trace = trace if trace is not None else TraceBuffer(span_s=style.TRACE_SPAN_S)
 
     def apply(self, cmd: Command) -> None:
+        if cmd.verb == "eeg":
+            self.trace.add_samples(*cmd.value)
+            return
+        if cmd.verb == "window":
+            self.trace.add_window(cmd.value)
+            return
         with self._lock:
             s = self._snap
             if cmd.verb == "groups":
@@ -172,6 +275,13 @@ class BoardState:
                 s = replace(s, panels=cmd.value)
             elif cmd.verb == "text":
                 s = replace(s, text=cmd.value)
+            elif cmd.verb == "stage":
+                s = replace(s, stage=cmd.value)
+            elif cmd.verb == "votes":
+                s = replace(s, votes=cmd.value)
+            elif cmd.verb == "lanes":
+                self.trace.set_lanes(len(cmd.value))
+                s = replace(s, lanes=cmd.value)
             elif cmd.verb in ("hold", "go"):
                 s = replace(s, holding=cmd.verb == "hold")
             else:
@@ -246,15 +356,20 @@ class CommandReader:
         return self._eof.wait(timeout)
 
 
-# -- luminance ------------------------------------------------------------------------------
+# -- luminance and colour -------------------------------------------------------------------
+
+def _dark_squares() -> np.ndarray:
+    sq = np.arange(N_SQUARES)
+    return (sq % 8 + sq // 8) % 2 == 0
+
 
 def square_luminances(groups: str, lum0: float, lum1: float, light: float = LIGHT_LUM,
                       dark: float = DARK_LUM) -> np.ndarray:
     """Luminance of every square, shape (64,): a static checker for '.', ``lum0`` / ``lum1``
-    for the two flicker groups, SELECTED_LUM for 's' (square_colors tints it amber)."""
+    for the two flicker groups, SELECTED_LUM for 's'. Only the flicker groups' values reach
+    the screen; square_colors paints the others in the palette."""
     check_groups(groups)
-    sq = np.arange(N_SQUARES)
-    out = np.where((sq % 8 + sq // 8) % 2 == 0, dark, light).astype(float)
+    out = np.where(_dark_squares(), dark, light).astype(float)
     g = np.frombuffer(groups.encode("ascii"), dtype=np.uint8)
     out[g == ord("0")] = lum0
     out[g == ord("1")] = lum1
@@ -263,14 +378,18 @@ def square_luminances(groups: str, lum0: float, lum1: float, light: float = LIGH
 
 
 def square_colors(groups: str, lums: np.ndarray) -> np.ndarray:
-    """PsychoPy rgb (-1..1) per square, shape (64, 3): grey from luminance, 's' amber."""
+    """PsychoPy rgb (-1..1) per square, shape (64, 3): flicker groups grey from their
+    luminance (the full swing, untinted), plain squares the board's light and dark, 's'
+    the selected amber."""
     lums = np.asarray(lums, dtype=float)
     if lums.shape != (N_SQUARES,):
         raise ValueError(f"need {N_SQUARES} luminances, got shape {lums.shape}")
-    rgb01 = np.repeat(lums[:, None], 3, axis=1)
-    selected = np.frombuffer(check_groups(groups).encode("ascii"), dtype=np.uint8) == ord("s")
-    rgb01[selected] = np.clip(lums[selected, None] * AMBER_TINT, 0.0, 1.0)
-    return 2.0 * rgb01 - 1.0
+    g = np.frombuffer(check_groups(groups).encode("ascii"), dtype=np.uint8)
+    out = np.where(_dark_squares()[:, None], style.SQ_DARK, style.SQ_LIGHT).astype(float)
+    flicker = (g == ord("0")) | (g == ord("1"))
+    out[flicker] = 2.0 * lums[flicker, None] - 1.0
+    out[g == ord("s")] = style.SELECTED
+    return out
 
 
 def frame_values(snap: BoardSnapshot, frame_index: int,
@@ -290,7 +409,8 @@ def frame_values(snap: BoardSnapshot, frame_index: int,
 
 def arrow_vertices(frm: int, to: int, flip: bool = False, shaft: float = 0.022,
                    head_length: float = 0.05, head_width: float = 0.06) -> np.ndarray:
-    """Polygon (7, 2) of an arrow from the centre of ``frm`` to the centre of ``to``."""
+    """Polygon (7, 2) of an arrow from the centre of ``frm`` to the centre of ``to``,
+    relative to the board's centre."""
     if frm == to:
         raise ValueError(f"arrow needs two different squares, got {frm} twice")
     a = np.array(square_center(frm, flip))
@@ -303,48 +423,118 @@ def arrow_vertices(frm: int, to: int, flip: bool = False, shaft: float = 0.022,
                      neck - n * head_width / 2, neck - n * shaft / 2, a - n * shaft / 2])
 
 
+def tag_position(sq: int, flip: bool = False) -> tuple[float, float]:
+    """Screen centre of the "15" / "17" tag in square ``sq``'s top-right corner."""
+    cx, cy = square_center(sq, flip)
+    w, h = style.TAG_SIZE
+    half = SQUARE_SIZE / 2 - style.TAG_INSET
+    return (style.BOARD_X + cx + half - w / 2, style.BOARD_Y + cy + half - h / 2)
+
+
 def check_layout(cfg: StimulusConfig) -> None:
-    """ValueError unless the config has two panels that sit fully outside the board."""
+    """ValueError unless the config has two panels in the side column, clear of the board,
+    the vote meters above and the trace strip below, on a screen the layout fits."""
     if cfg.n_targets != 2:
         raise ValueError(f"the board stimulus needs a two-target config, got "
                          f"{cfg.n_targets} target(s) in {cfg.name!r}")
-    inner = min(abs(t.pos[0]) for t in cfg.targets) - cfg.size / 2
-    if inner <= BOARD_SIZE / 2:
-        raise ValueError(f"config {cfg.name!r} puts the panels' inner edges at x = "
-                         f"+/-{inner:.3f}, inside the board (+/-{BOARD_SIZE / 2:g}); "
-                         "increase [layout] spacing")
+    board_right = style.BOARD_X + BOARD_SIZE / 2
+    inner = min(t.pos[0] for t in cfg.targets) - cfg.size / 2
+    if inner <= board_right:
+        raise ValueError(f"config {cfg.name!r} puts a panel's left edge at x = {inner:+.3f}, "
+                         f"inside the board (right edge {board_right:+.3f}); move the panels "
+                         "right with [layout] x_offset")
+    outer = max(t.pos[0] for t in cfg.targets) + cfg.reach
+    if outer > style.COLUMN_RIGHT + 1e-9:
+        raise ValueError(f"config {cfg.name!r} puts the panels out to x = {outer:+.3f}, past "
+                         f"the side column's edge {style.COLUMN_RIGHT:+.3f}")
+    top = max(t.pos[1] for t in cfg.targets) + cfg.size / 2
+    bottom = min(t.pos[1] for t in cfg.targets) - cfg.size / 2
+    ceiling = style.VOTES_Y - 0.06       # room for the active panels' labels above them
+    floor = style.TRACE_TOP + 0.03       # room for the Hz pills below them
+    if top > ceiling or bottom < floor:
+        raise ValueError(f"config {cfg.name!r} puts the panels between y = {bottom:+.3f} and "
+                         f"{top:+.3f}; they must stay within {floor:+.3f}..{ceiling:+.3f}, "
+                         "between the vote meters and the trace strip")
+    if cfg.display.aspect < style.LAYOUT_ASPECT - 1e-9:
+        raise ValueError(f"config {cfg.name!r} allows a {cfg.display.aspect:g}:1 screen; the "
+                         f"board and side column need {style.LAYOUT_ASPECT:.3f}:1")
+
+
+def layout_warning(width_px: float, height_px: float) -> str | None:
+    """Warning text when a window is too narrow for the board and side column."""
+    aspect = width_px / height_px
+    if aspect >= style.LAYOUT_ASPECT - 1e-9:
+        return None
+    return (f"this {aspect:.3f}:1 window is narrower than the {style.LAYOUT_ASPECT:.3f}:1 "
+            "the board and side column need; their edges will be cut off")
 
 
 # -- plan -----------------------------------------------------------------------------------
 
 def plan_lines(cfg: StimulusConfig, flip: bool) -> list[str]:
     hz = cfg.refresh
-    widest = max(abs(t.pos[0]) for t in cfg.targets) + cfg.reach
-    inner = min(abs(t.pos[0]) for t in cfg.targets) - cfg.size / 2
+    board_right = style.BOARD_X + BOARD_SIZE / 2
+    inner = min(t.pos[0] for t in cfg.targets) - cfg.size / 2
     lines = [
         f"config {cfg.name}" + (f" ({cfg.path})" if cfg.path else ""),
-        f"  board {BOARD_SIZE:g} screen heights, square {SQUARE_SIZE:g}, "
+        f"  board {BOARD_SIZE:g} screen heights, square {SQUARE_SIZE:g}, centre "
+        f"({style.BOARD_X:+.3f}, {style.BOARD_Y:+.3f}), "
         + ("black at the bottom (h8 bottom left)" if flip
            else "white at the bottom (a1 bottom left)"),
         f"  {cfg.waveform} flicker, depth {cfg.depth:g}, refresh {hz:g} Hz; squares and panels "
-        "share the target frequencies",
+        "share the target frequencies; flickering squares stay grey with a 15 / 17 tag",
     ]
     for t in cfg.targets:
         x, y = t.pos
         lines.append(f"  target {t.index}  panel {t.label!r}  {t.freq:.3f} Hz  phase "
                      f"{phase_pi(t.phase):.2f} pi  {frames_per_cycle(t.freq, hz):.3f} "
                      f"frames/cycle  panel centre ({x:+.3f}, {y:+.3f})  side {cfg.size:g}")
-    lines.append(f"  panels clear the board edge by {inner - BOARD_SIZE / 2:.3f} and reach "
-                 f"x = +/-{widest:.3f}: needs a screen at least {2 * widest:.3f}:1 "
+    lines.append(f"  panels clear the board edge by {inner - board_right:.3f}; side column "
+                 f"x = {style.COLUMN_LEFT:+.3f}..{style.COLUMN_RIGHT:+.3f} with the prompt, "
+                 f"votes and a {style.TRACE_SPAN_S:g} s EEG and decoder-window strip")
+    lines.append(f"  the layout needs a screen at least {style.LAYOUT_ASPECT:.3f}:1 "
                  f"(config aspect {cfg.display.aspect:g})")
     return lines
 
 
 # -- PsychoPy -------------------------------------------------------------------------------
 
+def _stadium(width: float, height: float, n: int = 10) -> np.ndarray:
+    """Vertices of a pill (rectangle with round ends), centred at (0, 0)."""
+    r = height / 2
+    half = max(width / 2 - r, 0.0)
+    angles = np.linspace(-math.pi / 2, math.pi / 2, n)
+    right = [(half + r * math.cos(a), r * math.sin(a)) for a in angles]
+    left = [(-half - r * math.cos(a), -r * math.sin(a)) for a in angles]
+    return np.array(right + left)
+
+
+def _rgb255(rgb: tuple[float, float, float]) -> tuple[int, int, int]:
+    r, g, b = (int(round((c + 1.0) * 127.5)) for c in rgb)
+    return (r, g, b)
+
+
+def tag_image(target: int, px_height: int = 96):
+    """PIL RGBA image of the "15" (square corners) or "17" (pill) tag."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    w = int(round(px_height * style.TAG_SIZE[0] / style.TAG_SIZE[1]))
+    img = Image.new("RGBA", (w, px_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    fill = _rgb255(style.TARGET_COLORS[target]) + (255,)
+    radius = px_height // 2 if target == 1 else 0
+    draw.rounded_rectangle((0, 0, w - 1, px_height - 1), radius=radius, fill=fill)
+    font = ImageFont.truetype(str(style.FONT_PATHS[style.MONO_BOLD_FONT]),
+                              int(px_height * 0.72))
+    draw.text((w / 2, px_height / 2), "15" if target == 0 else "17", font=font,
+              fill=(255, 255, 255, 255), anchor="mm")
+    return img
+
+
 class BoardRenderer:
-    """Fullscreen PsychoPy window: 64 squares in one ElementArrayStim, the pieces PNG, an
-    arrow, two side panels with labels and a caption."""
+    """Fullscreen PsychoPy window in the mockup's style: the board (64 squares in one
+    ElementArrayStim, tags, the pieces PNG, an arrow), the side column (stage row, prompt,
+    vote meters, PLAY / BACK panels) and the trace strip."""
 
     def __init__(self, cfg: StimulusConfig, flip: bool = False,
                  note: Callable[[str], None] = _stderr_note) -> None:
@@ -357,50 +547,270 @@ class BoardRenderer:
         self._note = note
         # The window's own timing check is skipped: measure_refresh() does that job.
         self.win = visual.Window(fullscr=True, screen=cfg.display.screen, units="height",
-                                 color=to_psychopy_rgb(cfg.display.background),
-                                 checkTiming=False)
+                                 color=style.PAPER, colorSpace="rgb", checkTiming=False)
         self.win.setMouseVisible(False)
-        xys = np.array([square_center(sq, flip) for sq in range(N_SQUARES)])
+        self._frame = 0
+        self.static = self._static_layer()
+        xys = np.array([square_center(sq, flip) for sq in range(N_SQUARES)]) \
+            + np.array(style.BOARD_ORIGIN)
         self.squares = visual.ElementArrayStim(
             self.win, units="height", nElements=N_SQUARES, sizes=SQUARE_SIZE, xys=xys,
             colors=square_colors(PLAIN_GROUPS, square_luminances(PLAIN_GROUPS, 0.5, 0.5)),
             colorSpace="rgb", elementTex=None, elementMask=None, interpolate=False)
+        self.tags = [visual.ImageStim(self.win, image=tag_image(k), units="height",
+                                      size=style.TAG_SIZE, interpolate=True) for k in (0, 1)]
+        self._tag_pos = [tag_position(sq, flip) for sq in range(N_SQUARES)]
         self.pieces = None
         self._pieces_version = 0
         self._pieces_tries = 0
-        self.arrow = visual.ShapeStim(self.win, units="height", vertices=arrow_vertices(12, 28),
-                                      fillColor=ARROW_RGB, lineColor=None,
+        self.arrow = visual.ShapeStim(self.win, units="height",
+                                      vertices=self._arrow_vertices((12, 28)),
+                                      fillColor=style.MARKER, lineColor=None,
                                       opacity=ARROW_OPACITY, closeShape=True)
         self._arrow: tuple[int, int] | None = None
-        side = cfg.size
-        self.panels = []
-        self.labels = []
-        for t in cfg.targets:
+        self._make_panels()
+        self._make_header()
+        self._make_trace()
+        self._make_fps()
+
+    # -- construction --------------------------------------------------------------------
+
+    def _text(self, text: str, pos: tuple[float, float], height: float,
+              font: str = style.MONO_FONT, color=style.INK, bold: bool = False,
+              anchor: str = "left", wrap: float | None = None, valign: str = "center"):
+        return self._visual.TextStim(self.win, text=text, units="height", pos=pos,
+                                     height=height, font=font, fontFiles=list(style.FONT_FILES),
+                                     bold=bold, color=color, colorSpace="rgb",
+                                     anchorHoriz=anchor, alignText=anchor, anchorVert=valign,
+                                     wrapWidth=wrap if wrap is not None else 2.0)
+
+    def _rect(self, pos, size, fill=None, line=None, line_width: float = 1.0):
+        return self._visual.Rect(self.win, units="height", pos=pos, size=size,
+                                 fillColor=fill, lineColor=line, lineWidth=line_width,
+                                 colorSpace="rgb")
+
+    def _circle(self, pos, radius: float, fill=None, line=None, line_width: float = 1.5):
+        return self._visual.Circle(self.win, units="height", pos=pos, radius=radius, edges=24,
+                                   fillColor=fill, lineColor=line, lineWidth=line_width,
+                                   colorSpace="rgb")
+
+    def _title(self) -> list:
+        h = style.TITLE_HEIGHT
+        parts = [("BRAINCHESS ", style.INK), ("15", style.TRACE15), ("/", style.INK_2),
+                 ("17", style.TRACE17)]
+        width = style.text_width("".join(p for p, _ in parts), style.DISPLAY_FONT, h)
+        h *= min(1.0, style.COLUMN_WIDTH / width)
+        out, x = [], style.COLUMN_LEFT
+        for text, color in parts:
+            out.append(self._text(text, (x, style.TITLE_Y), h, style.DISPLAY_FONT, color))
+            x += style.text_width(text, style.DISPLAY_FONT, h)
+        return out
+
+    def _stepper(self) -> list:
+        out, x = [], style.COLUMN_LEFT
+        self._step_dots = []
+        r = style.STEPPER_HEIGHT * 0.32
+        for _, label in style.STAGES:
+            self._step_dots.append(self._circle((x + r, style.STEPPER_Y), r, None, style.INK_2))
+            x += 2 * r + 0.008
+            out.append(self._text(label, (x, style.STEPPER_Y), style.STEPPER_HEIGHT,
+                                  style.MONO_BOLD_FONT, style.INK_2))
+            x += style.text_width(label, style.MONO_BOLD_FONT, style.STEPPER_HEIGHT) + 0.022
+        return out
+
+    def _vote_row(self) -> list:
+        h, box, y = style.VOTES_HEIGHT, style.VOTE_BOX, style.VOTES_Y
+        out = [self._text("VOTES", (style.COLUMN_LEFT, y), h, color=style.INK_2)]
+        x = style.COLUMN_LEFT + style.text_width("VOTES", style.MONO_FONT, h) + 0.02
+        self._meters: list[list] = [[], []]
+        for k, (label, color) in enumerate((("15 Hz", style.TRACE15), ("17 Hz", style.TRACE17))):
+            out.append(self._text(label, (x, y), h, style.MONO_BOLD_FONT, style.INK))
+            x += style.text_width(label, style.MONO_BOLD_FONT, h) + 0.008
+            for _ in range(4):
+                pos = (x + box / 2, y)
+                self._meters[k].append(self._rect(pos, (box, box), None, color, 2.0) if k == 0
+                                       else self._circle(pos, box / 2, None, color, 2.0))
+                x += box + 0.006
+            x += 0.016
+        return out
+
+    def _coordinates(self) -> list:
+        out = []
+        h, gap = style.COORD_HEIGHT, style.COORD_GAP
+        left = style.BOARD_X - BOARD_SIZE / 2 - gap
+        below = style.BOARD_Y - BOARD_SIZE / 2 - gap
+        for i in range(8):
+            col, row = grid_cell(i * 9, self.flip_board)    # a1, b2, ... h8: one per file/rank
+            x = style.BOARD_X + (col - 3.5) * SQUARE_SIZE
+            y = style.BOARD_Y + (row - 3.5) * SQUARE_SIZE
+            out.append(self._text("abcdefgh"[i], (x, below), h, color=style.INK_2,
+                                  anchor="center"))
+            out.append(self._text(str(i + 1), (left, y), h, color=style.INK_2, anchor="center"))
+        return out
+
+    def _idle_panel(self, k: int, t) -> list:
+        """A panel waiting for its turn: dashed frame, label, frequency, what it is for.
+        All of it inside the panel's square, which the active panel paints over."""
+        x, y = t.pos
+        side = self.cfg.size
+        out = []
+        n = 9
+        dash = side / n * 0.55
+        for j in range(n):
+            off = -side / 2 + (j + 0.5) * side / n
+            for pos, size in (((x + off, y + side / 2), (dash, 0.002)),
+                              ((x + off, y - side / 2), (dash, 0.002)),
+                              ((x - side / 2, y + off), (0.002, dash)),
+                              ((x + side / 2, y + off), (0.002, dash))):
+                out.append(self._rect(pos, size, style.INK_2))
+        out.append(self._text(t.label, (x, y + side * 0.2), style.PANEL_LABEL_HEIGHT,
+                              style.DISPLAY_FONT, style.INK_2, anchor="center"))
+        out += self._hz_pill(k, (x, y + side * 0.02))
+        out.append(self._text("used to confirm or promote", (x, y - side * 0.24),
+                              style.PANEL_NOTE_HEIGHT, color=style.INK_2, anchor="center",
+                              wrap=side * 0.8))
+        return out
+
+    def _hz_pill(self, k: int, pos) -> list:
+        h = style.PANEL_NOTE_HEIGHT * 1.15
+        text = f"{self.cfg.targets[k].freq:g} Hz"
+        w = style.text_width(text, style.MONO_BOLD_FONT, h) + 0.016
+        color = style.TARGET_COLORS[k]
+        if k == 0:
+            shape = self._rect(pos, (w, h * 1.7), None, color, 1.5)
+        else:
+            shape = self._visual.ShapeStim(self.win, units="height", pos=pos,
+                                           vertices=_stadium(w, h * 1.7), fillColor=None,
+                                           lineColor=color, lineWidth=1.5, closeShape=True,
+                                           colorSpace="rgb")
+        return [shape, self._text(text, pos, h, style.MONO_BOLD_FONT, color, anchor="center")]
+
+    def _trace_frame(self) -> list:
+        mid = (style.COLUMN_LEFT + style.COLUMN_RIGHT) / 2
+        out = [self._rect((mid, (style.TRACE_TOP + style.TRACE_BOTTOM) / 2),
+                          (style.COLUMN_WIDTH, style.TRACE_TOP - style.TRACE_BOTTOM),
+                          style.SURFACE, style.RULE, 1.5)]
+        h = style.TRACE_LABEL_HEIGHT
+        out.append(self._text("EEG · DECODER WINDOWS",
+                              (style.COLUMN_LEFT + 0.012, style.TRACE_HEADER_Y), h,
+                              style.MONO_BOLD_FONT, style.INK_2))
+        # legend, laid right to left from the strip's right edge
+        x = style.COLUMN_RIGHT - 0.012
+        sw = h * 0.8
+        for label, kind in (("too early", "stale"), ("no answer", "none"), ("17 Hz", 1),
+                            ("15 Hz", 0)):
+            x -= style.text_width(label, style.MONO_FONT, h)
+            out.append(self._text(label, (x, style.TRACE_HEADER_Y), h, color=style.INK_2))
+            x -= sw / 2 + 0.006
+            pos = (x, style.TRACE_HEADER_Y)
+            if kind == 0:
+                out.append(self._rect(pos, (sw, sw), style.TRACE15))
+            elif kind == 1:
+                out.append(self._circle(pos, sw / 2, style.TRACE17))
+            elif kind == "none":
+                out.append(self._rect(pos, (sw, 0.0025), style.INK_2))
+            else:
+                out.append(self._rect(pos, (sw, sw), style.RULE))
+            x -= sw / 2 + 0.014
+        out.append(self._text("win", (style.COLUMN_LEFT + 0.012,
+                                      (style.WINDOWS_TOP + style.WINDOWS_BOTTOM) / 2), h,
+                              color=style.INK_2))
+        return out
+
+    def _static_layer(self) -> list:
+        """Everything that never changes, drawn once into a single image."""
+        stims = self._title()
+        stims.append(self._rect(((style.COLUMN_LEFT + style.COLUMN_RIGHT) / 2, style.RULE_Y),
+                                (style.COLUMN_WIDTH, 0.002), style.RULE))
+        stims += self._stepper() + self._vote_row() + self._coordinates()
+        stims.append(self._rect(style.BOARD_ORIGIN, (BOARD_SIZE + 0.006,) * 2, style.INK))
+        for k, t in enumerate(self.cfg.targets):
+            stims += self._idle_panel(k, t)
+        stims += self._trace_frame()
+        try:
+            layer = self._visual.BufferImageStim(self.win, stim=stims)
+            self.win.clearBuffer()
+            return [layer]
+        except Exception as exc:  # noqa: BLE001 - any capture failure: draw them each frame
+            self._note(f"could not cache the static layer ({exc}); drawing it every frame")
+            return stims
+
+    def _make_panels(self) -> None:
+        side = self.cfg.size
+        self.panel_frames, self.panels, self.labels = [], [], []
+        for k, t in enumerate(self.cfg.targets):
             x, y = t.pos
-            self.panels.append(visual.Rect(self.win, units="height", size=(side, side),
-                                           pos=t.pos, lineColor=None,
-                                           fillColor=to_psychopy_rgb(0.0)))
-            # wrapped to the panel width and hung from its top line, so a long label
-            # ('Rook / Bishop / Knight') stacks under its panel instead of running onto
-            # the board or off the screen edge
-            self.labels.append(visual.TextStim(self.win, units="height", text=t.label,
-                                               pos=(x, y - side / 2 - LABEL_HEIGHT / 2),
-                                               height=LABEL_HEIGHT, wrapWidth=side,
-                                               anchorVert="top",
-                                               color=to_psychopy_rgb(0.9)))
-        self._labels = tuple(cfg.labels)
-        self.caption = visual.TextStim(self.win, units="height", text="", pos=(0.0, CAPTION_Y),
-                                       height=CAPTION_HEIGHT, wrapWidth=cfg.display.aspect,
-                                       color=to_psychopy_rgb(0.9))
+            # a hair wider than the panel, so it covers the idle panel's dashed outline
+            outer = side + 0.006
+            self.panel_frames.append(self._rect(t.pos, (outer, outer), style.TARGET_COLORS[k]))
+            inner = side - 2 * style.PANEL_INSET
+            self.panels.append(self._rect(t.pos, (inner, inner), to_psychopy_rgb(0.5)))
+            self.labels.append(self._text(t.label, (x, y + side / 2 + 0.012),
+                                          style.PANEL_LABEL_HEIGHT * 0.8, style.DISPLAY_FONT,
+                                          style.INK, anchor="center", wrap=side + 0.06,
+                                          valign="bottom"))
+        self._labels = tuple(self.cfg.labels)
+
+    def _make_header(self) -> None:
+        self.caption = self._text("", (style.COLUMN_LEFT, style.PROMPT_TOP), style.PROMPT_HEIGHT,
+                                  style.BODY_FONT, style.INK, bold=True,
+                                  wrap=style.COLUMN_WIDTH, valign="top")
         self._caption = ""
-        problem = layout_overflow(cfg, *self.win.size)
-        if problem:
-            self._note(f"warning: {problem}")
+        self._stage: str | None = None
+        self._votes: tuple[int, int, int] | None = None
+        self._counts: dict[tuple[int, int], Any] = {}
+
+    def _elements(self, n: int, sizes, **kw):
+        return self._visual.ElementArrayStim(self.win, units="height", nElements=n, sizes=sizes,
+                                             xys=np.zeros((n, 2)), colorSpace="rgb",
+                                             opacities=0.0, elementTex=None, elementMask=None,
+                                             **kw)
+
+    def _make_trace(self) -> None:
+        self.lanes: list = []
+        self.lane_labels: list = []
+        self._lane_names: tuple[str, ...] = ()
+        self._lane_points: list[np.ndarray] = []
+        lanes_h = style.LANES_TOP - style.WINDOWS_BOTTOM
+        self.grid = self._elements(8, (0.0015, lanes_h), colors=style.GRID)
+        self.ticks = self._elements(MAX_WINDOWS, np.full((MAX_WINDOWS, 2), 0.01),
+                                    colors=style.INK_2)
+        self.mark_lines = self._elements(MAX_MARKS, (0.002, lanes_h), colors=style.MARKER)
+        self.mark_heads = self._elements(MAX_MARKS, 0.011, oris=45.0, colors=style.MARKER)
+
+    def _make_fps(self) -> None:
+        """Frame-rate readout in the screen's top-left corner, above the board."""
+        w, h = self.win.size
+        self.fps_text = self._text("-- fps", (-w / h / 2 + 0.012, 0.5 - 0.016), 0.014,
+                                   color=style.INK_2)
+        self._flips: deque[float] = deque()
+        self._fps_due = 0.0
+        self.dropped = 0
+
+    def _count_flip(self, t: float) -> None:
+        """Track the frame rate and dropped frames from flip times; refresh the readout."""
+        if self._flips:
+            self.dropped += dropped_frames((self._flips[-1], t), self.cfg.refresh)
+        self._flips.append(t)
+        while t - self._flips[0] > FPS_SPAN_S:
+            self._flips.popleft()
+        if t >= self._fps_due and len(self._flips) > 1:
+            fps = (len(self._flips) - 1) / (self._flips[-1] - self._flips[0])
+            self.fps_text.text = f"{fps:4.1f} fps \u00b7 {self.dropped} dropped"
+            self._fps_due = t + FPS_EVERY_S
+
+    def _arrow_vertices(self, arrow: tuple[int, int]) -> np.ndarray:
+        return arrow_vertices(*arrow, flip=self.flip_board) + np.array(style.BOARD_ORIGIN)
 
     def measure_refresh(self, n: int = 120, warmup: int = 20) -> float:
         """Median-interval rate over ``n`` blank flips, after ``warmup`` unmeasured ones."""
         stamps = [self.win.flip() for _ in range(warmup + n)]
+        problem = layout_warning(*self.win.size)
+        if problem:
+            self._note(f"warning: {problem}")
         return median_rate(stamps[warmup:])
+
+    # -- per frame -----------------------------------------------------------------------
 
     def _update_pieces(self, snap: BoardSnapshot) -> None:
         """Load a new pieces PNG once per pieces command; keep the old one if it fails."""
@@ -411,7 +821,7 @@ class BoardRenderer:
                 # interpolate: the PNG is scaled to the board's physical pixels (about
                 # 2x on Retina); nearest-neighbour would leave stair-stepped glyph edges
                 self.pieces = self._visual.ImageStim(self.win, image=str(snap.pieces),
-                                                     units="height", pos=(0.0, 0.0),
+                                                     units="height", pos=style.BOARD_ORIGIN,
                                                      size=(BOARD_SIZE, BOARD_SIZE),
                                                      interpolate=True)
             else:
@@ -425,36 +835,158 @@ class BoardRenderer:
         self._pieces_version = snap.pieces_version
         self._pieces_tries = 0
 
-    def draw(self, snap: BoardSnapshot, square_lums: np.ndarray,
-             panel_lums: np.ndarray) -> None:
+    def _draw_tags(self, groups: str) -> None:
+        for k, char in enumerate("01"):
+            tag = self.tags[k]
+            for sq, g in enumerate(groups):
+                if g == char:
+                    tag.pos = self._tag_pos[sq]
+                    tag.draw()
+
+    def _draw_header(self, snap: BoardSnapshot) -> None:
+        if snap.stage != self._stage:
+            for (name, _), dot in zip(style.STAGES, self._step_dots):
+                active = name == snap.stage
+                dot.fillColor = style.MARKER if active else None
+                dot.lineColor = style.MARKER if active else style.INK_2
+            self._stage = snap.stage
+        for dot in self._step_dots:
+            dot.draw()
+        if snap.text != self._caption:
+            self.caption.text = snap.text
+            self._caption = snap.text
+        if snap.text:
+            self.caption.draw()
+        target, n, of = snap.votes
+        if snap.votes != self._votes:
+            for k, meter in enumerate(self._meters):
+                lit = n if target == k else 0
+                for j, stim in enumerate(meter):
+                    stim.fillColor = style.TARGET_COLORS[k] if j < lit else None
+            self._votes = snap.votes
+        for meter in self._meters:
+            for stim in meter:
+                stim.draw()
+        if (n, of) not in self._counts:
+            self._counts[(n, of)] = self._text(f"{n} of {of}",
+                                               (style.COLUMN_RIGHT, style.VOTES_Y),
+                                               style.VOTES_HEIGHT, color=style.INK_2,
+                                               anchor="right")
+        self._counts[(n, of)].draw()
+
+    def _draw_panels(self, snap: BoardSnapshot, panel_lums: np.ndarray) -> None:
+        if snap.panels is None:
+            return
+        if snap.panels != self._labels:
+            for label, text in zip(self.labels, snap.panels):
+                label.text = text
+            self._labels = snap.panels
+        for k, panel in enumerate(self.panels):
+            self.panel_frames[k].draw()
+            panel.fillColor = to_psychopy_rgb(panel_lums[k])
+            panel.draw()
+            self.labels[k].draw()
+
+    def _set_lanes(self, names: tuple[str, ...]) -> None:
+        lane = (style.LANES_TOP - style.LANES_BOTTOM) / max(len(names), 1)
+        self.lanes = [self._visual.ShapeStim(self.win, units="height",
+                                             vertices=[(0.0, 0.0), (0.0, 0.0)],
+                                             closeShape=False, fillColor=None,
+                                             lineColor=style.INK, lineWidth=1.2,
+                                             colorSpace="rgb") for _ in names]
+        self.lane_labels = [self._text(name, (style.COLUMN_LEFT + 0.012,
+                                              style.LANES_TOP - lane * (i + 0.5)),
+                                       style.TRACE_LABEL_HEIGHT, color=style.INK_2)
+                            for i, name in enumerate(names)]
+        self._lane_names = names
+        self._lane_points = [np.empty((0, 2)) for _ in names]
+
+    def _update_trace(self, view: TraceView) -> None:
+        x0, x1, span = style.TRACE_PLOT_LEFT, style.TRACE_PLOT_RIGHT, style.TRACE_SPAN_S
+        if view.values.shape[1] == len(self.lanes):
+            self._lane_points = lane_points(view, x0, x1, style.LANES_TOP, style.LANES_BOTTOM,
+                                            span)
+            for stim, pts in zip(self.lanes, self._lane_points):
+                if len(pts) >= 2:
+                    stim.vertices = pts
+        mid_y = (style.LANES_TOP + style.WINDOWS_BOTTOM) / 2
+        # one grid line per stream second, like recorder paper
+        xys, alpha = np.zeros((8, 2)), np.zeros(8)
+        if view.t_now is not None:
+            t0 = view.t_now - span
+            for j, s in enumerate(range(math.ceil(t0), math.ceil(t0) + 8)):
+                x = x0 + (s - t0) / span * (x1 - x0)
+                if x <= x1:
+                    xys[j], alpha[j] = (x, mid_y), 1.0
+        self.grid.xys, self.grid.opacities = xys, alpha
+        top, bottom = style.WINDOWS_TOP, style.WINDOWS_BOTTOM
+        xys = np.zeros((MAX_WINDOWS, 2))
+        sizes = np.full((MAX_WINDOWS, 2), 0.01)
+        colors = np.tile(np.array(style.INK_2), (MAX_WINDOWS, 1))
+        alpha = np.zeros(MAX_WINDOWS)
+        fired = []
+        for j, (left, width, w) in enumerate(window_marks(view, x0, x1, span)[-MAX_WINDOWS:]):
+            x = left + width / 2
+            if w.raw == 0:
+                xys[j], sizes[j], colors[j] = (x, (top + bottom) / 2), (width, top - bottom), \
+                    style.TRACE15
+            elif w.raw == 1:                       # a little shorter: not by colour alone
+                h = top - bottom - 0.005
+                xys[j], sizes[j], colors[j] = (x, bottom + h / 2), (width, h), style.TRACE17
+            else:
+                xys[j], sizes[j] = (x, (top + bottom) / 2), (width, 0.0025)
+            alpha[j] = 1.0 if w.fresh else 0.3
+            if w.fired:
+                fired.append(x)
+        self.ticks.xys, self.ticks.sizes, self.ticks.colors = xys, sizes, colors
+        self.ticks.opacities = alpha
+        lines, heads, alpha = np.zeros((MAX_MARKS, 2)), np.zeros((MAX_MARKS, 2)), np.zeros(MAX_MARKS)
+        for j, x in enumerate(fired[-MAX_MARKS:]):
+            lines[j], heads[j], alpha[j] = (x, mid_y), (x, style.MARKER_Y), 1.0
+        self.mark_lines.xys, self.mark_lines.opacities = lines, alpha
+        self.mark_heads.xys, self.mark_heads.opacities = heads, alpha
+
+    def _draw_trace(self, snap: BoardSnapshot, trace: TraceBuffer | None) -> None:
+        if snap.lanes != self._lane_names:
+            self._set_lanes(snap.lanes)
+        if trace is not None and self._frame % TRACE_EVERY == 0:
+            self._update_trace(trace.view())
+        self.grid.draw()
+        for label in self.lane_labels:
+            label.draw()
+        for stim, pts in zip(self.lanes, self._lane_points):
+            if len(pts) >= 2:
+                stim.draw()
+        self.ticks.draw()
+        self.mark_lines.draw()
+        self.mark_heads.draw()
+
+    def draw(self, snap: BoardSnapshot, square_lums: np.ndarray, panel_lums: np.ndarray,
+             trace: TraceBuffer | None = None) -> None:
         """Queue one frame; never blocks (flip() waits for vsync)."""
+        for stim in self.static:
+            stim.draw()
         self.squares.colors = square_colors(snap.groups, square_lums)
         self.squares.draw()
+        self._draw_tags(snap.groups)
         self._update_pieces(snap)
         if self.pieces is not None:
             self.pieces.draw()
         if snap.arrow is not None:
             if snap.arrow != self._arrow:
-                self.arrow.vertices = arrow_vertices(*snap.arrow, flip=self.flip_board)
+                self.arrow.vertices = self._arrow_vertices(snap.arrow)
                 self._arrow = snap.arrow
             self.arrow.draw()
-        if snap.panels is not None:
-            if snap.panels != self._labels:
-                for label, text in zip(self.labels, snap.panels):
-                    label.text = text
-                self._labels = snap.panels
-            for k, panel in enumerate(self.panels):
-                panel.fillColor = to_psychopy_rgb(panel_lums[k])
-                panel.draw()
-                self.labels[k].draw()
-        if snap.text:
-            if snap.text != self._caption:
-                self.caption.text = snap.text
-                self._caption = snap.text
-            self.caption.draw()
+        self._draw_panels(snap, panel_lums)
+        self._draw_header(snap)
+        self._draw_trace(snap, trace)
+        self.fps_text.draw()
+        self._frame += 1
 
     def flip(self) -> float:
-        return float(self.win.flip())
+        t = float(self.win.flip())
+        self._count_flip(t)
+        return t
 
     def escape_pressed(self) -> bool:
         return "escape" in self._keys(keyList=["escape"])
@@ -519,7 +1051,7 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace) -> int:
                 break
             snap = state.snapshot()
             started = started or not snap.holding
-            renderer.draw(snap, *frame_values(snap, frame, cfg))
+            renderer.draw(snap, *frame_values(snap, frame, cfg), state.trace)
             t = renderer.flip()
             markers.emit(_events(prev, snap))
             timing.n_frames += 1

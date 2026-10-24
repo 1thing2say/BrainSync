@@ -10,20 +10,24 @@ the next split starts flickering) and starts the next user turn from ``tick``.
 
 ``StimulusDisplay`` writes the board stimulus's stdin protocol (see
 brainsync.brainchess.stimulus) and sends only what changed; ``NullDisplay`` records the
-calls for tests and headless runs. ``SimulatedUser`` stands in for the user with
+calls for tests and headless runs. Besides the board, the session reports the stage it is
+at, and every decoder window and the gate's vote count go to the display for its trace
+strip and vote meters (``window``, ``votes``); the run loop adds the EEG lanes
+(``lanes``, ``eeg``). ``SimulatedUser`` stands in for the user with
 ``--fake``: it decides on a move at the start of each turn and after every screen change
 looks at the group holding it, or at BACK once a wrong pick has ruled it out.
 """
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
 import chess
 import chess.pgn
+import numpy as np
 
 from ..classify import ABSTAIN
 from ..online import Decision
@@ -40,6 +44,8 @@ PLAIN = "." * N_SQUARES
 # idle: before start(); user: picks are being made; opponent: the still board after the
 # opponent's move; over: the game ended or the move limit was reached
 PHASES = ("idle", "user", "opponent", "over")
+# what the stage row shows: the selector's stages, or none while the board is still
+STAGES = ("piece", "dest", "promo", "confirm", "none")
 
 Arrow = tuple[int, int] | None
 Panels = tuple[str, str] | None
@@ -49,8 +55,26 @@ class Display(Protocol):
     """What the session draws on. Each call returns False once the display is gone."""
 
     def show(self, groups: str, pieces_png: Path | None, arrow: Arrow, panels: Panels,
-             text: str) -> bool:
-        """Draw a board state; ``pieces_png`` None keeps the pieces layer already shown."""
+             text: str, stage: str = "none") -> bool:
+        """Draw a board state; ``pieces_png`` None keeps the pieces layer already shown.
+        ``stage`` is the selector's stage (piece, dest, promo, confirm) or "none"."""
+        ...
+
+    def window(self, t: float, raw: int, fresh: bool, fired: bool) -> bool:
+        """One decoder window ending at stream time ``t`` (s): the target it named
+        (ABSTAIN for none), whether the gate counted it and whether it fired a pick."""
+        ...
+
+    def votes(self, target: int, n: int, of: int) -> bool:
+        """``n`` of ``of`` agreeing fresh windows for ``target`` (ABSTAIN: none yet)."""
+        ...
+
+    def lanes(self, names: Sequence[str]) -> bool:
+        """Names of the EEG lanes ``eeg`` will send, in order."""
+        ...
+
+    def eeg(self, t_end: float, dt: float, samples: np.ndarray) -> bool:
+        """Display samples (k, lanes), ``dt`` apart, the last at stream time ``t_end``."""
         ...
 
     def hold(self) -> bool: ...
@@ -62,6 +86,10 @@ class Display(Protocol):
 
 def _one_line(text: str) -> str:
     return " ".join(str(text).split())
+
+
+def _target(k: int) -> str:
+    return "-" if k == ABSTAIN else str(int(k))
 
 
 class StimulusDisplay:
@@ -82,6 +110,8 @@ class StimulusDisplay:
         self._arrow: Arrow = None
         self._panels: Panels = None
         self._text = ""
+        self._stage = "none"
+        self._votes: tuple[int, int, int] | None = None
         self._holding = True
 
     def _write(self, lines: list[str]) -> bool:
@@ -99,9 +129,11 @@ class StimulusDisplay:
         return True
 
     def show(self, groups: str, pieces_png: Path | None, arrow: Arrow, panels: Panels,
-             text: str) -> bool:
+             text: str, stage: str = "none") -> bool:
         if len(groups) != N_SQUARES:
             raise ValueError(f"groups needs {N_SQUARES} characters, got {len(groups)}")
+        if stage not in STAGES:
+            raise ValueError(f"stage must be one of {', '.join(STAGES)}, got {stage!r}")
         text = _one_line(text)
         if panels is not None:
             # '|' separates the two labels in the protocol
@@ -117,12 +149,35 @@ class StimulusDisplay:
             lines.append("panels none" if panels is None else f"panels {panels[0]}|{panels[1]}")
         if text != self._text:
             lines.append(f"text {text}" if text else "text")
+        if stage != self._stage:
+            lines.append(f"stage {stage}")
         if not self._write(lines):
             return False
         self._groups, self._arrow, self._panels, self._text = groups, arrow, panels, text
+        self._stage = stage
         if pieces_png is not None:
             self._pieces = pieces_png
         return True
+
+    def window(self, t: float, raw: int, fresh: bool, fired: bool) -> bool:
+        return self._write([f"window {t:.4f} {_target(raw)} {int(fresh)} {int(fired)}"])
+
+    def votes(self, target: int, n: int, of: int) -> bool:
+        state = (int(target), int(n), int(of))
+        if state == self._votes:
+            return not self.closed
+        if not self._write([f"votes {_target(target)} {n} {of}"]):
+            return False
+        self._votes = state
+        return True
+
+    def lanes(self, names: Sequence[str]) -> bool:
+        names = [_one_line(n).replace(",", " ") for n in names]
+        return self._write([f"lanes {','.join(names)}"])
+
+    def eeg(self, t_end: float, dt: float, samples: np.ndarray) -> bool:
+        values = " ".join(f"{v:.1f}" for v in np.asarray(samples, dtype=float).ravel())
+        return self._write([f"eeg {t_end:.4f} {dt:.5f} {values}"])
 
     def _set_holding(self, holding: bool) -> bool:
         if holding == self._holding:
@@ -157,18 +212,40 @@ class NullDisplay:
         self.arrow: Arrow = None
         self.panels: Panels = None
         self.text = ""
+        self.stage = "none"
         self.holding = True
         self.closed = False
+        self.windows: list[tuple[float, int, bool, bool]] = []
+        self.vote_state: tuple[int, int, int] | None = None
+        self.lane_names: tuple[str, ...] = ()
+        self.eeg_samples = 0       # counted, not kept: a long headless run sends many
 
     def show(self, groups: str, pieces_png: Path | None, arrow: Arrow, panels: Panels,
-             text: str) -> bool:
+             text: str, stage: str = "none") -> bool:
         if len(groups) != N_SQUARES:
             raise ValueError(f"groups needs {N_SQUARES} characters, got {len(groups)}")
         self.calls.append(("show", {"groups": groups, "pieces": pieces_png, "arrow": arrow,
-                                    "panels": panels, "text": text}))
+                                    "panels": panels, "text": text, "stage": stage}))
         self.groups, self.arrow, self.panels, self.text = groups, arrow, panels, text
+        self.stage = stage
         if pieces_png is not None:
             self.pieces = pieces_png
+        return True
+
+    def window(self, t: float, raw: int, fresh: bool, fired: bool) -> bool:
+        self.windows.append((t, raw, fresh, fired))
+        return True
+
+    def votes(self, target: int, n: int, of: int) -> bool:
+        self.vote_state = (target, n, of)
+        return True
+
+    def lanes(self, names: Sequence[str]) -> bool:
+        self.lane_names = tuple(names)
+        return True
+
+    def eeg(self, t_end: float, dt: float, samples: np.ndarray) -> bool:
+        self.eeg_samples += len(samples)
         return True
 
     def hold(self) -> bool:
@@ -336,9 +413,16 @@ class ChessSession:
             self._pieces_ply = ply
         return self._pieces_path
 
-    def _show(self, groups: str, arrow: Arrow, panels: Panels, text: str) -> None:
-        self.display_ok = self.display.show(groups, self._pieces(), arrow, panels, text) \
-            and self.display_ok
+    def _show(self, groups: str, arrow: Arrow, panels: Panels, text: str,
+              stage: str = "none") -> None:
+        self.display_ok = self.display.show(groups, self._pieces(), arrow, panels, text,
+                                            stage) and self.display_ok
+
+    def _votes(self) -> None:
+        gate = self.gate
+        if gate is not None:
+            self.display_ok = self.display.votes(gate.pending, gate.streak, gate.votes) \
+                and self.display_ok
 
     def _hold(self) -> None:
         self.display_ok = self.display.hold() and self.display_ok
@@ -349,13 +433,14 @@ class ChessSession:
     def _screen_changed(self) -> None:
         if self.gate is not None:
             self.gate.screen_changed()
+            self._votes()
         if self.on_screen is not None:
             self.on_screen(self)
 
     def _draw_selector(self) -> None:
         sel = self.selector
         assert sel is not None
-        self._show(sel.groups(), sel.arrow(), sel.panels(), sel.prompt())
+        self._show(sel.groups(), sel.arrow(), sel.panels(), sel.prompt(), sel.stage)
 
     def show_still(self, text: str) -> None:
         """The position on a still board with a caption (calibration, before start)."""
@@ -487,13 +572,24 @@ class ChessSession:
     def push(self, d: Decision) -> int:
         """Pass one decoder decision through the gate; the pick it fired, or ABSTAIN.
 
-        Decisions outside the user's turn are dropped (the board is still then).
+        Decisions outside the user's turn are dropped (the board is still then). Every
+        decision goes to the display's trace strip, marked fresh only when the gate
+        counted it, and the vote meter follows the gate.
         """
-        if self.phase != "user" or self.gate is None:
+        if self.gate is None:
             return ABSTAIN
+        t = d.end / self.gate.decoder.fs
+        if self.phase != "user":
+            self.display_ok = self.display.window(t, int(d.raw), False, False) \
+                and self.display_ok
+            return ABSTAIN
+        stale = self.gate.stale
         target = self.gate.push(d)
+        self.display_ok = self.display.window(t, int(d.raw), self.gate.stale == stale,
+                                              target != ABSTAIN) and self.display_ok
         if target != ABSTAIN:
             self.on_pick(target)
+        self._votes()
         return target
 
     def _end(self, why: str) -> None:

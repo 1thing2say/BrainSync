@@ -31,7 +31,7 @@ chess = ["chess>=1.10"]
 include = ["brainsync*", "app*", "tools*"]
 
 [tool.setuptools.package-data]
-brainsync = ["stimulus/configs/*.toml", "swipe_deck/*.toml", "web/*"]
+brainsync = ["stimulus/configs/*.toml", "swipe_deck/*.toml", "web/*", "brainchess/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
