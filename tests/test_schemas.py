@@ -106,6 +106,18 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
         ),
         s.parse_server_to_ui,
     ),
+    (
+        s.UIStatus(
+            decoder_connected=True,
+            decoder_ok=True,
+            display_ok=True,
+            llm_ok=False,
+            fake_decoder=True,
+            keyboard_mode=False,
+            decoder_name="fake-decoder",
+        ),
+        s.parse_server_to_ui,
+    ),
     # browser -> server
     (s.TTSDone(utterance_id="u1"), s.parse_ui_to_server),
     (s.PartnerText(text="Hungry?", source="typed"), s.parse_ui_to_server),
@@ -194,6 +206,7 @@ def test_status_resolves_per_direction() -> None:
         "keyboard_mode": True,
     }
     assert isinstance(s.parse_server_to_ui(ui_status), s.UIStatus)
+    assert s.parse_server_to_ui(ui_status).decoder_name == ""  # optional: "" before an ack
 
 
 V2_HELLO = {"type": "hello", "protocol": 2, "name": "x", "refresh_hz": 60.0, "waveform": "sine",

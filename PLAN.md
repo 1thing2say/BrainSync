@@ -114,6 +114,13 @@ pull requests.
   browser fallback voice (`ui/voice_core.js`) prefers local Premium / Enhanced English voices
   and never a network voice.
 
+- **Quality fixes (2026-10-24, branch `feat/quality-fixes`):** fewer Claude pages lost to the
+  fallback: one spare candidate (`menus.spare_options`), repeats and duplicates compared without
+  case or punctuation, and a hedged second call after `llm.hedge_after_s` (live `llm_eval`: 11/12
+  pages valid, the miss was the cold first connection). A decoder whose hello name starts with
+  "fake" counts as fake even when started by hand: FAKE DECODER badge, preflight WARN,
+  `decoder_acked` in the log. `/api/health` uses public properties only.
+
 ## System design
 
 ```
@@ -337,8 +344,10 @@ BrainSync/
 | `menus.label_max_chars` | 18 | |
 | `menus.label_max_words` | 3 | |
 | `menus.utterance_max_words` | 14 | |
+| `menus.spare_options` | 1 | Extra lower-ranked candidates Claude writes; a bad or repeated option is dropped and the next one fills the page, so one slip no longer loses it |
 | `llm.model` | `claude-haiku-5-5` | |
-| `llm.timeout_s` | 4.0 | One retry, then fallback |
+| `llm.timeout_s` | 4.0 | The whole budget per page: at most 3 calls (first, hedge, one retry), then fallback |
+| `llm.hedge_after_s` | 2.5 | No answer by then: the same call again, in parallel; the first usable answer wins. 0 = off; must be below `timeout_s` |
 | `llm.keepalive_s` | 20.0 | While idle, a free API call this often keeps the connection open; 0 = off |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |

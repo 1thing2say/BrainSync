@@ -360,7 +360,8 @@ def test_health_without_keys_bridge_or_page(client):
     h = client.get("/api/health").json()
     assert h["state"] == "IDLE"
     assert h["decoder"] == {"connected": False, "ok": False, "display_ok": False, "board_ok": False,
-                            "message": "", "keyboard_mode": False, "fake_decoder": False}
+                            "message": "", "keyboard_mode": False, "fake_decoder": False,
+                            "name": "", "fake_flag": False}
     assert h["partner_page"] == {"connected": False, "mic": "", "mic_muted": False,
                                  "stt_mode": BASE.speech.stt_mode}
     assert h["llm"]["enabled"] is False and "ANTHROPIC_API_KEY" in h["llm"]["why_disabled"]
@@ -380,11 +381,27 @@ def test_health_follows_the_bridge_page_and_mic(client):
             pass
         h = client.get("/api/health").json()
         assert h["decoder"]["connected"] and h["decoder"]["ok"] and h["decoder"]["display_ok"]
+        assert (h["decoder"]["name"], h["decoder"]["fake_decoder"]) == ("test", False)
         assert h["partner_page"]["connected"] and h["partner_page"]["mic"] == "listening"
         assert h["resume_ready"]
     # The page is gone: its last mic report no longer counts.
     h = client.get("/api/health").json()
     assert h["partner_page"] == {**h["partner_page"], "connected": False, "mic": ""}
+
+
+@pytest.mark.parametrize("flag, name, fake", [(False, "fake-decoder", True),
+                                              (True, "ssvep-fbcca", True),
+                                              (False, "ssvep-fbcca", False)])
+def test_health_counts_a_hand_started_fake_decoder_as_fake(tmp_path, flag, name, fake):
+    with TestClient(create_app(fast_config(), fake_decoder=flag, log_dir=tmp_path)) as client:
+        with client.websocket_connect("/ws/decoder") as dec:
+            dec.send_text(to_json(HELLO.model_copy(update={"name": name})))
+            recv_until(dec, "hello_ack")
+            d = client.get("/api/health").json()["decoder"]
+            assert (d["fake_decoder"], d["name"], d["fake_flag"]) == (fake, name, flag)
+        # The decoder is gone: only the flag is left.
+        d = client.get("/api/health").json()["decoder"]
+        assert (d["fake_decoder"], d["name"]) == (flag, "")
 
 
 def test_health_with_keys_carries_no_secrets_or_conversation(tmp_path):

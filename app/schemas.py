@@ -349,7 +349,8 @@ class UIStatus(Message):
 
     ``decoder_ok``: the bridge's hello passed and its last status was ok. ``decoder_message``: why
     not (a rejected hello), or the bridge's own status message. ``resume_ready``: Resume would
-    start a session now.
+    start a session now. ``fake_decoder``: selections are not EEG (``--fake-decoder``, or the acked
+    hello's name starts with "fake"). ``decoder_name``: the acked hello's name, "" before an ack.
     """
 
     type: Literal["status"] = "status"
@@ -361,6 +362,7 @@ class UIStatus(Message):
     keyboard_mode: bool
     board_ok: bool = False
     decoder_message: str = ""
+    decoder_name: str = ""
     mic_muted: bool = False  # the partner's Mute
     mic: str = ""  # the page's last mic_report state ("listening", "offline", "denied", ...)
     resume_ready: bool = False

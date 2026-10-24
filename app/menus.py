@@ -8,11 +8,20 @@ the fixed list from config/intents.yaml). The LLM only writes options: it never 
 selection (rule 1), and an option is spoken exactly as shown (rule 2).
 
 The call forces one strict tool call, ``propose_replies``, whose input has one field per rank
-(``option_1`` .. ``option_3``), so the output is schema-valid JSON with the ranking explicit.
-Lengths, intents and duplicates are checked here (strict schemas cannot express them). A label
-that is too long is shortened rather than rejected: it is only the short tag beside a square, and
-the utterance (what is spoken) is never changed. An invalid answer is retried once with the
-problems named, and a transient error once, within ``llm.timeout_s`` in all.
+(``option_1`` .. ``option_4`` with the defaults), so the output is schema-valid JSON with the
+ranking explicit. It asks for ``menus.spare_options`` more candidates than a page shows, ranked
+last. Lengths, intents, duplicates and repeats of options already shown are checked here, for
+each candidate on its own (strict schemas cannot express them): the page is the first
+``menus.option_count`` usable candidates in rank order, so one bad candidate costs a spare, not the
+page. Duplicates and repeats are compared without case, punctuation or extra spaces ("Yes,
+please." repeats "yes please"). A label that is too long is shortened rather than rejected: it is
+only the short tag beside a square, and the utterance (what is spoken) is never changed.
+
+Each page gets at most three calls, all inside ``llm.timeout_s``: the first; a second, identical
+one (the hedge) if the first has not answered after ``llm.hedge_after_s``, since a call stuck on a
+congested network rarely recovers in time; and one retry after an answer with too few usable
+candidates (the problems named) or a transient error. The first usable answer wins and the other
+calls are cancelled. A permanent error (bad request, key, model) gives up at once.
 
 The API key comes from the environment (``ANTHROPIC_API_KEY``, loaded from ``.env`` by the
 server's ``main``) and is never logged.
@@ -28,9 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import ValidationError
 
@@ -40,14 +50,21 @@ from app.log import EventLog
 from app.schemas import Option, validate_option
 
 TOOL_NAME = "propose_replies"
-MAX_TOKENS = 1024  # three short options; a forced tool call skips thinking on Claude Haiku 5.5
-ATTEMPTS = 2  # the first try and one retry
+MAX_TOKENS = 1024  # a few short options; a forced tool call skips thinking on Claude Haiku 5.5
 # HTTP statuses a retry cannot fix: bad request, key, permissions, model name.
 PERMANENT_STATUS = {400, 401, 403, 404}
 
 Done = Callable[[int, "list[Option] | None"], None]
 Create = Callable[..., Awaitable[Any]]
 Warm = Callable[[], Awaitable[Any]]
+
+
+class Call(NamedTuple):
+    """One Claude call of a page: ``first``, ``hedge`` or ``retry``, numbered in start order."""
+
+    name: str
+    attempt: int
+    started: float  # time.monotonic()
 
 
 class MenuMaker:
@@ -104,6 +121,15 @@ class MenuMaker:
     @property
     def enabled(self) -> bool:
         return not self.why_disabled
+
+    @property
+    def warm_ok(self) -> bool | None:
+        """Whether the last keep-alive call answered; None before the first one (or keep-alive off)."""
+        return self._warm_ok
+
+    @property
+    def keepalive_running(self) -> bool:
+        return self._keeper is not None
 
     @property
     def why_disabled(self) -> str:
@@ -189,45 +215,91 @@ class MenuMaker:
         return options
 
     async def _make_page(self, req: PageRequest) -> list[Option] | None:
+        """Up to three calls (first, hedge, retry) inside ``llm.timeout_s``; the first usable
+        answer wins. Calls still running when it returns are cancelled and awaited."""
         self._log("llm_request", request_id=req.request_id, reason=req.reason,
                   partner_last=req.partner_last)
         loop = asyncio.get_running_loop()
+        page_started = time.monotonic()
         deadline = loop.time() + self.llm.timeout_s
-        feedback: list[str] = []  # what was wrong with the last answer, for the retry
-        for attempt in range(1, ATTEMPTS + 1):
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            started = time.monotonic()
-            try:
-                msg = await asyncio.wait_for(self._create(**self.params(req, feedback)), remaining)
-            except TimeoutError:
-                self._log("llm_failed", request_id=req.request_id, reason="timeout", attempt=attempt,
-                          ms=round((time.monotonic() - started) * 1000))
-                return None  # no time left for a retry
-            except Exception as exc:  # the SDK's APIStatusError carries .status_code
-                status = getattr(exc, "status_code", None)
-                self._log("llm_failed", request_id=req.request_id, reason=type(exc).__name__,
-                          status=status, attempt=attempt,
-                          ms=round((time.monotonic() - started) * 1000))
-                # A TypeError is an SDK too old for these parameters: a retry cannot fix it either.
-                if status in PERMANENT_STATUS or isinstance(exc, TypeError):
+        hedge_s = self.llm.hedge_after_s
+        hedge_at = loop.time() + hedge_s if 0 < hedge_s < self.llm.timeout_s else None
+        calls: dict[asyncio.Task[Any], Call] = {}  # the calls still running
+        attempts = 0  # calls started (at most 3: first, hedge, retry)
+        retried = False  # the one retry is used (after an invalid answer or a transient error)
+
+        def ms_since(started: float) -> int:
+            return round((time.monotonic() - started) * 1000)
+
+        def start(name: str, feedback: list[str]) -> asyncio.Task[Any]:
+            nonlocal attempts
+            attempts += 1
+
+            # Called inside the task, so an SDK that rejects the parameters (TypeError when the
+            # call is made) fails that call like any other error.
+            async def send() -> Any:
+                return await self._create(**self.params(req, feedback))
+
+            task = loop.create_task(send())
+            calls[task] = Call(name, attempts, time.monotonic())
+            return task
+
+        try:
+            first = start("first", [])
+            while calls:
+                wake = deadline if hedge_at is None else min(deadline, hedge_at)
+                done, _ = await asyncio.wait(calls, timeout=max(0.0, wake - loop.time()),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                for task in sorted(done, key=lambda t: calls[t].attempt):
+                    call = calls.pop(task)
+                    ms = ms_since(call.started)
+                    try:
+                        msg = task.result()
+                    except Exception as exc:  # the SDK's APIStatusError carries .status_code
+                        status = getattr(exc, "status_code", None)
+                        self._log("llm_failed", request_id=req.request_id, reason=type(exc).__name__,
+                                  status=status, attempt=call.attempt, call=call.name, ms=ms)
+                        # A TypeError is an SDK too old for these parameters: a retry cannot fix it.
+                        if status in PERMANENT_STATUS or isinstance(exc, TypeError):
+                            return None
+                        # Connection errors, 429, 5xx: retry if time allows.
+                        if not retried and loop.time() < deadline:
+                            retried = True
+                            start("retry", [])
+                        continue
+                    options, problems, shortened = self.parse(msg, req)
+                    usage = getattr(msg, "usage", None)
+                    tokens = {"input_tokens": getattr(usage, "input_tokens", None),
+                              "output_tokens": getattr(usage, "output_tokens", None)}
+                    if options is not None:
+                        self._log("llm_ok", request_id=req.request_id, attempt=call.attempt,
+                                  call=call.name, ms=ms, page_ms=ms_since(page_started),
+                                  options=[o.utterance for o in options], dropped=problems,
+                                  labels_shortened=shortened,
+                                  cancelled=[c.name for c in calls.values()], **tokens)
+                        return options
+                    self._log("llm_invalid", request_id=req.request_id, attempt=call.attempt,
+                              call=call.name, ms=ms, problems=problems, **tokens)
+                    if not retried and loop.time() < deadline:
+                        retried = True
+                        start("retry", problems)  # the problems named, so it can fix them
+                if hedge_at is not None and loop.time() >= hedge_at:
+                    hedge_at = None
+                    if first in calls:  # the first call has not answered: send the same one again
+                        start("hedge", [])
+                        self._log("llm_hedge", request_id=req.request_id, attempt=attempts,
+                                  after_ms=ms_since(page_started))
+                if calls and loop.time() >= deadline:
+                    running = sorted(calls.values(), key=lambda c: c.attempt)
+                    self._log("llm_failed", request_id=req.request_id, reason="timeout",
+                              attempt=running[-1].attempt, calls=[c.name for c in running],
+                              ms=ms_since(page_started))
                     return None
-                continue  # connection errors, 429, 5xx: retry if time allows
-            ms = round((time.monotonic() - started) * 1000)
-            options, problems, shortened = self.parse(msg, req)
-            usage = getattr(msg, "usage", None)
-            tokens = {"input_tokens": getattr(usage, "input_tokens", None),
-                      "output_tokens": getattr(usage, "output_tokens", None)}
-            if options is not None:
-                self._log("llm_ok", request_id=req.request_id, attempt=attempt, ms=ms,
-                          options=[o.utterance for o in options], labels_shortened=shortened,
-                          **tokens)
-                return options
-            self._log("llm_invalid", request_id=req.request_id, attempt=attempt, ms=ms,
-                      problems=problems, **tokens)
-            feedback = problems
-        return None
+            return None
+        finally:
+            for task in calls:
+                task.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
 
     def params(self, req: PageRequest, feedback: list[str] | None = None) -> dict[str, Any]:
         """The Messages API request for one page; ``feedback`` names what a rejected answer broke."""
@@ -248,7 +320,15 @@ class MenuMaker:
     # -- validation ---------------------------------------------------------
 
     def parse(self, msg: Any, req: PageRequest) -> tuple[list[Option] | None, list[str], list[str]]:
-        """Options from the response (or None), the problems found, and the labels shortened."""
+        """The page from the response, the problems found, and the labels shortened.
+
+        Each candidate (``option_1`` .. ``option_N``, N = option_count + spare_options) is checked
+        on its own; the page is the first ``option_count`` usable ones in rank order. A candidate
+        is dropped if it breaks a length or intent rule, repeats an earlier kept candidate's
+        sentence or label, or repeats an option already shown. With too few usable candidates the
+        page is None and the problems are what the retry is told; otherwise the problems name the
+        candidates dropped (logged). Only the label is ever shortened, never the utterance.
+        """
         if getattr(msg, "stop_reason", None) == "refusal":
             return None, ["refused"], []
         block = next((b for b in getattr(msg, "content", []) or []
@@ -260,34 +340,42 @@ class MenuMaker:
         shortened: list[str] = []
         options: list[Option] = []
         known = set(self.intents.intent_ids)
-        for key in rank_keys(self.menus.option_count):
+        shown = {normalized(u) for u in req.shown}
+        kept_utterances: dict[str, str] = {}  # normalized utterance -> the rank key that has it
+        kept_labels: dict[str, str] = {}
+        for key in rank_keys(self.menus.option_count + self.menus.spare_options):
+            if len(options) == self.menus.option_count:
+                break  # the page is full: later spares are not needed
             try:
                 option = Option.model_validate(block.input.get(key))
             except ValidationError as exc:
                 problems.append(f"{key}: {exc.errors()[0].get('msg')}")
                 continue
-            label = shorten_label(option.label, self.menus.label_max_words, self.menus.label_max_chars)
-            if label != option.label.strip():
-                shortened.append(f"{option.label.strip()!r} -> {label!r}")
+            written = option.label.strip()
+            label = shorten_label(written, self.menus.label_max_words, self.menus.label_max_chars)
             option = Option(label=label, utterance=option.utterance.strip(),
                             intent_id=option.intent_id.strip())
-            problems += [f"{key}: {p}" for p in validate_option(
-                option, self.menus.label_max_chars, self.menus.utterance_max_words,
-                self.menus.label_max_words)]
+            found = validate_option(option, self.menus.label_max_chars,
+                                    self.menus.utterance_max_words, self.menus.label_max_words)
             if option.intent_id not in known:
-                problems.append(f"{key}: unknown intent {option.intent_id!r}")
+                found.append(f"unknown intent {option.intent_id!r}")
+            utterance, short = normalized(option.utterance), normalized(label)
+            if utterance in shown:
+                found.append(f"repeats an option already shown ({option.utterance!r})")
+            elif utterance in kept_utterances:
+                found.append(f"duplicate of {kept_utterances[utterance]}")
+            elif short in kept_labels:
+                found.append(f"duplicate label of {kept_labels[short]} ({label!r})")
+            if found:
+                problems += [f"{key}: {p}" for p in found]
+                continue
+            if label != written:
+                shortened.append(f"{written!r} -> {label!r}")
+            kept_utterances[utterance], kept_labels[short] = key, key
             options.append(option)
-        labels = [o.label.casefold() for o in options]
-        utterances = [o.utterance.casefold() for o in options]
-        if len(set(labels)) != len(labels) or len(set(utterances)) != len(utterances):
-            problems.append("duplicate options")
-        shown = {u.casefold() for u in req.shown}
-        repeats = [o.utterance for o in options if o.utterance.casefold() in shown]
-        if repeats:
-            problems.append(f"repeats options already shown: {repeats}")
-        if problems:
+        if len(options) < self.menus.option_count:
             return None, problems, shortened
-        return options, [], shortened
+        return options, problems, shortened
 
     def _log(self, event: str, **fields: object) -> None:
         if self.log is not None:
@@ -323,12 +411,19 @@ def shorten_label(label: str, max_words: int, max_chars: int) -> str:
     return " ".join(words)[:max_chars].rstrip(" ,.;:-")
 
 
+def normalized(text: str) -> str:
+    """``text`` for comparing options: casefolded, without punctuation, single spaces, so
+    "Yes, please." and "yes  please" are the same option."""
+    return " ".join(re.sub(r"[^\w\s]", "", text.casefold()).split())
+
+
 def rank_keys(count: int) -> list[str]:
     return [f"option_{i}" for i in range(1, count + 1)]
 
 
 def reply_tool(intents: IntentsConfig, menus: MenusConfig) -> dict[str, Any]:
-    """The strict ``propose_replies`` tool: one field per rank, each a label, sentence and intent."""
+    """The strict ``propose_replies`` tool: one field per rank, each a label, sentence and intent.
+    It asks for ``option_count + spare_options`` candidates, all required; the spares rank last."""
     option = {
         "type": "object",
         "properties": {
@@ -344,11 +439,18 @@ def reply_tool(intents: IntentsConfig, menus: MenusConfig) -> dict[str, Any]:
         "required": ["label", "utterance", "intent_id"],
         "additionalProperties": False,
     }
-    keys = rank_keys(menus.option_count)
+    keys = rank_keys(menus.option_count + menus.spare_options)
+    description = (f"Give the {len(keys)} replies the user is most likely to want to say next, "
+                   "ranked: option_1 is the most likely.")
+    if menus.spare_options:
+        spares = keys[menus.option_count:]
+        description += (f" {' and '.join(spares)} {'is a' if len(spares) == 1 else 'are'} "
+                        f"lower-ranked alternative{'s' if len(spares) > 1 else ''}, shown only if "
+                        "one above cannot be used. All replies are different from each other and "
+                        "from the options already shown.")
     return {
         "name": TOOL_NAME,
-        "description": (f"Give the {len(keys)} replies the user is most likely to want to say next, "
-                        "ranked: option_1 is the most likely."),
+        "description": description,
         "strict": True,
         "input_schema": {
             "type": "object",
@@ -454,11 +556,16 @@ def system_prompt(profile: Profile, intents: IntentsConfig, menus: MenusConfig) 
     voice = voice_sample(profile)
     avoid = (f"\nNever bring up: {'; '.join(profile.avoid_topics)}. If the partner raises one, keep "
              "the replies short and neutral.\n" if profile.avoid_topics else "")
+    spares = rank_keys(n + menus.spare_options)[n:]
+    spare = (f" After those {n}, write {len(spares)} spare "
+             f"option{'s' if len(spares) > 1 else ''} ({', '.join(spares)}), ranked lower: {name} "
+             f"sees a spare only when one of the first {n} cannot be used. Every option is "
+             "different from every other one and from the options already shown." if spares else "")
     return f"""\
 You write reply options for {name}, who talks through a brain-computer interface. {name} cannot \
 speak or type: they choose one of {n} short replies by looking at it, then confirm it, and the \
 laptop says the sentence aloud. Choosing takes several seconds, so the right reply should be among \
-the {n} you write, and most often it should be option_1.
+the first {n} you write, and most often it should be option_1.{spare}
 
 {name} says these sentences aloud to a real person, so any detail you make up becomes a false \
 statement in {name}'s voice. So keep what the replies say basic, and let how they say it sound \

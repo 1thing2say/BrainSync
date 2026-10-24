@@ -11,7 +11,8 @@ import pytest
 from app.config import load_config, load_intents, load_profile
 from app.context import Conversation, PageRequest, Turn, time_of_day
 from app.log import EventLog, read_events
-from app.menus import TOOL_NAME, MenuMaker, rank_keys, reply_tool, shorten_label, user_message
+from app.menus import (TOOL_NAME, MenuMaker, normalized, rank_keys, reply_tool, shorten_label,
+                       user_message)
 
 CFG = load_config()
 INTENTS = load_intents()
@@ -22,6 +23,7 @@ GOOD = {
     "option_2": {"label": "Not now", "utterance": "Not right now, thanks.", "intent_id": "later"},
     "option_3": {"label": "After lunch", "utterance": "Maybe after lunch.", "intent_id": "maybe"},
 }
+SPARE = {"label": "Bit later", "utterance": "Maybe a bit later.", "intent_id": "later"}
 
 
 def reply(options: dict | None = None, stop_reason: str = "tool_use", name: str = TOOL_NAME):
@@ -72,9 +74,12 @@ def event_log(tmp_path):
     log.close()
 
 
-def maker(fake, event_log=None, timeout_s: float = 4.0, **menus) -> MenuMaker:
-    return MenuMaker(CFG.menus.model_copy(update=menus),
-                     CFG.llm.model_copy(update={"timeout_s": timeout_s}),
+def maker(fake, event_log=None, timeout_s: float = 4.0, hedge_after_s: float | None = None,
+          **menus) -> MenuMaker:
+    llm = {"timeout_s": timeout_s}
+    if hedge_after_s is not None:
+        llm["hedge_after_s"] = hedge_after_s
+    return MenuMaker(CFG.menus.model_copy(update=menus), CFG.llm.model_copy(update=llm),
                      INTENTS, PROFILE, api_key=None, log=event_log, create=fake)
 
 
@@ -103,8 +108,11 @@ async def test_valid_answer_gives_ranked_options_and_sends_a_forced_strict_call(
 
 
 def test_tool_schema_is_strict_with_one_field_per_rank():
-    schema = reply_tool(INTENTS, CFG.menus)["input_schema"]
-    assert schema["required"] == ["option_1", "option_2", "option_3"]
+    tool = reply_tool(INTENTS, CFG.menus)
+    schema = tool["input_schema"]
+    # option_count 3 + spare_options 1, all required; the spare is ranked last
+    assert schema["required"] == ["option_1", "option_2", "option_3", "option_4"]
+    assert "option_4 is a lower-ranked alternative" in tool["description"]
     assert schema["additionalProperties"] is False
     option = schema["properties"]["option_1"]
     assert option["additionalProperties"] is False
@@ -347,6 +355,250 @@ def test_disabled_without_a_key_or_with_dynamic_off():
     assert not no_key.enabled and no_key.why_disabled == "ANTHROPIC_API_KEY is not set"
     off = maker(FakeClaude(reply(GOOD)), dynamic=False)
     assert not off.enabled and off.why_disabled == "menus.dynamic is false"
+
+
+# ---------------------------------------------------------------------------
+# Spare candidates
+# ---------------------------------------------------------------------------
+
+WITH_SPARE = {**GOOD, "option_4": SPARE}
+
+
+def utterances(options) -> list[str]:
+    return [o.utterance for o in options]
+
+
+@pytest.mark.parametrize("text, same", [
+    ("Yes, please.", "yes please"),
+    ("Not right   now!", "not right now"),
+    ("Let's go", "lets go"),
+    ("So-so.", "soso"),
+])
+def test_normalized_ignores_case_punctuation_and_spaces(text, same):
+    assert normalized(text) == same
+
+
+async def test_a_near_repeat_of_a_shown_option_is_dropped_and_the_spare_fills_the_page(event_log):
+    fake = FakeClaude(reply(WITH_SPARE))
+    options = await maker(fake, event_log).make_page(
+        request(reason="more", shown=("yes, lets go outside",)))
+    assert len(fake.calls) == 1  # no retry: the spare took the dropped option's place
+    assert utterances(options) == ["Not right now, thanks.", "Maybe after lunch.", "Maybe a bit later."]
+    ok = llm_events(event_log)[-1]
+    assert ok["event"] == "llm_ok" and len(ok["dropped"]) == 1
+    assert ok["dropped"][0].startswith("option_1: repeats an option already shown")
+
+
+async def test_a_duplicate_in_the_page_is_dropped_and_the_rest_keep_their_rank(event_log):
+    near_copy = {"label": "Sure", "utterance": "yes lets go outside", "intent_id": "yes"}
+    fake = FakeClaude(reply({**WITH_SPARE, "option_2": near_copy}))
+    options = await maker(fake, event_log).make_page(request())
+    assert utterances(options) == ["Yes, let's go outside.", "Maybe after lunch.", "Maybe a bit later."]
+    assert llm_events(event_log)[-1]["dropped"] == ["option_2: duplicate of option_1"]
+
+
+async def test_a_duplicate_label_is_dropped():
+    same_label = {"label": "let's go!", "utterance": "Sure, I'd like that.", "intent_id": "yes"}
+    options = await maker(FakeClaude(reply({**WITH_SPARE, "option_3": same_label}))).make_page(request())
+    assert utterances(options) == ["Yes, let's go outside.", "Not right now, thanks.", "Maybe a bit later."]
+
+
+async def test_an_unused_spare_is_left_out_and_an_invalid_one_is_not_checked(event_log):
+    options = await maker(FakeClaude(reply({**GOOD, "option_4": {**SPARE, "intent_id": "teleport"}})),
+                          event_log).make_page(request())
+    assert utterances(options) == [GOOD[k]["utterance"] for k in rank_keys(3)]
+    assert llm_events(event_log)[-1]["dropped"] == []
+
+
+async def test_two_bad_candidates_with_one_spare_are_retried_with_both_named(event_log):
+    bad = {**WITH_SPARE, "option_1": {**GOOD["option_1"], "intent_id": "teleport"},
+           "option_3": {**GOOD["option_3"], "utterance": "word " * 15}}
+    fake = FakeClaude(reply(bad), reply(WITH_SPARE))
+    options = await maker(fake, event_log).make_page(request())
+    assert utterances(options) == [GOOD[k]["utterance"] for k in rank_keys(3)]
+    retry = fake.calls[1]["messages"][0]["content"]
+    assert "option_1: unknown intent 'teleport'" in retry and "option_3: utterance over 14 words" in retry
+    assert [e["event"] for e in llm_events(event_log)] == ["llm_request", "llm_invalid", "llm_ok"]
+
+
+async def test_without_spares_one_bad_option_costs_the_page_as_before():
+    fake = FakeClaude(reply({**WITH_SPARE, "option_2": {**GOOD["option_2"], "label": ""}}), reply(GOOD))
+    m = maker(fake, spare_options=0)
+    assert m.tool["input_schema"]["required"] == rank_keys(3)
+    assert "lower-ranked" not in m.tool["description"] and "spare" not in m.system
+    options = await m.make_page(request())
+    assert len(fake.calls) == 2 and utterances(options) == [GOOD[k]["utterance"] for k in rank_keys(3)]
+
+
+def test_the_prompt_names_the_spare():
+    assert "write 1 spare option (option_4), ranked lower" in maker(FakeClaude(reply(GOOD))).system
+
+
+# ---------------------------------------------------------------------------
+# The hedged request
+# ---------------------------------------------------------------------------
+
+
+class SlowClaude:
+    """Each call takes its own (delay, answer) step, in order; records start times and cancels."""
+
+    def __init__(self, *steps) -> None:
+        self.steps = list(steps)
+        self.calls: list[dict] = []
+        self.started: list[float] = []
+        self.cancelled = 0
+
+    async def __call__(self, **params):
+        delay, answer = self.steps[len(self.calls)]
+        self.calls.append(params)
+        self.started.append(asyncio.get_running_loop().time())
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+OTHER = {**GOOD, "option_1": {"label": "Sounds good", "utterance": "That sounds good to me.",
+                              "intent_id": "yes"}}
+
+
+def no_other_tasks() -> bool:
+    return asyncio.all_tasks() == {asyncio.current_task()}
+
+
+async def test_the_hedge_starts_after_hedge_after_s_and_wins_when_the_first_call_is_slow(event_log):
+    fake = SlowClaude((1.0, reply(GOOD)), (0.02, reply(OTHER)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.1)
+    started = asyncio.get_running_loop().time()
+    options = await m.make_page(request())
+    assert options[0].utterance == "That sounds good to me."
+    assert len(fake.calls) == 2 and fake.started[1] - started >= 0.1
+    assert fake.calls[0] == fake.calls[1]  # the same request again
+    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+    hedge, ok = [e for e in llm_events(event_log) if e["event"] in ("llm_hedge", "llm_ok")]
+    assert hedge["event"] == "llm_hedge" and hedge["after_ms"] >= 100
+    assert ok["call"] == "hedge" and ok["attempt"] == 2 and ok["cancelled"] == ["first"]
+
+
+async def test_the_first_usable_answer_wins_and_the_other_call_is_cancelled(event_log):
+    fake = SlowClaude((0.2, reply(GOOD)), (1.0, reply(OTHER)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.1)
+    options = await m.make_page(request())
+    assert options[0].utterance == "Yes, let's go outside." and len(fake.calls) == 2
+    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+    ok = llm_events(event_log)[-1]
+    assert ok["call"] == "first" and ok["cancelled"] == ["hedge"]
+
+
+async def test_no_hedge_when_the_first_call_answers_in_time(event_log):
+    fake = SlowClaude((0.05, reply(GOOD)))
+    assert await maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.2).make_page(request())
+    await asyncio.sleep(0.25)
+    assert len(fake.calls) == 1
+    assert "llm_hedge" not in [e["event"] for e in llm_events(event_log)]
+
+
+async def test_no_hedge_once_the_first_call_has_answered_even_if_badly(event_log):
+    # The first answer is unusable; the feedback retry is the next call, never a hedge on top.
+    fake = SlowClaude((0.0, reply(None)), (0.3, reply(GOOD)))
+    m = maker(fake, event_log, timeout_s=0.6, hedge_after_s=0.05)
+    assert await m.make_page(request())
+    assert len(fake.calls) == 2 and "could not be used" in fake.calls[1]["messages"][0]["content"]
+    events = llm_events(event_log)
+    assert "llm_hedge" not in [e["event"] for e in events]
+    assert events[-1]["event"] == "llm_ok" and events[-1]["call"] == "retry"
+
+
+@pytest.mark.parametrize("hedge_after_s", [0, 0.05])
+async def test_repeated_network_errors_stop_at_one_retry(event_log, hedge_after_s):
+    fake = FakeClaude(ConnectionError("offline"))  # fails at once, every time
+    m = maker(fake, event_log, timeout_s=0.3, hedge_after_s=hedge_after_s)
+    assert await m.make_page(request()) is None
+    assert len(fake.calls) == 2
+    assert [e["event"] for e in llm_events(event_log)].count("llm_failed") == 2
+    assert m._busy == 0 and no_other_tasks()
+
+
+async def test_hedge_after_s_zero_means_no_hedge(event_log):
+    fake = SlowClaude((0.3, reply(GOOD)))
+    assert await maker(fake, event_log, timeout_s=1.0, hedge_after_s=0).make_page(request())
+    assert len(fake.calls) == 1
+    assert "llm_hedge" not in [e["event"] for e in llm_events(event_log)]
+
+
+async def test_the_deadline_still_gives_none_and_cancels_both_calls(event_log):
+    fake = SlowClaude((1.0, reply(GOOD)), (1.0, reply(OTHER)))
+    m = maker(fake, event_log, timeout_s=0.3, hedge_after_s=0.1)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert await m.make_page(request()) is None
+    assert loop.time() - started < 0.6
+    assert fake.cancelled == 2 and m._busy == 0 and no_other_tasks()
+    failed = llm_events(event_log)[-1]
+    assert failed["event"] == "llm_failed" and failed["reason"] == "timeout"
+    assert failed["calls"] == ["first", "hedge"] and 250 <= failed["ms"] < 600
+
+
+async def test_a_permanent_error_gives_up_at_once_without_a_hedge(event_log):
+    fake = SlowClaude((0.0, APIStatusError(401)), (0.0, reply(GOOD)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
+    assert await m.make_page(request()) is None
+    await asyncio.sleep(0.1)
+    assert len(fake.calls) == 1 and m._busy == 0
+    assert "llm_hedge" not in [e["event"] for e in llm_events(event_log)]
+
+
+async def test_a_permanent_error_from_the_hedge_cancels_the_first_call():
+    fake = SlowClaude((1.0, reply(GOOD)), (0.0, APIStatusError(403)))
+    m = maker(fake, timeout_s=0.5, hedge_after_s=0.05)
+    assert await m.make_page(request()) is None
+    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+
+
+async def test_an_invalid_hedge_answer_is_retried_while_the_first_call_runs(event_log):
+    # The hedge's bad answer gets the feedback retry at once; that retry wins.
+    bad = reply({**GOOD, "option_1": {**GOOD["option_1"], "label": ""}, "option_2": {
+        **GOOD["option_2"], "label": ""}})
+    fake = SlowClaude((1.0, reply(GOOD)), (0.0, bad), (0.0, reply(OTHER)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
+    options = await m.make_page(request())
+    assert options[0].utterance == "That sounds good to me." and len(fake.calls) == 3
+    assert "could not be used" in fake.calls[2]["messages"][0]["content"]
+    assert fake.cancelled == 1 and no_other_tasks()
+    assert llm_events(event_log)[-1]["call"] == "retry"
+
+
+async def test_at_most_three_calls_per_page(event_log):
+    bad = reply({**GOOD, "option_1": {**GOOD["option_1"], "label": ""},
+                 "option_2": {**GOOD["option_2"], "label": ""}})
+    fake = SlowClaude((0.2, bad), (0.0, bad), (0.0, bad), (0.0, reply(GOOD)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
+    assert await m.make_page(request()) is None
+    assert len(fake.calls) == 3 and m._busy == 0
+    events = [e["event"] for e in llm_events(event_log)]
+    assert events.count("llm_invalid") == 3 and "llm_failed" not in events
+
+
+async def test_a_transient_error_gets_the_retry_while_the_hedge_runs(event_log):
+    fake = SlowClaude((0.2, ConnectionError("offline")), (1.0, reply(GOOD)), (0.0, reply(OTHER)))
+    m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
+    options = await m.make_page(request())
+    assert options[0].utterance == "That sounds good to me." and len(fake.calls) == 3
+    assert fake.cancelled == 1 and no_other_tasks()
+
+
+async def test_stop_cancels_a_page_and_its_calls():
+    fake = SlowClaude((1.0, reply(GOOD)), (1.0, reply(OTHER)))
+    m = maker(fake, timeout_s=0.8, hedge_after_s=0.05)
+    got = []
+    m.request(request(), lambda rid, options: got.append(options))
+    await asyncio.sleep(0.1)
+    await m.stop()
+    assert fake.cancelled == 2 and m._busy == 0 and not got and no_other_tasks()
 
 
 # ---------------------------------------------------------------------------

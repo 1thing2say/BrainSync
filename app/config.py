@@ -104,6 +104,8 @@ class MenusConfig(Strict):
     mode: Literal["page", "list"]
     dynamic: bool
     option_count: int = Field(ge=1)
+    # extra candidates Claude writes, ranked last, that replace an invalid or repeated option
+    spare_options: int = Field(default=1, ge=0, le=3)
     label_max_chars: int = Field(ge=1)
     label_max_words: int = Field(ge=1)
     utterance_max_words: int = Field(ge=1)
@@ -113,6 +115,7 @@ class LLMConfig(Strict):
     model: str = Field(min_length=1)
     timeout_s: float = Field(gt=0)
     keepalive_s: float = Field(default=20.0, ge=0)  # 0: no keep-alive calls
+    hedge_after_s: float = Field(default=2.5, ge=0)  # a second, identical call if none answered; 0: off
 
 
 class ContextConfig(Strict):
@@ -198,6 +201,11 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     elif cfg.selection.confirm_mode != "never":
         problems.append("selection.confirm_mode: list mode has no confirm step; use never")
 
+    if cfg.llm.hedge_after_s and cfg.llm.hedge_after_s >= cfg.llm.timeout_s:
+        problems.append(
+            f"llm.hedge_after_s ({cfg.llm.hedge_after_s:g}) must be shorter than "
+            f"llm.timeout_s ({cfg.llm.timeout_s:g}), or 0 for no hedge"
+        )
     if cfg.speech.stt_max_line_s <= cfg.speech.stt_gap_s:
         problems.append("speech.stt_max_line_s must be longer than speech.stt_gap_s")
     if cfg.speech.model.endswith("-latest"):

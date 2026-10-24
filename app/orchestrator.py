@@ -190,12 +190,19 @@ class Orchestrator:
         self.decoder_connected = False
         self.acked = False  # the bridge's hello passed the check (hello_ack sent)
         self.decoder_error = ""  # why the last hello was rejected
+        self.decoder_name = ""  # the acked hello's name; "" before an ack
         self.paused_by_decoder = False
         # Last bridge status; assumed fine until a status says otherwise.
         self.bridge_ok = self.board_ok = self.display_ok = True
         self.bridge_message = ""
         self.baseline_id = 0
         self.expected_baseline: int | None = None  # baseline_id we wait for, if a bridge records it
+
+    @property
+    def decoder_fake(self) -> bool:
+        """Selections are not EEG: started with --fake-decoder, or the acked bridge says it is a
+        fake (tools/fake_decoder.py names itself "fake-decoder" unless --name says otherwise)."""
+        return self.fake_decoder or self.decoder_name.lower().startswith("fake")
 
     @property
     def shown(self) -> ShowPage | None:
@@ -247,6 +254,7 @@ class Orchestrator:
         self.decoder_connected = False
         self.acked = False
         self.decoder_error = ""
+        self.decoder_name = ""
         self.bridge_ok = self.board_ok = self.display_ok = True
         self.bridge_message = ""
         self._record("decoder_disconnected")
@@ -280,6 +288,7 @@ class Orchestrator:
         """Check the bridge's hello against config: hello_ack, or error and stay paused."""
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
                                   self.cfg.display.expected_refresh_hz)
+        self.decoder_name = ""  # a new hello: only an acked one names the decoder
         if problems:
             self.acked = False
             self.decoder_error = "; ".join(problems)
@@ -290,6 +299,9 @@ class Orchestrator:
             return
         self.acked = True
         self.decoder_error = ""
+        self.decoder_name = hello.name
+        # The log says whether this session's selections came from EEG.
+        self._record("decoder_acked", name=hello.name, fake=self.decoder_fake)
         screen = self.screen or self._build_screen()
         self._send_decoder(HelloAck(protocol=PROTOCOL, roles=self.roles,
                                     labels=screen.display.labels or {}))
@@ -760,7 +772,8 @@ class Orchestrator:
                              else self.bridge_message),
             resume_ready=self.state in (St.IDLE, St.PAUSED) and not self.resume_problem(),
             llm_ok=self.request_page is not None and self.llm_ok,
-            fake_decoder=self.fake_decoder,
+            fake_decoder=self.decoder_fake,
+            decoder_name=self.decoder_name,
             keyboard_mode=self.keyboard_mode,
             mic_muted=self.mic_muted,
             mic=self.mic_report,

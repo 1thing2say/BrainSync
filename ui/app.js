@@ -248,7 +248,8 @@ function renderStatus(s) {
     b.textContent = text;
     return b;
   }));
-  $("decoder-message").textContent = s.decoder_message || "";
+  const name = s.decoder_name ? `Decoder: ${s.decoder_name}` : "";
+  $("decoder-message").textContent = [name, s.decoder_message].filter(Boolean).join(" · ");
   const resume = $("resume");
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";

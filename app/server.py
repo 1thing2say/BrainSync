@@ -199,7 +199,9 @@ def create_app(
             "decoder": {"connected": status.decoder_connected, "ok": status.decoder_ok,
                         "display_ok": status.display_ok, "board_ok": status.board_ok,
                         "message": status.decoder_message, "keyboard_mode": keyboard_mode,
-                        "fake_decoder": fake_decoder},
+                        # fake_decoder: the flag, or a hand-started tools/fake_decoder.py (its name)
+                        "fake_decoder": status.fake_decoder, "name": status.decoder_name,
+                        "fake_flag": fake_decoder},
             # A closed page's last mic report says nothing about the next one.
             "partner_page": {"connected": page, "mic": status.mic if page else "",
                              "mic_muted": status.mic_muted, "stt_mode": cfg.speech.stt_mode},
@@ -208,7 +210,7 @@ def create_app(
                     "ok": status.llm_ok, "model": cfg.llm.model,
                     "keepalive_s": cfg.llm.keepalive_s,
                     # None until the first keep-alive call answered (or with keep-alive off)
-                    "warm_ok": menus._warm_ok, "keepalive_running": menus._keeper is not None},
+                    "warm_ok": menus.warm_ok, "keepalive_running": menus.keepalive_running},
             "tts": {"enabled": tts.enabled, "why_disabled": tts.why_disabled,
                     "provider": cfg.speech.provider, "model": cfg.speech.model,
                     "voice_id": cfg.speech.voice_id, "format": cfg.speech.format},
