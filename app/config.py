@@ -83,6 +83,7 @@ class StimConfig(Strict):
 
 class BaselineConfig(Strict):
     seconds: float = Field(gt=0)
+    timeout_s: float = Field(gt=0)
 
 
 class MenusConfig(Strict):
@@ -164,6 +165,11 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     pairs = [(s.freq_hz, round(s.phase_deg % 360, 6)) for s in stim.slots]
     if len(set(pairs)) != len(pairs):
         problems.append("stim.slots: two slots share the same frequency and phase")
+    if cfg.baseline.timeout_s <= cfg.baseline.seconds:
+        problems.append(
+            f"baseline.timeout_s ({cfg.baseline.timeout_s:g}) must be longer than "
+            f"baseline.seconds ({cfg.baseline.seconds:g})"
+        )
     return problems
 
 

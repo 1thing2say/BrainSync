@@ -304,7 +304,12 @@ class Transcript(Message):
 
 
 class UIStatus(Message):
-    """Status badges for the partner page."""
+    """Status badges for the partner page.
+
+    ``decoder_ok``: the bridge's hello passed and its last status was ok. ``decoder_message``: why
+    not (a rejected hello), or the bridge's own status message. ``resume_ready``: Resume would
+    start a session now.
+    """
 
     type: Literal["status"] = "status"
     decoder_connected: bool
@@ -313,6 +318,9 @@ class UIStatus(Message):
     llm_ok: bool
     fake_decoder: bool
     keyboard_mode: bool
+    board_ok: bool = False
+    decoder_message: str = ""
+    resume_ready: bool = False
 
 
 # ---------------------------------------------------------------------------

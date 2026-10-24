@@ -23,6 +23,7 @@ stim:
 
 baseline:
   seconds: 10.0                # still screen at start for the decoder's resting baseline
+  timeout_s: 15.0              # no baseline_done from the bridge by then -> pause
 
 menus:
   dynamic: true                # false = fallback lists from intents.yaml only

@@ -11,6 +11,7 @@ from app.orchestrator import DIDNT_CATCH, MORE_LABEL, Orchestrator, St
 from app.schemas import (
     PROTOCOL,
     Baseline,
+    BaselineDone,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -58,14 +59,34 @@ class Clock:
 
 
 class Rig:
-    """An orchestrator plus everything it sent, and helpers to move time forward."""
+    """An orchestrator plus everything it sent, and helpers to move time forward.
 
-    def __init__(self, cfg=CFG, keyboard_mode: bool = False) -> None:
+    By default a bridge is connected and acked, and ``to_trial`` answers its baselines; pass
+    ``bridge=False`` for a session without one.
+    """
+
+    def __init__(self, cfg=CFG, keyboard_mode: bool = False, bridge: bool = True) -> None:
         self.clock = Clock()
         self.ui: list = []
         self.decoder: list = []
         self.o = Orchestrator(cfg, INTENTS, self.ui.append, self.decoder.append, clock=self.clock,
                               keyboard_mode=keyboard_mode)
+        if bridge:
+            self.connect()
+
+    def connect(self, **hello_changes) -> None:
+        self.o.on_decoder_connected()
+        self.o.on_decoder_message(bridge_hello(**hello_changes))
+
+    def finish_baseline(self, ok: bool = True, message: str = "") -> None:
+        assert self.o.state is St.BASELINE and self.o.expected_baseline is not None
+        self.o.on_decoder_message(BaselineDone(baseline_id=self.o.expected_baseline, ok=ok,
+                                               message=message))
+
+    def status(self, **flags) -> None:
+        fields = dict(ok=True, board_ok=True, display_ok=True, message="")
+        fields.update(flags)
+        self.o.on_decoder_message(DecoderStatus(**fields))
 
     def advance(self, seconds: float) -> None:
         self.clock.t += seconds
@@ -82,7 +103,10 @@ class Rig:
         if self.o.state in (St.IDLE, St.PAUSED):
             self.o.on_ui_message(Resume())
         while self.o.state is not St.STIMULATING:
-            self.run_out()
+            if self.o.state is St.BASELINE and self.o.expected_baseline is not None:
+                self.finish_baseline()
+            else:
+                self.run_out()
         return self.last(self.decoder, StimStart)
 
     def select(self, slot: str) -> None:
@@ -98,8 +122,6 @@ class Rig:
 
 def test_matching_hello_gets_hello_ack_with_roles_and_labels():
     r = Rig()
-    r.o.on_decoder_connected()
-    r.o.on_decoder_message(bridge_hello())
     ack = r.last(r.decoder, HelloAck)
     assert ack.protocol == PROTOCOL
     assert ack.roles == {"s1": "say", "s2": "next"}
@@ -116,30 +138,132 @@ def test_matching_hello_gets_hello_ack_with_roles_and_labels():
 def test_mismatched_hello_gets_error_and_pauses(changes, fragment):
     r = Rig()
     r.to_trial()
-    r.o.on_decoder_connected()
-    r.o.on_decoder_message(bridge_hello(**changes))
+    r.o.on_decoder_message(bridge_hello(**changes))  # the bridge says hello again, now wrong
     assert fragment in r.last(r.decoder, ProtocolError).message
-    assert not [m for m in r.decoder if isinstance(m, HelloAck)]
+    assert len([m for m in r.decoder if isinstance(m, HelloAck)]) == 1  # only the first hello
     assert r.o.state is St.PAUSED
     assert fragment in r.last(r.ui, State).detail
     assert not r.last(r.ui, UIStatus).decoder_ok
 
 
 def test_status_cannot_override_a_rejected_hello():
-    r = Rig()
-    r.o.on_decoder_connected()
-    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
-    r.o.on_decoder_message(DecoderStatus(ok=True, board_ok=True, display_ok=True))
+    r = Rig(bridge=False)
+    r.connect(refresh_hz=120.0)
+    r.status()
     assert not r.last(r.ui, UIStatus).decoder_ok
+
+
+def test_nothing_is_sent_to_the_bridge_before_hello_ack():
+    r = Rig(bridge=False)
+    r.connect(refresh_hz=120.0)
+    r.o.on_ui_message(Resume())
+    r.o.on_ui_message(Stop())
+    assert [type(m) for m in r.decoder] == [ProtocolError]
+    assert r.o.state is St.IDLE
+    assert "Decoder rejected" in r.last(r.ui, State).detail
+    assert not r.last(r.ui, UIStatus).resume_ready
+
+
+def test_resume_waits_for_a_bridge_unless_keyboard_mode():
+    r = Rig(bridge=False)
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.IDLE and r.last(r.ui, State).detail == "Waiting for the decoder"
+    k = Rig(bridge=False, keyboard_mode=True)
+    k.o.on_ui_message(Resume())
+    assert k.o.state is St.BASELINE and k.o.expected_baseline is None
+    k.advance(CFG.baseline.seconds)  # no bridge: the still screen is timed
+    assert k.o.state is St.MENU_CUE
+
+
+def test_baseline_waits_for_baseline_done_with_the_right_id():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    sent = r.last(r.decoder, Baseline)
+    r.advance(CFG.baseline.seconds + 1)
+    assert r.o.state is St.BASELINE  # the timer alone does not end it
+    r.o.on_decoder_message(BaselineDone(baseline_id=sent.baseline_id - 1, ok=True))
+    assert r.o.state is St.BASELINE  # stale id ignored
+    r.o.on_decoder_message(BaselineDone(baseline_id=sent.baseline_id, ok=True))
+    assert r.o.state is St.MENU_CUE
+
+
+def test_failed_baseline_pauses_with_the_message():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.finish_baseline(ok=False, message="O1 contact lost")
+    assert r.o.state is St.PAUSED
+    assert r.last(r.ui, State).detail == "Baseline failed: O1 contact lost"
+    assert isinstance(r.decoder[-1], Pause)
+    assert r.last(r.ui, UIStatus).resume_ready
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.BASELINE and r.o.expected_baseline == 2
+
+
+def test_missing_baseline_done_times_out_and_pauses():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.advance(CFG.baseline.timeout_s)
+    assert r.o.state is St.PAUSED
+    assert "no baseline_done" in r.last(r.ui, State).detail
+    r.o.on_decoder_message(BaselineDone(baseline_id=1, ok=True))  # too late: ignored
+    assert r.o.state is St.PAUSED
+
+
+def test_stop_during_baseline_forgets_it():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.o.on_ui_message(Stop())
+    r.o.on_decoder_message(BaselineDone(baseline_id=1, ok=True))
+    assert r.o.state is St.PAUSED
+
+
+def test_display_lost_pauses_and_only_resumes_by_hand():
+    r = Rig()
+    r.to_trial()
+    r.status(display_ok=False, message="Esc pressed")
+    assert r.o.state is St.PAUSED
+    assert [type(m) for m in r.decoder[-2:]] == [StimStop, Pause]
+    assert r.last(r.decoder, StimStop).reason == "paused"
+    status = r.last(r.ui, UIStatus)
+    assert not status.display_ok and not status.resume_ready
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.PAUSED and "Display closed" in r.last(r.ui, State).detail
+    r.status(display_ok=True)
+    assert r.o.state is St.PAUSED  # no automatic restart after Esc
+    assert r.last(r.ui, UIStatus).resume_ready
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.BASELINE
+
+
+def test_board_not_ok_is_a_badge_only():
+    r = Rig()
+    r.to_trial()
+    r.status(board_ok=False, message="posterior RMS 250 uV")
+    assert r.o.state is St.STIMULATING
+    status = r.last(r.ui, UIStatus)
+    assert not status.board_ok and status.display_ok
+    assert status.decoder_message == "posterior RMS 250 uV"
+
+
+def test_reconnect_needs_a_good_hello_before_the_baseline():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()
+    assert r.o.state is St.PAUSED
+    r.o.on_decoder_connected()
+    assert r.o.state is St.PAUSED  # not before the hello
+    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
+    assert r.o.state is St.PAUSED
+    r.o.on_decoder_message(bridge_hello())
+    assert r.o.state is St.BASELINE
 
 
 def test_start_goes_through_baseline_and_cue():
     r = Rig()
     r.o.on_ui_message(Resume())
     assert r.o.state is St.BASELINE
-    r.advance(CFG.baseline.seconds - 0.01)
-    assert r.o.state is St.BASELINE
-    r.advance(0.01)
+    assert r.last(r.decoder, Baseline).seconds == CFG.baseline.seconds
+    r.finish_baseline()
     assert r.o.state is St.MENU_CUE
     shown = r.last(r.ui, ShowOption)
     assert shown.index == 0 and shown.utterance == INTENTS.fallback_lists["home"][0].utterance
@@ -434,6 +558,8 @@ def test_twenty_trials_unattended_never_get_stuck():
         elif r.o.state is St.SPEAKING:
             r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
             spoken += 1
+        elif r.o.state is St.BASELINE:
+            r.finish_baseline()
         else:
             r.run_out()
         assert r.o.deadline is not None or r.o.state is St.SPEAKING, f"stuck in {r.o.state}"

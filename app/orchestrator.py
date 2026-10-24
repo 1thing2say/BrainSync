@@ -124,10 +124,14 @@ class Orchestrator:
         self.last_spoken_id: str | None = None
 
         self.decoder_connected = False
-        self.decoder_ok = False  # the bridge's hello passed the check (hello_ack sent)
+        self.acked = False  # the bridge's hello passed the check (hello_ack sent)
         self.decoder_error = ""  # why the last hello was rejected
         self.paused_by_decoder = False
+        # Last bridge status; assumed fine until a status says otherwise.
+        self.bridge_ok = self.board_ok = self.display_ok = True
+        self.bridge_message = ""
         self.baseline_id = 0
+        self.expected_baseline: int | None = None  # baseline_id we wait for, if a bridge records it
 
     # ------------------------------------------------------------------ events: time
 
@@ -139,7 +143,12 @@ class Orchestrator:
 
     def _on_deadline(self) -> None:
         if self.state is St.BASELINE:
-            self._enter_menu_cue()
+            if self.expected_baseline is None:
+                self._enter_menu_cue()  # no bridge recording it: the still screen was the baseline
+            else:
+                self._record("baseline_timeout", baseline_id=self.expected_baseline)
+                self._pause_session(f"Baseline failed: no baseline_done within "
+                                    f"{self.cfg.baseline.timeout_s:g} s", "baseline_failed")
         elif self.state is St.MENU_CUE:
             self._start_trial()
         elif self.state is St.STIMULATING:
@@ -165,8 +174,10 @@ class Orchestrator:
 
     def on_decoder_disconnected(self) -> None:
         self.decoder_connected = False
-        self.decoder_ok = False
+        self.acked = False
         self.decoder_error = ""
+        self.bridge_ok = self.board_ok = self.display_ok = True
+        self.bridge_message = ""
         self._record("decoder_disconnected")
         self._send_status()
         if self.keyboard_mode or self.state in (St.IDLE, St.PAUSED):
@@ -179,11 +190,9 @@ class Orchestrator:
         if isinstance(msg, DecoderHello):
             self._on_hello(msg)
         elif isinstance(msg, DecoderStatus):
-            if msg.ok != self.decoder_ok and not self.decoder_error:
-                self.decoder_ok = msg.ok
-                self._send_status()
+            self._on_bridge_status(msg)
         elif isinstance(msg, BaselineDone):
-            pass  # logged above; step 3 waits for it instead of the baseline timer
+            self._on_baseline_done(msg)
         elif isinstance(msg, Selection):
             self._on_selection(msg.trial_id, msg.slot, source="decoder")
         elif isinstance(msg, NoSelection):
@@ -199,14 +208,14 @@ class Orchestrator:
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
                                   self.cfg.display.expected_refresh_hz)
         if problems:
-            self.decoder_ok = False
+            self.acked = False
             self.decoder_error = "; ".join(problems)
             self._send_decoder(ProtocolError(message=self.decoder_error))
             self._send_status()
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause(f"Decoder rejected: {self.decoder_error}")
             return
-        self.decoder_ok = True
+        self.acked = True
         self.decoder_error = ""
         last = self.shown is not None and self.shown.index == self.shown.count - 1
         self._send_decoder(HelloAck(
@@ -215,8 +224,45 @@ class Orchestrator:
             labels={slot: self._label(role, last) for slot, role in self.roles.items()},
         ))
         self._send_status()
-        if self.state is St.PAUSED and self.paused_by_decoder:
+        if self.state is St.PAUSED and self.paused_by_decoder and self.display_ok:
             self._enter_baseline()
+
+    def _on_bridge_status(self, msg: DecoderStatus) -> None:
+        display_lost = self.display_ok and not msg.display_ok
+        changed = (msg.ok, msg.board_ok, msg.display_ok, msg.message) != (
+            self.bridge_ok, self.board_ok, self.display_ok, self.bridge_message)
+        self.bridge_ok, self.board_ok, self.display_ok = msg.ok, msg.board_ok, msg.display_ok
+        self.bridge_message = msg.message
+        if display_lost and self.state not in (St.IDLE, St.PAUSED):
+            # The flicker is already off (Esc or the display exited). No automatic resume:
+            # after Esc the partner presses Resume once the display is back.
+            self._pause_session("Display closed (Esc or exit)", "display_closed")
+            self.paused_by_decoder = False
+        elif changed:
+            self._send_status()
+
+    def _on_baseline_done(self, msg: BaselineDone) -> None:
+        if self.state is not St.BASELINE or msg.baseline_id != self.expected_baseline:
+            self._record("stale_baseline_done", baseline_id=msg.baseline_id)
+            return
+        self.expected_baseline = None
+        if msg.ok:
+            self._enter_menu_cue()
+        else:
+            self._pause_session(f"Baseline failed: {msg.message or 'no reason given'}",
+                                "baseline_failed")
+
+    def resume_problem(self) -> str:
+        """Why Resume would not start a session now; empty if it would."""
+        if self.keyboard_mode and not self.acked:
+            return ""  # keyboard mode runs without a bridge
+        if self.decoder_error:
+            return f"Decoder rejected: {self.decoder_error}"
+        if not self.acked:
+            return "Waiting for the decoder"
+        if not self.display_ok:
+            return "Display closed: restart it, then Resume"
+        return ""
 
     # ---------------------------------------------------------------- events: browser
 
@@ -232,7 +278,11 @@ class Orchestrator:
         self._record("from_ui", message=msg)
         if isinstance(msg, Resume):
             if self.state in (St.IDLE, St.PAUSED):
-                self._enter_baseline()
+                problem = self.resume_problem()
+                if problem:
+                    self._send_state(problem)  # stay put; the page shows why
+                else:
+                    self._enter_baseline()
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
@@ -276,11 +326,19 @@ class Orchestrator:
         self._send_state(detail)
 
     def _enter_baseline(self) -> None:
+        """Still screen while the bridge records the resting baseline (draft section 3).
+
+        With an acked bridge, wait for its baseline_done (up to baseline.timeout_s); without one
+        (keyboard mode) the still screen simply lasts baseline.seconds.
+        """
         self.paused_by_decoder = False
-        self._enter(St.BASELINE, self.cfg.baseline.seconds, "Keep still and look at the screen")
-        self._send_ui(Trial(trial_id=self.trial_id, phase="baseline"))
         self.baseline_id += 1
+        self.expected_baseline = self.baseline_id if self.acked else None
+        wait = self.cfg.baseline.timeout_s if self.acked else self.cfg.baseline.seconds
+        self._enter(St.BASELINE, wait, "Keep still and look at the screen")
+        self._send_ui(Trial(trial_id=self.trial_id, phase="baseline"))
         self._send_decoder(Baseline(baseline_id=self.baseline_id, seconds=self.cfg.baseline.seconds))
+        self._send_status()  # resume_ready changes
 
     def _enter_menu_cue(self) -> None:
         if self.pending_list is not None:
@@ -379,7 +437,14 @@ class Orchestrator:
 
     def _pause(self, detail: str) -> None:
         self._stop_trial("paused")
+        self.expected_baseline = None
         self._enter(St.PAUSED, None, detail)
+        self._send_status()  # resume_ready changes
+
+    def _pause_session(self, detail: str, reason: str) -> None:
+        """Pause and tell the bridge to keep the flicker off until the next baseline."""
+        self._pause(detail)
+        self._send_decoder(Pause(reason=reason))
 
     # ---------------------------------------------------------------------- helpers
 
@@ -395,11 +460,14 @@ class Orchestrator:
         return MORE_LABEL if role == "next" and last_option else ROLE_LABELS[role]
 
     def status(self) -> UIStatus:
-        # Step 3 adds the bridge's own board_ok / display_ok here.
         return UIStatus(
             decoder_connected=self.decoder_connected,
-            decoder_ok=self.decoder_ok,
-            display_ok=self.decoder_ok,
+            decoder_ok=self.acked and self.bridge_ok,
+            display_ok=self.acked and self.display_ok,
+            board_ok=self.acked and self.board_ok,
+            decoder_message=(f"Rejected: {self.decoder_error}" if self.decoder_error
+                             else self.bridge_message),
+            resume_ready=self.state in (St.IDLE, St.PAUSED) and not self.resume_problem(),
             llm_ok=False,  # no LLM until V3
             fake_decoder=self.fake_decoder,
             keyboard_mode=self.keyboard_mode,
@@ -419,6 +487,10 @@ class Orchestrator:
         self._send_ui_cb(msg)
 
     def _send_decoder(self, msg: Message) -> None:
+        # Draft rule 3: the bridge acts on nothing before hello_ack, so nothing is sent before it.
+        if not self.acked and not isinstance(msg, (HelloAck, ProtocolError)):
+            self._record("not_sent_before_ack", message=msg)
+            return
         self._record("to_decoder", message=msg)
         self._send_decoder_cb(msg)
 

@@ -162,7 +162,12 @@ def create_app(
 
     @app.websocket("/ws/decoder")
     async def ws_decoder(ws: WebSocket) -> None:
+        replacing = hub.decoder is not None
         conn = await attach(ws, "decoder")
+        if replacing:
+            # The old bridge is gone (its flicker is off): handle it as a disconnect, so a running
+            # trial pauses and the new bridge resumes it after its hello passes.
+            orch.on_decoder_disconnected()
         orch.on_decoder_connected()
         try:
             await receive(ws, parse_decoder_to_server, orch.on_decoder_message, "decoder")
