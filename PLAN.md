@@ -60,8 +60,14 @@ pull requests.
   input).
 - **Cartesia TTS built (2026-10-24):** `app/tts.py` pre-generates each page's 3 clips, the server
   serves them at `/audio/{id}`, `speech.js` plays them with the `speechSynthesis` fallback. Key from
-  `.env`; without it the server prints "browser speechSynthesis only". Not yet tried against the
-  live API.
+  `.env`; without it the server prints "browser speechSynthesis only". Tested live on the venue
+  Wi-Fi: MP3, at most 2 requests at once (plan limit), retries, 8 s per attempt.
+- **V3 built (2026-10-24), not yet tried live:** `app/menus.py` asks `claude-haiku-5-5` for each
+  page after a partner line and for "More options" (one forced strict tool call, validated, one
+  retry); `app/context.py` keeps the conversation. The next cue waits in `PREPARING` up to
+  `llm.timeout_s` (4 s), then shows the fixed list; a later page is dropped. The page after a
+  spoken reply is the fixed home list. A failed "More options" falls back to the fixed "more"
+  list. Needs `ANTHROPIC_API_KEY` in `.env`; the log summary (latency, option-1 rate) is V6.
 - **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
   mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
   draft describes 4 targets and 2-slot confirm trials.
@@ -291,7 +297,7 @@ BrainSync/
 | `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
 | `speech.model` | `sonic-3.5` | Pinned; never `sonic-latest` |
 | `speech.api_version` | `2026-03-01` | `Cartesia-Version` header. The API reference (checked 2026-10-24) lists `2026-08-14`; switch if a test synthesis is rejected |
-| `speech.language` / `speech.sample_rate` | `en` / `44100` | WAV `pcm_s16le`, played by a plain `<audio>` element |
+| `speech.language` / `speech.format` | `en` / `mp3` | MP3 22050 Hz, 64 kbps: about 17 KB a sentence, 10x smaller than 44.1 kHz WAV, which the venue Wi-Fi needed; `wav` (`pcm_s16le`) still works |
 | `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
 | `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
