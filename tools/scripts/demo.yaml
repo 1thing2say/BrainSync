@@ -1,0 +1,15 @@
+# Example fake-decoder script: one step per trial, in order. After the last step it loops back
+# to the first. Each step is exactly one of:
+#   {slot: s1}                 send a selection for that slot (must be one of the active slots)
+#   {no_selection: low_signal} send no_selection with that reason
+#   {timeout: true}            send nothing; the server ends the trial as not caught
+# Optional per step: latency (seconds), overriding --latency.
+#
+#   python tools/fake_decoder.py --script tools/scripts/demo.yaml
+- slot: s1
+- slot: s2
+  latency: 3.0
+- no_selection: low_signal
+- slot: s1
+  latency: 2.0
+- timeout: true
