@@ -238,24 +238,20 @@ dialog .actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap
       sees the SSVEP. A lower depth gives a weaker response, so measure accuracy at each depth
       with the headset before lowering any config's default.</p>
     <ol class="steps">
-      <li>Record one cued session per depth, same config and same sitting. Change the order
-        between people so fatigue doesn't always land on the same depth.
-        <pre>OUT=~/brainsync-depth-ab
-.venv/bin/python -m brainsync.record -c two_targets --depth 1.0 --save-dir "$OUT/d1.0"
-.venv/bin/python -m brainsync.record -c two_targets --depth 0.6 --save-dir "$OUT/d0.6"
-.venv/bin/python -m brainsync.record -c two_targets --depth 0.4 --save-dir "$OUT/d0.4"</pre></li>
-      <li>Score each depth's sessions and compare the accuracies.
-        <pre>for d in 1.0 0.6 0.4; do
-  echo "depth $d"; .venv/bin/python -m brainsync.score_cued "$OUT/d$d"/*_cued.npz
-done</pre></li>
-      <li>To include the square wave, copy <code>brainsync/stimulus/configs/two_targets.toml</code>,
-        set <code>waveform = "square"</code> under <code>[stimulus]</code>, and pass the copy with
-        <code>-c path/to/copy.toml</code>. At 60 Hz, 17 Hz is 3.53 frames per cycle, so its square
-        duty cycle is uneven; the config check warns about it.</li>
-      <li>Ask for a comfort rating (1–5) after each session, the same scale as the blind
-        test, so comfort and accuracy line up per depth.</li>
-      <li>For BrainChess, repeat with <code>-c chess_probe</code>: its board-square targets are
-        small and give the weakest response, so a lower depth costs the most there.</li>
+      <li>Run one session that mixes the conditions trial by trial, so fatigue and electrode
+        drift affect every condition equally. A per-condition table (decoded, SNR, CCA r,
+        comfort) updates under the squares between flickers, and the session is saved.
+        <pre>.venv/bin/python -m brainsync.ab --rate                                    # square 1, sine 1, sine 0.5
+.venv/bin/python -m brainsync.ab --rate --conditions sine:1,sine:0.6,sine:0.4</pre></li>
+      <li>With <code>--rate</code>, rate each trial 1–5 on the keyboard, the same scale as the
+        blind test. A trial's condition is shown only after it is rated.</li>
+      <li>Score a saved session again, or check the pipeline with no headset:
+        <pre>.venv/bin/python -m brainsync.ab --score &lt;file&gt;_cued.npz
+.venv/bin/python -m brainsync.ab --fake</pre></li>
+      <li>At 60 Hz, 17 Hz is 3.53 frames per cycle, so its square wave is uneven. The tool
+        warns about this.</li>
+      <li>For BrainChess, repeat with <code>-c chess_probe</code>. Its targets are small
+        board squares and give the weakest response, so a lower depth costs the most there.</li>
     </ol>
   </section>
 </div>
