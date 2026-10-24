@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import chess
+import numpy as np
 
 from ..board import CerelogBoard, FakeBoard
 from ..classify import ABSTAIN, make
@@ -54,6 +55,7 @@ from ..stimulus.config import config_warnings
 from .gate import MoveGate
 from .game import ChessSession, NullDisplay, SimulatedUser, StimulusDisplay, game_outcome
 from .prior import Engine, find_stockfish
+from .trace import TraceFeed
 
 STIMULUS_MODULE = "brainsync.brainchess.stimulus"
 DEFAULT_CONFIG = "chess"
@@ -200,12 +202,14 @@ def _status(d: Decision, elapsed: float, freqs: tuple[float, ...], session: Ches
 def play(session: ChessSession, decoder: Decoder, board: Any, seconds: float,
          on_decision: Callable[[Decision], None], sleep: Callable[[float], None] = time.sleep,
          clock: Callable[[], float] = time.monotonic, stop: Callable[[], str | None] | None = None,
-         poll_s: float = POLL_S, stall_s: float = STALL_S) -> str:
+         poll_s: float = POLL_S, stall_s: float = STALL_S,
+         on_read: Callable[[np.ndarray], None] | None = None) -> str:
     """Decode and play until the session ends; returns why the run ended.
 
     ``seconds`` > 0 caps the data fed; ``stop()`` returning a reason ends the run with it;
     a display that stopped accepting lines ends it ("stimulus pipe closed"); no samples
-    for ``stall_s`` by ``clock`` ends it with "board stalled".
+    for ``stall_s`` by ``clock`` ends it with "board stalled". ``on_read(X)`` sees every
+    non-empty read once the decoder has been fed it (the trace strip's EEG lanes).
     """
     limit = None if seconds <= 0 else decoder.n_seen + int(round(seconds * decoder.fs))
     heard = clock()
@@ -226,7 +230,10 @@ def play(session: ChessSession, decoder: Decoder, board: Any, seconds: float,
             heard = now
         elif now - heard >= stall_s:
             return "board stalled"
-        for d in decoder.feed(X, t):
+        decisions = decoder.feed(X, t)
+        if on_read is not None and X.shape[1]:
+            on_read(X)
+        for d in decisions:
             on_decision(d)
         session.tick()
 
@@ -391,6 +398,14 @@ def main(argv: list[str] | None = None) -> int:
                                        clock=clock, speak=say,
                                        pieces_dir=None if tmp is None else tmp.name,
                                        on_screen=look if user is not None else None)
+                display.lanes(decoder.channel_names)
+                feed = TraceFeed(decoder.rows, decoder.fs)
+
+                def on_read(X: np.ndarray) -> None:
+                    shown = feed.push(X, decoder.n_seen)
+                    if shown is not None:
+                        display.eeg(shown[0], feed.dt, shown[1])
+
                 # the baseline is fit on the still board the user will see between picks
                 session.show_still(STILL_PROMPT)
                 say(STILL_PROMPT + ".")
@@ -441,7 +456,8 @@ def main(argv: list[str] | None = None) -> int:
 
                     try:
                         ended = play(session, decoder, eeg, args.seconds, on_decision,
-                                     sleep=sleep, clock=clock, stop=stimulus_gone)
+                                     sleep=sleep, clock=clock, stop=stimulus_gone,
+                                     on_read=on_read)
                         if session.over and stim is not None and session.display_ok:
                             # the final position and result, on the wall clock even with
                             # --fast: the window is real

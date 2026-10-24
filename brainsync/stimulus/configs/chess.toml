@@ -1,11 +1,14 @@
 # BrainChess board stimulus (python -m brainsync.brainchess.stimulus). The two targets are
-# the side panels used for the promotion and PLAY/BACK confirm steps; the board squares in
-# between flicker at the same two frequencies, so a decoder trained on either works for both.
+# the PLAY / BACK panels used for the promotion and confirm steps; the board squares
+# flicker at the same two frequencies, so a decoder trained on either works for both.
 # 15 and 17 Hz are the only pair that separated reliably on the user's dry-electrode EEG
 # (Cerelog X8, 60 Hz display, 2026-10-22). Sine flicker, because 17 Hz does not divide 60.
-# The board is 0.9 screen heights tall (x within +/-0.45), so the panels sit just outside it:
-# centres at +/-0.59, inner edges at +/-0.47, outer edges (cue box included) at +/-0.734,
-# inside the 0.75 half-width of a 1.5:1 screen. No cue box: the game draws its own feedback.
+# The window follows the browser mockup (brainchess/style.py): the board, 0.9 screen heights
+# tall, sits left of centre (x -0.71..+0.19) and a side column (x +0.235..+0.735) holds the
+# prompt, the vote meters, these panels and the EEG strip. Panels 0.2 high, centres at
+# x +0.335 and +0.615 (x_offset 0.475 +/- spacing/2), 0.08 apart; their footprint with the
+# cue box reaches x +0.735, inside the 0.75 half-width of a 1.5:1 screen. No cue box: the
+# game draws its own feedback.
 name = "chess"
 
 [targets]
@@ -16,8 +19,9 @@ labels = ["PLAY", "BACK"]
 [layout]
 rows = 1
 cols = 2
-size = 0.24     # panel side, screen heights
-spacing = 1.18  # centre to centre, screen heights: one panel either side of the board
+size = 0.2       # panel side, screen heights
+spacing = 0.28   # centre to centre, screen heights
+x_offset = 0.475 # the pair's centre: the middle of the side column
 
 [stimulus]
 waveform = "sine"
@@ -27,7 +31,7 @@ hold_cue = false
 refresh_hz = 60.0   # ProMotion off
 refresh_tolerance_hz = 1.0
 screen = 0
-background = 0.0
+background = 0.0    # unused by the board stimulus, which paints the mockup's paper colour
 aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
 
 [session]
