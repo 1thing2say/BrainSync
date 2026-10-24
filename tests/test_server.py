@@ -70,7 +70,8 @@ def test_partner_page_is_served(client):
         "tts_rate": BASE.speech.tts_rate, "keyboard_mode": False,
         "stt_mode": "always", "listen_window_s": BASE.speech.listen_window_s,
         "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
-        "stt_echo_s": BASE.speech.stt_echo_s}
+        "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
+        "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam"}
 
 
 def test_a_connecting_page_gets_the_mic_state(kb_client):
