@@ -548,6 +548,85 @@ card overlap the boxes or squares. The card and the flash are drawn as separate
 stimuli, so they never change the squares' luminance. A test checks that the flicker
 sequence is identical with and without them.
 
+### Browser mock
+
+`brainsync.swipe_web` shows BrainSwipe in a web browser, without the headset and without
+any flicker. It is for showing the app when nobody is wearing the board. A local server
+runs the same `Swiper`, `Feed` and FBCCA decoder as the live demo, on a fake board in
+real time. You play the eyes. Point at a square with the mouse and the server sets the
+fake board's tone to that square's frequency. The real `Swiper` then decides when a
+swipe fires, so the page keeps the timing of the brain interface: a swipe builds up over
+fresh windows, repeats about every 3 s while you keep looking, and the stale windows
+after each card change are ignored.
+
+```bash
+.venv/bin/python -m brainsync.swipe_web --open
+```
+
+After about 1 s it prints `BrainSwipe mock at http://127.0.0.1:8780 (simulated EEG board,
+no flicker); Ctrl-C stops`. The 30 s rest baseline (`--calibrate`) is fitted in virtual
+time on a separate fake board, which is why startup is quick. The first decoder window
+arrives about 3.5 s later, once the buffer is full. `--port 0` picks a free port and
+prints its URL. The server uses only the standard library and the page loads only local
+files, so it works offline.
+
+The page shows the card between a still Pass square (left, 15 Hz) and a still Like
+square (right, 17 Hz). Nothing on it flickers: browser frame timing has not been checked
+for SSVEP, and a still page is safe for everyone in the room. The header says the page is
+a mock driven by a simulated EEG board. The squares are 0.4 of the stage height. When the
+window is wide enough they sit further apart than the stimulus's one stage height, so the
+card can be as tall as the stage and stays readable on a laptop or a projector (434 px tall
+at 1366x650, 384 px at 1024x600).
+
+| Control | Effect |
+|---|---|
+| Hover a square or hold ← / → (touch: press and hold) | Look at that square: the fake board plays its tone |
+| Leave the squares, release the key | Read the card: no tone |
+| Shift+← / Shift+→, or click a label | Swipe at once, without the decoder (dropped if the decoder has just swiped that card) |
+| Auto (A) | The fake board picks its own target and switches every 8 s (`--switch`) |
+| Mute (M) | Stop the spoken lines |
+
+Each square fills as fresh windows agree on it, out of 4. After a swipe both squares show
+"settling" while the windows are stale. When a swipe fires, the square's outline flashes
+for 0.35 s, the card slides off to that side (a crossfade with reduced motion), the voice
+line is spoken by the browser, and a match shows a banner. Chrome speaks only after the
+page has had a click or a key press. The footer shows swipes, swipes per minute, likes,
+passes, matches and stale windows ignored, plus each window's two scores and the fake
+board's true target.
+
+An instant swipe names the card the page shows. If the decoder swiped that card a moment
+before (the key press and the swipe event crossed), the server answers 409 and the page
+moves on with the decoder's swipe, so the next card is never swiped unseen.
+
+`--no-decoder` runs no board and no decoder: plain arrows and clicks swipe at once.
+`--cooldown`, `--deck`, `--match-rate` and `--calibrate` work as in `brainsync.swipe`.
+`--seed` defaults to 0, so the feed and the noise repeat from run to run. Ctrl-C,
+`kill -INT` or SIGTERM stops the server and removes the rendered cards (exit 0), also when
+it was started in the background, where the shell ignores SIGINT. A busy port exits 1
+with `error: port 8780 is in use; try --port 0`, also when the other server listens on
+0.0.0.0 (macOS would otherwise let both bind).
+
+Measured on the fake board in real time, through the page and the HTTP API (seed 0,
+default flags). These are fake-board numbers. They show that the logic and its timing
+work, not how well a person can use it.
+
+- From moving onto a square to the first swipe: 0.6 to 2.7 s over 8 tries, median
+  about 1.7 s. In the 0.6 s case, noise had already started a streak while the gaze was
+  on the card.
+- Holding the gaze on a square: swipes 2.8 to 3.2 s apart. The minimum in theory is 744
+  samples, or 2.98 s.
+- Reading the card still swipes on its own, about 6 to 8 times a minute, Pass and Like
+  mixed: 3 in a 30 s real-time run (121 windows), 8 to 16 per 120 s over 8 seeds in
+  virtual time, and 26 in 8 x 30 s (6.5 a minute) in the test that guards this rate
+  (it fails above 8 a minute; without the rest threshold the rate is 12.5). This is the real decoder (margin 0.5, threshold 0.5, 4 votes) on
+  Gaussian noise with no tone, and the mock leaves it unchanged. When talking over a
+  card, keep the gaze on Auto or on a square, or say that these are the decoder
+  reacting to noise.
+
+The mock is not the live demo. It has no EEG and no stimulus, and it says nothing about
+the open questions under **Untested** above. The live demo is `brainsync.swipe` with the
+board and the full-screen stimulus.
+
 ## Recording and electrode check
 
 Preview a session without opening a window:
@@ -620,6 +699,8 @@ quits.
 | `brainsync/profiles.py` | Invented dating profiles: load and check the deck TOML, draw the PNG cards |
 | `brainsync/swipe_deck/profiles.toml` | The bundled deck of 20 invented profiles |
 | `brainsync/swipe.py` | BrainSwipe: fresh-window swipe voting, the endless feed, CLI |
+| `brainsync/swipe_web.py` | BrainSwipe browser mock: localhost server with Server-Sent Events, the real swipe logic on a real-time fake board |
+| `brainsync/web/` | The mock's page: HTML, CSS, `app.js` (DOM, network, speech) and `logic.js` (pure helpers, tested with node) |
 
 ## Tests
 
