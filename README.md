@@ -275,6 +275,358 @@ margin. 30 s brings that to about 0.33. Ctrl-C or Escape ends the run. Ctrl-C du
 calibration ends the program before any decoding (exit code 130). A stimulus that
 crashes or refuses the display makes the demo exit with code 1.
 
+## Phase 4: Instagram Reels
+
+`brainsync.reels` scrolls Instagram Reels in Chrome with the same decoder. The BrainScroll
+extension (`extension/`, details in `extension/README.md`) draws two squares to the right
+of the reel on instagram.com/reels: the top one, "up", at 15 Hz goes to the previous reel,
+the bottom one, "down", at 17 Hz to the next (config `reels`: squares 0.3 high at
+x = 0.55, y = +/-0.325 screen heights, so they stay clear of the 9:16 video). Python is a
+WebSocket server on `ws://127.0.0.1:8765`. It sends the layout, the phase (wait,
+calibrate, run, stop), the cue box and each scroll. The extension answers with a hello
+(after Start on its photosensitivity warning and a refresh measurement over 120 frames),
+a frame report every 5 s, an ack per scroll and `bye` on Escape. The protocol is written
+out in `brainsync/bridge.py`. Only the extension and pages served from this machine may
+connect (the handshake's Origin is checked), so another web page cannot end the run or
+fake a hello. Each tab has its own socket, so a tab that opens or reloads mid-run gets
+the config and the current phase. After a reconnect the overlay greets the new socket
+again without a second Start. Every connection gets every scroll, but only a visible tab
+on Reels where Start was pressed moves the feed; the others ack `ok: false`, and Python
+counts one ack per scroll id. Escape in any tab ends the run, also before calibration
+(exit 0, "viewer quit").
+
+Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
+
+- A new commit fires one scroll in that target's direction. Abstentions never fire, and
+  watching the video abstains.
+- Every decision for 1.5 s after a scroll is ignored (`--cooldown`).
+- The first decision after the cooldown resets only the decoder's votes, not its sample
+  buffer. Refilling the buffer (1.5 s window + 2 s pad) would blind it for 3.5 s.
+  Someone who keeps looking at one square commits it again after 4 more agreeing
+  windows, so it scrolls about every 1.5 + 1.0 = 2.5 s. At 250 Hz a step is 62 samples
+  (0.248 s), so the reset falls on the 7th decision and the measured period is 2.73 s.
+- After a reset a commit counts only once 4 decisions have arrived. One board read can
+  produce several decisions, and a sooner commit was voted before the reset.
+
+The rest baseline is calibrated while the viewer watches the reel with the squares
+flickering in the periphery (`--calibrate-on watch`, the default). Here "not choosing"
+means watching the video, not a still screen. `--calibrate-on still` holds the squares
+still instead, as phase 3 does. This choice, the closer spacing below and the whole
+Reels setup are untested on real EEG. Only the fake board and the mock page have run
+it.
+
+Setup: install the `reels` extra (websockets). Load `extension/` unpacked at
+`chrome://extensions` (Developer mode, Chrome 116 or newer). Put Chrome in full screen
+(ctrl-cmd-F), because sizes are in screen heights and the overlay takes the window height
+as the screen. Set the display to 60 Hz as in the hardware rules. The run stops if the
+browser's measured refresh is more than 1 Hz off, unless you pass `--ignore-refresh`.
+Either way the overlay holds its squares still while its own refresh is off, because
+they would flicker at the wrong frequencies, and a later hello at the wrong refresh
+(another tab, a reload) prints a warning.
+
+```bash
+.venv/bin/python -m pip install -e ".[reels]"
+```
+
+Without a browser or board (about 1.3 s, virtual time):
+
+```bash
+.venv/bin/python -m brainsync.reels --fake --fast --no-browser --no-voice --seconds 30
+```
+
+It decodes 107 windows (1% abstained) and scrolls 10 times: down at 4.24, 6.97 and
+9.70 s, up at 12.43, 15.16 and 17.88 s, then down 4 times from 21.60 s. The repeats sit
+2.73 s apart. The committed target matches the true one on 62% of windows, against 84%
+for `brainsync.demo`, because every reset clears the committed target for about 1 s.
+
+On the mock Reels page (no Instagram login), in two terminals:
+
+```bash
+.venv/bin/python -m http.server -d extension 8000 --bind 127.0.0.1
+.venv/bin/python -m brainsync.reels --fake --no-voice --seconds 60 --calibrate 10
+# open http://127.0.0.1:8000/test/reels_mock.html and press Start
+```
+
+Measured on 2026-10-24 in headless Chrome 156 on this Mac:
+
+- The hello arrived with a 60.00 Hz refresh (59.99 Hz in a second run). The old median
+  estimate read 59.88 Hz here, because Chrome rounds rAF timestamps to 100 us and the
+  60 Hz intervals come out as 16.6 or 16.7 ms; the overlay now takes the mean of the
+  intervals near the median, and the frame reports said 60.04 Hz.
+- The HUD showed 10 s of calibrate (flicker), then run.
+- The 15 Hz square took only the values 0, 127, 128 and 255, the four levels of a 15 Hz
+  sine at 60 Hz. The 17 Hz square took 31.
+- In 45.4 s of decoding there were 15 scrolls. 12 were acked ok and moved the mock feed
+  by one reel each. The other 3 were "up" at the top of the feed: they were acked
+  `ok: false` and nothing was tried.
+- 11 frame reports arrived. The overlay counted 12 dropped frames in about 55 s of
+  flicker.
+- Escape sent `bye`, and Python ended with "viewer quit" and exit code 0.
+
+`--manual` needs neither board nor decoder: after the hello, stdin lines `u` and `d`
+scroll and `q` quits. That is how to check the extension on the real site:
+
+```bash
+.venv/bin/python -m brainsync.reels --manual
+```
+
+On the mock page, `d`, `d`, `u` moved the feed from reel 1 to 3 and back to 2, with 3 of
+3 acks ok. A second `--manual` run started straight after got its hello from the same
+tab without another Start.
+
+The real run (board, Chrome on instagram.com/reels with the extension, 30 s baseline,
+600 s of decoding):
+
+```bash
+.venv/bin/python -m brainsync.reels
+```
+
+It looks for the board's USB receiver before anything else. With none plugged in, the
+terminal says "no EEG device connected" (listing the device names it looked for) and the
+overlay shows "No EEG device connected. Plug in the Cerelog X8 USB receiver." It waits
+`--wait-device` (120 s) for the receiver, then exits 1. If the receiver is there but the
+headset does not answer, the overlay says "Could not connect to the EEG board". After
+connecting it waits up to 5 s for the first samples, so a receiver whose headset is
+switched off is reported as "no data" rather than as connected. The overlay's corner
+panel has an EEG line that follows these steps (not connected, connecting, receiving
+data, no data; "not used" in `--manual` mode).
+
+One status line per window goes to stderr. Each scroll and a summary (scrolls, acks,
+the last refresh and drop count) go to stdout. `--log FILE` writes JSON lines with every
+decision, scroll, reset and browser report. Exit codes:
+
+- 0: the run ended on time, Ctrl-C or Escape in the browser.
+- 1: no EEG device was found within `--wait-device` (120 s) or it would not connect,
+  no browser said hello within `--wait-browser` (120 s), the refresh was wrong, the
+  port was taken, calibration failed, or the board sent nothing for 5 s.
+- 2: bad arguments or config. `-c two_targets` is refused because its labels are not
+  up/down.
+- 130: Ctrl-C before decoding started.
+
+The overlay is told to stop on every exit Python lives through: normal ends, errors,
+Ctrl-C, and SIGTERM and SIGHUP (closing the terminal window), which count as Ctrl-C. For
+the rest (SIGKILL, a crash) the overlay holds the squares still as soon as its socket
+closes, until a server sends a flickering phase again. Both were checked on the mock
+page: `kill -TERM` mid-run delivered the stop phase and Python ended with "interrupted",
+exit 0; after `kill -9` the squares stood still and no more frame reports went out.
+Escape during calibration stops the flicker at once, but Python ends the run only when
+the baseline is finished.
+
+Caveat on spacing: the Reels squares are 0.3 high and 0.65 screen heights apart, against
+0.4 high and 1.0 apart in phase 2 and 3. No session has measured the response or the
+crosstalk at that spacing. Before trusting it, record a cued session in the Reels layout
+and score it (`brainsync.record -c reels`, then `brainsync.score_cued`). The cue box fits at
+`cue_scale = 1.1` (1.2 would reach 0.505 screen heights, past the top edge). The extension
+narrows the box's gap from 0.03 to 0.019 there for the same reason.
+
+## BrainSwipe: doomscroll with your eyes
+
+BrainSwipe runs the phase 3 demo with a dating-profile card drawn between the two
+squares. Look at the left square (target 0, 15 Hz) to **Pass**. Look at the right
+square (target 1, 17 Hz) to **Like**. Each square has its name written under its cue box
+in its flash colour (static text, outside the square, so the flicker is unchanged). When a
+swipe fires, that square's box flashes
+(red for Pass, green for Like) for 0.35 s, the next card appears and a voice line is
+spoken: "Pass", "Liked Priya", or on a match "Priya liked you back. It's a match!". If
+you keep looking at the square, it keeps swiping. The feed never ends: it is a shuffled
+order of the deck, shuffled again each time every card has been shown, and the same card
+never appears twice in a row.
+
+Every profile is made up. The 20 in the bundled deck (`brainsync/swipe_deck/profiles.toml`,
+ages 23 to 38) are invented people with prompt-and-answer pairs in the style of dating
+apps ("A shower thought I recently had", "My simple pleasures"). Each card is drawn, not
+photographed: an abstract accent-colour panel with the person's initials in a circle. No
+real photos and no app name or logo appear anywhere. The cards are 600x900 px PNGs (2:3)
+on a dark background. Across the bundled deck, mean luma is 0.18 to 0.26 and the
+brightest pixel is 0.87 (white is 1), so the card stays dimmer than the flicker it sits
+next to.
+
+The photosensitivity warning above applies unchanged. The flicker is the same 15 and
+17 Hz.
+
+Try it without the board or a window:
+
+```bash
+.venv/bin/python -m brainsync.swipe --fake --fast --no-stimulus --no-voice --seconds 60
+```
+
+It runs in a few seconds (30 s calibration plus 60 s decoding in virtual time). The fake
+board switches the attended target every 10 s. One status line per window goes to
+stderr, and the summary goes to stdout:
+
+```
+swipe: 59.8 s decoded, 18 swipes (18.1 per minute): 10 likes, 8 passes, 4 matches; 144 stale windows ignored; ended: time up
+  swipes: 4.2s->Like  7.2s->Like  10.2s->Like  13.2s->Pass  16.1s->Pass  19.1s->Pass  22.1s->Like  25.1s->Like  28.1s->Like  32.0s->Pass  35.0s->Pass  38.0s->Pass  41.4s->Like  44.4s->Like  47.4s->Like  50.4s->Like  53.3s->Pass  56.3s->Pass
+  fake board: 16 of 18 swipes (89%) went to the true target
+```
+
+Both misses (10.2 s and 50.4 s) fired within 0.4 s after the board switched targets.
+Most of their window still came from the old target. "True target" is read at the moment
+the swipe fires, so these count as misses. Over 8 fake-board seeds, a 60 s run gives 18
+to 19 swipes, and 84% to 94% go to the true target.
+
+The real thing (needs the board and opens the full-screen stimulus):
+
+```bash
+.venv/bin/python -m brainsync.swipe
+```
+
+The run follows the demo's sequence. First the deck is rendered to a temporary folder.
+The stimulus opens with the squares still and the first card already showing. Keep still
+and read it while the rest baseline calibrates for 30 s. Then the squares flicker and
+decoding runs for 300 s (`--seconds`). The demo's flags all work here, as do its exit
+codes and its Ctrl-C and Escape handling. BrainSwipe adds:
+
+- `--cooldown` (default 0.5 s): how long after a card change before a window may vote.
+- `--deck PATH`: a different profiles TOML.
+- `--match-rate` (default 0.3): the chance that a Like is a match.
+- `--seed`: sets the card order and the matches, plus the noise with `--fake`. By
+  default each run on the real board picks a fresh random seed, so the feed starts on a
+  different profile every session; with `--fake` it defaults to 0 so runs repeat. The
+  seed in use is printed on the `deck:` line.
+
+**Why swipes need fresh windows.** Each decoder window is 1.5 s long and a new one comes
+every 0.25 s, so consecutive windows overlap. Just after a swipe, the decoder is still
+scoring EEG recorded while you looked at the previous card. Your eyes also need a moment
+to land again. So a window counts as stale, and is ignored, if it started before the card
+change plus the cooldown. A swipe fires only after 4 fresh windows in a row (`--votes`)
+name the same square. BrainSwipe counts these votes itself; it does not use the decoder's
+own commit, which also counted the stale windows. The cue box moves onto a square after
+2 fresh windows in a row, so you can see a swipe building up. The card change is counted
+from the end of the board read in which the swipe fired, because the new card can only
+go up after that read is decoded. So a board that lags and then delivers seconds of
+backlog at once swipes at most once per backlog: the rest of it is EEG from the old
+card.
+
+With the defaults, this means swipes are at least 0.5 + 1.5 + 3 x 0.25 = 2.75 s apart.
+The decoder only steps in whole 62-sample hops (0.248 s at 250 Hz), so the true minimum
+is 744 samples, or 2.98 s. Holding your gaze gives one swipe about every 3 s (about 20
+per minute), and the run above shows that spacing. After each swipe, the 8 windows that
+come next are stale: that is the 144 stale windows (18 x 8).
+
+**Untested.** No session has been run on the real board yet. The false-swipe rate while
+reading a card is unmeasured. While you read, the flickering squares stay in your
+peripheral vision. The rest baseline was calibrated with the squares still, so reading
+could look like looking at a square. The planned test has two parts:
+
+1. Look only at the card for 60 s and count the swipes. Every swipe is a false one.
+2. Swipe on purpose for 2 min, saying each intended choice aloud. Count correct, wrong
+   and missed swipes.
+
+Until that has been done, the fake-board figures above say only that the logic works.
+They do not show how well it works for a person.
+
+The deck is TOML, made of `[[profile]]` tables:
+
+```toml
+[[profile]]
+name = "Priya"
+age = 29                      # integer, 18 to 99
+color = "#c86b5a"             # accent for the drawn avatar
+detail = "Product designer · Oakland"   # optional
+prompts = [
+    ["A shower thought I recently had", "If you microwave a burrito long enough it becomes a different burrito."],
+    ["My simple pleasures", "Farmers market peaches, a fresh notebook, and the first sip of a too-hot chai."],
+]
+```
+
+Each profile has 1 to 3 prompts. A bad entry stops the program with
+`error: <file>: profile <i>: ...`. Answers longer than about 120 characters are set in a
+smaller font or cut with an ellipsis. To preview the cards and their placement without a
+window:
+
+```bash
+OUT="$(mktemp -d)"
+.venv/bin/python -c "from brainsync.profiles import load_deck, render_deck; render_deck(load_deck(), '$OUT')"
+.venv/bin/python -m brainsync.stimulus -c swipe --free --plan --cards "$OUT"
+```
+
+The plan reports `cards: 20 card(s) ... 0.6 screen heights high (0.400 wide at 2:3),
+flash 0.35 s`. The card fills |x| < 0.2. The cue boxes start at 0.26 and the squares at
+0.3, so nothing overlaps. The config validation warns if a `[card]` height would make the
+card overlap the boxes or squares. The card and the flash are drawn as separate
+stimuli, so they never change the squares' luminance. A test checks that the flicker
+sequence is identical with and without them.
+
+### Browser mock
+
+`brainsync.swipe_web` shows BrainSwipe in a web browser, without the headset and without
+any flicker. It is for showing the app when nobody is wearing the board. A local server
+runs the same `Swiper`, `Feed` and FBCCA decoder as the live demo, on a fake board in
+real time. You play the eyes. Point at a square with the mouse and the server sets the
+fake board's tone to that square's frequency. The real `Swiper` then decides when a
+swipe fires, so the page keeps the timing of the brain interface: a swipe builds up over
+fresh windows, repeats about every 3 s while you keep looking, and the stale windows
+after each card change are ignored.
+
+```bash
+.venv/bin/python -m brainsync.swipe_web --open
+```
+
+After about 1 s it prints `BrainSwipe mock at http://127.0.0.1:8780 (simulated EEG board,
+no flicker); Ctrl-C stops`. The 30 s rest baseline (`--calibrate`) is fitted in virtual
+time on a separate fake board, which is why startup is quick. The first decoder window
+arrives about 3.5 s later, once the buffer is full. `--port 0` picks a free port and
+prints its URL. The server uses only the standard library and the page loads only local
+files, so it works offline.
+
+The page shows the card between a still Pass square (left, 15 Hz) and a still Like
+square (right, 17 Hz). Nothing on it flickers: browser frame timing has not been checked
+for SSVEP, and a still page is safe for everyone in the room. The header says the page is
+a mock driven by a simulated EEG board. The squares are 0.4 of the stage height. When the
+window is wide enough they sit further apart than the stimulus's one stage height, so the
+card can be as tall as the stage and stays readable on a laptop or a projector (434 px tall
+at 1366x650, 384 px at 1024x600).
+
+| Control | Effect |
+|---|---|
+| Hover a square or hold ← / → (touch: press and hold) | Look at that square: the fake board plays its tone |
+| Leave the squares, release the key | Read the card: no tone |
+| Shift+← / Shift+→, or click a label | Swipe at once, without the decoder (dropped if the decoder has just swiped that card) |
+| Auto (A) | The fake board picks its own target and switches every 8 s (`--switch`) |
+| Mute (M) | Stop the spoken lines |
+
+Each square fills as fresh windows agree on it, out of 4. After a swipe both squares show
+"settling" while the windows are stale. When a swipe fires, the square's outline flashes
+for 0.35 s, the card slides off to that side (a crossfade with reduced motion), the voice
+line is spoken by the browser, and a match shows a banner. Chrome speaks only after the
+page has had a click or a key press. The footer shows swipes, swipes per minute, likes,
+passes, matches and stale windows ignored, plus each window's two scores and the fake
+board's true target.
+
+An instant swipe names the card the page shows. If the decoder swiped that card a moment
+before (the key press and the swipe event crossed), the server answers 409 and the page
+moves on with the decoder's swipe, so the next card is never swiped unseen.
+
+`--no-decoder` runs no board and no decoder: plain arrows and clicks swipe at once.
+`--cooldown`, `--deck`, `--match-rate` and `--calibrate` work as in `brainsync.swipe`.
+`--seed` defaults to 0, so the feed and the noise repeat from run to run. Ctrl-C,
+`kill -INT` or SIGTERM stops the server and removes the rendered cards (exit 0), also when
+it was started in the background, where the shell ignores SIGINT. A busy port exits 1
+with `error: port 8780 is in use; try --port 0`, also when the other server listens on
+0.0.0.0 (macOS would otherwise let both bind).
+
+Measured on the fake board in real time, through the page and the HTTP API (seed 0,
+default flags). These are fake-board numbers. They show that the logic and its timing
+work, not how well a person can use it.
+
+- From moving onto a square to the first swipe: 0.6 to 2.7 s over 8 tries, median
+  about 1.7 s. In the 0.6 s case, noise had already started a streak while the gaze was
+  on the card.
+- Holding the gaze on a square: swipes 2.8 to 3.2 s apart. The minimum in theory is 744
+  samples, or 2.98 s.
+- Reading the card still swipes on its own, about 6 to 8 times a minute, Pass and Like
+  mixed: 3 in a 30 s real-time run (121 windows), 8 to 16 per 120 s over 8 seeds in
+  virtual time, and 26 in 8 x 30 s (6.5 a minute) in the test that guards this rate
+  (it fails above 8 a minute; without the rest threshold the rate is 12.5). This is the real decoder (margin 0.5, threshold 0.5, 4 votes) on
+  Gaussian noise with no tone, and the mock leaves it unchanged. When talking over a
+  card, keep the gaze on Auto or on a square, or say that these are the decoder
+  reacting to noise.
+
+The mock is not the live demo. It has no EEG and no stimulus, and it says nothing about
+the open questions under **Untested** above. The live demo is `brainsync.swipe` with the
+board and the full-screen stimulus.
+
 ## Recording and electrode check
 
 Preview a session without opening a window:
@@ -314,7 +666,8 @@ With the board attached, run the stimulus and the check in two terminals, then r
 .venv/bin/python -m brainsync.record                                           # 20 cued trials, 15/17 Hz
 ```
 
-Stimulus configs: `two_targets` (the demo pair) and `one_target_12`, `one_target_15`,
+Stimulus configs: `two_targets` (the demo pair), `swipe` (the same pair labelled Pass and
+Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`,
 `one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
 quits.
 
@@ -390,6 +743,16 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/online.py` | Ring buffer, sliding-window decoder, calibration, replay and tuning grid |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
+| `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |
+| `brainsync/bridge.py` | Localhost WebSocket server for the browser overlay, and its protocol |
+| `brainsync/reels.py` | Phase 4 Instagram Reels run (also `--manual` and `--no-browser`) |
+| `extension/` | BrainScroll Chrome extension: overlay, flicker, scroller, mock Reels page |
+| `brainsync/demo.py` | Phase 3 live demo; its session loop is reused by BrainSwipe |
+| `brainsync/profiles.py` | Invented dating profiles: load and check the deck TOML, draw the PNG cards |
+| `brainsync/swipe_deck/profiles.toml` | The bundled deck of 20 invented profiles |
+| `brainsync/swipe.py` | BrainSwipe: fresh-window swipe voting, the endless feed, CLI |
+| `brainsync/swipe_web.py` | BrainSwipe browser mock: localhost server with Server-Sent Events, the real swipe logic on a real-time fake board |
+| `brainsync/web/` | The mock's page: HTML, CSS, `app.js` (DOM, network, speech) and `logic.js` (pure helpers, tested with node) |
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 
 ## Tests
@@ -397,10 +760,29 @@ accuracy and dropped frames with the panel on versus off.
 ```bash
 env -u BRAINSYNC_DATA_DIR .venv/bin/python -m pytest -q
 BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data .venv/bin/python -m pytest -q
+node --test extension/test/*.test.mjs
 ```
 
-Without data: 420 passed, 9 skipped (the real-data tests skip themselves), about 33 s.
-With the data: 429 passed, about 45 s. No test opens a window or touches the board.
+The suite collects 997 tests. Without data the 9 real-data tests skip themselves, and the
+BrainFlow board test skips where the Cerelog fork is not installed. No test opens a window
+or touches the board. Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19
+(a real server on a free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
+and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11 and
+`test_extension.py` 12. Without the `reels` extra the 10 browser tests in
+`test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
+checks the flicker fixture against `brainsync.stimulus.flicker`, the manifest and the
+mock page, runs `node --check` on every script and runs the 65 node tests (the flicker
+port within 1e-9 of the Python luminance, the overlay's geometry, refresh meter and
+protocol state machine, the scroller, and the service worker against a fake `chrome`
+and WebSocket). Node 24 reads `--test` arguments as globs, so
+pass the files, not the folder. The node tests are skipped when node is not installed.
+
+BrainSwipe adds 220: `test_swipe.py` 53, `test_swipe_cli.py` 29, `test_swipe_web.py` 37,
+`test_profiles.py` 30, `test_stimulus_cards.py` 57 and `test_demo_session.py` 14. They
+run the whole swipe loop on the fake board. They check that stale windows never vote, that the
+voice line names the profile on screen, and that a card or flash command never changes a
+square's luminance.
+
 The filter tests check passband gain within 2% at 12, 15, 17 and 30 Hz, stopband gain
 under 0.05 at 1, 2, 90 and 110 Hz, zero lag, and a 60 Hz notch deeper than -40 dB. The
 real-data tests hold the Nakanishi and cued-session numbers above to minimum thresholds,

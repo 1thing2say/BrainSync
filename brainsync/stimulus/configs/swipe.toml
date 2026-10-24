@@ -1,0 +1,38 @@
+# BrainSwipe: the demo pair with a profile card between the squares. Look left (15 Hz)
+# to pass, right (17 Hz) to like. Targets, layout and display match two_targets, so the
+# decoder and its baseline carry over unchanged.
+name = "swipe"
+
+[targets]
+freqs = [15.0, 17.0]   # Hz
+phases_pi = [0.0, 0.0] # multiples of pi
+labels = ["Pass", "Like"]
+
+[layout]
+rows = 1
+cols = 2
+size = 0.4      # side length, screen heights
+spacing = 1.0   # centre to centre: the squares' inner edges sit at x = +/-0.3
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 10
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true
+
+[card]
+height = 0.6    # screen heights; a 2:3 card is then 0.4 wide, clear of the cue boxes at 0.26
+flash_s = 0.35  # how long the chosen square's box lights up after a swipe
+flash_colors = ["#d0605a", "#5aae6e"]   # Pass reddish, Like greenish

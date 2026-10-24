@@ -3,15 +3,22 @@
 A config names the flicker targets, where they sit, how they flicker and the session
 timing. Positions and sizes are in screen heights from the screen centre (PsychoPy
 ``height`` units), so a fullscreen window spans y in [-0.5, 0.5] and x in
-[-aspect/2, aspect/2].
+[-aspect/2, aspect/2]. ``x_offset`` (default 0) shifts the whole grid sideways, for a
+layout that must leave the middle of the screen free (the Reels pair sits in the right
+margin beside the video).
 
     name = "two_targets"
     [targets]   freqs = [15.0, 17.0]; phases_pi = [0.0, 0.0]; labels = ["15", "17"]
-    [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0
+    [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0; x_offset = 0.0
     [stimulus]  waveform = "sine"; hold_cue = true
     [display]   refresh_hz = 60.0; refresh_tolerance_hz = 1.0; screen = 0; background = 0.0
                 aspect = 1.5
     [session]   blocks = 10; cue_s = 1.0; stim_s = 4.0; rest_s = 3.0; shuffle = true
+    [card]      height = 0.6; flash_s = 0.35; flash_colors = ["#d0605a", "#5aae6e"]
+
+The optional [card] table sets up the BrainSwipe profile card drawn at the centre between
+the targets, and the box flash that confirms a swipe; configs without it are unchanged.
+A flash colour is "#rrggbb" or three values in [-1, 1] (PsychoPy rgb), one per target.
 """
 from __future__ import annotations
 
@@ -34,12 +41,17 @@ _PHASE_TOL = 1e-9
 
 _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels"}),
-    "layout": frozenset({"rows", "cols", "size", "spacing"}),
+    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset"}),
     "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
+    "card": frozenset({"height", "flash_s", "flash_colors"}),
 }
+# Card overlap checks assume this width/height: the profile cards are 600 x 900 px portraits.
+CARD_ASPECT = 2.0 / 3.0
+
+Color = tuple[float, float, float]
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,20 @@ class Session:
 
 
 @dataclass(frozen=True)
+class Card:
+    """The centred profile card and the swipe flash.
+
+    ``height`` in screen heights (the width follows the image's aspect); ``flash_s`` is how
+    long a flashed target's box stays lit; ``flash_colors`` holds one PsychoPy rgb colour
+    per target, or is empty to flash in the cue colour.
+    """
+
+    height: float = 0.6
+    flash_s: float = 0.35
+    flash_colors: tuple[Color, ...] = ()
+
+
+@dataclass(frozen=True)
 class StimulusConfig:
     name: str
     targets: tuple[Target, ...]
@@ -88,7 +114,19 @@ class StimulusConfig:
     rows: int = 1
     cols: int = 1
     spacing: float = 0.0
+    x_offset: float = 0.0   # screen heights the grid is shifted right (negative: left)
     path: Path | None = None
+    card: Card | None = None   # None: the config has no [card] table
+
+    @property
+    def card_spec(self) -> Card:
+        """The [card] settings, or their defaults when the config has none."""
+        return self.card if self.card is not None else Card()
+
+    def flash_color(self, k: int) -> Color:
+        """Target ``k``'s flash colour: its [card] flash_colors entry, else the cue colour."""
+        colors = self.card_spec.flash_colors
+        return colors[k] if colors else self.cue_color
 
     @property
     def n_targets(self) -> int:
@@ -188,6 +226,35 @@ class _Table:
             raise ValueError(f"{self._where(key)} must be a list of strings, got {v!r}")
         return list(v)
 
+    def colors(self, key: str) -> tuple[Color, ...]:
+        v = self.raw.get(key, [])
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(f"{self._where(key)} must be a list of colours, got {v!r}")
+        return tuple(parse_color(c, f"{self._where(key)}[{i}]") for i, c in enumerate(v))
+
+
+def parse_color(value: Any, where: str = "colour") -> Color:
+    """PsychoPy rgb (-1..1) from "#rrggbb" or three numbers already in [-1, 1]."""
+    if isinstance(value, str):
+        text = value.strip()
+        digits = text[1:] if text.startswith("#") else ""
+        try:
+            if len(digits) != 6:
+                raise ValueError
+            rgb = [int(digits[i:i + 2], 16) for i in (0, 2, 4)]
+        except ValueError:
+            raise ValueError(f"{where} must be \"#rrggbb\" or three numbers in [-1, 1], "
+                             f"got {value!r}") from None
+        r, g, b = (2.0 * c / 255.0 - 1.0 for c in rgb)
+        return (r, g, b)
+    if (not isinstance(value, (list, tuple)) or len(value) != 3
+            or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in value)):
+        raise ValueError(f"{where} must be \"#rrggbb\" or three numbers in [-1, 1], "
+                         f"got {value!r}")
+    if not all(-1.0 <= x <= 1.0 for x in value):
+        raise ValueError(f"{where} must hold values in [-1, 1], got {list(value)}")
+    return (float(value[0]), float(value[1]), float(value[2]))
+
 
 # -- loading --------------------------------------------------------------------------------
 
@@ -259,12 +326,21 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     cols = lay.integer("cols", n)
     size = lay.number("size", 0.4)
     spacing = lay.number("spacing", 1.0 if n > 1 else 0.0)
+    x_offset = lay.number("x_offset", 0.0)
+    if not math.isfinite(x_offset):
+        raise ValueError(f"[layout] x_offset must be finite, got {x_offset}")
 
     color = stim.numbers("cue_color", [1.0, -1.0, -1.0])
     if len(color) != 3 or not all(-1.0 <= v <= 1.0 for v in color):
         raise ValueError(f"[stimulus] cue_color must be three values in [-1, 1], got {color}")
 
-    positions = grid_positions(n, rows, cols, spacing)
+    card = None
+    if "card" in data:
+        ct = _Table(data, "card")
+        card = Card(height=ct.number("height", 0.6), flash_s=ct.number("flash_s", 0.35),
+                    flash_colors=ct.colors("flash_colors"))
+
+    positions = [(x + x_offset + 0.0, y) for x, y in grid_positions(n, rows, cols, spacing)]
     cfg = StimulusConfig(
         name=name,
         targets=tuple(Target(index=k, freq=freqs[k], phase=phases_pi[k] * math.pi,
@@ -288,7 +364,9 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         rows=rows,
         cols=cols,
         spacing=spacing,
+        x_offset=x_offset,
         path=path,
+        card=card,
     )
     validate(cfg)
     return cfg
@@ -341,6 +419,38 @@ def _check_geometry(cfg: StimulusConfig) -> None:
                          f"of a {aspect:g}:1 screen; reduce spacing or size")
 
 
+def _check_card(cfg: StimulusConfig) -> None:
+    c = cfg.card_spec
+    if not 0.0 < c.height <= 1.0:
+        raise ValueError(f"[card] height must be in (0, 1] screen heights, got {c.height}")
+    # TOML accepts inf and nan; caught here, not by n_frames once the window is up
+    if not (math.isfinite(c.flash_s) and c.flash_s >= 0):
+        raise ValueError(f"[card] flash_s must be finite and >= 0, got {c.flash_s}")
+    if c.flash_colors and len(c.flash_colors) != cfg.n_targets:
+        raise ValueError(f"[card] has {len(c.flash_colors)} flash_colors for "
+                         f"{cfg.n_targets} targets")
+
+
+def card_overlap(cfg: StimulusConfig, aspect: float = CARD_ASPECT) -> str | None:
+    """Warning text when the centred card would cover a target or its cue box.
+
+    The card is ``card_spec.height`` high and ``aspect`` times that wide, centred on (0, 0).
+    A card over a square would not change its luminance (the squares are drawn on top),
+    but it would cover part of the cue box and pull gaze off the target.
+    """
+    c = cfg.card_spec
+    half_w, half_h = c.height * aspect / 2.0, c.height / 2.0
+    for t in cfg.targets:
+        x, y = abs(t.pos[0]), abs(t.pos[1])
+        for part, half in (("square", cfg.size / 2.0), ("cue box", cfg.reach)):
+            if half_w > x - half + 1e-9 and half_h > y - half + 1e-9:
+                return (f"card {half_w * 2:.3f} x {c.height:.3f} screen heights reaches "
+                        f"x = +/-{half_w:.3f}, y = +/-{half_h:.3f} and overlaps target "
+                        f"{t.index}'s {part} (inner edge at x = {max(x - half, 0.0):.3f}); "
+                        "lower [card] height")
+    return None
+
+
 def validate(cfg: StimulusConfig) -> None:
     """Raise ValueError for a config that cannot be shown correctly."""
     if cfg.waveform not in WAVEFORMS:
@@ -356,6 +466,7 @@ def validate(cfg: StimulusConfig) -> None:
                          f"{d.background}")
     _check_targets(cfg)
     _check_geometry(cfg)
+    _check_card(cfg)
     s = cfg.session
     if s.blocks < 1:
         raise ValueError(f"[session] blocks must be >= 1, got {s.blocks}")
@@ -368,7 +479,8 @@ def validate(cfg: StimulusConfig) -> None:
 
 
 def config_warnings(cfg: StimulusConfig) -> list[str]:
-    """Human-readable warnings: photosensitive band, uneven square-wave duty cycles."""
+    """Human-readable warnings: photosensitive band, uneven square-wave duty cycles, and
+    (with a [card] table) a card that covers a target, assuming CARD_ASPECT."""
     notes: list[str] = []
     risky = sorted({t.freq for t in cfg.targets if photosensitive(t.freq)})
     if risky:
@@ -383,6 +495,10 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
                 notes.append(f"target {t.index} ({t.freq:g} Hz): {hz / t.freq:.3g} frames "
                              f"per cycle at {hz:g} Hz cannot split evenly into on and off, "
                              "so the square duty cycle is uneven; prefer waveform = \"sine\"")
+    if cfg.card is not None:
+        overlap = card_overlap(cfg)
+        if overlap:
+            notes.append(overlap)
     return notes
 
 
