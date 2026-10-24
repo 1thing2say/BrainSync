@@ -16,7 +16,7 @@ from brainsync.bridge import (DEFAULT_EEG, DEFAULT_PHASE, Bridge,  # noqa: E402
                               config_message, cue_message, eeg_message, origin_allowed,
                               parse_client_message, phase_message, scroll_message,
                               status_message)
-from brainsync.stimulus import load_config  # noqa: E402
+from brainsync.stimulus import load_config, override  # noqa: E402
 
 CONFIG = config_message(load_config("reels"))
 
@@ -47,13 +47,21 @@ async def until(cond, timeout: float = 5.0) -> None:
 
 def test_config_message_follows_the_protocol():
     assert CONFIG == {
-        "type": "config", "name": "reels", "waveform": "sine", "refresh_hz": 60.0,
-        "refresh_tolerance_hz": 1.0,
+        "type": "config", "name": "reels", "waveform": "sine", "depth": 1.0,
+        "refresh_hz": 60.0, "refresh_tolerance_hz": 1.0,
         "targets": [{"label": "up", "freq": 15.0, "phase": 0.0, "x": 0.55, "y": 0.325,
                      "size": 0.3},
                     {"label": "down", "freq": 17.0, "phase": 0.0, "x": 0.55, "y": -0.325,
                      "size": 0.3}]}
     json.dumps(CONFIG)   # plain JSON types only
+
+
+def test_config_message_carries_the_depth():
+    cfg = override(load_config("reels"), depth=0.5)
+    msg = config_message(cfg)
+    assert msg["depth"] == 0.5 and isinstance(msg["depth"], float)
+    assert {k: v for k, v in msg.items() if k != "depth"} == {
+        k: v for k, v in CONFIG.items() if k != "depth"}
 
 
 def test_message_builders():
@@ -219,6 +227,31 @@ def test_wait_hello_and_latest_hello(bridge):
     assert bridge.latest_hello == hello
     assert bridge.events() == [hello]
     assert bridge.events() == []
+
+
+def test_showing_follows_each_clients_hello_and_view(bridge, capsys):
+    hello = {"type": "hello", "agent": "extension", "refresh_hz": 60.0, "accepted": True}
+
+    async def main():
+        assert not bridge.showing                           # nobody connected
+        async with connect(bridge.url) as a, connect(bridge.url) as b:
+            await joined(a)
+            await joined(b)
+            await a.send(json.dumps(hello))                 # older extension: no "showing"
+            await until(lambda: bridge.showing)
+            await a.send(json.dumps({"type": "view", "showing": False}))
+            await until(lambda: not bridge.showing)
+            await b.send(json.dumps({**hello, "showing": False}))
+            await b.send(json.dumps({"type": "view", "showing": "yes"}))   # ignored
+            await b.send(json.dumps({"type": "view", "showing": True}))
+            await until(lambda: bridge.showing)
+        await until(lambda: bridge.n_clients == 0)
+        assert not bridge.showing                           # gone clients stop counting
+
+    asyncio.run(main())
+    views = [e["showing"] for e in bridge.events() if e["type"] == "view"]
+    assert views == [False, True]
+    assert "without a true/false \"showing\"" in capsys.readouterr().err and bridge.ignored == 1
 
 
 def test_malformed_messages_are_ignored_and_the_connection_survives(bridge, capsys):

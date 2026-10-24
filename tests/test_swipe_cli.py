@@ -74,7 +74,7 @@ def summary_value(out: str, key: str) -> int:
 
 
 def spoken(err: str) -> list[str]:
-    return [ln[6:] for ln in err.splitlines() if ln.startswith("[say] ")]
+    return [ln[8:] for ln in err.splitlines() if ln.startswith("[speak] ")]
 
 
 # -- headless runs ------------------------------------------------------------------------

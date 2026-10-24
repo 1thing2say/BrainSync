@@ -528,6 +528,48 @@ def test_stimulus_display_writes_only_what_changed():
     assert d.lines == len(lines)
 
 
+def test_stimulus_display_strip_lines():
+    out = io.StringIO()
+    d = StimulusDisplay(out)
+    groups = "0" * 32 + "1" * 32
+    assert d.show(groups, None, None, None, "Look", stage="piece")
+    assert d.show(groups, None, None, None, "Look", stage="piece")      # unchanged: nothing
+    assert d.show("." * 64, None, None, None, "Look", stage="none")
+    assert d.votes(ABSTAIN, 0, 4) and d.votes(0, 1, 4) and d.votes(0, 1, 4)
+    assert d.window(12.25, 0, True, False) and d.window(12.5, ABSTAIN, False, True)
+    assert d.lanes(["O1", "O,2"])
+    assert d.eeg(12.5, 0.02, np.array([[1.04, -2.0], [3.0, 4.56]]))
+    lines = out.getvalue().splitlines()
+    assert lines == [f"groups {groups}", "text Look", "stage piece", "groups " + "." * 64,
+                     "stage none", "votes - 0 4", "votes 0 1 4", "window 12.2500 0 1 0",
+                     "window 12.5000 - 0 1", "lanes O1,O 2",
+                     "eeg 12.5000 0.02000 1.0 -2.0 3.0 4.6"]
+    for ln in lines:
+        parse_command(ln)
+    with pytest.raises(ValueError, match="stage must be"):
+        d.show(groups, None, None, None, "", stage="castle")
+
+
+def test_session_reports_windows_votes_and_stage():
+    gate = MoveGate(small_decoder(votes=3))         # fresh once a window starts at 125
+    display = NullDisplay()
+    session = ChessSession(chess.Board(), Engine(None, seed=0), display, gate=gate,
+                           hold_s=0.0)
+    assert session.push(decision(300, 0)) == ABSTAIN    # before start: the board is still
+    assert display.windows == [(300 / FS, 0, False, False)]
+    session.start()
+    assert display.stage == "piece" and display.vote_state == (ABSTAIN, 0, 3)
+    picks = [session.push(decision(e, r)) for e, r in ((350, 1), (400, 0), (450, 0), (500, 0))]
+    assert picks == [ABSTAIN, ABSTAIN, ABSTAIN, 0]
+    assert display.windows[1:] == [(350 / FS, 1, False, False), (400 / FS, 0, True, False),
+                                   (450 / FS, 0, True, False), (500 / FS, 0, True, True)]
+    # the pick redrew the board: the meter starts over and the stage moved on or stayed
+    assert display.vote_state == (ABSTAIN, 0, 3)
+    assert display.stage in ("piece", "dest")
+    session.push(decision(900, 1))
+    assert display.vote_state == (1, 1, 3)
+
+
 def test_stimulus_display_reports_a_closed_pipe():
     class Broken(io.StringIO):
         def write(self, s):
@@ -558,7 +600,7 @@ def test_end_to_end_fake_fast_three_moves(capsys):
     game = read_pgn(cap.out)
     moves = list(game.mainline_moves())
     assert len(moves) == 5                  # 3 user moves and the 2 replies between them
-    assert "[say] Keep still and look at the middle of the board." in cap.err
+    assert "[speak] Keep still and look at the middle of the board." in cap.err
     assert "fake board:" in cap.out
     assert "baseline from" in cap.err
 
@@ -697,14 +739,32 @@ def test_board_commands_reach_the_stimulus(fake_stimulus, capsys):
     sent = lines.read_text().splitlines()
     cmds = [parse_command(ln) for ln in sent]
     verbs = [c.verb for c in cmds]
-    # the still board for calibration first, then the opponent's move, then flicker
-    assert verbs[0] == "pieces" and "go" in verbs
+    # the trace strip's lanes, the still board for calibration, the opponent's move, flicker
+    assert verbs[0] == "lanes" and verbs[1] == "pieces" and "go" in verbs
+    assert cmds[0].value == ("P7", "P8", "O1", "O2")
     assert [v for v in verbs if v in ("hold", "go")][-1] == "hold"   # still at the end
     assert verbs.index("arrow") < verbs.index("go")
     pieces = [c.value for c in cmds if c.verb == "pieces"]
     assert [p.name for p in pieces] == ["pieces_000.png", "pieces_001.png", "pieces_002.png"]
     assert not pieces[0].parent.exists()            # the temp dir is gone after the run
     assert any(c.verb == "panels" and c.value == ("PLAY", "BACK") for c in cmds)
+    # the stage row follows the selector, and the strip gets windows, votes and EEG
+    stages = [c.value for c in cmds if c.verb == "stage"]
+    assert stages[0] == "piece" and "dest" in stages and "confirm" in stages
+    assert stages[-1] == "none"
+    windows = [c.value for c in cmds if c.verb == "window"]
+    assert any(w.fired for w in windows) and any(not w.fresh for w in windows)
+    assert all(b.t > a.t for a, b in zip(windows, windows[1:]))
+    # one window per decoder step: 0.25 s rounds to 62 samples at 250 Hz
+    assert windows[-1].t - windows[-2].t == pytest.approx(62 / 250)
+    votes = [c.value for c in cmds if c.verb == "votes"]
+    assert (0, 4, 4) in votes or (1, 4, 4) in votes or any(v[1] == 0 for v in votes)
+    assert all(n <= of == 4 for _, n, of in votes)
+    eeg = [c.value for c in cmds if c.verb == "eeg"]
+    assert eeg and all(len(v) % 4 == 0 for _, _, v in eeg)
+    assert all(dt == pytest.approx(0.02) for _, dt, _ in eeg)
+    # samples and windows share the stream clock: the last samples sit near the last window
+    assert abs(eeg[-1][0] - windows[-1].t) < 1.0
     assert calls[0]["stim"].proc.returncode == 0
 
 

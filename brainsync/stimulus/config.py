@@ -10,7 +10,7 @@ margin beside the video).
     name = "two_targets"
     [targets]   freqs = [15.0, 17.0]; phases_pi = [0.0, 0.0]; labels = ["15", "17"]
     [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0; x_offset = 0.0
-    [stimulus]  waveform = "sine"; hold_cue = true
+    [stimulus]  waveform = "sine"; hold_cue = true; depth = 1.0
     [display]   refresh_hz = 60.0; refresh_tolerance_hz = 1.0; screen = 0; background = 0.0
                 aspect = 1.5
     [session]   blocks = 10; cue_s = 1.0; stim_s = 4.0; rest_s = 3.0; shuffle = true
@@ -19,6 +19,15 @@ margin beside the video).
 The optional [card] table sets up the BrainSwipe profile card drawn at the centre between
 the targets, and the box flash that confirms a swipe; configs without it are unchanged.
 A flash colour is "#rrggbb" or three values in [-1, 1] (PsychoPy rgb), one per target.
+
+[stimulus] depth (default 1.0, in (0, 1]) is the flicker's modulation depth: luminance
+swings around mid-grey 0.5 by depth / 2, so 1.0 is full black-to-white and 0.5 is a
+gentler 0.25-0.75 flicker with the same mean.
+
+A session can also mix flicker conditions (``conditions``, set from the stimulus's
+--conditions, never from TOML): each one is a waveform and depth, such as "square:1" or
+"sine:0.5". Every block then cues every (condition, target) pair once, and each trial
+flickers with its own condition instead of [stimulus] waveform and depth.
 """
 from __future__ import annotations
 
@@ -42,7 +51,8 @@ _PHASE_TOL = 1e-9
 _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels"}),
     "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset"}),
-    "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px"}),
+    "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px",
+                           "depth"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
@@ -100,12 +110,30 @@ class Card:
 
 
 @dataclass(frozen=True)
+class Condition:
+    """One flicker condition of a mixed session: a waveform and a modulation depth."""
+
+    waveform: str = "sine"
+    depth: float = 1.0
+
+    @property
+    def spec(self) -> str:
+        """``<waveform>:<depth>``, the form parse_conditions reads."""
+        return f"{self.waveform}:{self.depth:g}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.waveform} {self.depth:g}"
+
+
+@dataclass(frozen=True)
 class StimulusConfig:
     name: str
     targets: tuple[Target, ...]
     size: float
     waveform: str = "sine"
     hold_cue: bool = False
+    depth: float = 1.0   # modulation depth: luminance swings 0.5 +/- depth / 2
     cue_color: tuple[float, float, float] = (1.0, -1.0, -1.0)
     cue_scale: float = 1.2
     cue_line_px: float = 8.0
@@ -117,6 +145,7 @@ class StimulusConfig:
     x_offset: float = 0.0   # screen heights the grid is shifted right (negative: left)
     path: Path | None = None
     card: Card | None = None   # None: the config has no [card] table
+    conditions: tuple[Condition, ...] = ()   # mixed per trial; empty: waveform and depth
 
     @property
     def card_spec(self) -> Card:
@@ -157,11 +186,13 @@ class StimulusConfig:
 
 @dataclass(frozen=True)
 class Trial:
-    """One cued trial: ``index`` counts trials across the session."""
+    """One cued trial: ``index`` counts trials across the session; ``condition`` indexes
+    the config's conditions (0 when it has none)."""
 
     index: int
     block: int
     target: int
+    condition: int = 0
 
 
 # -- typed TOML access ----------------------------------------------------------------------
@@ -348,6 +379,7 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         size=size,
         waveform=stim.text("waveform", "sine"),
         hold_cue=stim.flag("hold_cue", False),
+        depth=stim.number("depth", 1.0),
         cue_color=(color[0], color[1], color[2]),
         cue_scale=stim.number("cue_scale", 1.2),
         cue_line_px=stim.number("cue_line_px", 8.0),
@@ -451,10 +483,38 @@ def card_overlap(cfg: StimulusConfig, aspect: float = CARD_ASPECT) -> str | None
     return None
 
 
+def _check_flicker(waveform: str, depth: float, where: str) -> None:
+    if waveform not in WAVEFORMS:
+        raise ValueError(f"{where} unknown waveform {waveform!r}; expected one of {WAVEFORMS}")
+    if not 0.0 < depth <= 1.0:   # also refuses nan
+        raise ValueError(f"{where} depth must be in (0, 1], got {depth}")
+
+
+def parse_conditions(text: str) -> tuple[Condition, ...]:
+    """Comma-separated ``<waveform>[:<depth>]`` specs, e.g. "square:1,sine:1,sine:0.5"."""
+    out: list[Condition] = []
+    for part in (p.strip() for p in text.split(",")):
+        if not part:
+            raise ValueError(f"empty condition in {text!r}")
+        waveform, _, depth_text = part.partition(":")
+        try:
+            depth = float(depth_text) if depth_text else 1.0
+        except ValueError:
+            raise ValueError(f"condition {part!r}: depth {depth_text!r} is not a number") \
+                from None
+        _check_flicker(waveform, depth, f"condition {part!r}:")
+        cond = Condition(waveform, depth)
+        if cond in out:
+            raise ValueError(f"condition {cond.spec} is listed twice in {text!r}")
+        out.append(cond)
+    return tuple(out)
+
+
 def validate(cfg: StimulusConfig) -> None:
     """Raise ValueError for a config that cannot be shown correctly."""
-    if cfg.waveform not in WAVEFORMS:
-        raise ValueError(f"unknown waveform {cfg.waveform!r}; expected one of {WAVEFORMS}")
+    _check_flicker(cfg.waveform, cfg.depth, "[stimulus]")
+    for c in cfg.conditions:
+        _check_flicker(c.waveform, c.depth, f"condition {c.spec}:")
     d = cfg.display
     if d.refresh_hz <= 0:
         raise ValueError(f"[display] refresh_hz must be positive, got {d.refresh_hz}")
@@ -488,7 +548,7 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
         notes.append(f"photosensitivity: {listed} Hz lies inside 15-25 Hz, where flicker "
                      "is most likely to provoke a seizure in photosensitive people; ask "
                      "about epilepsy before every session")
-    if cfg.waveform == "square":
+    if cfg.waveform == "square" or any(c.waveform == "square" for c in cfg.conditions):
         hz = cfg.refresh
         for t in cfg.targets:
             if not square_duty_even(t.freq, hz):
@@ -506,7 +566,7 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
 
 _SESSION_FIELDS = frozenset(f.name for f in dataclasses.fields(Session))
 _DISPLAY_FIELDS = frozenset(f.name for f in dataclasses.fields(Display))
-_TOP_FIELDS = frozenset({"hold_cue", "waveform"})
+_TOP_FIELDS = frozenset({"hold_cue", "waveform", "depth", "conditions"})
 
 
 def _subset(values: Mapping[str, Any], names: frozenset[str]) -> dict[str, Any]:
@@ -514,9 +574,10 @@ def _subset(values: Mapping[str, Any], names: frozenset[str]) -> dict[str, Any]:
 
 
 def override(cfg: StimulusConfig, **changes: Any) -> StimulusConfig:
-    """A re-validated copy with session, display or hold_cue/waveform fields replaced.
+    """A re-validated copy with session, display or hold_cue/waveform/depth/conditions
+    fields replaced.
 
-    Keyword names are field names (``blocks``, ``stim_s``, ``refresh_hz``, ``hold_cue``...);
+    Keyword names are field names (``blocks``, ``stim_s``, ``refresh_hz``, ``depth``...);
     ``None`` values are skipped so argparse defaults can be passed straight through.
     """
     given = {k: v for k, v in changes.items() if v is not None}
@@ -538,22 +599,27 @@ def override(cfg: StimulusConfig, **changes: Any) -> StimulusConfig:
 # -- trial order ----------------------------------------------------------------------------
 
 def make_trials(n_targets: int, blocks: int, shuffle: bool = True,
-                seed: int | None = None) -> list[Trial]:
-    """Trial order: each block cues every target once, in a seeded random order if asked."""
+                seed: int | None = None, n_conditions: int = 1) -> list[Trial]:
+    """Trial order: each block cues every (condition, target) pair once, in a seeded random
+    order if asked. With one condition this is every target once per block."""
     if n_targets < 1:
         raise ValueError(f"need at least one target, got {n_targets}")
     if blocks < 1:
         raise ValueError(f"need at least one block, got {blocks}")
+    if n_conditions < 1:
+        raise ValueError(f"need at least one condition, got {n_conditions}")
+    per_block = n_targets * n_conditions
     if shuffle:
-        keys = np.random.default_rng(seed).random((blocks, n_targets))
+        keys = np.random.default_rng(seed).random((blocks, per_block))
         grid = np.argsort(keys, axis=1, kind="stable")
     else:
-        grid = np.broadcast_to(np.arange(n_targets), (blocks, n_targets))
-    return [Trial(index=i, block=i // n_targets, target=int(k))
-            for i, k in enumerate(grid.ravel())]
+        grid = np.broadcast_to(np.arange(per_block), (blocks, per_block))
+    return [Trial(index=i, block=i // per_block, target=int(p) % n_targets,
+                  condition=int(p) // n_targets)
+            for i, p in enumerate(grid.ravel())]
 
 
 def session_trials(cfg: StimulusConfig, seed: int | None = None) -> list[Trial]:
     """make_trials for a config's session settings."""
     s = cfg.session
-    return make_trials(cfg.n_targets, s.blocks, s.shuffle, seed)
+    return make_trials(cfg.n_targets, s.blocks, s.shuffle, seed, max(1, len(cfg.conditions)))

@@ -92,6 +92,48 @@ def test_luminance_errors_and_helpers():
     assert dropped_frames([0.0], 60.0) == 0
 
 
+@pytest.mark.parametrize("waveform", ["sine", "square"])
+def test_full_depth_is_bit_identical_to_the_undamped_flicker(waveform):
+    n = np.arange(600)
+    for f, ph in [(15.0, 0.0), (17.0, 0.3), (12.0, math.pi / 2)]:
+        if waveform == "sine":
+            old = 0.5 * (1.0 + np.sin(2.0 * np.pi * f * n / 60.0 + ph))
+        else:
+            old = (np.mod((f * n) / 60.0 + ph / (2.0 * np.pi), 1.0) < 0.5).astype(float)
+        assert np.array_equal(luminance(f, ph, n, 60.0, waveform), old)
+        assert np.array_equal(luminance(f, ph, n, 60.0, waveform, depth=1.0), old)
+    freqs, phases = np.array([15.0, 17.0]), np.array([0.0, 0.3])
+    for i in (0, 1, 59):
+        assert np.array_equal(frame_luminances(freqs, phases, i, 60.0, waveform, depth=1.0),
+                              frame_luminances(freqs, phases, i, 60.0, waveform))
+
+
+def test_half_depth_swings_around_mid_grey():
+    n = np.arange(600)   # 10 s: whole cycles of 12, 15 and 17 Hz
+    for f in (12.0, 15.0, 17.0):
+        lum = luminance(f, 0.3, n, 60.0, depth=0.5)
+        assert lum.min() >= 0.25 and lum.max() <= 0.75
+        assert lum.mean() == pytest.approx(0.5, abs=1e-12)
+        np.testing.assert_allclose(lum - 0.5, 0.5 * (luminance(f, 0.3, n, 60.0) - 0.5),
+                                   atol=1e-12)
+    np.testing.assert_array_equal(luminance(15.0, 0.0, np.arange(8), 60.0, "square", 0.5),
+                                  [0.75, 0.75, 0.25, 0.25, 0.75, 0.75, 0.25, 0.25])
+    assert set(luminance(12.0, 0.3, n, 60.0, "square", depth=0.5)) == {0.25, 0.75}
+    lum = frame_luminances(np.array([15.0, 17.0]), np.zeros(2), 1, 60.0, depth=0.5)
+    assert lum[0] == pytest.approx(0.75)
+    assert luminance(15.0, 0.0, 3, 60.0, depth=0.5) == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("depth", [0.0, -0.1, 1.2, math.nan, math.inf])
+def test_bad_depth_is_refused(depth):
+    with pytest.raises(ValueError, match=r"depth must be in \(0, 1\]"):
+        luminance(15.0, 0.0, 0, 60.0, depth=depth)
+    with pytest.raises(ValueError, match=r"depth must be in \(0, 1\]"):
+        luminance(15.0, 0.0, 0, 60.0, "square", depth=depth)
+    with pytest.raises(ValueError, match=r"depth must be in \(0, 1\]"):
+        frame_luminances(np.array([15.0]), np.zeros(1), 0, 60.0, depth=depth)
+
+
 # -- configs --------------------------------------------------------------------------------
 
 def test_shipped_configs():
@@ -173,6 +215,23 @@ def test_overrides():
         override(base, refresh_hz=-1.0)
 
 
+def test_depth_defaults_to_full_and_is_checked():
+    assert _cfg().depth == 1.0
+    assert all(load_config(name).depth == 1.0 for name in available_configs())
+    half = _cfg(stimulus={"depth": 0.5})
+    assert half.depth == 0.5 and _cfg(stimulus={"depth": 1}).depth == 1.0
+    for bad in (0.0, 1.5, -0.2, math.nan, math.inf):
+        with pytest.raises(ValueError, match=r"\[stimulus\] depth must be in \(0, 1\]"):
+            _cfg(stimulus={"depth": bad})
+    base = _cfg()
+    assert override(base, depth=0.5).depth == 0.5 and base.depth == 1.0
+    assert override(half, depth=None) is half
+    with pytest.raises(ValueError, match="depth"):
+        override(base, depth=0.0)
+    with pytest.raises(ValueError, match="depth"):
+        override(base, depth=1.5)
+
+
 @pytest.mark.parametrize("phases", [[1.0, 3.0], [1.0, -1.0], [0.5, 2.5], [0.0, 2.0],
                                     [-0.5, 1.5], [0.25, 4.25]])
 def test_duplicate_phase_modulo_two_pi(phases):
@@ -195,6 +254,8 @@ def test_same_phase_helper():
     ("targets", "labels", ["a", 2], "list of strings"),
     ("stimulus", "hold_cue", "false", "true or false"),
     ("stimulus", "waveform", 1, "string"),
+    ("stimulus", "depth", "x", "number"),
+    ("stimulus", "depth", True, "number"),
     ("session", "shuffle", 1, "true or false"),
     ("session", "blocks", 2.7, "integer"),
     ("session", "blocks", True, "integer"),
@@ -368,6 +429,29 @@ def test_hold_cue_and_zero_cue():
     assert held[0].events == ("cue:0", "stim_on:0")
 
 
+def test_frames_draw_at_the_config_depth():
+    # non-zero phases, so the still frame 0 is off mid-grey and shows the depth
+    cfg = _cfg(stimulus={"depth": 0.5}, targets={"phases_pi": [0.5, 0.25]})
+    trials = make_trials(2, 1, shuffle=False)
+    frames = list(cued_frames(cfg, trials))
+    still = frame_luminances(cfg.freqs, cfg.phases, 0, 60.0, depth=0.5)
+    assert not np.allclose(still, frame_luminances(cfg.freqs, cfg.phases, 0, 60.0))
+    np.testing.assert_array_equal(frames[0].lum, still)
+    np.testing.assert_array_equal(frames[-1].lum, still)
+    stim = [f for f in frames if f.trial == 0]
+    for i, fr in enumerate(stim):
+        np.testing.assert_array_equal(
+            fr.lum, frame_luminances(cfg.freqs, cfg.phases, i, 60.0, depth=0.5))
+    assert all(0.25 <= v <= 0.75 for fr in frames for v in fr.lum)
+    held = iter([True] * 3 + [False] * 100)
+    free = list(free_frames(cfg, seconds=0.1, hold=lambda: next(held)))
+    for fr in free[:3]:
+        np.testing.assert_array_equal(fr.lum, still)
+    for i, fr in enumerate(free[3:]):
+        np.testing.assert_array_equal(
+            fr.lum, frame_luminances(cfg.freqs, cfg.phases, i, 60.0, depth=0.5))
+
+
 def test_play_marks_after_flip_and_counts_drops():
     cfg = _cfg()
     trials = make_trials(2, 2, seed=3)
@@ -478,6 +562,14 @@ def test_plan_overrides_and_errors(capsys):
     assert "30 Hz refresh" in capsys.readouterr().err
     assert cli.main(["--plan", "--no-hold-cue"]) == 0
     assert "cue held through flicker: no" in capsys.readouterr().out
+    assert cli.main(["--plan"]) == 0
+    assert "flicker depth 1\n" in capsys.readouterr().out
+    assert cli.main(["--plan", "--depth", "0.5"]) == 0
+    assert "flicker depth 0.5\n" in capsys.readouterr().out
+    assert cli.main(["--plan", "--depth", "0"]) == 2
+    assert "depth must be in (0, 1]" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(["--plan", "--depth", "half"])
     with pytest.raises(SystemExit):
         cli.main(["--plan", "--seconds", "5"])
     with pytest.raises(SystemExit):
@@ -568,6 +660,23 @@ def test_main_free_run_with_seconds(fake_window, capsys):
     out = capsys.readouterr().out
     assert "30 frames, 0 dropped overall" in out
     assert {c for _, c in fake_window.instances[0].draws} == {-1}
+
+
+def test_main_start_screen_shows_the_depth(fake_window, monkeypatch, tmp_path, capsys):
+    seen = []
+    monkeypatch.setattr(fake_window, "wait_for_start", lambda self, still: seen.append(still))
+    src = resolve_config("two_targets").read_text()
+    assert "phases_pi = [0.0, 0.0]" in src
+    p = tmp_path / "phased.toml"
+    p.write_text(src.replace("phases_pi = [0.0, 0.0]", "phases_pi = [0.5, 0.25]"))
+    assert cli.main(["-c", str(p), "--depth", "0.5", "--blocks", "1", "--stim-s", "0.05",
+                     "--cue-s", "0", "--rest-s", "0", "--markers", "none"]) == 0
+    capsys.readouterr()
+    cfg = load_config(str(p))
+    assert len(seen) == 1
+    np.testing.assert_array_equal(
+        seen[0], frame_luminances(cfg.freqs, cfg.phases, 0, 60.0, depth=0.5))
+    assert not np.allclose(seen[0], frame_luminances(cfg.freqs, cfg.phases, 0, 60.0))
 
 
 def test_main_free_feedback_stdin_ends_at_eof(fake_window, monkeypatch, capsys):

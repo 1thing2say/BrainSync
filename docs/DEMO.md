@@ -4,7 +4,7 @@ The operator's script for the Cal Hacks demo (`PLAN.md` V6 items 2-3). The partn
 writes 3 reply options, the user picks one with their eyes on the flicker display, confirms it,
 and the laptop speaks it.
 
-**Safety first (PLAN rule 10).** The display flickers at 12-20 Hz, mostly in the range most likely
+**Safety first (PLAN rule 10).** The display flickers at 11-17 Hz, mostly in the range most likely
 to trigger photosensitive seizures, with up to 4 squares at once. Nobody with photosensitive
 epilepsy or flicker sensitivity uses it or stands facing it. Say so before the first trial, and
 keep the audience out of the user's line of sight to the display where you can. `Esc` on the

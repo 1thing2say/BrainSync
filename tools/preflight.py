@@ -69,7 +69,7 @@ HEADSET_CHECKLIST = [
     "Allow about 16 s for the board to connect; its first \"Handshake verification failed\" line "
     "is harmless.",
     "Display at a fixed 60 Hz, ProMotion / variable refresh off (with it on there is no SSVEP).",
-    "Nobody with photosensitive epilepsy or flicker sensitivity uses it (15-20 Hz flicker).",
+    "Nobody with photosensitive epilepsy or flicker sensitivity uses it (11-17 Hz flicker).",
 ]
 
 

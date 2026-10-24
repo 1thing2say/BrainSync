@@ -47,3 +47,8 @@ CLAUDE.local.md
 
 # dmux hook templates (tool config, not project code)
 .dmux-hooks/
+
+# TRIBE v2 heatmap: its own venv, model cache and rendered clips
+.venv-tribe/
+.tribe-cache/
+extension/heatmap/clips/

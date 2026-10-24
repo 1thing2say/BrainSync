@@ -8,6 +8,7 @@ when a window is opened.
 
 The card and the flash never touch a square's fill: the card is its own image stimulus
 and the flash is a thicker, coloured outline box, so the flicker frequencies stay exact.
+Text (a status line under the targets, a prompt above them) is only ever on still frames.
 """
 from __future__ import annotations
 
@@ -29,6 +30,12 @@ from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
 FLASH_LINE_SCALE = 2.0
 LABEL_HEIGHT = 0.045   # screen heights
 LABEL_GAP = 0.03       # between a target's cue box and its label
+TEXT_HEIGHT = 0.028    # status and prompt lines, screen heights
+TEXT_GAP = 0.04        # between the targets' cue boxes and the status or prompt text
+RATE_KEYS = ("1", "2", "3", "4", "5")
+RATE_PROMPT = ("How comfortable was that flicker?\n"
+               "1 unpleasant  2  3 fine  4  5 comfortable")
+END_PROMPT = "Session over. Press space to close."
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 MARKER_CLOCKS: dict[str, Callable[[], float] | None] = {
@@ -47,7 +54,8 @@ class Frame:
     """One display frame. ``trial`` >= 0 marks a flicker frame of that trial.
 
     ``card`` is the profile card shown (-1: none) and ``flash`` the target whose box is
-    flashing (-1: none); neither affects ``lum``.
+    flashing (-1: none); neither affects ``lum``. ``text`` is drawn under the targets and
+    ``prompt`` above them ("": nothing).
     """
 
     lum: np.ndarray
@@ -56,6 +64,8 @@ class Frame:
     trial: int = -1
     card: int = -1
     flash: int = -1
+    text: str = ""
+    prompt: str = ""
 
 
 def format_marker(stamp: float, event: str) -> str:
@@ -90,30 +100,70 @@ class MarkerWriter:
         out.flush()
 
 
-def cued_frames(cfg: StimulusConfig, trials: list[Trial]) -> Iterator[Frame]:
+def still_luminances(cfg: StimulusConfig) -> np.ndarray:
+    """What the targets show between flickers: the flicker's frame 0, so onset has no jump.
+
+    A mixed-condition session shows mid-grey 0.5 instead (the mean of every waveform at
+    every depth), so the still screen is the same whatever condition comes next.
+    """
+    if cfg.conditions:
+        return np.full(cfg.n_targets, 0.5)
+    return frame_luminances(cfg.freqs, cfg.phases, 0, cfg.refresh, cfg.waveform, cfg.depth)
+
+
+def cued_frames(cfg: StimulusConfig, trials: list[Trial],
+                status: Callable[[], str] | None = None,
+                rate: Callable[[], int | None] | None = None,
+                finish: Callable[[], bool] | None = None) -> Iterator[Frame]:
     """Frames of a cued session: per trial cue, flicker (from frame 0), then rest.
 
-    Cue and rest frames hold the flicker's frame-0 luminance, so onset has no jump.
-    Rest gets at least one frame so stim_off is always shown.
+    Cue and rest frames hold still_luminances. Rest gets at least one frame so stim_off
+    is always shown. In a mixed-condition session each trial flickers with its own
+    condition, and its first frame also carries a cond:<j> marker.
+
+    ``status()`` is polled on every still frame (never during the flicker) for the text
+    under the targets. With ``rate``, a comfort prompt follows each rest until ``rate()``
+    returns a rating, marked rate:<n>; it is polled once before the prompt shows, to
+    drop keys pressed earlier. With ``finish``, still frames follow the last trial until
+    ``finish()`` turns true.
     """
     r = cfg.refresh
     freqs, phases = cfg.freqs, cfg.phases
-    still = frame_luminances(freqs, phases, 0, r, cfg.waveform)
+    still = still_luminances(cfg)
     n_cue = n_frames(cfg.session.cue_s, r)
     n_stim = max(1, n_frames(cfg.session.stim_s, r))
     n_rest = max(1, n_frames(cfg.session.rest_s, r))
+
+    def note() -> str:
+        return status() if status is not None else ""
+
     for tr in trials:
         k = tr.target
+        if cfg.conditions:
+            cond = cfg.conditions[tr.condition]
+            waveform, depth, head = cond.waveform, cond.depth, (f"cond:{tr.condition}",)
+        else:
+            waveform, depth, head = cfg.waveform, cfg.depth, ()
         for i in range(n_cue):
-            yield Frame(still, cue=k, events=(f"cue:{k}",) if i == 0 else ())
+            yield Frame(still, cue=k, events=head + (f"cue:{k}",) if i == 0 else (),
+                        text=note())
         stim_cue = k if cfg.hold_cue else -1
-        onset = ((f"cue:{k}",) if n_cue == 0 and cfg.hold_cue else ()) + (f"stim_on:{k}",)
+        onset = ((head + ((f"cue:{k}",) if cfg.hold_cue else ())) if n_cue == 0 else ()) \
+            + (f"stim_on:{k}",)
         for i in range(n_stim):
             events = onset if i == 0 else ()
-            yield Frame(frame_luminances(freqs, phases, i, r, cfg.waveform), cue=stim_cue,
-                        events=events, trial=tr.index)
+            yield Frame(frame_luminances(freqs, phases, i, r, waveform, depth),
+                        cue=stim_cue, events=events, trial=tr.index)
         for i in range(n_rest):
-            yield Frame(still, events=(f"stim_off:{k}",) if i == 0 else ())
+            yield Frame(still, events=(f"stim_off:{k}",) if i == 0 else (), text=note())
+        if rate is not None:
+            rate()
+            while (score := rate()) is None:
+                yield Frame(still, text=note(), prompt=RATE_PROMPT)
+            yield Frame(still, events=(f"rate:{score}",), text=note())
+    if finish is not None:
+        while not finish():
+            yield Frame(still, text=note(), prompt=END_PROMPT)
 
 
 def free_frames(cfg: StimulusConfig, seconds: float | None = None,
@@ -134,7 +184,7 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
     flash in progress. Neither changes the luminances.
     """
     r = cfg.refresh
-    still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform)
+    still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform, cfg.depth)
     total = None if seconds is None else n_frames(seconds, r)
     flash_len = n_frames(cfg.card_spec.flash_s, r)
     holding = hold is not None
@@ -155,8 +205,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
             continue
         holding = False
         k = cue() if cue is not None else -1
-        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform), cue=k,
-                    card=shown, flash=lit)
+        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
+                    cue=k, card=shown, flash=lit)
         i += 1
 
 
@@ -204,10 +254,11 @@ class SessionTiming:
 
 
 class Renderer(Protocol):
-    """``play`` passes ``card`` and ``flash`` only on frames that set them, so a renderer
-    for card-free sessions may take just ``(lum, cue)``."""
+    """``play`` passes ``card`` and ``flash``, or ``text`` and ``prompt``, only on frames
+    that set them, so a renderer for plain sessions may take just ``(lum, cue)``."""
 
-    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1) -> None: ...
+    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
+             text: str = "", prompt: str = "") -> None: ...
     def flip(self) -> float: ...
     def escape_pressed(self) -> bool: ...
 
@@ -227,10 +278,12 @@ def play(frames: Iterable[Frame], renderer: Renderer, markers: MarkerWriter,
         for fr in frames:
             if renderer.escape_pressed():
                 raise Aborted
+            extra: dict[str, int | str] = {}
             if fr.card >= 0 or fr.flash >= 0:
-                renderer.draw(fr.lum, fr.cue, card=fr.card, flash=fr.flash)
-            else:
-                renderer.draw(fr.lum, fr.cue)
+                extra.update(card=fr.card, flash=fr.flash)
+            if fr.text or fr.prompt:
+                extra.update(text=fr.text, prompt=fr.prompt)
+            renderer.draw(fr.lum, fr.cue, **extra)
             t = renderer.flip()
             markers.emit(fr.events)
             timing.n_frames += 1
@@ -316,7 +369,9 @@ class PsychoPyRenderer:
     the frame loop), centred, [card] height high and as wide as its own aspect says, and
     each target's label (Pass, Like) is written under its cue box in its flash colour, so
     the audience can see what each square does. Labels are static and drawn outside the
-    squares, so they never touch the flicker.
+    squares, so they never touch the flicker. Status text goes under the targets and
+    prompts above them, in a monospaced font so a status table lines up; a text stimulus
+    is re-rendered only when its text changes.
     """
 
     def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = ()) -> None:
@@ -355,6 +410,16 @@ class PsychoPyRenderer:
                                                    pos=label_pos(cfg, t.index),
                                                    height=LABEL_HEIGHT,
                                                    color=cfg.flash_color(t.index)))
+        bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
+        top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
+        self.status = visual.TextStim(self.win, text="", pos=(0.0, bottom), height=TEXT_HEIGHT,
+                                      color=to_psychopy_rgb(0.75), font="Menlo",
+                                      wrapWidth=1.5, anchorVert="top", alignText="left")
+        self.prompt = visual.TextStim(self.win, text="", pos=(0.0, top), height=TEXT_HEIGHT,
+                                      color=to_psychopy_rgb(0.9), font="Menlo",
+                                      wrapWidth=1.5, anchorVert="bottom")
+        self._texts: dict[int, str] = {}
+        self._escaped = False
         self.cards = []
         for path in cards:
             w, h = png_size(path)
@@ -370,7 +435,16 @@ class PsychoPyRenderer:
         stamps = [self.win.flip() for _ in range(warmup + n)]
         return median_rate(stamps[warmup:])
 
-    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1) -> None:
+    def _draw_text(self, stim: object, text: str) -> None:
+        if not text:
+            return
+        if self._texts.get(id(stim)) != text:
+            stim.text = text
+            self._texts[id(stim)] = text
+        stim.draw()
+
+    def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
+             text: str = "", prompt: str = "") -> None:
         # the card goes first so a square drawn over an oversized card keeps its luminance
         if 0 <= card < len(self.cards):
             self.cards[card].draw()
@@ -383,12 +457,33 @@ class PsychoPyRenderer:
             self.boxes[cue].draw()
         if 0 <= flash < len(self.flashes):
             self.flashes[flash].draw()
+        self._draw_text(self.status, text)
+        self._draw_text(self.prompt, prompt)
 
     def flip(self) -> float:
         return float(self.win.flip())
 
     def escape_pressed(self) -> bool:
+        if self._escaped:
+            return True
         return "escape" in self._keys(keyList=["escape"])
+
+    def poll_keys(self, keys: Sequence[str]) -> list[str]:
+        """Which of ``keys`` were pressed since the last poll. An Escape seen here is kept
+        for the next escape_pressed(), so polling never swallows it."""
+        pressed = self._keys(keyList=[*keys, "escape"])
+        if "escape" in pressed:
+            self._escaped = True
+        return [k for k in pressed if k != "escape"]
+
+    def rating(self) -> int | None:
+        """The last comfort key (1-5) pressed since the previous call, or None."""
+        pressed = self.poll_keys(RATE_KEYS)
+        return int(pressed[-1]) if pressed else None
+
+    def close_pressed(self) -> bool:
+        """Space or Escape on the end screen: closes it normally (not an abort)."""
+        return bool(self._keys(keyList=["space", "escape"]))
 
     def wait_for_start(self, still: np.ndarray, text: str = "press space to start") -> None:
         """Show the still targets and a prompt until space (Escape raises Aborted)."""

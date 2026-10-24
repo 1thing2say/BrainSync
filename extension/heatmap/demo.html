@@ -1,0 +1,113 @@
+<!doctype html>
+<!--
+  Heatmap panel demo: our own clips in a Reels-style 9:16 column, with the precomputed
+  TRIBE v2 prediction for the reel on screen in the left margin.
+
+      .venv-tribe/bin/python -m brainsync.heatmap render <id> --video <clip>   (once per clip)
+      python3 -m http.server -d extension 8000
+      open http://127.0.0.1:8000/heatmap/demo.html          (?squares=0 hides the outlines)
+
+  The dashed boxes mark where overlay.js draws the 15/17 Hz squares (static here, nothing
+  flickers), to check the panel keeps clear of them. Scroll with the wheel or arrow keys.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heatmap panel demo</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+               font-family: -apple-system, system-ui, sans-serif; }
+  #feed { height: 100vh; width: calc(100vh * 9 / 16); max-width: 100vw; margin: 0 auto;
+          overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; }
+  #feed::-webkit-scrollbar { display: none; }
+  .reel { position: relative; height: 100%; scroll-snap-align: start; overflow: hidden; background: #111; }
+  .reel video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .reel .caption { position: absolute; left: 16px; bottom: 20px; color: #fff; font-size: 15px;
+                   text-shadow: 0 1px 6px rgba(0,0,0,0.7); }
+  .reel.missing { display: flex; align-items: center; justify-content: center; color: #888; }
+  .square { position: fixed; box-sizing: border-box; border: 2px dashed #555; pointer-events: none;
+            color: #666; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+  #note { position: fixed; right: 12px; bottom: 12px; color: #777; font-size: 12px; max-width: 28vw; }
+</style>
+</head>
+<body>
+<div id="feed" aria-label="Reels"></div>
+<div id="note"></div>
+<script src="panel.js"></script>
+<script>
+  "use strict";
+  (async function () {
+    const H = window.BrainSyncHeatmap;
+    const feed = document.getElementById("feed"), note = document.getElementById("note");
+    const params = new URLSearchParams(location.search);
+    const panel = H.create({ base: "clips/" });
+
+    let clips = [];
+    try {
+      const r = await fetch("clips/index.json");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      clips = (await r.json()).clips || [];
+    } catch (e) {
+      note.textContent = "No clips/index.json (" + e.message + "). Render a clip first: " +
+        "python -m brainsync.heatmap render <id> --video <clip>.";
+    }
+    // a reel with no prediction, to show the placeholder the panel keeps up
+    const reels = clips.map((c) => c.clip_id).concat([null]);
+    for (const id of reels) {
+      const reel = document.createElement("section");
+      reel.className = "reel";
+      if (id) {
+        reel.dataset.clipId = id;
+        reel.innerHTML = '<video muted loop playsinline preload="auto" src="clips/' + id +
+          '/clip.mp4"></video><div class="caption">' + id + "</div>";
+      } else {
+        reel.classList.add("missing");
+        reel.innerHTML = '<video muted loop playsinline></video><div>reel without a prediction</div>';
+      }
+      feed.appendChild(reel);
+    }
+
+    const sections = Array.from(feed.querySelectorAll(".reel"));
+    function current() {
+      return sections[Math.min(sections.length - 1, Math.round(feed.scrollTop / feed.clientHeight))];
+    }
+    let shown = null;
+    function follow() {
+      const reel = current();
+      if (reel === shown) return;
+      shown = reel;
+      sections.forEach((s) => { const v = s.querySelector("video"); if (v && s !== reel) v.pause(); });
+      const video = reel.querySelector("video");
+      if (video && video.src) video.play().catch(() => {});
+      panel.show(video, reel.dataset.clipId || null);
+    }
+    feed.addEventListener("scroll", () => requestAnimationFrame(follow), { passive: true });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") feed.scrollBy({ top: feed.clientHeight, behavior: "smooth" });
+      if (e.key === "ArrowUp") feed.scrollBy({ top: -feed.clientHeight, behavior: "smooth" });
+    });
+    follow();
+
+    function drawSquares() {
+      document.querySelectorAll(".square").forEach((s) => s.remove());
+      if (params.get("squares") === "0") return;
+      for (const r of H.squareRects(H.DEFAULT_TARGETS, innerWidth, innerHeight)) {
+        const d = document.createElement("div");
+        d.className = "square";
+        Object.assign(d.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+        d.textContent = r.label + " square (static outline)";
+        document.body.appendChild(d);
+      }
+      const problem = H.layoutProblem(H.DEFAULT_LAYOUT, H.DEFAULT_TARGETS, innerWidth, innerHeight);
+      if (problem) note.textContent = "Panel hidden: " + problem + ".";
+    }
+    addEventListener("resize", drawSquares);
+    drawSquares();
+    window.heatmapPanel = panel;
+  })();
+</script>
+</body>
+</html>

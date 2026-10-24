@@ -9,15 +9,16 @@ display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
 
 stim:
-  # Mirrors the teammate's stimulus config (ssvep two_targets.toml); the bridge's hello must match.
+  # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.
   # Page mode: a diamond, s1 top, s2 left, s3 right, s4 bottom (PLAN.md section 14, 4-target gate).
-  # NEXT sits on 12 Hz, the weakest frequency, so the likeliest error only turns a page.
+  # All four sit clear of the user's alpha (9.25 Hz) and the 18-21 Hz venue interference.
+  # NEXT sits on 11 Hz, the lowest (nearest alpha), so the likeliest error only turns a page.
   # List-mode fallback: s1 15 Hz (say) and s2 17 Hz (next) only.
   slots:
-    - {slot: s1, freq_hz: 15.0, phase_deg: 0}
-    - {slot: s2, freq_hz: 17.0, phase_deg: 0}
-    - {slot: s3, freq_hz: 20.0, phase_deg: 0}
-    - {slot: s4, freq_hz: 12.0, phase_deg: 0}
+    - {slot: s1, freq_hz: 13.0, phase_deg: 0}
+    - {slot: s2, freq_hz: 15.0, phase_deg: 0}
+    - {slot: s3, freq_hz: 17.0, phase_deg: 0}
+    - {slot: s4, freq_hz: 11.0, phase_deg: 0}
   roles:                       # page mode: option_count "option" slots + one "next"
     s1: option
     s2: option

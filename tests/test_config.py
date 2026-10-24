@@ -42,7 +42,7 @@ def test_default_config_loads() -> None:
     assert isinstance(cfg, AppConfig)
     assert cfg.server.host == "127.0.0.1" and cfg.server.port == 8000
     assert [(s.slot, s.freq_hz) for s in cfg.stim.slots] == [
-        ("s1", 15.0), ("s2", 17.0), ("s3", 20.0), ("s4", 12.0)]
+        ("s1", 13.0), ("s2", 15.0), ("s3", 17.0), ("s4", 11.0)]
     assert cfg.stim.roles == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
     assert cfg.stim.slot_for("next") == "s4"
     assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s4")

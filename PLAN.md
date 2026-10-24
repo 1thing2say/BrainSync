@@ -38,7 +38,7 @@ pull requests.
   1. **Accuracy drops with every target.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at
      78–86 % single-target, and 64–93 % with both squares flickering (section 14); 3 targets
      (12/15/17) only reach 61–66 %; 4 targets were never recorded; 10 Hz is unusable (alpha).
-     **Decision (2026-10-24): try 4 targets first** (3 options + NEXT at 12/15/17/20 Hz), so the
+     **Decision (2026-10-24): try 4 targets first** (3 options + NEXT at 13/15/17/11 Hz, the teammate's `four_diamond.toml`), so the
      user sees 3 options at once. A cued 4-target recording decides whether it stays; if not, fall
      back to a list with a moving highlight decoded with 2 targets (section 14, "4-target gate").
   2. **His decoder is continuous, not per trial.** `SlidingDecoder` classifies a 4 s window every
@@ -156,6 +156,8 @@ pull requests.
   `ListenCore`) is tested against `ui_messages.json`, written from `app/schemas.py` by
   `tools/ui_fixture.py` (`--check` fails when stale). Built on the teammate's Mac with Xcode 16
   (`ios/README.md`); not yet compiled or run on a device.
+- **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
+  s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 
 ## System design
 
@@ -290,8 +292,8 @@ confirmation. State the measured accuracy for the target count actually used.
    from the gitignored `.env` at the repo root if set there. Never commit, print or log them.
 10. **Safety:** flicker warning before the first trial (partner page and his display's start
     screen), `Esc` in his display stops all flicker immediately, and the partner page's STOP does
-    the same through the bridge. 15, 17 and 20 Hz are in the 15–25 Hz range most likely to
-    trigger photosensitive seizures, and 4 flickering squares cover more of the screen than 2:
+    the same through the bridge. 11, 13, 15 and 17 Hz are all in the photosensitive range (15 and
+    17 Hz in the 15–25 Hz band most likely to trigger seizures), and 4 flickering squares cover more of the screen than 2:
     nobody with photosensitive epilepsy or flicker sensitivity uses it.
 11. Ask before adding dependencies outside section 4. All tunable numbers live in
     `config/default.yaml`.
@@ -377,8 +379,8 @@ BrainSync/
 | Key | Default | Notes |
 | --- | --- | --- |
 | `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` for the iPhone app on the LAN (or use `--tunnel`), later the Jetson |
-| `stim.slots` | s1 15 Hz, s2 17 Hz, s3 20 Hz, s4 12 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
-| `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 12 Hz, the weakest and alpha-biased frequency, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
+| `stim.slots` | s1 13 Hz, s2 15 Hz, s3 17 Hz, s4 11 Hz | Mirrors his `four_diamond.toml` (changed 2026-10-24 from 15/17/20/12); checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
+| `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 11 Hz, the lowest and nearest the user's alpha, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
 | `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
 | `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
@@ -464,7 +466,7 @@ any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)
 
 - `MENU_CUE` waits for the next page up to `llm.timeout_s`, then uses a fallback page.
 - `CONFIRMING` is its own trial (new `trial_id`) with only two active slots: "Say it" on s1
-  (15 Hz) and "Back" on s4 (12 Hz), so the confirm step is a 2-class decision. A timeout counts as
+  (13 Hz) and "Back" on s4 (11 Hz), so the confirm step is a 2-class decision. A timeout counts as
   Back: nothing is ever spoken by default.
 - NEXT twice in a row on a "More options" page → home page.
 - **List mode** (fallback, `menus.mode: list`): `STIMULATING --selection(say)--> SPEAKING`;
@@ -813,7 +815,7 @@ questions for the teammate"), with a note asking the teammate's Claude session t
    - `stim_start` from the server means "start flickering now"; the decoder answers with
      `stim_onset` {trial_id, t_unix} from the display's first flickering frame.
    - `stim_stop` turns the flicker off; `reason` gains `no_selection`.
-   - Section 6 table filled in: 4 targets (s1–s3 options, s4 NEXT), 15 / 17 / 20 / 12 Hz, sine,
+   - Section 6 table filled in: 4 targets (s1–s3 options, s4 NEXT), 13 / 15 / 17 / 11 Hz, sine,
      rest 1 s, max trial 10 s, baseline 10 s; `stim_start.active_slots` can be 2 of them (confirm
      screen). Fallback: 2 targets, 15 / 17 Hz. (Done in the draft, 2026-10-24.)
 6. **Scores.** His `Decision.scores` exist already: send `scores` (and `score` for the chosen slot)
@@ -822,7 +824,7 @@ questions for the teammate"), with a note asking the teammate's Claude session t
 7. **Window length.** 4 s or 2 s. In the three cued 15/17 recordings the best 2 s cell was 13/14,
    17/19 and 12/17, against 10/14, 14/19 and 14/17 at 3.86 s (section 14). Shorter windows make
    each selection about 3 s instead of 5 s. *Recommended:* 2 s, if a live check agrees.
-8. **Frequency set.** 12/15/17/20 Hz for page mode, NEXT on 12 Hz; 15/17 for the list-mode
+8. **Frequency set.** 13/15/17/11 Hz for page mode (his `four_diamond.toml`), NEXT on 11 Hz; 15/17 for the list-mode
    fallback. Settled by the 4-target gate (section 14).
 9. **Where the decoder lives.** `../ssvep` (his repo) or the `brainsync/` rebuild on branch
    `check-implemtation-calhacks-desktop`. The bridge (item 3) has to be written against one of them.
@@ -894,7 +896,7 @@ Guidance from the same sessions, for 3 or 4 targets later:
 - 11–17 Hz is a plateau: each frequency is expected within 1 dB of 15 Hz (literature response
   curve over the teammate's measured noise floor). Below 9 Hz and above 20 Hz lose clearly.
 - Avoid harmonic clashes such as 7.5/15 and 10/20.
-- Candidate four-target sets: 12/15/17/20 (the current plan; 20 Hz never measured, though it was
+- Candidate four-target sets: 12/15/17/20 (the first plan; 20 Hz never measured, though it was
   the most phase-locked response seen, as the 10 Hz flicker's harmonic), or 11/13/15/17 with sine
   flicker (no shared harmonics below 45 Hz).
 
@@ -912,9 +914,9 @@ What this means:
 - **Safety does not change.** 12, 15 and 17 Hz are all in the photosensitive range (rule 10).
 
 **4-target gate (decided 2026-10-24; teammate, as early as possible, before the display work).**
-One cued recording with all 4 squares flickering at 12/15/17/20 Hz in the real page-mode layout
-(diamond, fixation marks, text beside each square), using `cued_trials -c` with a
-`four_targets.toml`: about 6–8 trials per target, roughly 5 minutes, headset settled for 20
+One cued recording with all 4 squares flickering at 13/15/17/11 Hz in the real page-mode layout
+(diamond, fixation marks, text beside each square), using `cued_trials -c` with his
+`four_diamond.toml`: about 6–8 trials per target, roughly 5 minutes, headset settled for 20
 minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 
 | 4-class accuracy | Decision |
@@ -923,11 +925,13 @@ minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 | 55–70 % | Train TRCA on the same recording (section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
 | Below that | List mode: options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
 
-Why 12/15/17/20 and not 11/13/15/17: wider spacing (3–5 Hz instead of 2 Hz), and it keeps the two
-strongest measured frequencies. 20 Hz is exactly 3 frames at 60 Hz and was the most phase-locked
-response seen, but has no direct recording, so the gate is its first real test. NEXT goes on 12 Hz
-because the still screen already favours it (alpha), so its errors turn a page instead of picking
-an option.
+**Changed 2026-10-24 to 13/15/17/11 Hz**, the teammate's `four_diamond.toml`: 15 and 17 Hz keep
+their places from `two_targets.toml` (left and right), 13 Hz goes on top and 11 Hz at the bottom,
+so only one pair of neighbouring squares is 2 Hz apart. All four sit clear of the user's
+eyes-closed alpha (9.25 Hz) and of the 18–21 Hz interference he measured at the venue, which
+rules out 20 Hz; with sine flicker they share no harmonics below 45 Hz. NEXT stays at the bottom
+on the lowest frequency, nearest alpha, so its errors turn a page instead of picking an option.
+(The first plan was 12/15/17/20 for wider spacing and the strong 20 Hz response.)
 
 The 12/17 two-target test above is now only relevant to the list-mode fallback: switch from 15/17
 only if it beats it by more than 10 points. Any switch is a config change on both sides: his

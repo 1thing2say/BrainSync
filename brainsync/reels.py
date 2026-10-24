@@ -25,6 +25,14 @@ the decoder's committed target. A new commit scrolls once, decisions are ignored
 --cooldown s (default 1.5), and then only the decoder's votes are reset, so dwelling on
 one square scrolls about every 2.5-2.7 s (brainsync/scroll.py).
 
+Decisions count only while the squares are in view. The overlay reports when its tab is
+hidden (a background tab, another Space, a covered window, the viewer reading this
+terminal) and when it is back; meanwhile decisions are still scored and logged but never
+scroll, because with no flicker on screen the decoder drifts to a target (a first headset
+run committed 15 times in such spells, 12 of them "down"). When the squares are back the
+votes are reset, so a commit needs fresh windows. The summary says how long the squares
+were out of view.
+
 One status line per window goes to stderr, each scroll and a summary to stdout. --log
 writes JSON lines (one per decision, scroll, re-arm and browser report) for tuning.
 The run ends on time, Ctrl-C, Escape in the browser ("viewer quit") or the board going
@@ -210,6 +218,39 @@ class Link:
     frames: dict[str, Any] | None = None   # last frames report (or the hello)
     quit: bool = False                     # the viewer pressed Escape
     stop_text: str | None = None           # overlay text for the final stop phase
+    hidden_at: float | None = None         # decision time the squares went out of view
+    hidden_s: float = 0.0                  # decoding seconds with the squares out of view
+    hidden_spells: int = 0
+
+    @property
+    def showing(self) -> bool:
+        """True while some tab shows the squares (always without a browser)."""
+        return self.bridge is None or self.bridge.showing
+
+    def track_view(self, t: float) -> str | None:
+        """Follow the overlay's view at decision time ``t``: "hidden" when the squares just
+        went out of view, "back" when they just came back, else None."""
+        showing = self.showing
+        if not showing and self.hidden_at is None:
+            self.hidden_at = t
+            self.hidden_spells += 1
+            print(f"{t:7.2f} s  squares out of view: decisions ignored until they are back",
+                  file=sys.stderr)
+            self.log.write("pause", t=round(t, 4))
+            return "hidden"
+        if showing and self.hidden_at is not None:
+            print(f"{t:7.2f} s  squares back in view after {t - self.hidden_at:.1f} s",
+                  file=sys.stderr)
+            self.end_view(t)
+            self.log.write("resume", t=round(t, 4))
+            return "back"
+        return None
+
+    def end_view(self, t: float) -> None:
+        """Close a spell out of view at decision time ``t`` (the run's end)."""
+        if self.hidden_at is not None:
+            self.hidden_s += max(0.0, t - self.hidden_at)
+            self.hidden_at = None
 
     def send(self, msg: dict[str, Any]) -> None:
         if self.bridge is not None:
@@ -259,6 +300,8 @@ class Link:
                 self.log.write("bye")
             elif kind == "scrolled":
                 self._ack(ev)
+            elif kind == "view":
+                self.log.write("view", showing=ev.get("showing"))
             elif kind == "frames":
                 self.frames = ev
                 self.log.write("frames", refresh_hz=ev.get("refresh_hz"),
@@ -471,6 +514,10 @@ def _summary(tally: Tally, link: Link, labels: tuple[str, ...], ended: str,
     lines = [f"{head} {len(link.scrolls)} scrolls (up {up}, down {down}); ended: {ended}"]
     if link.scrolls:
         lines.append("  scrolls: " + "  ".join(f"{a.time:.1f}s->{a.dir}" for a in link.scrolls))
+    if link.hidden_spells:
+        lines.append(f"  squares out of view {link.hidden_s:.1f} s in {link.hidden_spells} "
+                     f"spell{'s' if link.hidden_spells != 1 else ''}: decisions then were "
+                     "ignored")
     if link.bridge is not None:
         lines.append(f"  browser acks: {link.acks_ok} ok, {link.acks_failed} failed, "
                      f"{link.unanswered} unanswered")
@@ -722,16 +769,26 @@ def _main(argv: list[str] | None) -> int:
             gate.rearm = rearm
 
             def on_decision(d: Decision) -> bool:
+                nonlocal stale_end
                 elapsed = (d.end - began) / decoder.fs
                 truth = board.active_target() if args.fake else None
                 tally.add(d, elapsed, truth)
+                view = link.track_view(elapsed)
+                if view == "hidden":
+                    link.send(cue_message(ABSTAIN))
+                elif view == "back":
+                    # the votes were cast with no squares on screen: start them afresh,
+                    # and drop the rest of this read, scored with those votes
+                    decoder.voter.reset()
+                    stale_end = decoder.n_seen
+                hidden = link.hidden_at is not None
                 stale = d.end <= stale_end
                 print(_status(d, elapsed, labels, truth), file=sys.stderr, flush=True)
                 log.write("decision", t=round(elapsed, 4), time=d.time,
                           scores=[round(float(s), 5) for s in d.scores], raw=d.raw,
                           committed=d.committed, changed=d.changed, gap=round(d.gap, 4),
-                          level=round(d.level, 4), truth=truth, stale=stale)
-                if stale:   # neither redraws the cue the re-arm cleared nor reaches the gate
+                          level=round(d.level, 4), truth=truth, stale=stale, hidden=hidden)
+                if stale or hidden:   # neither draws a cue nor reaches the gate
                     return True
                 if d.changed:
                     link.send(cue_message(d.committed))
@@ -745,6 +802,7 @@ def _main(argv: list[str] | None) -> int:
                             clock=clock, stop=link.poll, poll_s=POLL_S)
             except KeyboardInterrupt:
                 ended = "interrupted"
+            link.end_view(tally.seconds)
             if ended == "board stalled":
                 print(f"error: the board sent nothing for {STALL_S:g} s", file=sys.stderr)
                 link.stop_text = "The EEG board stopped sending data."
