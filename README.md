@@ -702,6 +702,112 @@ Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`
 `one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
 quits.
 
+## Live brain map
+
+A live scalp map of your own EEG in the browser. Every 0.25 s the last 2 s from the 8
+electrodes become one frame: band power per electrode (delta, theta, alpha, beta) as a z-score
+against your own rest baseline, 15/17 Hz SSVEP SNR and contact quality. A stdlib HTTP server
+streams the frames as Server-Sent Events to `extension/brainmap/`, which interpolates them over
+a drawing of the head. It needs only numpy, scipy and the standard library, so the same code
+runs on the Jetson.
+
+```bash
+.venv/bin/python -m brainsync.brainmap --open                     # fake board, http://127.0.0.1:8140/
+.venv/bin/python -m brainsync.brainmap --board cerelog --open     # the headset (port auto-detected)
+.venv/bin/python -m brainsync.brainmap --board replay --recording run_cued.npz --speed 4
+.venv/bin/python -m brainsync.brainmap --host 0.0.0.0             # headless Jetson, viewed over the LAN
+```
+
+Sit still with the eyes open for the first `--baseline-s` seconds (30 by default). Until then
+the band views show dB relative to the mean across electrodes, not z-scores. Keys 1-6 pick
+delta, theta, alpha, beta, SSVEP 15 and SSVEP 17 Hz. An electrode that is flat, noisy, clipped
+or offset is greyed out and left out of the interpolation. Only one process can hold the board,
+so close any other BrainSync tool first.
+
+Measured on the M4 on 2026-10-24. The fake board (`--seconds 60`, default 30 s baseline) gave
+232 frames at 4.00 Hz with no gaps, and the baseline was ready 32 s in (30 s of windows after
+the first 2 s window). The fake board stays quiet through the baseline, then puts 10, 15 and
+17 Hz tones on P7/P8/O1/O2 for 10 s each. In the 10 Hz phase the median posterior alpha z was
++3.4 to +4.3 per channel (never below +2.2) while the front four channels stayed near 0
+(-0.3). The SSVEP SNR on those channels, averaged over the last 4 s, was +14.6 dB at 15 Hz
+against -0.3 dB at 17 Hz in the 15 Hz phase, and +14.7 dB at 17 Hz against -0.9 dB at 15 Hz
+in the 17 Hz phase. A synthetic 40 s recording (20 s noise, then 20 s of 10 Hz alpha on
+O1/O2) replayed at `--speed 4 --baseline-s 15` gave all 153 frames. During the alpha phase O1
+and O2 alpha z averaged +5.8 and +6.1, while the other six channels averaged -0.2. The run
+ended with the "ended" status reaching the client, and exit 0. One frame costs about 0.44 ms
+and 730 bytes of JSON.
+
+The rest baseline leaves out blinks and movements (over 150 µV peak to peak after filtering,
+plus the second after), and it uses the median and the median absolute deviation, so a few
+artifacts barely move it. An electrode that was off or bad during the rest needs a full
+`--baseline-s` of clean signal of its own before it gets z-scores; until then the page says
+"no baseline yet" for it.
+
+It is a scalp map from 8 electrodes, not a brain scan, and the page says so. The colours
+between the dots are interpolated, not measured. They show which part of the head carries
+which rhythm, not where in the cortex it comes from, which would need dozens of electrodes and
+a head model. Blinks dominate Fp1/Fp2, and jaw or neck muscle shows up as beta on P7/P8. Noise
+alone moves a z-score too: in the two runs above, channels carrying only noise were beyond
+±1.7 to ±2.5 z (by band) in 5% of frames, and single frames reached ±5.6, mostly on the blue
+side, so read one red or blue patch as a hint until it holds for a few seconds. Still to check on the headset: the table of actions in
+[extension/brainmap/README.md](extension/brainmap/README.md) (eyes closed, blinks, jaw, the
+15 Hz square), and decoder accuracy with the map on screen versus off.
+
+## Predicted-brain heatmap (optional, Reels demo)
+
+This is the offline, simulated alternative to the [live brain map](#live-brain-map): it shows
+a model's prediction for an average brain, not your EEG.
+
+A side panel for the Reels demo that shows what Meta's TRIBE v2 predicts an average brain's
+fMRI response to the reel on screen would be. It is decoration: computed offline for our own
+clips, never fed to the decoder, and labelled "Not your EEG" in the panel and on every frame.
+TRIBE v2 is CC BY-NC 4.0 (non-commercial use only, credit Meta). Only use clips you own.
+
+TRIBE needs its own venv: torch < 2.7 and Python 3.11+, on the arm64 Homebrew Python (the
+Rosetta `/usr/local/bin/python3*` cannot install that torch). About 1.5 GB for the venv and
+7 GB of models (TRIBE 0.7, V-JEPA2 ViT-g 4.1, w2v-BERT 2.3), all deletable:
+
+```bash
+/opt/homebrew/bin/python3.11 -m venv .venv-tribe
+.venv-tribe/bin/pip install --no-cache-dir \
+    "tribev2 @ git+https://github.com/facebookresearch/tribev2@af58661791a351a448a489042a28f6c37e1c14b7" \
+    nilearn pytest
+.venv-tribe/bin/pip install --no-cache-dir --no-deps -e .
+# predict defaults HF_HOME to .tribe-cache/hf (git-ignored) and caps MPS memory so it fails
+# instead of swapping; set either variable yourself to override
+.venv-tribe/bin/python -m brainsync.heatmap predict beach.mp4 --clip-id beach   # auto: cuda, mps, cpu
+.venv-tribe/bin/python -m brainsync.heatmap render beach --video beach.mp4
+python3 -m http.server -d extension 8000    # http://127.0.0.1:8000/heatmap/demo.html
+```
+
+Only video and audio are used: the text path needs the gated Llama-3.2-3B and WhisperX, and
+TRIBE drops it by itself when there are no words (it was trained with modality dropout). No
+Hugging Face token is needed.
+
+Measured on the M4 (24 GB) on 2026-10-24, 5 s test clip:
+
+| Device | Predict time | Per second of video | Matches CPU fp32 |
+|---|---|---|---|
+| CPU, fp32 | 1030 s | ~206 s | reference |
+| MPS, fp16, chunked attention | 316 s | ~63 s | r = 1.000 every second, 0.1% relative error |
+
+Two fixes in `predict.py` make MPS work. torch 2.6's MPS attention builds the whole
+8192 x 8192 score matrix for V-JEPA2 (a 6 GB allocation that pushed the Mac into swap), so
+attention runs in exact 1024-query chunks. And neuralset's per-pass stack of 41 hidden
+layers stayed on the GPU (5.9 to 13.8 GB in three passes, then the process died), so each
+pass moves to the CPU and the GPU cache is emptied. Both apply on CUDA too.
+
+Jetson Orin Nano 8 GB (not yet tried): one fp16 V-JEPA2 pass needed 5.2 GB of GPU memory on
+the Mac. That is tight next to the OS on 8 GB of shared memory, so run predict there with
+nothing else open, or keep predicting on the Mac and copy `extension/heatmap/clips/` over.
+The panel itself is static files and runs anywhere Chrome does.
+
+The panel (`extension/heatmap/`, see its README) sits in the left margin, mirroring the
+squares, refuses any layout within 0.05 screen heights of a square, the reel column or the
+HUD, does no per-frame work, and keeps its backdrop up for reels without a prediction so the
+scene does not change after calibration. Still to measure on the headset: decoder
+accuracy and dropped frames with the panel on versus off.
+
 ## Module map
 
 | Module | Role |
@@ -732,6 +838,9 @@ quits.
 | `brainsync/swipe.py` | BrainSwipe: fresh-window swipe voting, the endless feed, CLI |
 | `brainsync/swipe_web.py` | BrainSwipe browser mock: localhost server with Server-Sent Events, the real swipe logic on a real-time fake board |
 | `brainsync/web/` | The mock's page: HTML, CSS, `app.js` (DOM, network, speech) and `logic.js` (pure helpers, tested with node) |
+| `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
+| `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
+| `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
 
 ## Tests
 
