@@ -160,8 +160,8 @@ class Orchestrator:
         self.decoder_connected = True
         self._record("decoder_connected")
         self._send_status()
-        if self.state is St.PAUSED and self.paused_by_decoder:
-            self._enter_baseline()
+        # A session paused by a lost decoder resumes in _on_hello, once the bridge's hello passes:
+        # baseline comes after hello_ack (INTERFACE-v2-draft.md section 3).
 
     def on_decoder_disconnected(self) -> None:
         self.decoder_connected = False
@@ -215,6 +215,8 @@ class Orchestrator:
             labels={slot: self._label(role, last) for slot, role in self.roles.items()},
         ))
         self._send_status()
+        if self.state is St.PAUSED and self.paused_by_decoder:
+            self._enter_baseline()
 
     # ---------------------------------------------------------------- events: browser
 

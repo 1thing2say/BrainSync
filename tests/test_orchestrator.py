@@ -302,6 +302,34 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
     assert r.o.state is St.PAUSED
     assert r.last(r.ui, State).detail == "Decoder disconnected"
     r.o.on_decoder_connected()
+    assert r.o.state is St.PAUSED  # not before the bridge's hello passes
+    r.o.on_decoder_message(bridge_hello())
+    assert r.o.state is St.BASELINE
+
+
+def test_reconnect_sends_baseline_only_after_hello_ack():
+    r = Rig()
+    r.o.on_decoder_connected()
+    r.o.on_decoder_message(bridge_hello())
+    r.to_trial()
+    r.o.on_decoder_disconnected()
+    r.decoder.clear()
+    r.o.on_decoder_connected()
+    assert r.decoder == []
+    r.o.on_decoder_message(bridge_hello())
+    assert [type(m) for m in r.decoder] == [HelloAck, Baseline]
+
+
+def test_reconnect_with_rejected_hello_stays_paused_until_a_good_one():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()
+    r.decoder.clear()
+    r.o.on_decoder_connected()
+    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
+    assert r.o.state is St.PAUSED
+    assert not [m for m in r.decoder if isinstance(m, Baseline)]
+    r.o.on_decoder_message(bridge_hello())
     assert r.o.state is St.BASELINE
 
 
