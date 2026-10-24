@@ -27,8 +27,12 @@ pull requests.
 - The server and fake decoder speak only protocol 2 (`INTERFACE-v2-draft.md`) since `d4c1af9`; v1
   is gone from the code. The server sends nothing to the bridge before `hello_ack`, waits for
   `baseline_done` (pausing on a failure or after `baseline.timeout_s`), pauses on
-  `display_ok: false` without restarting by itself, and shows `board_ok: false` as a badge. Not
-  built yet: `tools/contract_check.py`.
+  `display_ok: false` without restarting by itself, and shows `board_ok: false` as a badge.
+- **For the teammate:** `python tools/contract_check.py` (our venv) is a stand-in server on
+  `:8000/ws/decoder`. Start it, then the bridge; it runs a handshake, two baselines, three trials
+  and a paused one, prints PASS/FAIL per check and exits 0 only if everything passed. Our fake
+  decoder passes it (`python tools/fake_decoder.py` in a second terminal shows what a passing run
+  looks like).
 - Read the teammate's `ssvep` code (section 12). Three facts shape this plan:
   1. **2 targets, not 4.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at 78–86 %
      single-target, and 64–93 % with both squares flickering (section 14); 3 targets (12/15/17)
@@ -92,7 +96,8 @@ Design risks to settle:
    the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
 2. **The contract is not confirmed yet.** The server speaks only protocol 2
    (`INTERFACE-v2-draft.md`), but the teammate has not agreed it, and the bridge cannot be built
-   until they do, so it gates SYNC 2. Server part of v2 still missing: `tools/contract_check.py`.
+   until they do, so it gates SYNC 2. The server side of v2 is built, including
+   `tools/contract_check.py` for testing the bridge.
 3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
    a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
    demo script rehearses switching to it.
@@ -202,7 +207,7 @@ BrainSync/
     speech.js           # TTS (speechSynthesis) + STT (Web Speech API)
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
-    contract_check.py   # stand-in server on :8000 for the bridge; pass/fail per message (not built yet)
+    contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
   logs/                 # gitignored
   tests/
