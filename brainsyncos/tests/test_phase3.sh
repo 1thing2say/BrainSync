@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# test_phase3.sh - check the BrainSyncOS package build and its signed repository (host side).
+#
+# Usage: BASE_ISO=/path/to/base.iso tests/test_phase3.sh [--keep]
+#
+# Checks config/build.env and config/packages.env (host bash 3.2), that the
+# builder container really runs with the configured CPU and memory caps,
+# scripts/build.sh and the Makefile, and the Phase 3 chain with a throwaway
+# signing key (never config/repo-signing-key.asc): make-repo-key.sh, then
+# build-packages.sh and build-repo.sh for both editions, the signed result,
+# and refusals of bad input. In the builder (tests/phase3-checks.sh): the
+# install-side apt helper against good and tampered repositories, the md5sum
+# merge of mapped trees, and hook.sh mounting the repository for
+# 60-apt-repo.sh in NVIDIA's real target base layer. Last, shellcheck over
+# every BrainSyncOS shell script (koalaman/shellcheck:v0.10.0, used offline).
+# Builds no ISO: tests/test_phase2.sh and test_vm.sh build test ISOs that
+# carry a repository and run the full hook. Everything goes to
+# build/tmp/phase3/ (deleted at the end unless --keep). Per-check logs:
+# build/test-logs/phase3/.
+
+BSOS_SCRIPT=test_phase3.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
+
+load_config
+load_product_config
+load_packages_config
+load_build_config
+
+keep=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --keep) keep=1; shift ;;
+        -h|--help) usage_from_header; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+S="$BRAINSYNCOS_ROOT/scripts"
+B="$S/builder.sh"
+LOGS="$BUILD_DIR/test-logs/phase3"
+TD="build/tmp/phase3"          # relative to brainsyncos/ (= /work in the builder)
+KEY="$TD/key/repo-signing-key.asc"
+SHELLCHECK_IMAGE=koalaman/shellcheck:v0.10.0
+mkdir -p "$LOGS"
+rm -f "$LOGS"/*.log
+# shellcheck source=tests/testlib.sh
+source "$BRAINSYNCOS_ROOT/tests/testlib.sh"
+
+cleanup() {
+    [ "$keep" = 1 ] || force_rm_tree "$BRAINSYNCOS_ROOT/$TD"
+}
+trap cleanup EXIT
+
+in_builder() { "$B" run tests/phase3-checks.sh "$1" "$TD"; }
+
+# expect_fail PATTERN CMD...: CMD fails and its output matches PATTERN.
+expect_fail() {
+    local pat="$1" out
+    shift
+    if out="$("$@" 2>&1)"; then die "accepted: $*"; fi
+    printf '%s\n' "$out" | grep -Eq -e "$pat" || die "refused for the wrong reason ($*): $out"
+    echo "refuses ${*##*/}: $(printf '%s\n' "$out" | grep -Em1 -e "$pat")"
+}
+
+t_configs() {
+    /bin/bash --version | head -1
+    /bin/bash -c 'source "$1/scripts/lib.sh"; load_build_config; load_packages_config
+        echo "build: $BUILD_CPUS CPUs, $BUILD_JOBS jobs, $BUILD_MEMORY, /scratch $BUILD_SCRATCH_SIZE; repo: $REPO_SUITE/$REPO_COMPONENT, key expiry $REPO_KEY_EXPIRE"' _ "$BRAINSYNCOS_ROOT"
+    [ "$(BSOS_BUILD_CPUS=1.5 /bin/bash -c 'source "$1/scripts/lib.sh"; load_build_config; echo $BUILD_CPUS' _ "$BRAINSYNCOS_ROOT")" = 1.5 ] \
+        || die "BSOS_BUILD_CPUS does not override BUILD_CPUS"
+    local bad="$TMP_DIR/bad.env" kv out
+    mkdir -p "$TMP_DIR"
+    for kv in BUILD_CPUS=0 BUILD_CPUS=two BUILD_JOBS=0 BUILD_MEMORY=6G BUILD_MEMORY=3g BUILD_SCRATCH_SIZE=3; do
+        sed "s/^${kv%%=*}=.*/$kv/" "$BSOS_BUILD_CONFIG" > "$bad"
+        if out="$(BSOS_BUILD_CONFIG="$bad" /bin/bash -c 'source "$1/scripts/lib.sh"; load_build_config' _ "$BRAINSYNCOS_ROOT" 2>&1)"; then
+            rm -f "$bad"; die "accepted $kv"
+        fi
+        printf '%s\n' "$out" | grep -q "${kv%%=*} must" || die "rejected $kv for the wrong reason: $out"
+        echo "rejects $kv: ${out##*ERROR: }"
+    done
+    for kv in REPO_SUITE=Bad_Suite REPO_COMPONENT=-x REPO_KEY_EXPIRE=forever PACKAGE_MAINTAINER_EMAIL=nobody; do
+        sed "s/^${kv%%=*}=.*/$kv/" "$BSOS_PACKAGES_CONFIG" > "$bad"
+        if out="$(BSOS_PACKAGES_CONFIG="$bad" /bin/bash -c 'source "$1/scripts/lib.sh"; load_packages_config' _ "$BRAINSYNCOS_ROOT" 2>&1)"; then
+            rm -f "$bad"; die "accepted $kv"
+        fi
+        printf '%s\n' "$out" | grep -q "${kv%%=*} must" || die "rejected $kv for the wrong reason: $out"
+        echo "rejects $kv: ${out##*ERROR: }"
+    done
+    rm -f "$bad"
+}
+
+# The container must run with the caps of config/build.env (and an override).
+t_builder_caps() {
+    local cpu mem want_cpu want_mem
+    "$B" build > /dev/null
+    want_cpu="$(awk -v c="$BUILD_CPUS" 'BEGIN {printf "%d 100000", c * 100000}')"
+    want_mem=$(( $(size_mb "$BUILD_MEMORY") * 1024 * 1024 ))
+    cpu="$("$B" run cat /sys/fs/cgroup/cpu.max)"
+    mem="$("$B" run cat /sys/fs/cgroup/memory.max)"
+    [ "$cpu" = "$want_cpu" ] || die "cpu.max is '$cpu', want '$want_cpu' (BUILD_CPUS=$BUILD_CPUS)"
+    [ "$mem" = "$want_mem" ] || die "memory.max is $mem, want $want_mem (BUILD_MEMORY=$BUILD_MEMORY)"
+    echo "cpu.max $cpu, memory.max $mem"
+    "$B" run bash -c 'echo "BSOS_JOBS=$BSOS_JOBS MAKEFLAGS=$MAKEFLAGS CMAKE_BUILD_PARALLEL_LEVEL=$CMAKE_BUILD_PARALLEL_LEVEL"; df -k /scratch | tail -1' > "$TMP_DIR/env.out"
+    cat "$TMP_DIR/env.out"
+    grep -q "^BSOS_JOBS=$BUILD_JOBS MAKEFLAGS=-j$BUILD_JOBS CMAKE_BUILD_PARALLEL_LEVEL=$BUILD_JOBS$" "$TMP_DIR/env.out" || die "job variables wrong"
+    [ "$(awk 'NR==2 {print $2}' "$TMP_DIR/env.out")" = $(( $(size_mb "$BUILD_SCRATCH_SIZE") * 1024 )) ] || die "/scratch is not $BUILD_SCRATCH_SIZE"
+    [ "$(BSOS_BUILD_CPUS=1 "$B" run cat /sys/fs/cgroup/cpu.max)" = "100000 100000" ] || die "BSOS_BUILD_CPUS=1 not applied"
+    "$B" run bash -c 'command -v apt-ftparchive gpg gpgv faketime dpkg-deb' > /dev/null || die "builder lacks Phase 3 tools"
+    echo "override BSOS_BUILD_CPUS=1: cpu.max 100000 100000; apt-ftparchive, gpg, gpgv, faketime present"
+}
+
+t_build_sh() {
+    local out rc
+    "$S/build.sh" --help | grep -q '^Usage: scripts/build.sh COMMAND' || die "build.sh --help"
+    expect_fail 'unknown command: bogus' "$S/build.sh" bogus
+    expect_fail '--edition must be jetson or vm' "$S/build.sh" packages --edition pi
+    expect_fail 'takes no arguments' "$S/build.sh" repo --fast
+    expect_fail 'unknown test suite: phase9' "$S/build.sh" test phase9
+    set +e; out="$("$S/build.sh" doctor 2>&1)"; rc=$?; set -e
+    printf '%s\n' "$out"
+    case "$rc" in
+        0) printf '%s\n' "$out" | grep -q '^ready: ' || die "doctor exit 0 without 'ready'" ;;
+        1) printf '%s\n' "$out" | grep -q 'missing; fix them' || die "doctor exit 1 without the summary" ;;
+        *) die "doctor exit code $rc" ;;
+    esac
+    printf '%s\n' "$out" | grep -q '^  ok       resources: ' || die "doctor did not report resources"
+    (cd "$BRAINSYNCOS_ROOT" && make -n EDITION=vm iso) | grep -qx 'scripts/build.sh iso --edition vm' || die "make iso EDITION=vm"
+    (cd "$BRAINSYNCOS_ROOT" && make -n) | grep -qx 'scripts/build.sh all --edition jetson' || die "make (all)"
+    (cd "$BRAINSYNCOS_ROOT" && make -n test TESTS="phase2 vm") | grep -qx 'scripts/build.sh test phase2 vm' || die "make test"
+    echo "build.sh: help, refusals, doctor (rc=$rc); Makefile targets map to build.sh"
+}
+
+t_repo_key() {
+    force_rm_tree "$BRAINSYNCOS_ROOT/$TD"
+    "$B" run scripts/make-repo-key.sh --out "$TD/key"
+    local f="$BRAINSYNCOS_ROOT/$KEY" pub="$BRAINSYNCOS_ROOT/$TD/key/repo-signing-key.pub.asc" fpr fpr2
+    [ "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f")" = 600 ] || die "secret key is not mode 600"
+    grep -q 'BEGIN PGP PRIVATE KEY BLOCK' "$f" || die "secret key file holds no secret key"
+    ! grep -q 'PRIVATE KEY' "$pub" || die "public key file holds a private key"
+    "$B" run bash -c 'source scripts/lib.sh; key_records "$1"' _ "$KEY" > "$TMP_DIR/key.recs"
+    grep '^sec:' "$TMP_DIR/key.recs"
+    awk -F: '/^sec:/ {exit !($4 == 22 && $12 ~ /S/ && $12 !~ /[eE]/ && $7 != "")}' "$TMP_DIR/key.recs" \
+        || die "not an expiring Ed25519 (algo 22) sign-only key"
+    [ "$(grep -c '^ssb:' "$TMP_DIR/key.recs")" = 0 ] || die "key has subkeys"
+    fpr="$("$B" run bash -c 'source scripts/lib.sh; key_fingerprint "$1"' _ "$KEY")"
+    expect_fail 'already exists' "$B" run scripts/make-repo-key.sh --out "$TD/key"
+    "$B" run scripts/make-repo-key.sh --out "$TD/key" --force 2> /dev/null
+    fpr2="$("$B" run bash -c 'source scripts/lib.sh; key_fingerprint "$1"' _ "$KEY")"
+    [ -n "$fpr" ] && [ "$fpr" != "$fpr2" ] || die "--force did not make a new key"
+    echo "key $fpr2: mode 600, Ed25519 sign-only, expires; refuses to overwrite; --force replaces"
+}
+
+t_packages() {
+    local e deb fpr
+    fpr="$("$B" run bash -c 'source scripts/lib.sh; key_fingerprint "$1"' _ "$KEY")"
+    for e in jetson vm; do
+        "$B" run scripts/build-packages.sh --edition "$e" --key "$KEY" --out "$TD/debs/$e"
+        deb="$(ls "$BRAINSYNCOS_ROOT/$TD/debs/$e/brainsyncos-archive-keyring_${BRAINSYNCOS_VERSION}_all.deb")"
+        "$B" run bash -c 'set -e; source scripts/lib.sh
+            d="$(scratch_dir deb)"; dpkg-deb -x "$1" "$d"; dpkg-deb -f "$1" Package Version Architecture Maintainer
+            dpkg-deb -c "$1" | awk "{print \$2}" | sort -u
+            key_fingerprint "$d/usr/share/keyrings/brainsyncos-archive-keyring.gpg"
+            dpkg-deb -e "$1" "$d/DEBIAN"; (cd "$d" && md5sum -c --quiet DEBIAN/md5sums)' _ "${deb#$BRAINSYNCOS_ROOT/}" > "$TMP_DIR/deb.$e"
+        cat "$TMP_DIR/deb.$e"
+        grep -qx 'root/root' "$TMP_DIR/deb.$e" && [ "$(grep -c '/' "$TMP_DIR/deb.$e")" = 1 ] || die "$e: files not all root/root"
+        grep -qx "$fpr" "$TMP_DIR/deb.$e" || die "$e: the keyring does not hold key $fpr"
+        grep -qx "Maintainer: BrainSyncOS <$PACKAGE_MAINTAINER_EMAIL>" "$TMP_DIR/deb.$e" || die "$e: Maintainer"
+    done
+    cmp "$BRAINSYNCOS_ROOT/$TD/debs/jetson/"*.deb "$BRAINSYNCOS_ROOT/$TD/debs/vm/"*.deb \
+        || die "the keyring .deb differs between editions (not reproducible)"
+    expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
+    expect_fail 'no repository signing key' "$B" run scripts/build-packages.sh --edition vm --key "$TD/none.asc" --out "$TD/x"
+    expect_fail 'no package named nope' "$B" run scripts/build-packages.sh --edition vm --only nope --key "$KEY" --out "$TD/x"
+    echo "keyring package for both editions: root-owned, md5sums OK, holds $fpr, byte-identical (SOURCE_DATE_EPOCH)"
+}
+
+t_repo() {
+    local e r
+    for e in jetson vm; do
+        "$B" run scripts/build-repo.sh --edition "$e" --debs "$TD/debs/$e" --key "$KEY" --out "$TD/repo/$e"
+        r="$BRAINSYNCOS_ROOT/$TD/repo/$e"
+        (cd "$r" && find . -type f | LC_ALL=C sort)
+        [ "$(cat "$r/edition")" = "$e" ] || die "$e: edition file"
+        grep -qx "Suite: $REPO_SUITE" "$r/dists/$REPO_SUITE/Release" && grep -qx "Origin: $REPO_ORIGIN" "$r/dists/$REPO_SUITE/Release" \
+            || die "$e: Release fields"
+        "$B" run bash -c 'source scripts/lib.sh; load_packages_config; validate_repo "$1" "$2"' _ "$TD/repo/$e" "$e"
+    done
+    "$B" run bash -c 'source scripts/lib.sh; load_packages_config; validate_repo "$1" vm' _ "$TD/repo/jetson" 2> "$TMP_DIR/v.err" \
+        && die "a jetson repository passed as vm"
+    grep -q "built for edition 'jetson', not vm" "$TMP_DIR/v.err" || die "edition mix-up: $(cat "$TMP_DIR/v.err")"
+    echo "refuses a jetson repository for the vm ISO"
+    expect_fail 'holds no secret key' "$B" run scripts/build-repo.sh --edition vm --debs "$TD/debs/vm" \
+        --key "$TD/key/repo-signing-key.pub.asc" --out "$TD/x"
+    expect_fail 'no .debs in' "$B" run scripts/build-repo.sh --edition vm --debs "$TD/none" --key "$KEY" --out "$TD/x"
+    [ ! -e "$BRAINSYNCOS_ROOT/$TD/x" ] && [ ! -e "$BRAINSYNCOS_ROOT/$TD/x.new" ] || die "a refused build left output"
+    # A rebuild replaces the repository as a whole.
+    "$B" run scripts/build-repo.sh --edition vm --debs "$TD/debs/vm" --key "$KEY" --out "$TD/repo/vm" > /dev/null 2>&1
+    [ ! -e "$BRAINSYNCOS_ROOT/$TD/repo/vm.new" ] || die "rebuild left repo/vm.new"
+    echo "repositories for both editions signed and validated; bad input refused; rebuild replaces"
+}
+
+t_shellcheck() {
+    docker image inspect "$SHELLCHECK_IMAGE" > /dev/null 2>&1 \
+        || die "$SHELLCHECK_IMAGE is not available locally (docker pull $SHELLCHECK_IMAGE)"
+    local files
+    files="$(cd "$BRAINSYNCOS_ROOT" && ls scripts/*.sh tests/*.sh tests/shims/curtin payload/hook.sh payload/install.d/*.sh \
+        payload/lib/*.sh packages/*/build.sh)"
+    # shellcheck disable=SC2086
+    docker run --rm --network none --cpus "$BUILD_CPUS" -v "$BRAINSYNCOS_ROOT:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
+        -x -S warning $files
+    echo "shellcheck: $(printf '%s\n' "$files" | wc -l | tr -d ' ') scripts clean"
+}
+
+log "Phase 3 test chain (logs: ${LOGS#$BRAINSYNCOS_ROOT/}/)"
+check configs              t_configs
+check builder-caps         t_builder_caps
+check build-sh             t_build_sh
+check repo-key             t_repo_key
+if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
+check packages             t_packages
+check repo                 t_repo
+if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
+    check apt-helper       in_builder apt
+    check md5-map          in_builder md5map
+    check install-hook     in_builder hook
+fi
+check shellcheck           t_shellcheck
+
+finish "Phase 3"

@@ -10,8 +10,9 @@
 # and on the host, the boot-menu and autoinstall generators (the latter against
 # the schema of the ISO's own subiquity), the md5sum merge, and the login checks
 # of build-vm-iso.sh. Builds a test ISO (build/out/vm-test.iso, with a throwaway
-# SSH key generated for the run; the real build/out/brainsyncos-*-vm-arm64.iso
-# and config/authorized_keys are never used), compares its boot structure with
+# SSH key and a throwaway package repository signing key generated for the
+# run; the real build/out/brainsyncos-*-vm-arm64.iso, config/authorized_keys
+# and config/repo-signing-key.asc are never used), compares its boot structure with
 # the Ubuntu base (El Torito, MBR + CHS geometry, ESP bytes, ISO9660/Joliet
 # names), checks its contents (including Ubuntu's signed casper checksums), and
 # runs the install hook against Ubuntu's real target layers; boots it under
@@ -45,6 +46,7 @@ LOGS="$BUILD_DIR/test-logs/vm"
 NAME="vm-test"
 ISO="$OUT_DIR/$NAME.iso"
 LOGIN="build/tmp/vm-test-login"   # relative to brainsyncos/ (= /work in the builder)
+REPO_T="build/tmp/vm-test-repo"    # test key, packages and repository (test_repo)
 BASE_FILE="$DOWNLOADS_DIR/$BASE_ISO_NAME"
 mkdir -p "$LOGS" "$TMP_DIR"
 rm -f "$LOGS"/*.log
@@ -55,10 +57,17 @@ cleanup_test_iso() {
     [ "$keep" = 1 ] && return 0
     rm_released "$ISO" "$ISO.sha256" "$OUT_DIR/$NAME.manifest.txt" "$OUT_DIR/$NAME.xorriso.log" \
         "$OUT_DIR/.$NAME.iso.partial"
+    force_rm_tree "$BRAINSYNCOS_ROOT/$REPO_T"
 }
 trap cleanup_test_iso EXIT
 
 in_builder() { "$B" run tests/vm-checks.sh "$1" "$NAME"; }
+
+# A throwaway repository signing key and the vm package repository built with it.
+t_test_repo() {
+    test_repo vm "$REPO_T"
+    [ -f "$BRAINSYNCOS_ROOT/$REPO_T/repo/dists/brainsyncos/InRelease" ]
+}
 
 t_vm_config() {
     /bin/bash --version | head -1
@@ -156,11 +165,13 @@ t_build_logins() {
     expect_refusal 'not a valid authorized_keys' --authorized-keys "$LOGIN/password.hash" --password-hash "$LOGIN/none"
     expect_refusal 'not a single crypt(3) hash' --authorized-keys "$LOGIN/none" --password-hash "$LOGIN/authorized_keys"
     expect_refusal 'invalid --name' --name ../x --authorized-keys "$LOGIN/authorized_keys"
+    expect_refusal 'no BrainSyncOS package repository' --authorized-keys "$LOGIN/authorized_keys" --repo "$REPO_T/none"
     [ ! -e "$OUT_DIR/refused.iso" ] || die "a refused build left an ISO"
 }
 
 t_build() {
-    "$B" run scripts/build-vm-iso.sh --name "$NAME" --authorized-keys "$LOGIN/authorized_keys" --password-hash "$LOGIN/none"
+    "$B" run scripts/build-vm-iso.sh --name "$NAME" --authorized-keys "$LOGIN/authorized_keys" --password-hash "$LOGIN/none" \
+        --repo "$REPO_T/repo"
     [ -s "$ISO" ] && [ -s "$ISO.sha256" ] && [ -s "$OUT_DIR/$NAME.manifest.txt" ] || die "build outputs missing"
     (cd "$OUT_DIR" && shasum -a 256 -c "$NAME.iso.sha256")
     grep -q 'brainsyncos-vm-test' "$VM_STAGE_DIR/brainsyncos/config/authorized_keys" || die "staged key is not the throwaway one"
@@ -170,7 +181,7 @@ t_boot_compare() {
     local out added
     out="$("$B" run scripts/compare-iso.sh "build/out/$NAME.iso" --edition vm 2>&1)" || { printf '%s\n' "$out"; return 1; }
     printf '%s\n' "$out"
-    added="$(find "$VM_STAGE_DIR/brainsyncos" | wc -l | tr -d ' ')"
+    added=$(( $(find "$VM_STAGE_DIR/brainsyncos" | wc -l) + $(find "$BRAINSYNCOS_ROOT/$REPO_T/repo" | wc -l) ))
     printf '%s\n' "$out" | grep -q "^PASS names .*iso9660 [0-9]* names equal (+$added added); joliet [0-9]* names equal (+$added added)" \
         || die "names check: expected all base names unchanged and $added added"
     for c in eltorito boot-esp mkisofs chs descriptors mbr esp-bytes names; do
@@ -467,12 +478,13 @@ t_cleanup() {
 
 log "VM edition test chain (logs: ${LOGS#$BRAINSYNCOS_ROOT/}/)"
 check vm-config            t_vm_config
-check disk-space           check_free_space "$BUILD_DIR" "$MIN_FREE_GB"
+check disk-space           check_free_space "$BUILD_DIR" "$(iso_need_gb "$BASE_ISO_SIZE")"
 check fetch-idempotent     t_fetch
 if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
 check builder-image        t_builder_image
 check verify-base          t_verify
 check test-login           t_test_login
+check test-repo            t_test_repo
 check render-grub          in_builder grub
 check autoinstall          in_builder autoinstall
 check merge-md5sums        in_builder md5

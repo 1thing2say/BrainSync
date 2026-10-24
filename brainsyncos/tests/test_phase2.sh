@@ -6,14 +6,16 @@
 # Checks the product config (host bash 3.2), the boot-menu and autoinstall
 # generators and the md5sum merge on NVIDIA's real files, and the login
 # checks of build-iso.sh. Builds a test ISO (build/out/phase2-test.iso, with a
-# throwaway SSH key generated for the run, so the real deliverable
-# build/out/brainsyncos-*.iso is never touched), compares its boot structure
+# throwaway SSH key and a throwaway package repository signing key generated
+# for the run, so the real deliverable build/out/brainsyncos-*.iso and
+# config/ are never touched), compares its boot structure
 # with the base (El Torito, GPT, ESP bytes, ISO9660/Joliet names), checks its
 # contents and rebuilt overlay layer, and runs the install hook against
 # NVIDIA's real target base layer prepared the way NVIDIA's late-commands
 # leave it (Phase 2.5 identity: hostname, account, SSH, no OOBE), including
-# the console-password variant and the failure paths. The test ISO (~5 GB) is
-# deleted at the end unless --keep. Per-check logs: build/test-logs/phase2/.
+# the console-password variant and the failure paths; the hook also mounts
+# the ISO's package repository and 60-apt-repo.sh installs its keyring. The
+# test ISO (~5 GB) and build/tmp/phase2-repo are deleted at the end unless --keep. Per-check logs: build/test-logs/phase2/.
 # The in-container halves are in tests/phase2-checks.sh.
 
 BSOS_SCRIPT=test_phase2.sh
@@ -37,6 +39,7 @@ LOGS="$BUILD_DIR/test-logs/phase2"
 NAME=phase2-test
 ISO="$OUT_DIR/$NAME.iso"
 LOGIN="build/tmp/test-login"   # relative to brainsyncos/ (= /work in the builder)
+REPO_T="build/tmp/phase2-repo" # test key, packages and repository (test_repo)
 mkdir -p "$LOGS"
 rm -f "$LOGS"/*.log
 # shellcheck source=tests/testlib.sh
@@ -46,10 +49,20 @@ cleanup_test_iso() {
     [ "$keep" = 1 ] && return 0
     rm_released "$ISO" "$ISO.sha256" "$OUT_DIR/$NAME.manifest.txt" "$OUT_DIR/$NAME.xorriso.log" \
         "$OUT_DIR/.$NAME.iso.partial"
+    force_rm_tree "$BRAINSYNCOS_ROOT/$REPO_T"
 }
 trap cleanup_test_iso EXIT
 
 in_builder() { "$B" run tests/phase2-checks.sh "$1" "$NAME"; }
+
+# A throwaway repository signing key and the jetson package repository built
+# with it, plus a vm one (the build must refuse it for this edition).
+t_test_repo() {
+    test_repo jetson "$REPO_T"
+    "$B" run scripts/build-repo.sh --edition vm --debs "$REPO_T/debs" --key "$REPO_T/key/repo-signing-key.asc" \
+        --out "$REPO_T/vm-repo" > /dev/null 2>&1
+    [ -f "$BRAINSYNCOS_ROOT/$REPO_T/repo/dists/brainsyncos/InRelease" ] && [ -f "$BRAINSYNCOS_ROOT/$REPO_T/vm-repo/edition" ]
+}
 
 t_product_config() {
     /bin/bash --version | head -1
@@ -98,11 +111,14 @@ t_build_logins() {
     expect_refusal 'contains a PRIVATE key' --authorized-keys "$LOGIN/id_ed25519" --password-hash "$LOGIN/none"
     expect_refusal 'not a valid authorized_keys' --authorized-keys "$LOGIN/password.hash" --password-hash "$LOGIN/none"
     expect_refusal 'not a single crypt(3) hash' --authorized-keys "$LOGIN/none" --password-hash "$LOGIN/authorized_keys"
+    expect_refusal 'no BrainSyncOS package repository' --authorized-keys "$LOGIN/authorized_keys" --repo "$REPO_T/none"
+    expect_refusal "built for edition 'vm', not jetson" --authorized-keys "$LOGIN/authorized_keys" --repo "$REPO_T/vm-repo"
     [ ! -e "$OUT_DIR/refused.iso" ] || die "a refused build left an ISO"
 }
 
 t_build() {
-    "$B" run scripts/build-iso.sh --name "$NAME" --authorized-keys "$LOGIN/authorized_keys" --password-hash "$LOGIN/none"
+    "$B" run scripts/build-iso.sh --name "$NAME" --authorized-keys "$LOGIN/authorized_keys" --password-hash "$LOGIN/none" \
+        --repo "$REPO_T/repo"
     [ -s "$ISO" ] && [ -s "$ISO.sha256" ] && [ -s "$OUT_DIR/$NAME.manifest.txt" ] || die "build outputs missing"
     (cd "$OUT_DIR" && shasum -a 256 -c "$NAME.iso.sha256")
 }
@@ -111,18 +127,20 @@ t_boot_compare() {
     local out added
     out="$("$B" run scripts/compare-iso.sh "build/out/$NAME.iso" --boot-only 2>&1)" || { printf '%s\n' "$out"; return 1; }
     printf '%s\n' "$out"
-    # Every base name unchanged; exactly the staged payload (dirs + files) added.
-    added="$(find "$STAGE_DIR/brainsyncos" | wc -l | tr -d ' ')"
+    # Every base name unchanged; exactly the staged payload and the package
+    # repository (dirs + files) added.
+    added=$(( $(find "$STAGE_DIR/brainsyncos" | wc -l) + $(find "$BRAINSYNCOS_ROOT/$REPO_T/repo" | wc -l) ))
     printf '%s\n' "$out" | grep -q "^PASS names .*iso9660 [0-9]* names equal (+$added added); joliet [0-9]* names equal (+$added added)" \
         || die "names check: expected all base names unchanged and $added added"
 }
 
 log "Phase 2 test chain (logs: ${LOGS#$BRAINSYNCOS_ROOT/}/)"
 check product-config       t_product_config
-check disk-space           check_free_space "$BUILD_DIR" "$MIN_FREE_GB"
+check disk-space           check_free_space "$BUILD_DIR" "$(iso_need_gb "$BASE_ISO_SIZE")"
 if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
 check builder-image        t_builder_image
 check test-login           t_test_login
+check test-repo            t_test_repo
 check render-grub          in_builder grub
 check patch-autoinstall    in_builder autoinstall
 check merge-md5sums        in_builder md5

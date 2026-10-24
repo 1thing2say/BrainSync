@@ -14,7 +14,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       xorriso squashfs-tools mtools fdisk gdisk dosfstools \
       cpio zstd lz4 xz-utils initramfs-tools-core \
-      rsync file bsdextrautils gnupg \
+      rsync file bsdextrautils gnupg apt-utils faketime \
       python3 python3-yaml \
       grub-common openssh-client openssl \
  && rm -rf /var/lib/apt/lists/* \

@@ -29,6 +29,17 @@ check() {
     return 0
 }
 
+# test_repo EDITION DIR: a throwaway signing key, the edition's packages and
+# their signed repository under DIR (relative to brainsyncos/, as the builder
+# sees it): DIR/key, DIR/debs, DIR/repo. Never touches config/repo-signing-key.asc.
+test_repo() {
+    local e="$1" d="$2" b="$BRAINSYNCOS_ROOT/scripts/builder.sh"
+    force_rm_tree "${BRAINSYNCOS_ROOT:?}/$d"
+    "$b" run scripts/make-repo-key.sh --out "$d/key"
+    "$b" run scripts/build-packages.sh --edition "$e" --key "$d/key/repo-signing-key.asc" --out "$d/debs"
+    "$b" run scripts/build-repo.sh --edition "$e" --debs "$d/debs" --key "$d/key/repo-signing-key.asc" --out "$d/repo"
+}
+
 # finish LABEL: print the summary and exit 1 if any check failed.
 finish() {
     echo

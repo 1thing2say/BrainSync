@@ -2,12 +2,13 @@
 # build-vm-iso.sh - build the BrainSyncOS VM edition installer ISO (builder only).
 #
 # Usage: scripts/builder.sh run scripts/build-vm-iso.sh [--build-id ID] [--name NAME]
-#            [--authorized-keys FILE] [--password-hash FILE]
+#            [--authorized-keys FILE] [--password-hash FILE] [--repo DIR]
 #
 # Output: build/out/NAME.iso, NAME defaulting to brainsyncos-VERSION-vm-arm64
 # (+ .iso.sha256, .manifest.txt with the sha256 of every file BrainSyncOS adds
 # or replaces, .xorriso.log). Staged files stay in build/stage-vm/.
-# Logins (--authorized-keys / --password-hash): exactly as for build-iso.sh.
+# Logins (--authorized-keys / --password-hash) and the package repository
+# (--repo, default build/repo/vm): exactly as for build-iso.sh.
 #
 # A remaster of stock Ubuntu Server arm64 (config/vm-base-iso.env, fetched by
 # scripts/fetch-vm-base.sh into build/downloads/) for UTM on Apple Silicon.
@@ -16,9 +17,10 @@
 # account, key-only SSH, hostname, release file). Nothing of the vendor ISO is
 # rebuilt; only these paths are added or replaced:
 #   /brainsyncos/            payload, release (EDITION=vm-arm64), settings.env,
-#                            config/ logins, autoinstall.yaml (vm/autoinstall.yaml
+#                            repo-key.gpg, config/ logins, autoinstall.yaml (vm/autoinstall.yaml
 #                            plus the VM_DESKTOP package, scripts/render-vm-autoinstall.py;
 #                            checked by scripts/check-autoinstall.py)
+#   /brainsyncos-repo/       the signed package repository (--repo)
 #   /boot/grub/grub.cfg      BrainSyncOS menu (scripts/render-vm-grub.py)
 #   /md5sum.txt              vendor entries + the staged files
 # The squashfs layers, casper/SHA256SUMS, the ESP (shim + signed GRUB) and the
@@ -28,18 +30,20 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 load_vm_config
 load_vm_product_config
+load_packages_config
 
-parse_build_args "$(vm_iso_name)" "$@"
+parse_build_args "$(vm_iso_name)" vm "$@"
 require_container
-require_cmd xorriso python3 grub-script-check md5sum sha256sum sfdisk truncate ssh-keygen
+require_cmd xorriso python3 grub-script-check md5sum sha256sum sfdisk truncate ssh-keygen gpg gpgv
 [ -d /scratch ] && [ -w /scratch ] || die "/scratch (tmpfs) is missing; run this through scripts/builder.sh run"
 validate_logins
+validate_repo "$REPO_SRC" vm
 
 iso="$(resolve_vm_base_iso)"
 "$BRAINSYNCOS_ROOT/scripts/verify-base-iso.sh" --edition vm --iso "$iso"
 check_base_boot_bytes "$iso"
 mkdir -p "$OUT_DIR"
-check_free_space "$OUT_DIR"
+check_free_space "$OUT_DIR" "$(iso_need_gb "$BASE_ISO_SIZE" "$REPO_SRC")"
 log "building $BUILD_NAME (build $BUILD_ID), $EDITION edition on Ubuntu $UBUNTU_RELEASE"
 
 # --- vendor inputs ---------------------------------------------------------------
@@ -66,6 +70,7 @@ EDITION=$EDITION
 UBUNTU_RELEASE=$UBUNTU_RELEASE
 BASE_ISO_NAME=$BASE_ISO_NAME
 BASE_ISO_SHA256=$BASE_ISO_SHA256
+REPO_KEY=$REPO_KEY_FPR
 EOF
 python3 "$BRAINSYNCOS_ROOT/scripts/render-vm-autoinstall.py" "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" \
     "$VM_STAGE_DIR/brainsyncos/autoinstall.yaml" --desktop "$VM_DESKTOP" \
@@ -81,6 +86,7 @@ grub-script-check "$VM_STAGE_DIR/boot/grub/grub.cfg" || die "rendered grub.cfg d
 [ "$VM_GRUB_TIMEOUT" = -1 ] || log "VM_GRUB_TIMEOUT=$VM_GRUB_TIMEOUT: the install entry (erases the VM's disk) starts after ${VM_GRUB_TIMEOUT}s"
 
 # --- md5sum.txt and the ISO ------------------------------------------------------------
-merge_stage_md5sums "$work/vendor/md5sum.txt" "$VM_STAGE_DIR"
-write_stage_iso "$iso" "$VM_STAGE_DIR" "$BUILD_NAME" /brainsyncos /boot/grub/grub.cfg /md5sum.txt
+merge_stage_md5sums "$work/vendor/md5sum.txt" "$VM_STAGE_DIR" "$REPO_SRC" "$ISO_REPO_PATH"
+write_stage_iso --map "$REPO_SRC" "$ISO_REPO_PATH" \
+    "$iso" "$VM_STAGE_DIR" "$BUILD_NAME" /brainsyncos /boot/grub/grub.cfg /md5sum.txt
 force_rm_tree "$work"

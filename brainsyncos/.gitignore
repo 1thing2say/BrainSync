@@ -1,0 +1,12 @@
+# BrainSyncOS keeps its own ignore rules, so the folder stays self-contained
+# (the repository root's .gitignore repeats the build/ and login entries).
+
+# Build cache and output, and any ISO image (base ISOs are user-supplied).
+/build/
+*.iso
+
+# User-specific secrets baked into a build: never commit.
+/config/authorized_keys
+/config/brainsync-password.hash
+/config/repo-signing-key.asc
+/config/repo-signing-key.pub.asc

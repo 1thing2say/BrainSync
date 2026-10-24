@@ -38,7 +38,17 @@ that UTM on an Apple Silicon Mac installs it unattended with the same install
 hook, account, SSH policy and hostname scheme. See
 [VM edition (UTM on Apple Silicon)](#vm-edition-utm-on-apple-silicon).
 
-BrainSync itself is not installed yet; that is Phases 3 and 4.
+Phase 3 installs BrainSync itself. It is being delivered in parts. Part 3a,
+done, is the delivery channel:
+- one build command for a fresh clone (`scripts/build.sh`, or `make`)
+- builder containers capped at 2 CPUs by default (`config/build.env`)
+- a package build (`packages/`)
+- a signed apt repository, shipped on every ISO at `/brainsyncos-repo`
+- the first install step from it, `60-apt-repo.sh`
+
+The BrainSync apps, BrainFlow, llama.cpp and CUDA come next, through the same
+repository. See [Building BrainSyncOS](#building-brainsyncos) and
+[The package repository (Phase 3)](#the-package-repository-phase-3).
 
 ## Base image (user-supplied)
 
@@ -68,13 +78,39 @@ directory that holds it read-only at `/in`. The scripts find the ISO at
   - **x86_64 Linux** works for Phase 1, but you must register qemu-user-static/binfmt with Docker (`docker run --privileged --rm tonistiigi/binfmt --install arm64`). Later phases chroot into the arm64 rootfs and are much slower under emulation.
 - **Builder pinning:** `docker/Dockerfile.builder` pins `ubuntu:24.04` by digest, but apt installs whatever noble/noble-updates currently ships. snapshot.ubuntu.com returns 401 for `ubuntu-ports`, so arm64 cannot be snapshot-pinned. The installed versions (with `xorriso -version`) are recorded in `build/meta/builder-packages.txt` on every extraction.
 - **Linux hosts:** the container runs as root. With rootful Docker, everything under `build/` ends up owned by root, and the host-side test steps that write there fail. Use rootless Docker or Docker Desktop for Linux (both map container root to your user), or run `sudo chown -R "$(id -u):$(id -g)" build` after each step. macOS Docker Desktop is not affected.
+- **CPU:** every builder container is capped by `config/build.env`. The defaults are 2 CPUs, 2 compiler jobs, 6 GiB of memory and a 3 GiB `/scratch`. Builds get slower (the Jetson ISO takes about 4 minutes instead of 1), not different. Override one run with `BSOS_BUILD_CPUS=6 scripts/build.sh ...` (and `BSOS_BUILD_JOBS`, `BSOS_BUILD_MEMORY`, `BSOS_BUILD_SCRATCH_SIZE`).
 - **bash 3.2 or newer** on the host. Host-side scripts stay compatible with macOS `/bin/bash`. All heavy tools run in the container: xorriso, squashfs-tools, mtools, sfdisk, gpgv and others.
 - **Disk:**
   - `build/iso-root` takes about 4.2 GiB.
-  - Each output ISO takes about 4.7 GiB.
-  - The scripts refuse to start below `MIN_FREE_GB=20` GiB free.
+  - Each output ISO takes about 4.7 GiB (Jetson) or 3.6 GiB (VM), plus its package repository.
+  - The product ISO builds compute what they need: the base ISO plus the package repository plus 2 GiB, so about 7 GiB for the Jetson ISO today. `scripts/build.sh doctor` reports it. The Phase 1 tools (`extract-iso.sh`, `repack-iso.sh`) still refuse to start below `MIN_FREE_GB=20` GiB.
   - Never keep more than one extraction.
   - **Docker Desktop on macOS caveat:** the Docker VM keeps host file descriptors open for files it has accessed through the bind mount, even after they are deleted on either side. A plain `rm` of a 5 GB ISO therefore frees nothing until Docker restarts (check with `lsof +L1`). The scripts truncate files before deleting them (`rm_released` and `force_rm_tree` in `scripts/lib.sh`). Clean up with `scripts/builder.sh clean [--all]`, not with `rm -rf build`. If space has already gone missing, either restart Docker Desktop or run `docker run --rm --privileged brainsyncos-builder:latest sh -c 'sync; echo 2 > /proc/sys/vm/drop_caches'`.
+
+## Building BrainSyncOS
+
+From a fresh clone, with Docker running:
+
+```sh
+cd brainsyncos
+export BASE_ISO=/path/to/jetsoninstaller-r39.2.1-2026-08-07-18-30-47-arm64.iso  # if not in ~/Downloads
+cp ~/.ssh/id_ed25519.pub config/authorized_keys     # logins for the brainsync account (see Phase 2)
+
+scripts/build.sh doctor                # what is missing, and how to fix it
+scripts/build.sh key                   # once: the package repository signing key (config/, gitignored)
+scripts/build.sh all                   # packages -> signed repository -> build/out/brainsyncos-0.1.0-orin-nano.iso
+scripts/build.sh all --edition vm      # the UTM edition (downloads Ubuntu's ISO first)
+scripts/build.sh test phase3           # tests: phase1 phase2 phase3 vm
+```
+
+`make`, `make EDITION=vm`, `make doctor`, `make test TESTS="phase2 vm"` and so on do the same (see `Makefile`).
+
+The steps of `all` also run one at a time:
+- `packages` builds the edition's packages into `build/debs/EDITION/`.
+- `repo` signs them into `build/repo/EDITION/`.
+- `iso` writes the installer ISO. Its options go to `build-iso.sh` / `build-vm-iso.sh`, e.g. `scripts/build.sh iso --name test`.
+
+**Back up `config/repo-signing-key.asc`.** An installed device trusts only the key its ISO was signed with. Updates for it (Phase 6) can only be signed with that same key.
 
 ## Quickstart (Phase 1)
 
@@ -112,8 +148,9 @@ ssh-keygen -t ed25519                                 # if you have no key yet (
 cp ~/.ssh/id_ed25519.pub config/authorized_keys       # SSH key(s), one per line
 scripts/make-password-hash.sh                         # optional console password -> config/brainsync-password.hash
 
-scripts/builder.sh run scripts/build-iso.sh          # -> build/out/brainsyncos-0.1.0-orin-nano.iso (~1 min)
-tests/test_phase2.sh                                  # builds a separate test ISO with a throwaway key, 15 checks (~3 min)
+scripts/build.sh key                                  # once: the package repository signing key
+scripts/build.sh all                                  # packages + repository + build/out/brainsyncos-0.1.0-orin-nano.iso (~5 min)
+tests/test_phase2.sh                                  # a separate test ISO with throwaway keys, 16 checks (~6 min)
 
 scripts/write-usb.sh                                  # list external disks
 scripts/write-usb.sh build/out/brainsyncos-0.1.0-orin-nano.iso /dev/diskN   # ERASES diskN
@@ -179,8 +216,8 @@ and `install.d/` steps as on the Jetson.
 ```sh
 cd brainsyncos
 scripts/fetch-vm-base.sh                          # once: 3.6 GB into build/downloads/, sha256 + signed SHA256SUMS
-scripts/builder.sh run scripts/build-vm-iso.sh    # -> build/out/brainsyncos-0.1.0-vm-arm64.iso (~20 s)
-tests/test_vm.sh                                  # 18 checks with a throwaway key (~3 min)
+scripts/build.sh all --edition vm                 # packages + repository + build/out/brainsyncos-0.1.0-vm-arm64.iso (~4 min)
+tests/test_vm.sh                                  # 19 checks with throwaway keys (~11 min at 2 CPUs)
 ```
 
 - `fetch-vm-base.sh` resumes an interrupted download (`.part`), checks the size
@@ -347,7 +384,7 @@ byte) and maps three paths over it:
   keeps its own.
 - The groups in `30-user.sh` are filtered to those that exist (no `gpio`/`i2c` on a VM).
 
-**Tested without UTM** (`tests/test_vm.sh`, 18 checks; the in-container halves are
+**Tested without UTM** (`tests/test_vm.sh`, 19 checks; the in-container halves are
 in `tests/vm-checks.sh`):
 - **Configs and fetch:** config validation, both configs in macOS bash 3.2, fetch
   idempotency and wrong-pin refusal, base verification.
@@ -410,19 +447,32 @@ QEMU `utmctl ip-address` works through the guest agent. Bugs this found and fixe
 
 ```
 brainsyncos/
+  Makefile                   thin wrapper around scripts/build.sh (make, make EDITION=vm, ...)
+  .gitignore                 build/, ISOs and the user-specific secrets in config/
   config/base-iso.env        pinned base ISO + release identity (KEY=value)
   config/brainsyncos.env     product: version, board, hooked autoinstall, boot menu
   config/vm-base-iso.env     VM edition: pinned Ubuntu Server arm64 ISO (same keys + BASE_ISO_URL)
   config/vm.env              VM edition: EDITION, boot menu, consoles, UTM VM defaults
-  docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub tooling
+  config/build.env           builder container resources: CPUs, jobs, memory, /scratch
+  config/packages.env        package repository: suite, component, key lifetime, maintainer
+  config/repo-signing-key{,.pub}.asc   the repository signing key (gitignored; scripts/build.sh key)
+  docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub/apt-repo tooling
   docs/base-iso-inventory.md tracked copy of the inventory report (deterministic)
+  packages/NAME/             one folder per BrainSyncOS package: package.env + build.sh
+    brainsyncos-archive-keyring/   the repository's public key, for apt
   payload/                   copied to /brainsyncos on the ISO
-    hook.sh                  late-command: installs the payload, runs install.d in-target
+    hook.sh                  late-command: installs the payload, mounts the package
+                             repository, runs install.d in-target
     install.d/NN-*.sh        install steps, run inside the installed system in order
+    lib/apt-repo.sh          for install steps: apt against the ISO's signed repository only
   vm/autoinstall.yaml        VM edition: subiquity autoinstall (-> /brainsyncos/autoinstall.yaml)
   scripts/
-    lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO helpers
+    lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO and package helpers
+    build.sh                 one entry point: doctor | key | packages | repo | iso | all | test | clean
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
+    make-repo-key.sh         the repository signing key (Ed25519, sign-only, expiring)
+    build-packages.sh        packages/*/build.sh -> build/debs/EDITION/
+    build-repo.sh            build/debs/EDITION -> signed apt repository build/repo/EDITION
     verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer (--edition vm)
     fetch-vm-base.sh         VM edition: download + verify the Ubuntu ISO (host, resumable)
     extract-iso.sh           atomic, idempotent extraction + boot metadata
@@ -436,7 +486,7 @@ brainsyncos/
     utm-vm.sh                macOS: create/install/start/stop/delete BrainSyncOS* VMs in UTM
     patch-autoinstall.py     inserts the hook into an NVIDIA autoinstall file
     render-grub.py           BrainSyncOS boot menu from NVIDIA's grub.cfg
-    merge-md5sums.py         md5sum.txt = vendor entries + staged files
+    merge-md5sums.py         md5sum.txt = vendor entries + staged and mapped files
     write-usb.sh             macOS: guarded dd of an ISO to an external disk
     make-password-hash.sh    console password hash for the brainsync account
   tests/
@@ -446,6 +496,8 @@ brainsyncos/
     phase2-checks.sh         its in-container checks
     test_vm.sh               end-to-end VM edition test (host side)
     vm-checks.sh             its in-container checks
+    test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository (host side)
+    phase3-checks.sh         its in-container checks: apt helper, md5 maps, hook + 60-apt-repo.sh
     boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
     shims/curtin             `curtin in-target` as chroot, for the hook simulation
   build/                     gitignored cache and output
@@ -457,9 +509,11 @@ brainsyncos/
     reports/                 base-iso-inventory.md (copied to docs/ on a full run)
     stage/                   files build-iso.sh maps over the base ISO
     stage-vm/                files build-vm-iso.sh maps over the Ubuntu ISO
+    debs/{jetson,vm}/        built packages (scripts/build-packages.sh)
+    repo/{jetson,vm}/        signed apt repositories (scripts/build-repo.sh), mapped onto the ISOs
     downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg)
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
-    test-logs/{phase1,phase2,vm}/  one log per test check
+    test-logs/{phase1,phase2,phase3,vm}/  one log per test check
     vm/                      utm-vm.sh serial console captures
 ```
 
@@ -522,9 +576,10 @@ other file and all the boot bytes are NVIDIA's.
 | ISO path | Change |
 |---|---|
 | `/casper/…installer.kernel.nvidia.squashfs` | `ai/jetsoniso_orin-ai.yaml` gets 3 lines: a comment, a progress `logger` line, and `/bin/bash /cdrom/brainsyncos/hook.sh`. They go before NVIDIA's final `Step 13/13` line, after every vendor step. |
-| `/brainsyncos/` | the payload (`hook.sh`, `install.d/`) plus a `release` file |
+| `/brainsyncos/` | the payload (`hook.sh`, `install.d/`, `lib/`) plus a `release` file and the package repository's public key, `repo-key.gpg` |
+| `/brainsyncos-repo/` | the signed package repository (Phase 3), mapped from `build/repo/jetson` in place |
 | `/boot/grub/grub.cfg` | the BrainSyncOS menu |
-| `/md5sum.txt` | vendor entries plus the staged files |
+| `/md5sum.txt` | vendor entries plus the staged files and the repository |
 
 **The rebuilt layer.**
 - It is unpacked in a tmpfs (`/scratch`), because its `trusted.overlay.*` xattrs need `CAP_SYS_ADMIN` and cannot live on the macOS bind mount.
@@ -548,10 +603,48 @@ NVIDIA's built-in `oem-iso-cfg` hook was also rejected. It runs `/cdrom/oemdata/
 
 **`hook.sh`** runs in the live installer (ISO at `/cdrom`, target at `$TARGET_MOUNT_POINT`, default `/target`). It:
 1. copies the payload to `/opt/brainsyncos/installer`
-2. runs each `install.d/NN-*.sh` with `curtin in-target`
-3. tees everything to `/var/log/brainsyncos/install.log`, which it copies to the target even on failure
+2. mounts the ISO's package repository read-only at `/tmp/brainsyncos-repo` inside the target (Phase 3), and always unmounts it again on exit
+3. runs each `install.d/NN-*.sh` with `curtin in-target`
+4. tees everything to `/var/log/brainsyncos/install.log`, which it copies to the target even on failure
 
 Any failing step fails the installation. It warns, but does not stop, if the board is not an Orin Nano.
+
+## The package repository (Phase 3)
+
+Everything BrainSyncOS installs beyond the base system comes from one signed
+apt repository per edition, which every ISO carries at `/brainsyncos-repo`.
+The pool on NVIDIA's ISO is signed with NVIDIA's key, so it cannot take our
+packages.
+
+**Building it.**
+- `scripts/build.sh key` (`make-repo-key.sh`) creates the signing key once:
+  - Ed25519, sign-only, expiring after `REPO_KEY_EXPIRE` (3 years).
+  - It lives in `config/repo-signing-key.asc` (mode 600, gitignored) and is generated in a tmpfs GnuPG home.
+- `build-packages.sh --edition E` runs `packages/NAME/build.sh` for every package whose `package.env` lists the edition. `build_deb` in `lib.sh` gives the packages root ownership, `md5sums` and the commit time as file times. The same input gives the same `.deb`.
+- `build-repo.sh --edition E` lays out `pool/` and `dists/brainsyncos/` with `apt-ftparchive` and signs `InRelease` and `Release.gpg`. The secret key is only ever imported on `/scratch`. Before the new repository replaces the old one, the script checks:
+  - `gpgv` verifies the signatures;
+  - every `.deb` matches its index entry;
+  - nothing outside `pool/` holds private key material.
+- The ISO builds check the repository again. It must be signed by its own `repo-key.gpg` and built for the right edition: a VM repository is refused for the Jetson ISO. They then map it onto the ISO in place, without copying it into `build/stage`. `repo-key.gpg` also goes into the payload, and its fingerprint goes into the release file as `REPO_KEY=`.
+
+**Installing from it.**
+- `hook.sh` bind-mounts `/cdrom/brainsyncos-repo` read-only at `/tmp/brainsyncos-repo` in the target and unmounts it when it exits, even on failure.
+- Install steps source `payload/lib/apt-repo.sh`. `bsos_repo_open` points apt at that repository alone:
+  - its sources and lists go in a private directory, so the target's own apt configuration is neither used nor changed, and nothing goes to the network;
+  - `Signed-By` is the payload's key;
+  - `apt-get update --error-on=any` turns a missing, unsigned or tampered repository into a failed install;
+  - `Check-Date: no`, because a Jetson without an RTC battery can start the installer with a wrong clock;
+  - no dpkg pty and no `needrestart`, because the installer's chroot has neither a terminal nor services.
+- `60-apt-repo.sh` is the first such step, on both editions. It installs `brainsyncos-archive-keyring` and requires the installed keyring (`/usr/share/keyrings/brainsyncos-archive-keyring.gpg`) to verify the repository by itself. The device keeps that keyring for later updates. No apt source is left behind.
+
+**Verified by `tests/test_phase3.sh`** (10 checks):
+- the container really runs at the configured CPU and memory caps;
+- the key, packages and repositories for both editions;
+- in NVIDIA's real target layer, the hook mounts the repository, `60-apt-repo.sh` installs the keyring, the target's apt state is unchanged, and the mount is gone afterwards (also when a later step fails or the repository is missing);
+- the apt helper accepts a clock set to 2001;
+- the apt helper refuses: a tampered index, a tampered `.deb`, an unsigned repository, the wrong key, a missing repository.
+
+`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all seven steps in each edition's target.
 
 ## Appliance identity (Phase 2.5)
 
@@ -573,10 +666,10 @@ Four more `install.d` steps run after `00-release.sh` and `10-issue.sh`. `hook.s
 
 Public keys and the salted hash are readable by anyone holding the USB stick, so treat the stick like the device.
 
-**Tested without hardware** (`tests/test_phase2.sh`, 15 checks):
+**Tested without hardware** (`tests/test_phase2.sh`, 16 checks):
 - **Generators:** the config validation, both generators against NVIDIA's real files including their failure modes, and the md5 merge identity.
 - **The built ISO:**
-  - its boot structure against the base: El Torito, GPT, ESP bytes, and every ISO9660/Joliet name unchanged with +6 added
+  - its boot structure against the base: El Torito, GPT, ESP bytes, and every ISO9660/Joliet name unchanged, with exactly the payload and the package repository added
   - every staged file
   - all 2463 untouched `md5sum.txt` entries
   - read-only, root-owned payload modes
@@ -584,8 +677,13 @@ Public keys and the salted hash are readable by anyone holding the USB stick, so
   - The target is first brought to the state NVIDIA's late-commands leave it in: vendor groups, OOBE as the default target, and `openssh-server` + `libwrap0` from the ISO pool, with what their postinst does.
   - A fake Orin Nano device tree supplies the model and serial.
   - `curtin in-target` is a shim that, like curtin, bind-mounts `/dev`, `/proc` and `/sys` and chroots.
-  - It covers: success including the whole identity (hostname, groups, locked password + sudoers, key file modes, sshd config with `sshd -t`, OOBE links, NVIDIA's default user removed), a re-run, the console-password variant, a failing step, a build without logins, and a missing target.
-- **Login checks:** `build-iso.sh` refuses missing, private and malformed credentials. The test build uses a throwaway key and its own `phase2-test.iso`, which is deleted afterwards, so your real ISO is never touched.
+  - It covers:
+    - success including the whole identity (hostname, groups, locked password + sudoers, key file modes, sshd config with `sshd -t`, OOBE links, NVIDIA's default user removed);
+    - the repository keyring from `60-apt-repo.sh`;
+    - a re-run;
+    - the console-password variant;
+    - a failing step, a build without logins, and a missing target.
+- **Login and repository checks:** `build-iso.sh` refuses missing, private and malformed credentials, a missing package repository, and a repository built for the VM edition. The test build uses throwaway SSH and repository keys and its own `phase2-test.iso`, which is deleted afterwards, so your real ISO and `config/` are never touched.
 
 **Not tested yet:**
 - the real subiquity/curtin run on a Jetson
@@ -629,14 +727,22 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
   - Open: Wi-Fi provisioning at build time.
 - **VM edition (UTM): done (see above).** Installed end to end in UTM on both backends. Not tried yet: USB passthrough of the real EEG board.
   - Phase 3 and 4 `install.d` steps must run on both editions (or skip cleanly on the one they do not apply to).
-- **Phase 3: BrainSync payload.**
-  - Build these in an arm64 chroot of the target layers:
-    - the `ssvep` package
-    - the vendored BrainFlow fork
-    - liblsl
-    - a Python venv or wheels, because the pool has no pip/venv
-  - Ship them as a separate apt repo under `/brainsyncos/repo`, signed with our own key and installed into `/target/etc/apt/keyrings`.
-  - Check the kernel config for `CONFIG_USB_ACM`, `CP210X`, `FTDI_SIO` and `CH341` in `nvidia-l4t-kernel`. Missing drivers ship as an out-of-tree module deb.
+- **Phase 3: BrainSync payload**, in five parts, each shipped through the signed repository. Status, pins and the handoff to an x86-64 build machine are in [`docs/phase3-notes.md`](docs/phase3-notes.md).
+  - **3a, build system and repository: done** (see [The package repository](#the-package-repository-phase-3)).
+  - **3b, the apps.**
+    - Make the app installable outside the repo: configurable paths instead of the repo-root lookups, console commands, a speech fallback without macOS `say`.
+    - Ship it as a self-contained Python venv (`brainsync-runtime`, built from a hash-locked set of wheels) plus the app package. PsychoPy goes in with a trimmed dependency set, because wxPython has no arm64 wheels.
+    - Core apps: the SSVEP demo and tools, BrainSwipe, BrainChess and BCI Voice. Reels is left out, because it needs Chrome and Instagram.
+  - **3c, the board.**
+    - The Cerelog BrainFlow fork, built for arm64 at a pinned commit plus its one local patch.
+    - udev rules for the board.
+    - The **CH340 driver**. NVIDIA's kernel lacks it: `CONFIG_USB_SERIAL_CH341` is not set, while `USB_ACM`, `CP210X` and `FTDI_SIO` are modules. It ships as `brainsyncos-ch341-tegra`, built for the exact L4T kernel; the VM's Ubuntu kernel already has it.
+  - **3d, local LLMs.**
+    - llama.cpp: a CPU build for both editions, plus the CUDA backend for the Orin (sm_87).
+    - The CUDA 13.2 runtime only (cudart and cuBLAS, about 0.5 GB), with no toolkit or TensorRT. On the device, `apt install nvidia-jetpack` still works through NVIDIA's repo.
+    - A sandboxed `llama-server` on localhost and a pinned default model (Qwen3.5-2B Q4).
+    - BCI Voice tries the local model first, then Claude, then the fixed lists.
+  - **3e, integration.** Both ISOs built end to end, a VM install in UTM, and a hardware checklist for the first Orin (GPU backend, memory, CH340, flicker timing while the LLM runs).
 - **Phase 4: appliance runtime.**
   - Kiosk session: gdm autologin on X11 (the AI file disables Wayland), with systemd units starting BrainSync.
   - Disable suspend (errata 6235055).

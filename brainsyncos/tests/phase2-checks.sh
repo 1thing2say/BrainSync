@@ -9,9 +9,11 @@
 #   autoinstall  patch-autoinstall.py on the vendor orin file: +3 lines only,
 #                rejects an already-patched file and a file without the anchor
 #   md5          merge-md5sums.py with nothing staged == vendor md5sum.txt
-#   contents     built ISO: staged files == manifest, md5sum.txt = vendor
-#                entries + correct new ones, read-only root-owned payload,
-#                release file and boot menu match the config
+#   contents     built ISO: staged and mapped files == manifest, md5sum.txt =
+#                vendor entries + correct new ones, read-only root-owned
+#                payload and package repository, release file (REPO_KEY = the
+#                payload's repo-key.gpg, which verifies the repository) and
+#                boot menu match the config
 #   layer        built ISO's overlay layer vs NVIDIA's: only the hooked
 #                autoinstall file differs (content); every path's type, mode,
 #                owner, mtime, device number and xattrs equal; same
@@ -23,7 +25,8 @@
 #                openssh-server from the pool), curtin via chroot shim, a fake
 #                Orin Nano device tree: release, issue, hostname, account
 #                (SSH key only, passwordless sudo), sshd config, OOBE skipped,
-#                NVIDIA's default users removed; re-run is idempotent
+#                NVIDIA's default users removed, package repository keyring
+#                installed and the repository unmounted again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -33,6 +36,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
 load_config
 load_product_config
+load_packages_config
 require_container
 [ "$#" = 1 ] || [ "$#" = 2 ] || die "usage: phase2-checks.sh CHECK [ISO_NAME] (see --help)"
 case "$1" in -h|--help) usage_from_header; exit 0 ;; esac
@@ -150,17 +154,33 @@ if keys != sorted(keys, key=lambda s: s.encode()):
 print("md5sum.txt: %d vendor entries unchanged, %d staged entries correct" % (len(vendor) - len(staged & set(vendor)), len(staged)))
 EOF
     xorriso -indev "$OUT" -find /brainsyncos -exec lsdl -- 2>/dev/null > "$W/lsdl"
+    xorriso -indev "$OUT" -find "$ISO_REPO_PATH" -exec lsdl -- 2>/dev/null >> "$W/lsdl"
     cat "$W/lsdl"
     [ "$(wc -l < "$W/lsdl" | tr -d ' ')" -ge 6 ] || die "payload listing too short"
+    grep -q "'$ISO_REPO_PATH/dists/$REPO_SUITE/InRelease'\$" "$W/lsdl" || die "no package repository on the ISO"
     ! awk '{print $1}' "$W/lsdl" | grep -q w || die "payload has writable modes"
     awk '$3 != 0 || $4 != 0' "$W/lsdl" | grep -q . && die "payload not owned by 0:0"
     grep -qx "VERSION=$BRAINSYNCOS_VERSION" "$x/brainsyncos/release" || die "release VERSION wrong"
     grep -qx "BASE_ISO_SHA256=$BASE_ISO_SHA256" "$x/brainsyncos/release" || die "release BASE_ISO_SHA256 wrong"
     grep -qx "BOARD=$TARGET_BOARD" "$x/brainsyncos/release" || die "release BOARD wrong"
     grep -qx "EDITION=$(jetson_edition)" "$x/brainsyncos/release" || die "release EDITION is not $(jetson_edition)"
+    check_repo_key "$x"
     grep -qx "set timeout=$GRUB_TIMEOUT" "$x/boot/grub/grub.cfg" || die "grub timeout is not GRUB_TIMEOUT=$GRUB_TIMEOUT"
     grep -m1 '^menuentry' "$x/boot/grub/grub.cfg"
     cat "$x/brainsyncos/release"
+}
+
+# check_repo_key DIR: DIR (the ISO's files) has the repository key in the
+# payload, equal to the repository's own, named by REPO_KEY in the release
+# file, and it verifies the repository's InRelease.
+check_repo_key() {
+    local x="$1" fpr
+    cmp "$x/brainsyncos/repo-key.gpg" "$x${ISO_REPO_PATH}/repo-key.gpg" || die "payload repo-key.gpg differs from the repository's"
+    fpr="$(key_fingerprint "$x/brainsyncos/repo-key.gpg")"
+    grep -qx "REPO_KEY=$fpr" "$x/brainsyncos/release" || die "release REPO_KEY is not $fpr"
+    gpgv --keyring "$x/brainsyncos/repo-key.gpg" "$x${ISO_REPO_PATH}/dists/$REPO_SUITE/InRelease" > /dev/null 2>&1 \
+        || die "the payload key does not verify the ISO's repository"
+    echo "repository key $fpr: in the payload and the release file, verifies $ISO_REPO_PATH"
 }
 
 # meta DIR: one line per path with type+mode, owner, mtime, link target,
@@ -217,6 +237,7 @@ setup_target() {
     need_out
     local t="$W/target" deb g
     iso_get "$OUT" /brainsyncos "$W/iso/brainsyncos"
+    iso_get "$OUT" "$ISO_REPO_PATH" "$W/iso${ISO_REPO_PATH}"
     iso_get "$BASE" /casper/ubuntu-server-minimal.squashfs "$W/target.squashfs"
     unsquashfs -q -no-progress -d "$t" "$W/target.squashfs" > /dev/null
     rm -f "$W/target.squashfs"
@@ -251,7 +272,7 @@ in_target() {  # in_target TARGET CMD...: run CMD in TARGET via the curtin shim
 
 run_hook() {  # run_hook PAYLOAD_DIR TARGET -> hook's exit code
     PATH="$BRAINSYNCOS_ROOT/tests/shims:$PATH" TARGET_MOUNT_POINT="$2" BSOS_HOOK_LOG="$W/live.log" \
-        BSOS_DT_DIR="$W/dt" bash "$1/hook.sh"
+        BSOS_DT_DIR="$W/dt" BSOS_REPO_SRC="$W/iso${ISO_REPO_PATH}" bash "$1/hook.sh"
 }
 
 # payload_copy DIR: a writable copy of the ISO payload to tamper with.
@@ -315,6 +336,18 @@ check_identity() {
     grep -q '50-skip-oobe.sh: default target was nv-oobe.target (NVIDIA OOBE)' "$t/var/log/brainsyncos/install.log" || die "50-skip-oobe.sh did not see the OOBE target"
 }
 
+# check_keyring TARGET: 60-apt-repo.sh installed the repository's keyring and
+# hook.sh unmounted the repository again.
+check_keyring() {
+    local t="$1"
+    grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$t/var/log/brainsyncos/install.log" \
+        || die "60-apt-repo.sh did not finish"
+    cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
+        || die "the installed keyring is not the build's repository key"
+    ! mountpoint -q "$t/tmp/brainsyncos-repo" && [ ! -e "$t/tmp/brainsyncos-repo" ] || die "the repository is still mounted"
+    echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
+}
+
 c_hook() {
     setup_target
     local t="$W/target" rel
@@ -332,7 +365,8 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (6 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (7 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    check_keyring "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.

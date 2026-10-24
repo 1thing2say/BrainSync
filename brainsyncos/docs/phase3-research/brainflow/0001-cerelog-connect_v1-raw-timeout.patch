@@ -1,0 +1,20 @@
+diff --git a/src/board_controller/cerelog/cerelog.cpp b/src/board_controller/cerelog/cerelog.cpp
+index 8a038d5b..00cd2b7e 100644
+--- a/src/board_controller/cerelog/cerelog.cpp
++++ b/src/board_controller/cerelog/cerelog.cpp
+@@ -181,6 +181,15 @@ int Cerelog_X8::connect_v1 (const std::string &port_path)
+         return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
+     }
+ 
++    // Raw mode with a 1s read timeout. A freshly re-opened tty on macOS is canonical and fully
++    // blocking, so if the board never starts streaming the verification read below hangs forever
++    // instead of failing over to the V2 strategy.
++    if (serial->set_serial_port_settings (1000, false) < 0)
++    {
++        safe_logger (spdlog::level::err, "Failed to configure re-opened serial port.");
++        return (int)BrainFlowExitCodes::BOARD_WRITE_ERROR;
++    }
++
+     safe_logger (spdlog::level::info, "Setting host to target baud rate: {}", info.baudrate);
+     if (serial->set_custom_baudrate (info.baudrate) < 0)
+     {

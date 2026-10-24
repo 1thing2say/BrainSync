@@ -27,12 +27,14 @@
 #                from the DMI serial, account, sshd config (sshd -t), default
 #                target untouched, no Jetson warning; then the product_uuid and
 #                machine-id fallbacks; the autoinstall's user-data passes the
-#                target's own `cloud-init schema`
+#                target's own `cloud-init schema`; the hook mounts the ISO's
+#                package repository and 60-apt-repo.sh installs its keyring
 # Work happens in /scratch (tmpfs); nothing is written to build/.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
 load_vm_config
 load_vm_product_config
+load_packages_config
 require_container
 [ "$#" = 1 ] || [ "$#" = 2 ] || die "usage: vm-checks.sh CHECK [ISO_NAME] (see --help)"
 case "$1" in -h|--help) usage_from_header; exit 0 ;; esac
@@ -231,13 +233,21 @@ if list(new)[:len(vendor)] != list(vendor):
 print("md5sum.txt: %d vendor entries unchanged in Ubuntu's order, %d staged entries correct" % (len(vendor) - len(staged & set(vendor)), len(staged)))
 EOF
     xorriso -indev "$OUT" -find /brainsyncos -exec lsdl -- 2>/dev/null > "$W/lsdl"
+    xorriso -indev "$OUT" -find "$ISO_REPO_PATH" -exec lsdl -- 2>/dev/null >> "$W/lsdl"
     cat "$W/lsdl"
     [ "$(wc -l < "$W/lsdl" | tr -d ' ')" -ge 8 ] || die "payload listing too short"
+    grep -q "'$ISO_REPO_PATH/dists/$REPO_SUITE/InRelease'\$" "$W/lsdl" || die "no package repository on the ISO"
     ! awk '{print $1}' "$W/lsdl" | grep -q w || die "payload has writable modes"
     awk '$3 != 0 || $4 != 0' "$W/lsdl" | grep -q . && die "payload not owned by 0:0"
     for p in "EDITION=$EDITION" "VERSION=$BRAINSYNCOS_VERSION" "UBUNTU_RELEASE=$UBUNTU_RELEASE" "BASE_ISO_SHA256=$BASE_ISO_SHA256"; do
         grep -qx "$p" "$x/brainsyncos/release" || die "release lacks $p"
     done
+    cmp "$x/brainsyncos/repo-key.gpg" "$x${ISO_REPO_PATH}/repo-key.gpg" || die "payload repo-key.gpg differs from the repository's"
+    grep -qx "REPO_KEY=$(key_fingerprint "$x/brainsyncos/repo-key.gpg")" "$x/brainsyncos/release" || die "release REPO_KEY wrong"
+    gpgv --keyring "$x/brainsyncos/repo-key.gpg" "$x${ISO_REPO_PATH}/dists/$REPO_SUITE/InRelease" > /dev/null 2>&1 \
+        || die "the payload key does not verify the ISO's repository"
+    [ "$(cat "$x${ISO_REPO_PATH}/edition")" = vm ] || die "the ISO's repository is not the vm one"
+    echo "repository: $ISO_REPO_PATH (vm), verified by the payload key named in the release file"
     python3 "$S/render-vm-autoinstall.py" "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" "$W/ai-want.yaml" --desktop "$VM_DESKTOP" > /dev/null
     cmp "$x/brainsyncos/autoinstall.yaml" "$W/ai-want.yaml" || die "ISO autoinstall is not vm/autoinstall.yaml rendered for VM_DESKTOP=$VM_DESKTOP"
     echo "autoinstall: vm/autoinstall.yaml with VM_DESKTOP=$VM_DESKTOP: $(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["autoinstall"]["packages"])' "$x/brainsyncos/autoinstall.yaml")"
@@ -321,6 +331,7 @@ setup_target() {
     need_out
     local t="$W/target" l deb
     iso_get "$OUT" /brainsyncos "$W/iso/brainsyncos"
+    iso_get "$OUT" "$ISO_REPO_PATH" "$W/iso${ISO_REPO_PATH}"
     iso_get "$BASE" /casper/ubuntu-server-minimal.squashfs "$W/l1.squashfs"
     unsquashfs -q -no-progress -d "$t" "$W/l1.squashfs" > /dev/null
     rm -f "$W/l1.squashfs"
@@ -363,7 +374,8 @@ in_target() {  # in_target TARGET CMD...: run CMD in TARGET via the curtin shim
 
 run_hook() {  # run_hook PAYLOAD_DIR TARGET [DMI_DIR] -> hook's exit code
     PATH="$BRAINSYNCOS_ROOT/tests/shims:$PATH" TARGET_MOUNT_POINT="$2" BSOS_HOOK_LOG="$W/live.log" \
-        BSOS_DT_DIR="$W/dt" BSOS_DMI_DIR="${3:-$W/dmi}" BSOS_MACHINE_ID_FILE="$W/machine-id" bash "$1/hook.sh"
+        BSOS_DT_DIR="$W/dt" BSOS_DMI_DIR="${3:-$W/dmi}" BSOS_MACHINE_ID_FILE="$W/machine-id" \
+        BSOS_REPO_SRC="$W/iso${ISO_REPO_PATH}" bash "$1/hook.sh"
 }
 
 # check_host TARGET SUFFIX SOURCE: hostname, /etc/hosts and device.env.
@@ -398,7 +410,12 @@ c_hook() {
         || die "/etc/issue line 1: $(head -1 "$t/etc/issue")"
     head -2 "$t/etc/issue"
     tail -1 "$log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$log")"
-    grep -q 'BrainSyncOS layer installed (6 steps)' "$log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (7 steps)' "$log" || die "log lacks the summary"
+    grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$log" || die "60-apt-repo.sh did not finish"
+    cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
+        || die "the installed keyring is not the build's repository key"
+    ! mountpoint -q "$t/tmp/brainsyncos-repo" && [ ! -e "$t/tmp/brainsyncos-repo" ] || die "the repository is still mounted"
+    echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
     grep -q 'hook.sh: vm-arm64 edition on: QEMU QEMU Virtual Machine, serial UTM0042AB12CD (from dmi product_serial)' "$log" \
         || die "machine identity not logged: $(grep 'edition on' "$log")"
     ! grep -n 'WARNING\|No such file' "$log" || die "the VM install logged a warning"

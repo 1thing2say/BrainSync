@@ -8,6 +8,9 @@
 # shellcheck disable=SC2034
 
 set -euo pipefail
+# bash 4.4+ (the builder): keep set -e inside $(...), so a die in a helper
+# called as x="$(helper)" stops the script. macOS bash 3.2 has no such option.
+shopt -s inherit_errexit 2>/dev/null || true
 
 BSOS_SCRIPT="${BSOS_SCRIPT:-$(basename "$0")}"
 
@@ -53,6 +56,24 @@ BASE_ESP_SHA256 BASE_SYSTEM_AREA_SHA256 ISO_COMPLIANCE UBUNTU_RELEASE UBUNTU_COD
 
 BSOS_VM_PRODUCT_REQUIRED_KEYS="EDITION VM_GRUB_TIMEOUT VM_DESKTOP VM_INSTALL_KERNEL VM_CONSOLES
 VM_NAME VM_BACKEND VM_MEMORY_MB VM_CPU_CORES VM_DISK_GB"
+
+# Builder container resources (scripts/builder.sh) and the package repository.
+BSOS_BUILD_CONFIG="${BSOS_BUILD_CONFIG:-$BRAINSYNCOS_ROOT/config/build.env}"
+BSOS_PACKAGES_CONFIG="${BSOS_PACKAGES_CONFIG:-$BRAINSYNCOS_ROOT/config/packages.env}"
+BSOS_BUILD_REQUIRED_KEYS="BUILD_CPUS BUILD_JOBS BUILD_MEMORY BUILD_SCRATCH_SIZE"
+BSOS_PACKAGES_REQUIRED_KEYS="REPO_SUITE REPO_COMPONENT REPO_ORIGIN REPO_LABEL REPO_KEY_EXPIRE
+PACKAGE_MAINTAINER_EMAIL"
+# packages/NAME/{package.env,build.sh}: the BrainSyncOS packages.
+PACKAGES_DIR="$BRAINSYNCOS_ROOT/packages"
+# scripts/build-packages.sh -> DEBS_DIR/EDITION, scripts/build-repo.sh -> REPO_DIR/EDITION.
+DEBS_DIR="$BUILD_DIR/debs"
+REPO_DIR="$BUILD_DIR/repo"
+# The repository signing key (scripts/make-repo-key.sh; gitignored, like the logins).
+REPO_SECRET_KEY="$BRAINSYNCOS_ROOT/config/repo-signing-key.asc"
+# Where the repository sits on the ISO: next to /brainsyncos, not inside it,
+# because hook.sh copies /brainsyncos onto the target. hook.sh mounts it at
+# /tmp/brainsyncos-repo inside the target for the install.d steps.
+ISO_REPO_PATH=/brainsyncos-repo
 
 # load_env_file FILE KEYS: source FILE after checking every line is plain
 # KEY=value (so it stays usable as a docker --env-file and sourcing it cannot
@@ -188,13 +209,169 @@ config_volid() {
     printf '%s\n' "$BASE_ISO_VOLID" | tr '_' ' '
 }
 
+# --- build resources (scripts/builder.sh) ----------------------------------------
+
+# config/build.env, each value overridable as BSOS_<KEY> in the environment.
+load_build_config() {
+    load_env_file "$BSOS_BUILD_CONFIG" "$BSOS_BUILD_REQUIRED_KEYS"
+    BUILD_CPUS="${BSOS_BUILD_CPUS:-$BUILD_CPUS}"
+    BUILD_JOBS="${BSOS_BUILD_JOBS:-$BUILD_JOBS}"
+    BUILD_MEMORY="${BSOS_BUILD_MEMORY:-$BUILD_MEMORY}"
+    BUILD_SCRATCH_SIZE="${BSOS_BUILD_SCRATCH_SIZE:-$BUILD_SCRATCH_SIZE}"
+    printf '%s\n' "$BUILD_CPUS" | grep -Eq '^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$' \
+        || die "BUILD_CPUS must be a number of CPUs above 0 (e.g. 2 or 1.5), got $BUILD_CPUS"
+    printf '%s\n' "$BUILD_JOBS" | grep -Eq '^[1-9][0-9]{0,2}$' \
+        || die "BUILD_JOBS must be a whole number from 1, got $BUILD_JOBS"
+    local key val
+    for key in BUILD_MEMORY BUILD_SCRATCH_SIZE; do
+        eval "val=\$$key"
+        printf '%s\n' "$val" | grep -Eq '^[1-9][0-9]*[mg]$' \
+            || die "$key must be a size like 512m or 6g, got $val"
+    done
+    [ "$(size_mb "$BUILD_MEMORY")" -ge $(( $(size_mb "$BUILD_SCRATCH_SIZE") + 1024 )) ] \
+        || die "BUILD_MEMORY must exceed BUILD_SCRATCH_SIZE by 1g or more (the tmpfs counts against it), got $BUILD_MEMORY and $BUILD_SCRATCH_SIZE"
+}
+
+# size_mb SIZE: 512m -> 512, 6g -> 6144.
+size_mb() {
+    case "$1" in
+        *g) echo $(( ${1%g} * 1024 )) ;;
+        *m) echo "${1%m}" ;;
+        *) die "not a size in m or g: $1" ;;
+    esac
+}
+
+# --- packages and the package repository (Phase 3) -------------------------------
+
+# config/packages.env: repository layout, signing-key lifetime, maintainer.
+load_packages_config() {
+    load_env_file "$BSOS_PACKAGES_CONFIG" "$BSOS_PACKAGES_REQUIRED_KEYS"
+    local key val
+    for key in REPO_SUITE REPO_COMPONENT; do
+        eval "val=\$$key"
+        printf '%s\n' "$val" | grep -Eq '^[a-z0-9][a-z0-9.-]*$' \
+            || die "$key must be lowercase letters, digits, . and -, got $val"
+    done
+    printf '%s\n' "$REPO_KEY_EXPIRE" | grep -Eq '^(0|[1-9][0-9]*[dwmy])$' \
+        || die "REPO_KEY_EXPIRE must be 0 or a gpg expiry like 3y, 18m, 90d, got $REPO_KEY_EXPIRE"
+    printf '%s\n' "$PACKAGE_MAINTAINER_EMAIL" | grep -Eq '^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$' \
+        || die "PACKAGE_MAINTAINER_EMAIL must be an e-mail address, got $PACKAGE_MAINTAINER_EMAIL"
+}
+
+# parse_edition VALUE: check a --edition value (jetson or vm, as in
+# verify-base-iso.sh) and print it. Packages and repositories are per edition:
+# build/debs/EDITION, build/repo/EDITION.
+parse_edition() {
+    case "$1" in
+        jetson|vm) printf '%s\n' "$1" ;;
+        *) die "--edition must be jetson or vm, got '${1:-}'" ;;
+    esac
+}
+
+# repo_edition_ok DIR EDITION: DIR is a repository built for EDITION.
+repo_edition_ok() {
+    [ "$(cat "$1/edition" 2>/dev/null)" = "$2" ]
+}
+
+# scratch_dir NAME: a fresh private directory on /scratch (tmpfs; the builder),
+# else under $TMPDIR, for secrets that must never reach build/.
+scratch_dir() {
+    local base=/scratch d
+    [ -d "$base" ] && [ -w "$base" ] || base="${TMPDIR:-/tmp}"
+    d="$base/bsos-$1.$$"
+    force_rm_tree "$d"
+    mkdir -p "$d"
+    chmod 700 "$d"
+    printf '%s\n' "$d"
+}
+
+# key_records KEYFILE: gpg's colon listing of the keys in KEYFILE (armored or
+# binary, public or secret) without importing them anywhere.
+key_records() {
+    local home rc=0
+    home="$(scratch_dir gpg-show)"
+    GNUPGHOME="$home" gpg --batch --with-colons --show-keys "$1" 2>/dev/null || rc=$?
+    gpgconf_kill "$home"
+    rm -rf "$home"
+    return "$rc"
+}
+
+# gpgconf_kill HOME: stop the agent a GnuPG home may have started.
+gpgconf_kill() {
+    GNUPGHOME="$1" gpgconf --kill all > /dev/null 2>&1 || true
+}
+
+# key_fingerprint KEYFILE: the fingerprint of the one primary key in KEYFILE.
+key_fingerprint() {
+    local recs n
+    recs="$(key_records "$1")" || die "not an OpenPGP key file: $1"
+    n="$(printf '%s\n' "$recs" | grep -Ec '^(pub|sec):')" || true
+    [ "$n" = 1 ] || die "$1 must hold exactly one key, found $n"
+    printf '%s\n' "$recs" | awk -F: '/^fpr:/ {print $10; exit}'
+}
+
+# public_keyring KEYFILE OUT: OUT = the public part of KEYFILE's key in binary
+# form, as apt (Signed-By) and gpgv --keyring take it. Prints the fingerprint.
+public_keyring() {
+    local fpr home
+    fpr="$(key_fingerprint "$1")"
+    home="$(scratch_dir gpg-export)"
+    GNUPGHOME="$home" gpg --batch --quiet --import "$1" 2>/dev/null || { rm -rf "$home"; die "gpg cannot import $1"; }
+    GNUPGHOME="$home" gpg --batch --export "$fpr" > "$2"
+    gpgconf_kill "$home"
+    rm -rf "$home"
+    [ -s "$2" ] || die "could not export the public key of $1"
+    printf '%s\n' "$fpr"
+}
+
+# validate_repo DIR EDITION: DIR is a signed BrainSyncOS repository for
+# EDITION (scripts/build-repo.sh): its InRelease verifies with gpgv against
+# DIR/repo-key.gpg and nothing outside pool/ holds private key material. Sets
+# REPO_KEY_FPR. Needs load_packages_config.
+validate_repo() {
+    local dir="$1" edition="$2" inrel="$1/dists/$REPO_SUITE/InRelease"
+    [ -f "$inrel" ] && [ -s "$dir/repo-key.gpg" ] \
+        || die "no BrainSyncOS package repository at $dir (build one: scripts/build.sh repo --edition $edition)"
+    repo_edition_ok "$dir" "$edition" || die "$dir was built for edition '$(cat "$dir/edition" 2>/dev/null)', not $edition"
+    gpgv --keyring "$dir/repo-key.gpg" "$inrel" > /dev/null 2>&1 \
+        || die "$inrel does not verify against $dir/repo-key.gpg"
+    ! grep -rlq --exclude-dir=pool -e 'PRIVATE KEY' "$dir" || die "$dir contains private key material"
+    REPO_KEY_FPR="$(key_fingerprint "$dir/repo-key.gpg")"
+    log "package repository: ${dir#$BRAINSYNCOS_ROOT/} ($(find "$dir/pool" -name '*.deb' | wc -l | tr -d ' ') packages, key $REPO_KEY_FPR)"
+}
+
+# build_deb STAGING OUT_DIR: build OUT_DIR/PACKAGE_VERSION_ARCH.deb from
+# STAGING (the file tree plus DEBIAN/control). Writes DEBIAN/md5sums, makes
+# directories 755, gives every file root ownership and, when
+# BSOS_SOURCE_DATE_EPOCH is set (builder.sh: the commit time), that mtime
+# (dpkg-deb gets it as SOURCE_DATE_EPOCH). Prints the .deb's path.
+build_deb() {
+    local s="$1" out="$2" pkg ver arch deb
+    pkg="$(sed -n 's/^Package: //p' "$s/DEBIAN/control")"
+    ver="$(sed -n 's/^Version: //p' "$s/DEBIAN/control")"
+    arch="$(sed -n 's/^Architecture: //p' "$s/DEBIAN/control")"
+    [ -n "$pkg" ] && [ -n "$ver" ] && [ -n "$arch" ] || die "$s/DEBIAN/control needs Package, Version and Architecture"
+    (cd "$s" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0r md5sum) > "$s/DEBIAN/md5sums"
+    find "$s" -type d -exec chmod 755 {} +
+    chmod 644 "$s/DEBIAN/control" "$s/DEBIAN/md5sums"
+    local epoch="${BSOS_SOURCE_DATE_EPOCH:-}"
+    [ -z "$epoch" ] || find "$s" -exec touch -h -d "@$epoch" {} +
+    mkdir -p "$out"
+    deb="$out/${pkg}_${ver}_${arch}.deb"
+    SOURCE_DATE_EPOCH="${epoch:-$(date +%s)}" dpkg-deb --root-owner-group -Zxz --build "$s" "$deb" > /dev/null \
+        || die "dpkg-deb failed for $pkg"
+    printf '%s\n' "$deb"
+}
+
 # --- product ISO builds (build-iso.sh, build-vm-iso.sh) --------------------------
 
-# parse_build_args DEFAULT_NAME ARG...: the options both product builds take.
-# Sets BUILD_ID, BUILD_NAME, KEYS_FILE, HASH_FILE.
+# parse_build_args DEFAULT_NAME EDITION ARG...: the options both product
+# builds take. Sets BUILD_ID, BUILD_NAME, KEYS_FILE, HASH_FILE and REPO_SRC
+# (--repo, default build/repo/EDITION).
 parse_build_args() {
     BUILD_NAME="$1"
-    shift
+    REPO_SRC="$REPO_DIR/$2"
+    shift 2
     BUILD_ID="${BSOS_GIT_REV:-unknown}"
     KEYS_FILE="$BRAINSYNCOS_ROOT/config/authorized_keys"
     HASH_FILE="$BRAINSYNCOS_ROOT/config/brainsync-password.hash"
@@ -204,6 +381,7 @@ parse_build_args() {
             --name) BUILD_NAME="${2:?--name needs a value}"; shift 2 ;;
             --authorized-keys) KEYS_FILE="${2:?--authorized-keys needs a file}"; shift 2 ;;
             --password-hash) HASH_FILE="${2:?--password-hash needs a file}"; shift 2 ;;
+            --repo) REPO_SRC="${2:?--repo needs a directory}"; shift 2 ;;
             -h|--help) usage_from_header; exit 0 ;;
             *) die "unknown argument: $1" ;;
         esac
@@ -234,7 +412,9 @@ validate_logins() {
 }
 
 # stage_payload STAGE < RELEASE: payload/ -> STAGE/brainsyncos, with the
-# release file read from stdin, settings.env and the logins (validate_logins).
+# release file read from stdin, settings.env, the logins (validate_logins) and
+# the package repository's public key (validate_repo: REPO_SRC/repo-key.gpg,
+# the trust anchor the install.d steps check the repository against).
 stage_payload() {
     local d="$1/brainsyncos"
     cp -R "$BRAINSYNCOS_ROOT/payload" "$d"
@@ -242,42 +422,67 @@ stage_payload() {
     cat > "$d/settings.env" <<EOF
 BRAINSYNC_USER=$BRAINSYNC_USER
 HOSTNAME_PREFIX=$HOSTNAME_PREFIX
+REPO_SUITE=$REPO_SUITE
+REPO_COMPONENT=$REPO_COMPONENT
 EOF
+    cp "$REPO_SRC/repo-key.gpg" "$d/repo-key.gpg"
     mkdir -p "$d/config"
     [ "$HAVE_KEYS" = 0 ] || grep -v '^[[:space:]]*$' "$KEYS_FILE" > "$d/config/authorized_keys"
     [ "$HAVE_HASH" = 0 ] || cp "$HASH_FILE" "$d/config/password.hash"
 }
 
-# merge_stage_md5sums VENDOR_MD5SUM_TXT STAGE: STAGE/md5sum.txt = the vendor
-# entries plus every staged file (scripts/merge-md5sums.py).
+# merge_stage_md5sums VENDOR_MD5SUM_TXT STAGE [SRC ISO_PATH]...: STAGE/md5sum.txt
+# = the vendor entries plus every staged file and every file of each extra
+# tree SRC mapped at ISO_PATH (scripts/merge-md5sums.py).
 merge_stage_md5sums() {
-    local vendor="$1" stage="$2" tmp="$2.md5sum.tmp"
-    python3 "$BRAINSYNCOS_ROOT/scripts/merge-md5sums.py" "$vendor" "$stage" > "$tmp"
+    local vendor="$1" stage="$2" tmp="$2.md5sum.tmp" maps=""
+    shift 2
+    while [ "$#" -ge 2 ]; do maps="$maps --map $1 $2"; shift 2; done
+    # shellcheck disable=SC2086  # paths under build/ and the ISO have no spaces
+    python3 "$BRAINSYNCOS_ROOT/scripts/merge-md5sums.py" "$vendor" "$stage" $maps > "$tmp"
     mv "$tmp" "$stage/md5sum.txt"
     log "md5sum.txt: $(wc -l < "$stage/md5sum.txt" | tr -d ' ') entries (vendor $(wc -l < "$vendor" | tr -d ' '))"
 }
 
-# write_stage_iso BASE STAGE NAME ISO_PATH...: OUT_DIR/NAME.iso = BASE with its
-# boot setup replayed and STAGE mapped over /; the given ISO paths (what STAGE
-# adds or replaces) get the vendor's 0:0 ownership and read-only modes. Then
-# finalize_iso and NAME.manifest.txt (sha256 of every staged file).
+# write_stage_iso [--map SRC ISO_PATH]... BASE STAGE NAME ISO_PATH...:
+# OUT_DIR/NAME.iso = BASE with its boot setup replayed, STAGE mapped over /
+# and each SRC tree mapped at its ISO_PATH (large trees such as the package
+# repository, mapped in place instead of copied into STAGE); the given ISO
+# paths and the --map ones (what the build adds or replaces) get the vendor's
+# 0:0 ownership and read-only modes. Then finalize_iso and NAME.manifest.txt
+# (sha256 of every staged and mapped file, by ISO path).
 write_stage_iso() {
+    local maps="" mapped=""
+    while [ "${1:-}" = --map ]; do
+        [ -d "$2" ] || die "write_stage_iso: --map source $2 is not a directory"
+        maps="$maps -map $2 $3"
+        mapped="$mapped $2:$3"
+        shift 3
+    done
     local base="$1" stage="$2" name="$3"
     shift 3
     local out="$OUT_DIR/$name.iso" partial="$OUT_DIR/.$name.iso.partial" xlog="$OUT_DIR/$name.xorriso.log"
+    local paths m manifest="$OUT_DIR/$name.manifest.txt"
+    paths="$* $(for m in $mapped; do printf '%s ' "${m#*:}"; done)"
     rm_released "$partial" "$out" "$out.sha256"
     # shellcheck disable=SC2064  # expand the paths now: they are locals
     trap "rm_released '$partial' '$partial.sfdisk-V'" EXIT
     log "writing $out"
+    # shellcheck disable=SC2086  # $maps and $paths: build/ and ISO paths have no spaces
     write_replayed_iso "$base" "$partial" "$xlog" \
-        -map "$stage" / \
-        -chown_r 0 "$@" -- \
-        -chgrp_r 0 "$@" -- \
-        -chmod_r a-w,a+r "$@" --
+        -map "$stage" / $maps \
+        -chown_r 0 $paths -- \
+        -chgrp_r 0 $paths -- \
+        -chmod_r a-w,a+r $paths --
     finalize_iso "$partial" "$out"
     trap - EXIT
-    (cd "$stage" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$OUT_DIR/$name.manifest.txt"
-    log "manifest: $OUT_DIR/$name.manifest.txt ($(wc -l < "$OUT_DIR/$name.manifest.txt" | tr -d ' ') files)"
+    {
+        (cd "$stage" && find . -type f -print0 | xargs -0r sha256sum)
+        for m in $mapped; do
+            (cd "${m%%:*}" && find . -type f -print0 | xargs -0r sha256sum) | sed "s|  \./|  ./${m#*:/}/|"
+        done
+    } | LC_ALL=C sort -k2 > "$manifest"
+    log "manifest: $manifest ($(wc -l < "$manifest" | tr -d ' ') files)"
 }
 
 require_cmd() {
@@ -357,6 +562,16 @@ check_free_space() {
         die "only $((avail_kb / 1024 / 1024)) GiB free under $dir; need at least $need GiB"
     fi
     log "free space under $dir: $((avail_kb / 1024 / 1024)) GiB (need $need)"
+}
+
+# iso_need_gb BASE_BYTES [DIR]: GiB a product ISO build needs free under
+# build/out: the output (the base ISO plus DIR, the package repository mapped
+# onto it) and a 2 GiB margin, rounded up. The Phase 1 tools keep the fixed
+# MIN_FREE_GB, since an extraction also needs room for build/iso-root.
+iso_need_gb() {
+    local kb=0
+    [ -z "${2:-}" ] || [ ! -d "$2" ] || kb="$(du -sk "$2" | awk '{print $1}')"
+    echo $(( ($1 / 1024 + kb) / 1024 / 1024 + 1 + 2 ))
 }
 
 # iso_cat ISO PATH: print one file from an ISO (xorriso in the builder, bsdtar on the host).

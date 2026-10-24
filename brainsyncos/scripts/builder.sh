@@ -10,8 +10,14 @@
 #
 # Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
 # only when the ISO is found; commands that do not need it run without),
-# a 3 GiB tmpfs at /scratch (squashfs work; with CAP_SYS_ADMIN for xattrs).
-# BSOS_GIT_REV carries the host's git revision (build id) into the container.
+# a tmpfs at /scratch (squashfs work, GnuPG homes; with CAP_SYS_ADMIN for xattrs).
+# Resources (config/build.env, BSOS_BUILD_* overrides): the container gets
+# BUILD_CPUS CPUs (--cpus), BUILD_MEMORY (--memory), a BUILD_SCRATCH_SIZE
+# /scratch, and BUILD_JOBS as BSOS_JOBS, MAKEFLAGS=-jN and
+# CMAKE_BUILD_PARALLEL_LEVEL for compilers. `clean` gets the same CPU cap.
+# BSOS_GIT_REV carries the host's git revision (build id) into the container,
+# BSOS_SOURCE_DATE_EPOCH its commit time (file times in the packages; not
+# SOURCE_DATE_EPOCH itself, which mksquashfs would apply to the ISO's layers).
 # The ISO is $BASE_ISO if set, else ~/Downloads/$BASE_ISO_NAME; symlinks are
 # resolved first and the real file's directory is mounted.
 # The image tag is derived from the Dockerfile hash, so editing the Dockerfile
@@ -23,6 +29,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 load_config
+load_build_config
 
 DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.builder"
 # tini as PID 1 passes Ctrl-C/SIGTERM to the whole process group. Without it the
@@ -56,6 +63,12 @@ host_git_rev() {
     printf '%s\n' "$rev"
 }
 
+# host_source_date: commit time of HEAD (seconds), the time stamped into the
+# packages; the current time outside git.
+host_source_date() {
+    git -C "$BRAINSYNCOS_ROOT" log -1 --format=%ct 2>/dev/null || date +%s
+}
+
 ensure_image() {
     docker image inspect "$(image_ref)" >/dev/null 2>&1 || cmd_build
 }
@@ -86,13 +99,18 @@ cmd_run() {
     # shellcheck disable=SC2086
     exec docker run --rm $io_flags $INIT_FLAGS \
         --platform "$BUILDER_PLATFORM" \
+        --cpus "$BUILD_CPUS" --memory "$BUILD_MEMORY" \
         --cap-add SYS_ADMIN \
-        --tmpfs /scratch:rw,exec,size=3g \
+        --tmpfs "/scratch:rw,exec,size=$BUILD_SCRATCH_SIZE" \
         -v "$BRAINSYNCOS_ROOT:/work" \
         $iso_flags \
         -e BRAINSYNCOS_IN_CONTAINER=1 \
         -e BRAINSYNCOS_ROOT=/work \
         -e BSOS_GIT_REV="$(host_git_rev)" \
+        -e BSOS_SOURCE_DATE_EPOCH="$(host_source_date)" \
+        -e BSOS_JOBS="$BUILD_JOBS" \
+        -e MAKEFLAGS="-j$BUILD_JOBS" \
+        -e CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS" \
         -w /work \
         "$(image_ref)" "$@"
 }
@@ -108,7 +126,8 @@ cmd_clean() {
     ensure_image
     log "removing $target/ (inside the builder)"
     # shellcheck disable=SC2086
-    docker run --rm $INIT_FLAGS --platform "$BUILDER_PLATFORM" -v "$BRAINSYNCOS_ROOT:/work" -w /work \
+    docker run --rm $INIT_FLAGS --platform "$BUILDER_PLATFORM" --cpus "$BUILD_CPUS" --memory "$BUILD_MEMORY" \
+        -v "$BRAINSYNCOS_ROOT:/work" -w /work \
         "$(image_ref)" bash -c 'source scripts/lib.sh; force_rm_tree "$1"' _ "$target"
 }
 

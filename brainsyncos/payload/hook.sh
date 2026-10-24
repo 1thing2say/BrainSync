@@ -11,13 +11,18 @@
 # release file (EDITION=orin-nano or vm-arm64).
 #
 # It copies the payload to /opt/brainsyncos/installer on the target, records
-# the machine (model, serial number, edition) in device.env there, then
-# runs every install.d/NN-*.sh inside the target (curtin in-target), in order,
-# with BSOS_INSTALL_DIR set. Any failure fails the installation: a
-# half-installed BrainSyncOS is worse than an installer error on screen.
+# the machine (model, serial number, edition) in device.env there, mounts
+# the ISO's signed package repository (/brainsyncos-repo, next to the
+# payload) read-only at /tmp/brainsyncos-repo inside the target, then runs
+# every install.d/NN-*.sh inside the target (curtin in-target), in order,
+# with BSOS_INSTALL_DIR and BSOS_REPO_DIR set. The repository is unmounted on
+# exit, whatever happened, so the installer can unmount the target. Any
+# failure fails the installation: a half-installed BrainSyncOS is worse than
+# an installer error on screen.
 # Log: /var/log/brainsyncos/install.log, in the live system and on the target.
 #
-# Test overrides: BSOS_HOOK_SRC (payload dir), BSOS_HOOK_LOG (live log file),
+# Test overrides: BSOS_HOOK_SRC (payload dir), BSOS_REPO_SRC (repository
+# dir, default <payload>/../brainsyncos-repo), BSOS_HOOK_LOG (live log file),
 # BSOS_DT_DIR (device tree, default /sys/firmware/devicetree/base),
 # BSOS_DMI_DIR (default /sys/class/dmi/id), BSOS_MACHINE_ID_FILE (default
 # /etc/machine-id).
@@ -28,6 +33,8 @@ src="${BSOS_HOOK_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}"
 target="${TARGET_MOUNT_POINT:-/target}"
 export TARGET_MOUNT_POINT="$target"
 dest=/opt/brainsyncos/installer
+repo_src="${BSOS_REPO_SRC:-$(dirname "$src")/brainsyncos-repo}"
+repo_mnt=/tmp/brainsyncos-repo
 live_log="${BSOS_HOOK_LOG:-/var/log/brainsyncos/install.log}"
 
 mkdir -p "$(dirname "$live_log")"
@@ -38,6 +45,10 @@ tee_pid=$!
 # 10 s: a daemon started by a step could keep the pipe open and hang the install.
 save_log() {
     local rc=$?
+    if mountpoint -q "$target$repo_mnt" 2>/dev/null; then
+        umount "$target$repo_mnt" 2>/dev/null || umount -l "$target$repo_mnt" || true
+    fi
+    rmdir "$target$repo_mnt" 2>/dev/null || true
     echo "hook.sh: exit $rc"
     exec >&- 2>&-
     for _ in $(seq 1 50); do
@@ -113,13 +124,24 @@ chmod -R u+rwX,go+rX,go-w "$target$dest"
 # Login credentials: readable by root only on the installed system.
 [ ! -d "$target$dest/config" ] || chmod -R go-rwx "$target$dest/config"
 
+# The package repository, read-only for the steps (payload lib/apt-repo.sh).
+[ -d "$repo_src/dists" ] || { echo "hook.sh: no package repository at $repo_src" >&2; exit 1; }
+if mountpoint -q "$target$repo_mnt" 2>/dev/null; then
+    umount "$target$repo_mnt"
+fi
+mkdir -p "$target$repo_mnt"
+mount --bind "$repo_src" "$target$repo_mnt"
+mount -o remount,bind,ro "$target$repo_mnt"
+echo "hook.sh: package repository $repo_src mounted at $repo_mnt (read-only)"
+
 n=0
 for script in "$target$dest"/install.d/[0-9][0-9]-*.sh; do
     [ -e "$script" ] || continue
     step="$(basename "$script")"
     n=$((n + 1))
     echo "hook.sh: == $step"
-    curtin in-target --target="$target" -- /usr/bin/env BSOS_INSTALL_DIR="$dest" /bin/bash "$dest/install.d/$step"
+    curtin in-target --target="$target" -- /usr/bin/env BSOS_INSTALL_DIR="$dest" BSOS_REPO_DIR="$repo_mnt" \
+        /bin/bash "$dest/install.d/$step"
 done
 [ "$n" -gt 0 ] || { echo "hook.sh: no install.d steps in $src" >&2; exit 1; }
 echo "hook.sh: BrainSyncOS layer installed ($n steps)"
