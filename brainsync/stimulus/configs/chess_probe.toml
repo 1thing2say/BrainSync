@@ -1,0 +1,37 @@
+# BrainChess feasibility probe: two targets the size of one chess-board square, as they
+# would sit on the board. The BrainChess board is 0.9 screen heights tall, so a square is
+# 0.1125 high, and the cut between flicker groups leaves at least one still square, so the
+# nearest 15 and 17 Hz squares sit two squares (0.225) apart, centre to centre. The demo
+# pair (two_targets) uses 0.4 squares 1.0 apart; whether a dry-electrode Cerelog X8 still
+# separates 15 from 17 Hz at this size and distance is unmeasured. Record a cued session
+# with this config and score it before building on board-square flicker.
+name = "chess_probe"
+
+[targets]
+freqs = [15.0, 17.0]   # Hz
+phases_pi = [0.0, 0.0] # multiples of pi
+labels = ["15", "17"]
+
+[layout]
+rows = 1
+cols = 2
+size = 0.1125   # one board square, screen heights
+spacing = 0.225 # two squares centre to centre: one still square between them
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 10
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true
