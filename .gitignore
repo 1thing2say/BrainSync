@@ -27,3 +27,8 @@ logs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Claude Code: local instructions and settings (never committed)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
