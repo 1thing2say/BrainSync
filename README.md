@@ -326,6 +326,18 @@ on Reels where Start was pressed moves the feed; the others ack `ok: false`, and
 counts one ack per scroll id. Escape in any tab ends the run, also before calibration
 (exit 0, "viewer quit").
 
+Decisions count only while some tab shows the squares. Each tab says whether its squares
+are in view in its hello and again in a `view` message each time that changes: they are
+out of view in a background tab, on another Space, in a covered window or after leaving
+Reels. While no tab shows them, decisions are still scored and logged (`"hidden": true`),
+but none scrolls and the cue box is cleared. When the squares come back the votes are
+reset, so a scroll needs fresh windows. The summary says how long they were out of view.
+On the first headset run the viewer kept switching to the terminal. The decoder committed
+15 times while Chrome was hidden, 12 of them "down", with nothing on screen to look at.
+Only the 2 scrolls with the squares in view reached Instagram, and both moved the reel.
+Keep Chrome and the terminal side by side, both visible: a tab only has to be visible,
+not focused.
+
 Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
 
 - A new commit fires one scroll in that target's direction. Abstentions never fire, and
@@ -342,9 +354,9 @@ Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
 The rest baseline is calibrated while the viewer watches the reel with the squares
 flickering in the periphery (`--calibrate-on watch`, the default). Here "not choosing"
 means watching the video, not a still screen. `--calibrate-on still` holds the squares
-still instead, as phase 3 does. This choice, the closer spacing below and the whole
-Reels setup are untested on real EEG. Only the fake board and the mock page have run
-it.
+still instead, as phase 3 does. This choice and the closer spacing below are not
+validated on real EEG yet: one headset run so far (above), with too few scrolls in view
+to judge accuracy.
 
 Setup: install the `reels` extra (websockets). Load `extension/` unpacked at
 `chrome://extensions` (Developer mode, Chrome 116 or newer). Put Chrome in full screen
@@ -852,13 +864,13 @@ node --test extension/test/*.test.mjs
 
 The suite collects 997 tests. Without data the 9 real-data tests skip themselves, and the
 BrainFlow board test skips where the Cerelog fork is not installed. No test opens a window
-or touches the board. Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19
-(a real server on a free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
+or touches the board. Phase 4 adds 117 of them: `test_scroll.py` 22, `test_bridge.py` 23
+(a real server on a free port), `test_reels.py` 49 (fake board, a WebSocket client in place of the browser,
 and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11 and
-`test_extension.py` 12. Without the `reels` extra the 10 browser tests in
+`test_extension.py` 12. Without the `reels` extra the 14 browser tests in
 `test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
 checks the flicker fixture against `brainsync.stimulus.flicker`, the manifest and the
-mock page, runs `node --check` on every script and runs the 65 node tests (the flicker
+mock page, runs `node --check` on every script and runs the 84 node tests (the flicker
 port within 1e-9 of the Python luminance, the overlay's geometry, refresh meter and
 protocol state machine, the scroller, and the service worker against a fake `chrome`
 and WebSocket). Node 24 reads `--test` arguments as globs, so
