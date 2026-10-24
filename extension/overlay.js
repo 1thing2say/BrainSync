@@ -19,9 +19,11 @@
  * the median. Not the median itself: Chrome coarsens rAF timestamps to 100 us on pages
  * that are not cross-origin isolated, such as instagram.com, so at 60 Hz the intervals are
  * 16.6 or 16.7 ms and the median, 16.7, reads 59.88 Hz; the mean cancels the rounding.
- * Luminance itself is computed at the config's refresh_hz, as the stimulus does. Python
- * refuses a display that is off by more than refresh_tolerance_hz; here the HUD turns red
- * and the squares are held still, because the frequencies would be wrong.
+ * Luminance itself is computed at the config's refresh_hz and modulation depth (default 1,
+ * full black-white; still squares sit at 0.5, the flicker's mean at any depth), as the
+ * stimulus does. Python refuses a display that is off by more than refresh_tolerance_hz;
+ * here the HUD turns red and the squares are held still, because the frequencies would be
+ * wrong.
  *
  * Nothing is drawn until the viewer presses Start on the warning. Escape stops the
  * flicker, removes the squares and tells the server ("bye"). A bye that could not go out
@@ -44,6 +46,7 @@
   const DEFAULT_CONFIG = Object.freeze({
     name: "reels",
     waveform: "sine",
+    depth: 1.0,
     refresh_hz: 60.0,
     refresh_tolerance_hz: 1.0,
     targets: Object.freeze([
@@ -215,6 +218,8 @@
   function parseConfig(msg) {
     const waveform = msg.waveform === undefined ? "sine" : msg.waveform;
     if (F.WAVEFORMS.indexOf(waveform) < 0) throw new Error("unknown waveform " + JSON.stringify(waveform));
+    const depth = msg.depth === undefined ? DEFAULT_CONFIG.depth : msg.depth;
+    if (!finite(depth) || depth <= 0 || depth > 1) throw new Error("depth must be a number in (0, 1]");
     const refresh = msg.refresh_hz === undefined ? DEFAULT_CONFIG.refresh_hz : msg.refresh_hz;
     if (!finite(refresh) || refresh <= 0) throw new Error("refresh_hz must be a positive number");
     const tol = msg.refresh_tolerance_hz === undefined ? DEFAULT_CONFIG.refresh_tolerance_hz
@@ -232,7 +237,7 @@
       return Object.freeze({ label: String(t.label === undefined ? k : t.label), freq: t.freq,
                              phase, x: t.x, y: t.y, size: t.size });
     });
-    return Object.freeze({ name: String(msg.name || "config"), waveform, refresh_hz: refresh,
+    return Object.freeze({ name: String(msg.name || "config"), waveform, depth, refresh_hz: refresh,
                            refresh_tolerance_hz: tol, targets: Object.freeze(targets) });
   }
 
@@ -487,7 +492,7 @@
       const n = frameIndex(ts, t0, period);
       for (let k = 0; k < cfg.targets.length; k++) {
         const t = cfg.targets[k];
-        lum[k] = F.luminance(t.freq, t.phase, n, cfg.refresh_hz, cfg.waveform);
+        lum[k] = F.luminance(t.freq, t.phase, n, cfg.refresh_hz, cfg.waveform, cfg.depth);
       }
       if (ts - lastFramesAt >= FRAMES_EVERY_MS) {
         lastFramesAt = ts;

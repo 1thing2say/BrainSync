@@ -137,6 +137,6 @@ node --test extension/test/*.test.mjs                 # flicker port + overlay/s
 Node 24 reads `--test` arguments as globs, so pass the files, not the folder.
 `flicker.test.mjs` checks `flicker.js` against values computed by
 `brainsync.stimulus.flicker.luminance` (15, 17 and 12 Hz, phases 0 and pi/2, frames
-0..240, sine and square) to within 1e-9. `tests/test_extension.py` rebuilds that fixture
+0..240, sine and square, modulation depths 1 and 0.5) to within 1e-9. `tests/test_extension.py` rebuilds that fixture
 and compares it with the file, checks the manifest and the mock page, and runs
 `node --check` on every script.

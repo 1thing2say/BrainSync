@@ -5,7 +5,8 @@
 
 Every value comes from brainsync.stimulus.flicker.luminance, the function the PsychoPy
 stimulus draws with: 15, 17 and 12 Hz, phases 0 and pi/2, frames 0..240 at 60 Hz, both
-waveforms. tests/test_extension.py rebuilds it in memory and compares with the file.
+waveforms, modulation depths 1 and 0.5. tests/test_extension.py rebuilds it in memory and
+compares with the file.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from brainsync.stimulus.flicker import WAVEFORMS, luminance
 FIXTURE = Path(__file__).with_name("flicker_fixture.json")
 FREQS = (15.0, 17.0, 12.0)
 PHASES = (0.0, 0.5 * math.pi)
+DEPTHS = (1.0, 0.5)   # full swing first, so the depth-1 cases keep their old place
 REFRESH = 60.0
 N_FRAMES = 241   # frames 0..240: 4 s at 60 Hz, 60 cycles at 15 Hz
 
@@ -30,13 +32,14 @@ def build() -> dict:
     """The fixture as a JSON-ready dict."""
     frames = np.arange(N_FRAMES)
     cases = []
-    for waveform in WAVEFORMS:
-        for freq in FREQS:
-            for phase in PHASES:
-                values = luminance(freq, phase, frames, REFRESH, waveform)
-                cases.append({"waveform": waveform, "freq": freq, "phase": phase,
-                              "refresh": REFRESH,
-                              "values": [float(v) for v in np.asarray(values)]})
+    for depth in DEPTHS:
+        for waveform in WAVEFORMS:
+            for freq in FREQS:
+                for phase in PHASES:
+                    values = luminance(freq, phase, frames, REFRESH, waveform, depth)
+                    cases.append({"waveform": waveform, "freq": freq, "phase": phase,
+                                  "depth": depth, "refresh": REFRESH,
+                                  "values": [float(v) for v in np.asarray(values)]})
     return {"source": "brainsync.stimulus.flicker.luminance", "frames": N_FRAMES,
             "cases": cases}
 

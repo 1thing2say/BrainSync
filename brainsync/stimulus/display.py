@@ -98,7 +98,7 @@ def cued_frames(cfg: StimulusConfig, trials: list[Trial]) -> Iterator[Frame]:
     """
     r = cfg.refresh
     freqs, phases = cfg.freqs, cfg.phases
-    still = frame_luminances(freqs, phases, 0, r, cfg.waveform)
+    still = frame_luminances(freqs, phases, 0, r, cfg.waveform, cfg.depth)
     n_cue = n_frames(cfg.session.cue_s, r)
     n_stim = max(1, n_frames(cfg.session.stim_s, r))
     n_rest = max(1, n_frames(cfg.session.rest_s, r))
@@ -110,8 +110,8 @@ def cued_frames(cfg: StimulusConfig, trials: list[Trial]) -> Iterator[Frame]:
         onset = ((f"cue:{k}",) if n_cue == 0 and cfg.hold_cue else ()) + (f"stim_on:{k}",)
         for i in range(n_stim):
             events = onset if i == 0 else ()
-            yield Frame(frame_luminances(freqs, phases, i, r, cfg.waveform), cue=stim_cue,
-                        events=events, trial=tr.index)
+            yield Frame(frame_luminances(freqs, phases, i, r, cfg.waveform, cfg.depth),
+                        cue=stim_cue, events=events, trial=tr.index)
         for i in range(n_rest):
             yield Frame(still, events=(f"stim_off:{k}",) if i == 0 else ())
 
@@ -134,7 +134,7 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
     flash in progress. Neither changes the luminances.
     """
     r = cfg.refresh
-    still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform)
+    still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform, cfg.depth)
     total = None if seconds is None else n_frames(seconds, r)
     flash_len = n_frames(cfg.card_spec.flash_s, r)
     holding = hold is not None
@@ -155,8 +155,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
             continue
         holding = False
         k = cue() if cue is not None else -1
-        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform), cue=k,
-                    card=shown, flash=lit)
+        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
+                    cue=k, card=shown, flash=lit)
         i += 1
 
 

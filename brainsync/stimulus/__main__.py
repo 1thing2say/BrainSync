@@ -76,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     session.add_argument("--hold-cue", action=argparse.BooleanOptionalAction, default=None,
                          help="leave the cue box up while the cued target flickers "
                               "(default: as the config says)")
+    p.add_argument("--depth", type=float,
+                   help="flicker modulation depth in (0, 1]: luminance swings 0.5 +/- depth/2, "
+                        "1 is full black-white (default: as the config says)")
     p.add_argument("--seed", type=int, help="seed for the shuffled order (random if omitted)")
     p.add_argument("--no-wait", action="store_true", help="skip the press-space start screen")
     p.add_argument("--refresh", type=_refresh_arg,
@@ -93,7 +96,7 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
         f"config {cfg.name}" + (f" ({cfg.path})" if cfg.path else ""),
         f"  {cfg.n_targets} target(s), {cfg.waveform} flicker, refresh {hz:g} Hz, "
         f"side {cfg.size:g} screen heights, cue held through flicker: "
-        f"{'yes' if cfg.hold_cue else 'no'}",
+        f"{'yes' if cfg.hold_cue else 'no'}, flicker depth {cfg.depth:g}",
     ]
     for t in cfg.targets:
         x, y = t.pos
@@ -135,7 +138,8 @@ def _configure(args: argparse.Namespace) -> StimulusConfig:
     cfg = load_config(args.config)
     hz = args.refresh if isinstance(args.refresh, float) else None
     return override(cfg, blocks=args.blocks, cue_s=args.cue_s, stim_s=args.stim_s,
-                    rest_s=args.rest_s, hold_cue=args.hold_cue, refresh_hz=hz)
+                    rest_s=args.rest_s, hold_cue=args.hold_cue, depth=args.depth,
+                    refresh_hz=hz)
 
 
 def _check_refresh(cfg: StimulusConfig, args: argparse.Namespace,
@@ -176,7 +180,8 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
         if not args.no_wait:
             try:
                 renderer.wait_for_start(frame_luminances(cfg.freqs, cfg.phases, 0,
-                                                         cfg.refresh, cfg.waveform))
+                                                         cfg.refresh, cfg.waveform,
+                                                         cfg.depth))
             except Aborted:
                 print("aborted before start", file=sys.stderr)
                 return 1

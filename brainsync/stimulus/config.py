@@ -10,7 +10,7 @@ margin beside the video).
     name = "two_targets"
     [targets]   freqs = [15.0, 17.0]; phases_pi = [0.0, 0.0]; labels = ["15", "17"]
     [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0; x_offset = 0.0
-    [stimulus]  waveform = "sine"; hold_cue = true
+    [stimulus]  waveform = "sine"; hold_cue = true; depth = 1.0
     [display]   refresh_hz = 60.0; refresh_tolerance_hz = 1.0; screen = 0; background = 0.0
                 aspect = 1.5
     [session]   blocks = 10; cue_s = 1.0; stim_s = 4.0; rest_s = 3.0; shuffle = true
@@ -19,6 +19,10 @@ margin beside the video).
 The optional [card] table sets up the BrainSwipe profile card drawn at the centre between
 the targets, and the box flash that confirms a swipe; configs without it are unchanged.
 A flash colour is "#rrggbb" or three values in [-1, 1] (PsychoPy rgb), one per target.
+
+[stimulus] depth (default 1.0, in (0, 1]) is the flicker's modulation depth: luminance
+swings around mid-grey 0.5 by depth / 2, so 1.0 is full black-to-white and 0.5 is a
+gentler 0.25-0.75 flicker with the same mean.
 """
 from __future__ import annotations
 
@@ -42,7 +46,8 @@ _PHASE_TOL = 1e-9
 _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels"}),
     "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset"}),
-    "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px"}),
+    "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px",
+                           "depth"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
@@ -106,6 +111,7 @@ class StimulusConfig:
     size: float
     waveform: str = "sine"
     hold_cue: bool = False
+    depth: float = 1.0   # modulation depth: luminance swings 0.5 +/- depth / 2
     cue_color: tuple[float, float, float] = (1.0, -1.0, -1.0)
     cue_scale: float = 1.2
     cue_line_px: float = 8.0
@@ -348,6 +354,7 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         size=size,
         waveform=stim.text("waveform", "sine"),
         hold_cue=stim.flag("hold_cue", False),
+        depth=stim.number("depth", 1.0),
         cue_color=(color[0], color[1], color[2]),
         cue_scale=stim.number("cue_scale", 1.2),
         cue_line_px=stim.number("cue_line_px", 8.0),
@@ -455,6 +462,8 @@ def validate(cfg: StimulusConfig) -> None:
     """Raise ValueError for a config that cannot be shown correctly."""
     if cfg.waveform not in WAVEFORMS:
         raise ValueError(f"unknown waveform {cfg.waveform!r}; expected one of {WAVEFORMS}")
+    if not 0.0 < cfg.depth <= 1.0:   # also refuses nan
+        raise ValueError(f"[stimulus] depth must be in (0, 1], got {cfg.depth}")
     d = cfg.display
     if d.refresh_hz <= 0:
         raise ValueError(f"[display] refresh_hz must be positive, got {d.refresh_hz}")
@@ -506,7 +515,7 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
 
 _SESSION_FIELDS = frozenset(f.name for f in dataclasses.fields(Session))
 _DISPLAY_FIELDS = frozenset(f.name for f in dataclasses.fields(Display))
-_TOP_FIELDS = frozenset({"hold_cue", "waveform"})
+_TOP_FIELDS = frozenset({"hold_cue", "waveform", "depth"})
 
 
 def _subset(values: Mapping[str, Any], names: frozenset[str]) -> dict[str, Any]:
@@ -514,9 +523,9 @@ def _subset(values: Mapping[str, Any], names: frozenset[str]) -> dict[str, Any]:
 
 
 def override(cfg: StimulusConfig, **changes: Any) -> StimulusConfig:
-    """A re-validated copy with session, display or hold_cue/waveform fields replaced.
+    """A re-validated copy with session, display or hold_cue/waveform/depth fields replaced.
 
-    Keyword names are field names (``blocks``, ``stim_s``, ``refresh_hz``, ``hold_cue``...);
+    Keyword names are field names (``blocks``, ``stim_s``, ``refresh_hz``, ``depth``...);
     ``None`` values are skipped so argparse defaults can be passed straight through.
     """
     given = {k: v for k, v in changes.items() if v is not None}

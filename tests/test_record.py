@@ -112,6 +112,20 @@ def test_stimulus_args_pass_timing_through() -> None:
     stim_parser().parse_args(out + ["--plan"])
 
 
+def test_stimulus_args_pass_depth_through() -> None:
+    plain = record._stimulus_args(record.build_parser().parse_args([]), blocks=1)
+    assert "--depth" not in plain   # the config's depth stands
+    args = record.build_parser().parse_args(["--depth", "0.5"])
+    out = record._stimulus_args(args, blocks=1)
+    assert out[out.index("--depth") + 1] == "0.5"
+    from brainsync.stimulus.__main__ import build_parser as stim_parser
+    assert stim_parser().parse_args(out + ["--plan"]).depth == 0.5
+    for bad in ("0", "1.5"):
+        problems = record._check_args(record.build_parser().parse_args(["--depth", bad]))
+        assert any("--depth must be in (0, 1]" in p for p in problems)
+    assert record._check_args(args) == []
+
+
 def test_stimulus_command_adds_nothing() -> None:
     cmd = launch.stimulus_command(["-c", "two_targets"])
     assert cmd == [sys.executable, "-m", "brainsync.stimulus", "-c", "two_targets"]
