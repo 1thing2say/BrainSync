@@ -134,6 +134,19 @@ c_autoinstall() {
     local schema="$W/schema.json" t="$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" spec name msg
     subiquity_schema "$schema"
     python3 "$S/check-autoinstall.py" "$t" --schema "$schema"
+    # Every VM_DESKTOP rendering is a valid autoinstall with its package first.
+    for spec in none: minimal:ubuntu-desktop-minimal full:ubuntu-desktop; do
+        python3 "$S/render-vm-autoinstall.py" "$t" "$W/desktop.yaml" --desktop "${spec%%:*}"
+        python3 "$S/check-autoinstall.py" "$W/desktop.yaml" --schema "$schema" > /dev/null
+        python3 -c 'import sys, yaml; p = yaml.safe_load(open(sys.argv[1]))["autoinstall"]["packages"]; sys.exit(0 if (p[0] == sys.argv[2] if sys.argv[2] else "ubuntu-desktop" not in " ".join(p)) else 1)' \
+            "$W/desktop.yaml" "${spec#*:}" || die "VM_DESKTOP=${spec%%:*}: wrong packages"
+    done
+    python3 "$S/render-vm-autoinstall.py" "$t" "$W/desktop.yaml" --desktop none > /dev/null
+    cmp -s "$t" "$W/desktop.yaml" || die "VM_DESKTOP=none changed the template"
+    echo "VM_DESKTOP none/minimal/full: valid autoinstalls, desktop package first; none = the template"
+    sed 's/^  packages:$/  packages: []/' "$t" > "$W/nopkgs.yaml"
+    if python3 "$S/render-vm-autoinstall.py" "$W/nopkgs.yaml" "$W/x.yaml" --desktop minimal 2> "$W/err"; then die "rendered a template without a packages list"; fi
+    echo "render-vm-autoinstall rejects a template without '  packages:': $(cat "$W/err")"
     # mutate NAME PYTHON: a copy of the template changed by PYTHON (ai = the autoinstall dict).
     mutate() {
         python3 - "$t" "$W/$1.yaml" "$2" <<'EOF'
@@ -225,7 +238,9 @@ EOF
     for p in "EDITION=$EDITION" "VERSION=$BRAINSYNCOS_VERSION" "UBUNTU_RELEASE=$UBUNTU_RELEASE" "BASE_ISO_SHA256=$BASE_ISO_SHA256"; do
         grep -qx "$p" "$x/brainsyncos/release" || die "release lacks $p"
     done
-    cmp "$x/brainsyncos/autoinstall.yaml" "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" || die "ISO autoinstall is not vm/autoinstall.yaml"
+    python3 "$S/render-vm-autoinstall.py" "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" "$W/ai-want.yaml" --desktop "$VM_DESKTOP" > /dev/null
+    cmp "$x/brainsyncos/autoinstall.yaml" "$W/ai-want.yaml" || die "ISO autoinstall is not vm/autoinstall.yaml rendered for VM_DESKTOP=$VM_DESKTOP"
+    echo "autoinstall: vm/autoinstall.yaml with VM_DESKTOP=$VM_DESKTOP: $(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["autoinstall"]["packages"])' "$x/brainsyncos/autoinstall.yaml")"
     python3 "$S/check-autoinstall.py" "$x/brainsyncos/autoinstall.yaml"
     grep -qx "set timeout=$VM_GRUB_TIMEOUT" "$x/boot/grub/grub.cfg" || die "grub timeout is not VM_GRUB_TIMEOUT=$VM_GRUB_TIMEOUT"
     grep -m1 '^menuentry' "$x/boot/grub/grub.cfg" | grep -q "Install BrainSyncOS $BRAINSYNCOS_VERSION" || die "first menu entry is not the install"

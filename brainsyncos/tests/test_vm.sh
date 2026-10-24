@@ -72,7 +72,7 @@ t_vm_config() {
         echo "jetson: $BASE_ISO_NAME -> $(product_iso_name) EDITION=$(jetson_edition) volid=[$(config_volid)]"
         [ "$(product_iso_name)" = "brainsyncos-$BRAINSYNCOS_VERSION-orin-nano" ] && [ "$(config_volid)" = "$BASE_ISO_VOLID" ]' _ "$BRAINSYNCOS_ROOT"
     local bad="$TMP_DIR/bad-vm.env" kv out
-    for kv in EDITION=orin-nano VM_GRUB_TIMEOUT=soon VM_INSTALL_KERNEL=lowlatency VM_CONSOLES=tty0,,x \
+    for kv in EDITION=orin-nano VM_GRUB_TIMEOUT=soon VM_DESKTOP=kde VM_INSTALL_KERNEL=lowlatency VM_CONSOLES=tty0,,x \
               VM_NAME=deb VM_NAME=MyBrainSyncOS VM_BACKEND=vmware VM_MEMORY_MB=512 VM_CPU_CORES=0 VM_DISK_GB=8; do
         sed "s/^${kv%%=*}=.*/$kv/" "$BSOS_VM_PRODUCT_CONFIG" > "$bad"
         if out="$(BSOS_VM_PRODUCT_CONFIG="$bad" /bin/bash -c 'source "$1/scripts/lib.sh"; load_vm_config; load_vm_product_config' _ "$BRAINSYNCOS_ROOT" 2>&1)"; then
@@ -257,14 +257,17 @@ next_status() {  # the first line of status.seq, consumed unless it is the last
     printf '%s' "$s"
 }
 shift
-if grep -q 'update configuration' "$src"; then echo "eject $*" >> "$STUB_DIR/calls"; echo 1
+if grep -q 'is running' "$src"; then echo false
+elif grep -q 'to quit' "$src"; then echo quit >> "$STUB_DIR/calls"
+elif grep -q 'update configuration' "$src"; then echo "eject $*" >> "$STUB_DIR/calls"; echo 1
 elif grep -q 'make new virtual machine' "$src"; then
     # create: record argv and whether the staged installer exists right now.
     echo "create $* staged=$([ -s "$2" ] && echo yes || echo no)" >> "$STUB_DIR/calls"; echo ID-NEW
 elif grep -q 'repeat with vm in virtual machines' "$src"; then
-    printf 'BrainSyncOS-stub\tID-1\tstopped\tapple\nOther VM\tID-2\tstarted\tqemu\n'
+    printf 'BrainSyncOS-stub\tID-1\tstopped\tapple\nOther VM\tID-2\t%s\tqemu\n' "${STUB_OTHER:-started}"
 elif grep -q 'exists virtual machine named' "$src"; then
-    [ -n "${STUB_NOVM:-}" ] || printf 'ID-1\t%s\tapple' "$(next_status)"
+    # STUB_NOVM: no such VM until create made it.
+    [ -n "${STUB_NOVM:-}" ] && ! grep -q '^create ' "$STUB_DIR/calls" || printf 'ID-1\t%s\tapple' "$(next_status)"
 elif grep -q 'drives of cfg' "$src"; then printf 'false\tDRIVE-ISO\t\nfalse\tDRIVE-DISK\t\n'
 elif grep -q 'serial port 1' "$src"; then cat "$STUB_DIR/serial"
 fi
@@ -294,7 +297,7 @@ EOF
 <plist version="1.0"><dict><key>Drive</key><array>
 <dict><key>Identifier</key><string>DRIVE-DISK</string><key>ImageName</key><string>DRIVE-DISK.img</string></dict>
 <dict><key>Identifier</key><string>DRIVE-ISO</string><key>ImageName</key><string>brainsyncos-installer.iso</string></dict>
-</array></dict></plist>
+</array><key>Virtualization</key><dict><key>Keyboard</key><string>Disabled</string><key>Pointer</key><string>Disabled</string></dict></dict></plist>
 EOF
     stub() {  # stub ARGS...: utm-vm.sh with the stubs; output in $out, seconds in $t
         local t0 r
@@ -362,19 +365,27 @@ EOF
     printf '%s\n' "$out" | grep -q 'does not allow this terminal to control UTM' || die "deny: $out"
     echo "-1743: $(printf '%s\n' "$out" | tail -1 | cut -c1-90)..."
     # install: --hide with a boot menu that waits for a key is refused.
-    if [ "$VM_GRUB_TIMEOUT" = -1 ]; then
-        if stub install --name "$vm" --hide; then die "install --hide accepted with VM_GRUB_TIMEOUT=-1"; fi
-        printf '%s\n' "$out" | grep -q -- '--hide: the ISO.s boot menu waits for a key' || die "--hide: $out"
-        echo "install --hide refused: VM_GRUB_TIMEOUT=-1"
-    fi
+    sed 's/^VM_GRUB_TIMEOUT=.*/VM_GRUB_TIMEOUT=-1/' "$BRAINSYNCOS_ROOT/config/vm.env" > "$d/vm-wait.env"
+    if BSOS_VM_PRODUCT_CONFIG="$d/vm-wait.env" stub install --name "$vm" --hide; then die "install --hide accepted with VM_GRUB_TIMEOUT=-1"; fi
+    printf '%s\n' "$out" | grep -q -- '--hide: the ISO.s boot menu waits for a key' || die "--hide: $out"
+    echo "install --hide refused: VM_GRUB_TIMEOUT=-1"
     # create: the ISO goes to UTM as a clone staged in UTM's container, which
     # is gone afterwards; UTM imports it (no removable drive).
     printf 'fake iso\n' > "$d/fake.iso"
     : > "$d/calls"
-    STUB_NOVM=1 stub create --name "$vm" --iso "$d/fake.iso" || die "create: $out"
+    if STUB_NOVM=1 stub create --name "$vm" --iso "$d/fake.iso"; then die "create quit UTM while another VM runs"; fi
+    printf '%s\n' "$out" | grep -q 'these VMs are running: Other VM' && [ ! -s "$d/calls" ] || die "create with a running VM: $out"
+    echo "create: refused while another VM runs (it would quit UTM), nothing created"
+    STUB_NOVM=1 STUB_OTHER=stopped stub create --name "$vm" --iso "$d/fake.iso" || die "create: $out"
     grep -q "^create $vm $d/utmdata/tmp/brainsyncos-$vm/brainsyncos-installer.iso .* staged=yes" "$d/calls" || die "create argv: $(cat "$d/calls")"
     [ ! -e "$d/utmdata/tmp/brainsyncos-$vm" ] || die "create left the staged ISO behind"
     echo "create: staged clone passed to UTM, removed afterwards"
+    # create (apple): keyboard and pointer set in config.plist while UTM is quit.
+    grep -qx quit "$d/calls" || die "create did not quit UTM for the input settings: $(cat "$d/calls")"
+    [ "$(plutil -extract Virtualization.Keyboard raw -o - "$d/utmdata/Documents/$vm.utm/config.plist")" = Generic ] \
+        && [ "$(plutil -extract Virtualization.Pointer raw -o - "$d/utmdata/Documents/$vm.utm/config.plist")" = Mouse ] \
+        || die "create left keyboard/pointer disabled"
+    echo "create: keyboard Generic, pointer Mouse (UTM quit for the edit)"
     # eject: the installer drive (by ImageName in config.plist), not the disk.
     stub eject-iso --dry-run --name "$vm" || die "eject dry-run: $out"
     printf '%s\n' "$out" | grep -q 'would remove 1 drive(s) .*DRIVE-ISO' && ! printf '%s\n' "$out" | grep -q DRIVE-DISK || die "eject dry-run: $out"
@@ -391,10 +402,18 @@ EOF
     printf 'stopped\nstarted\nstopped\n' > "$d/status.seq"
     : > "$d/calls"
     if stub install --name "$vm"; then die "install accepted an immediate power-off"; fi
-    printf '%s\n' "$out" | grep -q 'too soon for an install' || die "early stop: $out"
+    printf '%s\n' "$out" | grep -q 'serial console printed nothing' || die "early stop: $out"
     ! grep -q eject "$d/calls" || die "early stop ejected the ISO"
     grep -q "utmctl start ID-1" "$d/calls" || die "install did not start the VM: $(cat "$d/calls")"
-    echo "power-off after ${t}s without console output: refused, ISO kept"
+    echo "power-off after ${t}s with an empty console capture: refused, ISO kept"
+    # install: no console to capture at all; a power-off within 5 min is not an install.
+    printf 'none\t\t' > "$d/serial"
+    printf 'stopped\nstarted\nstopped\n' > "$d/status.seq"
+    : > "$d/calls"
+    if stub install --name "$vm"; then die "install accepted an immediate power-off"; fi
+    printf '%s\n' "$out" | grep -q 'too soon for an install' || die "early stop without console: $out"
+    ! grep -q eject "$d/calls" || die "early stop without console ejected the ISO"
+    echo "power-off after ${t}s without a console: refused, ISO kept"
     # install: console captured (boot menu text) but no success marker, then stopped.
     printf 'tcp\t\t%s' "$port" > "$d/serial"
     printf 'stopped\nstarted\nstarted\nstopped\n' > "$d/status.seq"

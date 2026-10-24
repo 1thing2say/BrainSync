@@ -16,7 +16,8 @@
 # account, key-only SSH, hostname, release file). Nothing of the vendor ISO is
 # rebuilt; only these paths are added or replaced:
 #   /brainsyncos/            payload, release (EDITION=vm-arm64), settings.env,
-#                            config/ logins, autoinstall.yaml (vm/autoinstall.yaml,
+#                            config/ logins, autoinstall.yaml (vm/autoinstall.yaml
+#                            plus the VM_DESKTOP package, scripts/render-vm-autoinstall.py;
 #                            checked by scripts/check-autoinstall.py)
 #   /boot/grub/grub.cfg      BrainSyncOS menu (scripts/render-vm-grub.py)
 #   /md5sum.txt              vendor entries + the staged files
@@ -66,7 +67,9 @@ UBUNTU_RELEASE=$UBUNTU_RELEASE
 BASE_ISO_NAME=$BASE_ISO_NAME
 BASE_ISO_SHA256=$BASE_ISO_SHA256
 EOF
-cp "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" "$VM_STAGE_DIR/brainsyncos/autoinstall.yaml"
+python3 "$BRAINSYNCOS_ROOT/scripts/render-vm-autoinstall.py" "$BRAINSYNCOS_ROOT/vm/autoinstall.yaml" \
+    "$VM_STAGE_DIR/brainsyncos/autoinstall.yaml" --desktop "$VM_DESKTOP" \
+    || die "could not render the autoinstall for VM_DESKTOP=$VM_DESKTOP"
 python3 "$BRAINSYNCOS_ROOT/scripts/check-autoinstall.py" "$VM_STAGE_DIR/brainsyncos/autoinstall.yaml" \
     || die "vm/autoinstall.yaml is not a valid unattended BrainSyncOS autoinstall"
 
@@ -75,7 +78,7 @@ python3 "$BRAINSYNCOS_ROOT/scripts/render-vm-grub.py" "$work/vendor/grub.cfg" "$
     --kernel "$VM_INSTALL_KERNEL" --consoles "$VM_CONSOLES" \
     --autoinstall /cdrom/brainsyncos/autoinstall.yaml --base-iso "$BASE_ISO_NAME"
 grub-script-check "$VM_STAGE_DIR/boot/grub/grub.cfg" || die "rendered grub.cfg does not parse"
-[ "$VM_GRUB_TIMEOUT" = -1 ] || warn "VM_GRUB_TIMEOUT=$VM_GRUB_TIMEOUT: this ISO erases the VM's disk unattended"
+[ "$VM_GRUB_TIMEOUT" = -1 ] || log "VM_GRUB_TIMEOUT=$VM_GRUB_TIMEOUT: the install entry (erases the VM's disk) starts after ${VM_GRUB_TIMEOUT}s"
 
 # --- md5sum.txt and the ISO ------------------------------------------------------------
 merge_stage_md5sums "$work/vendor/md5sum.txt" "$VM_STAGE_DIR"

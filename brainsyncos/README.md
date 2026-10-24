@@ -192,7 +192,7 @@ tests/test_vm.sh                                  # 18 checks with a throwaway k
 - `build-vm-iso.sh` takes the same login options as `build-iso.sh`
   (`--authorized-keys`, `--password-hash`, `--name`, `--build-id`); by default your
   `config/authorized_keys` and `config/brainsync-password.hash`.
-- Settings: `config/vm.env` (`EDITION=vm-arm64`, `VM_GRUB_TIMEOUT`, `VM_INSTALL_KERNEL`
+- Settings: `config/vm.env` (`EDITION=vm-arm64`, `VM_GRUB_TIMEOUT`, `VM_DESKTOP`, `VM_INSTALL_KERNEL`
   ga|hwe, `VM_CONSOLES`, and the UTM defaults: `VM_NAME`, `VM_BACKEND`, memory,
   CPUs, disk). Version, account and hostname prefix come from `config/brainsyncos.env`,
   shared with the Jetson edition.
@@ -224,9 +224,15 @@ scripts/utm-vm.sh create --backend qemu --name BrainSyncOS-usb   # for USB passt
 - **The install needs network access.** UTM's default shared network provides it.
   `avahi-daemon`, `libnss-mdns` and `qemu-guest-agent` are not on the ISO, and the
   security updates are downloaded during the install.
-- The boot menu waits for you (`VM_GRUB_TIMEOUT=-1`). The first entry, **Install
-  BrainSyncOS 0.1.0 (VM, erases the virtual disk)**, installs unattended (about 10
-  to 20 minutes) and then **powers the VM off**. It does not reboot, because the ISO
+- **Desktop:** `VM_DESKTOP=minimal` (default) installs `ubuntu-desktop-minimal`, GNOME
+  as on the Jetson, so the VM boots to a graphical login (`full` = `ubuntu-desktop`,
+  `none` = server only). It is downloaded during the install (about 1.5 GB) and
+  added by `scripts/render-vm-autoinstall.py` as the first entry of the
+  autoinstall's `packages`, so the BrainSyncOS hook runs on the desktop system.
+  On a VM installed with `none`: `sudo apt install ubuntu-desktop-minimal && sudo reboot`.
+- The boot menu starts its first entry, **Install BrainSyncOS 0.1.0 (VM, erases
+  the virtual disk)**, after 10 seconds (`VM_GRUB_TIMEOUT`; `-1` waits for a key).
+  It installs unattended (about 5 to 20 minutes) and then **powers the VM off**. It does not reboot, because the ISO
   is still attached and would install again. `install` waits for that power-off,
   ejects the ISO, starts the VM from its disk and waits for SSH. It reads the serial
   console (`build/vm/NAME-install.log`): the last late-command prints
@@ -234,8 +240,14 @@ scripts/utm-vm.sh create --backend qemu --name BrainSyncOS-usb   # for USB passt
   A power-off without the success marker (stopped at the boot menu, window closed,
   crash) keeps the ISO attached so `install` can simply run again; a failure marker
   ends the wait at once (subiquity stays at its error screen and does not power off).
-  Without any console output it falls back to "ran at least 5 minutes". `install
-  --hide` is refused while the boot menu waits for a key (`VM_GRUB_TIMEOUT=-1`).
+  A captured but empty console means the installer never started (left in the
+  boot menu): the ISO stays. Only when the console cannot be captured at all does
+  it fall back to "ran at least 5 minutes". `install --hide` is refused while the
+  boot menu waits for a key (`VM_GRUB_TIMEOUT=-1`).
+- **Keyboard and mouse:** UTM creates an Apple-backend VM made by script with
+  keyboard and pointer *Disabled*, and its scripting cannot change them. `create`
+  therefore quits UTM (only when no VM is running), sets `Keyboard=Generic` and
+  `Pointer=Mouse` in the bundle's `config.plist`, and starts UTM again.
   *Advanced options*
   has the same install with the HWE kernel, plus Ubuntu's stock installer entries
   unchanged (no BrainSyncOS).

@@ -139,6 +139,21 @@ end run
 EOF
 }
 
+as_running() { cat <<'EOF'
+on run argv
+    -- No tell block: that would launch UTM.
+    return application "UTM" is running
+end run
+EOF
+}
+
+as_quit() { cat <<'EOF'
+on run argv
+    tell application "UTM" to quit
+end run
+EOF
+}
+
 as_list() { cat <<'EOF'
 on run argv
     set out to ""
@@ -479,7 +494,7 @@ c_check_scripts() {
     local fn src n=0
     [ -d "$UTM_APP" ] || die "UTM not found at $UTM_APP"
     src="$(mktemp)"
-    for fn in as_lookup as_list as_create_apple as_create_qemu as_drives as_eject as_serial as_delete; do
+    for fn in as_running as_quit as_lookup as_list as_create_apple as_create_qemu as_drives as_eject as_serial as_delete; do
         "$fn" > "$src"
         osacompile -o "$src.scpt" "$src" 2> "$src.err" || { cat "$src.err" >&2; rm -rf "$src" "$src.scpt" "$src.err"; die "AppleScript ${fn#as_} does not compile"; }
         rm -rf "$src.scpt" "$src.err"
@@ -493,8 +508,31 @@ c_list() {
     osa as_list | awk -F '\t' '$1 ~ /^BrainSyncOS/ {printf "%-24s %-8s %-6s %s\n", $1, $3, $4, $2}'
 }
 
+# apple_input: give the Apple-backend VM $name a keyboard and a mouse. A VM
+# created by script gets Keyboard and Pointer "Disabled" (UTM's apple
+# configuration record has no input properties), so its boot menu and console
+# ignore every key. UTM keeps each config in memory and rewrites config.plist
+# on its next change, so the plist is edited while UTM is not running.
+apple_input() {
+    local plist="$UTM_DATA/Documents/$name.utm/config.plist" i
+    [ -w "$plist" ] || die "no $plist: give $name a keyboard by hand (UTM > $name > Edit > Input)"
+    log "quitting UTM to give $name a keyboard and mouse (UTM cannot set them by script)"
+    osa as_quit > /dev/null
+    for i in $(seq 30); do
+        [ "$(osa as_running)" = true ] || break
+        sleep 1
+    done
+    [ "$(osa as_running)" != true ] || die "UTM did not quit; set the keyboard by hand (UTM > $name > Edit > Input)"
+    plutil -replace Virtualization.Keyboard -string Generic "$plist"
+    plutil -replace Virtualization.Pointer -string Mouse "$plist"
+    lookup   # starts UTM again, which loads the edited config
+    [ "$(plutil -extract Virtualization.Keyboard raw -o - "$plist")" = Generic ] \
+        || die "UTM did not keep the keyboard setting in $plist"
+    log "$name: keyboard Generic, pointer Mouse"
+}
+
 c_create() {
-    local disk_mib=$((disk_gb * 1024)) mac script id port
+    local disk_mib=$((disk_gb * 1024)) mac script id port busy
     # stage and staged are global, not local: the EXIT trap below must see them.
     mac="$(vm_mac "$name")"
     case "$iso" in /*) ;; *) iso="$(pwd -P)/$iso" ;; esac
@@ -519,6 +557,11 @@ c_create() {
         return 0
     fi
     [ -z "$(osa as_lookup "$name")" ] || die "UTM already has a VM named $name (delete it first, or pick --name)"
+    if [ "$backend" = apple ]; then
+        # apple_input quits UTM, which would stop running VMs (or ask first).
+        busy="$(osa as_list | awk -F '\t' '$3 != "stopped" {print $1}')"
+        [ -z "$busy" ] || die "these VMs are running: $busy. Stop them first: create quits UTM once to give $name a keyboard and mouse"
+    fi
     [ -d "$UTM_DATA" ] || die "no UTM container at $UTM_DATA (start UTM once)"
     rm -rf "$stage"
     mkdir -p "$stage"
@@ -528,6 +571,7 @@ c_create() {
     id="$(osa "$script" "$@")"
     rm -rf "$stage"
     log "created $name ($id), installer drive $INSTALLER_IMAGE imported into the VM bundle"
+    [ "$backend" != apple ] || apple_input
     echo "Next: scripts/utm-vm.sh install${name:+ --name $name}   (or start it and pick 'Install BrainSyncOS ...')"
     [ "$backend" = apple ] || echo "USB passthrough for the EEG board: UTM > $name > Edit > Input > USB Sharing (not scriptable in UTM 4.7)"
 }
@@ -620,7 +664,11 @@ c_install() {
     lookup
     [ "$VM_STATUS" = stopped ] || die "$name is $VM_STATUS; the install starts from a stopped VM"
     installer_attached || die "$name has no installer drive (create a new VM to reinstall)"
-    log "starting the installer in $name; in the boot menu pick 'Install BrainSyncOS ...' (erases the VM disk)"
+    if [ "$VM_GRUB_TIMEOUT" -ge 0 ]; then
+        log "starting the installer in $name; its boot menu starts 'Install BrainSyncOS ...' (erases the VM disk) after ${VM_GRUB_TIMEOUT}s"
+    else
+        log "starting the installer in $name; in the boot menu pick 'Install BrainSyncOS ...' (erases the VM disk)"
+    fi
     t0="$(date +%s)"
     until=$((t0 + timeout_min * 60))
     start_vm
@@ -650,6 +698,10 @@ c_install() {
             # (boot menu, window closed, crash). The ISO stays for a retry.
             [ -z "$SERIAL_PID" ] || [ ! -s "$logf" ] \
                 || die "$name powered off after ${elapsed}s without the installer's success marker ($INSTALL_OK) on the serial console: stopped at the boot menu, closed, or crashed? The ISO stays attached; run install again. See $rel"
+            # A captured but empty console: the kernel, which logs to it from
+            # its first second, never started (still in the boot menu).
+            [ -z "$SERIAL_PID" ] \
+                || die "$name powered off after ${elapsed}s and its serial console printed nothing: the installer never started (left in the boot menu?). The ISO stays attached; run install again. If you know the install finished: scripts/utm-vm.sh eject-iso --name $name"
             [ "$elapsed" -ge "$MIN_INSTALL_SECS" ] \
                 || die "$name powered off after only ${elapsed}s, too soon for an install (stopped at the boot menu, or closed?). The ISO stays attached; run install again"
             warn "no serial console output to confirm the install; $name ran ${elapsed}s and powered off, so assuming the install finished"

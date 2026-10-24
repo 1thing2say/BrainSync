@@ -51,7 +51,7 @@ BSOS_VM_REQUIRED_KEYS="BASE_ISO_NAME BASE_ISO_URL BASE_ISO_SHA256 BASE_ISO_SIZE 
 BASE_ISO_DISK_INFO_BUILD BASE_ISO_ARCH BASE_ESP_START_SECTOR BASE_ESP_SIZE_SECTORS
 BASE_ESP_SHA256 BASE_SYSTEM_AREA_SHA256 ISO_COMPLIANCE UBUNTU_RELEASE UBUNTU_CODENAME MIN_FREE_GB"
 
-BSOS_VM_PRODUCT_REQUIRED_KEYS="EDITION VM_GRUB_TIMEOUT VM_INSTALL_KERNEL VM_CONSOLES
+BSOS_VM_PRODUCT_REQUIRED_KEYS="EDITION VM_GRUB_TIMEOUT VM_DESKTOP VM_INSTALL_KERNEL VM_CONSOLES
 VM_NAME VM_BACKEND VM_MEMORY_MB VM_CPU_CORES VM_DISK_GB"
 
 # load_env_file FILE KEYS: source FILE after checking every line is plain
@@ -134,6 +134,10 @@ load_vm_product_config() {
     [ "$EDITION" = vm-arm64 ] || die "EDITION must be vm-arm64, got $EDITION"
     printf '%s\n' "$VM_GRUB_TIMEOUT" | grep -Eq '^(-1|[0-9]+)$' \
         || die "VM_GRUB_TIMEOUT must be -1 or a number of seconds, got $VM_GRUB_TIMEOUT"
+    case "$VM_DESKTOP" in
+        none|minimal|full) ;;
+        *) die "VM_DESKTOP must be none, minimal or full, got $VM_DESKTOP" ;;
+    esac
     case "$VM_INSTALL_KERNEL" in
         ga|hwe) ;;
         *) die "VM_INSTALL_KERNEL must be ga or hwe, got $VM_INSTALL_KERNEL" ;;
