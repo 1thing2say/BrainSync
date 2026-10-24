@@ -552,8 +552,11 @@ describe("page files", () => {
   test("app.js uses only the contract's endpoints and events", () => {
     const paths = [...app.matchAll(/["'`](\/(?:api|cards)\/[^"'`$]*)/g)].map((m) => m[1]);
     for (const p of paths) {
-      assert.ok(["/api/state", "/api/events", "/api/gaze", "/api/swipe"].includes(p), p);
+      assert.ok(["/api/state", "/api/events", "/api/gaze", "/api/swipe",
+                 "/api/speech?text="].includes(p), p);
     }
+    // the voice is Cartesia through /api/speech; the browser's own voice is never used
+    assert.ok(!app.includes("speechSynthesis"));
     for (const ev of ["state", "window", "swipe", "gaze"]) {
       assert.ok(app.includes(`addEventListener("${ev}"`), ev);
     }
