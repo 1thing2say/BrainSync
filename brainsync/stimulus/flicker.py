@@ -1,0 +1,86 @@
+"""Frame-indexed flicker luminance and frame-timing arithmetic (no display needed).
+
+Luminance is a function of the frame count since flicker onset, never of the wall
+clock: frame ``n`` of a target at ``f`` Hz on a ``refresh`` Hz display shows
+``0.5 * (1 + sin(2 pi f n / refresh + phase))`` for the sine waveform. The square
+waveform is on for the first half of every cycle of that same phase.
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+
+WAVEFORMS = ("sine", "square")
+DROP_FACTOR = 1.5
+
+
+def luminance(freq: float, phase: float, frame: int | np.ndarray, refresh: float,
+              waveform: str = "sine") -> float | np.ndarray:
+    """Luminance in [0, 1] of one target on frame index ``frame`` (scalar or array)."""
+    if refresh <= 0:
+        raise ValueError(f"refresh must be positive, got {refresh}")
+    if waveform not in WAVEFORMS:
+        raise ValueError(f"unknown waveform {waveform!r}; expected one of {WAVEFORMS}")
+    n = np.asarray(frame, dtype=float)
+    if waveform == "sine":
+        out = 0.5 * (1.0 + np.sin(2.0 * np.pi * freq * n / refresh + phase))
+    else:
+        cycles = (freq * n) / refresh + phase / (2.0 * np.pi)
+        out = (np.mod(cycles, 1.0) < 0.5).astype(float)
+    return float(out) if out.ndim == 0 else out
+
+
+def frame_luminances(freqs: np.ndarray, phases: np.ndarray, frame: int, refresh: float,
+                     waveform: str = "sine") -> np.ndarray:
+    """Luminance of every target on one frame, shape (n_targets,)."""
+    freqs = np.asarray(freqs, dtype=float)
+    phases = np.asarray(phases, dtype=float)
+    out = luminance(freqs, phases, frame, refresh, waveform) if freqs.size else np.zeros(0)
+    return np.atleast_1d(np.asarray(out, dtype=float))
+
+
+def frames_per_cycle(freq: float, refresh: float) -> float:
+    """Display frames in one flicker cycle (need not be an integer for sine flicker)."""
+    if freq <= 0:
+        raise ValueError(f"frequency must be positive, got {freq}")
+    return refresh / freq
+
+
+def square_duty_even(freq: float, refresh: float, tol: float = 1e-9) -> bool:
+    """True when square flicker at ``freq`` has an exact 50 % duty cycle (even frames/cycle)."""
+    fpc = frames_per_cycle(freq, refresh)
+    k = round(fpc)
+    return abs(fpc - k) < tol and k % 2 == 0
+
+
+def n_frames(seconds: float, refresh: float) -> int:
+    """Whole frames closest to ``seconds`` at ``refresh`` Hz."""
+    if seconds < 0:
+        raise ValueError(f"duration must be >= 0, got {seconds}")
+    return int(round(seconds * refresh))
+
+
+def to_psychopy_rgb(lum: float) -> tuple[float, float, float]:
+    """Grey level in PsychoPy's -1..1 rgb space for luminance in [0, 1]."""
+    v = 2.0 * float(lum) - 1.0
+    return (v, v, v)
+
+
+def dropped_frames(flip_times: np.ndarray | list[float], refresh: float,
+                   factor: float = DROP_FACTOR) -> int:
+    """Count flip intervals longer than ``factor`` refresh periods."""
+    t = np.asarray(flip_times, dtype=float)
+    if t.size < 2:
+        return 0
+    return int(np.sum(np.diff(t) > factor / refresh))
+
+
+def photosensitive(freq: float) -> bool:
+    """15-25 Hz flicker is the band most likely to trigger photosensitive seizures."""
+    return 15.0 <= freq <= 25.0
+
+
+def phase_pi(phase: float) -> float:
+    """Phase in multiples of pi, for printing."""
+    return phase / math.pi

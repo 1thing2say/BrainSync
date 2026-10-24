@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "fixture": "cd ../../.. && .venv/bin/python web/brainchess/test/make_fixture.py",
+    "test": "node --test core.test.mjs"
+  },
+  "dependencies": {
+    "chess.js": "0.10.3"
+  }
+}
