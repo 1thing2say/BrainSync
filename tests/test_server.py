@@ -12,6 +12,7 @@ from app.config import REPO_ROOT, load_config
 from app.log import read_events
 from app.server import create_app
 from app.schemas import PROTOCOL, BaselineDone, DecoderHello, Selection, SlotSpec, to_json
+from tests.test_menus import GOOD, FakeClaude, reply
 from tests.test_tts import CLIP, KEY, MP3, FakeCartesia
 
 BASE = load_config()
@@ -133,6 +134,37 @@ def test_cartesia_clip_is_prefetched_spoken_and_served(tmp_path):
     assert sorted(json.loads(q.content)["transcript"] for q in fake.requests) == sorted(
         s["utterance"] for s in shown["slots"] if s["role"] == "option")
     assert KEY not in next(tmp_path.glob("*.jsonl")).read_text()
+
+
+def test_typed_partner_question_gets_claudes_page(tmp_path):
+    fake = FakeClaude(reply(GOOD))
+    app = create_app(fast_config(), keyboard_mode=True, log_dir=tmp_path, llm_create=fake)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.send_text(json.dumps({"type": "resume"}))
+            recv_until(ui, "show_page")  # the fixed home page first
+            ui.send_text(json.dumps({"type": "partner_text", "text": "Do you want to go outside?",
+                                     "source": "typed"}))
+            page = status = None
+            for _ in range(200):  # the llm_ok status comes just before the new page
+                msg = json.loads(ui.receive_text())
+                if msg["type"] == "status" and msg["llm_ok"]:
+                    status = msg
+                if msg["type"] == "show_page" and msg["slots"][0]["utterance"] == GOOD["option_1"]["utterance"]:
+                    page = msg
+                if page and status:
+                    break
+    assert [s["utterance"] for s in page["slots"] if s["role"] == "option"] == [
+        GOOD[k]["utterance"] for k in ("option_1", "option_2", "option_3")]
+    assert status["llm_ok"]
+    assert "Do you want to go outside?" in fake.calls[0]["messages"][0]["content"]
+    events = read_events(next(tmp_path.glob("*.jsonl")))
+    assert any(e["event"] == "llm_ok" for e in events)
+
+
+def test_without_a_key_pages_are_fixed_and_llm_is_off(client):
+    assert not client.app.state.menus.enabled
+    assert client.app.state.orch.request_page is None
 
 
 def test_invalid_messages_are_logged_not_fatal(client):

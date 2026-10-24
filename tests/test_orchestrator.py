@@ -11,6 +11,7 @@ import random
 import pytest
 
 from app.config import load_config, load_intents
+from app.context import PageRequest, Turn
 from app.orchestrator import DIDNT_CATCH, NOT_CONFIRMED, Orchestrator, St
 from app.schemas import (
     PROTOCOL,
@@ -23,6 +24,7 @@ from app.schemas import (
     Highlight,
     Key,
     NoSelection,
+    Option,
     PartnerText,
     Pause,
     ProtocolError,
@@ -715,3 +717,404 @@ def test_list_mode_next_on_the_last_option_says_more_then_loads_a_new_page():
 def test_twenty_trials_unattended_in_list_mode():
     r = run_unattended(CFG_LIST)
     assert r.spoken()
+
+
+# ---------------------------------------------------------------------------
+# LLM pages (V3): request_page / on_page_ready
+# ---------------------------------------------------------------------------
+
+LLM_OPTIONS = [
+    Option(label="Let's go", utterance="Yes, let's go outside.", intent_id="yes"),
+    Option(label="Not now", utterance="Not right now, thanks.", intent_id="later"),
+    Option(label="After lunch", utterance="Maybe after lunch.", intent_id="maybe"),
+]
+QUESTION = "Do you want to go outside?"
+
+
+class LLMRig(Rig):
+    """A Rig whose pages come from a fake LLM: ``requests`` collects what it was asked."""
+
+    def __init__(self, cfg=CFG, **kwargs) -> None:
+        self.requests: list[PageRequest] = []
+        super().__init__(cfg, request_page=self.requests.append, **kwargs)
+
+    def partner(self, text: str = QUESTION) -> PageRequest:
+        self.o.on_ui_message(PartnerText(text=text, source="typed"))
+        return self.requests[-1]
+
+    def answer(self, options=LLM_OPTIONS, req: PageRequest | None = None) -> None:
+        self.o.on_page_ready((req or self.requests[-1]).request_id, options)
+
+    def page_utterances(self) -> list[str]:
+        return [s.utterance for s in self.last(self.ui, ShowPage).slots if s.role == "option"]
+
+
+def test_partner_line_asks_the_llm_and_waits_for_its_page():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()
+    assert req.reason == "partner" and req.partner_last == QUESTION
+    assert req.shown == () and req.history[-1] == Turn("partner", QUESTION)
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.o.state is St.PREPARING  # still screen, nothing flickers while waiting
+    r.answer()
+    assert r.o.state is St.MENU_CUE
+    assert r.page_utterances() == [o.utterance for o in LLM_OPTIONS]  # ranked: option 1 on s1
+    assert r.last(r.decoder, Display).labels["s1"] == LLM_OPTIONS[0].utterance
+    assert r.last(r.ui, UIStatus).llm_ok
+
+
+def test_llm_timeout_shows_the_fallback_and_ignores_the_late_page():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()
+    r.advance(CFG.llm.timeout_s)
+    assert r.o.state is St.MENU_CUE
+    assert r.page_utterances() == [o.utterance for o in YES_NO]  # the question fallback
+    assert not r.last(r.ui, UIStatus).llm_ok
+    r.answer(req=req)  # too late: the user is already reading the fallback
+    assert r.page_utterances() == [o.utterance for o in YES_NO]
+
+
+def test_llm_failure_shows_the_fallback_at_once():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.answer(None)
+    assert r.o.state is St.MENU_CUE and r.page_utterances() == [o.utterance for o in YES_NO]
+
+
+def test_a_newer_partner_line_replaces_the_pending_request():
+    r = LLMRig()
+    r.to_trial()
+    first = r.partner("Are you hungry?")
+    second = r.partner()
+    assert second.request_id != first.request_id and r.o.state is St.PREPARING
+    r.answer(req=first)  # answers the old question: ignored
+    assert r.o.state is St.PREPARING
+    r.answer(req=second)
+    assert r.page_utterances() == [o.utterance for o in LLM_OPTIONS]
+
+
+def test_more_options_asks_the_llm_for_different_replies():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.answer()
+    r.to_trial()
+    r.select(NEXT)
+    r.run_out()  # SELECTED -> REST
+    req = r.requests[-1]
+    assert req.reason == "more" and req.shown == tuple(o.utterance for o in LLM_OPTIONS)
+    r.run_out()  # REST -> PREPARING
+    assert r.o.state is St.PREPARING
+    more = [Option(label=f"New {i}", utterance=f"Something new {i}.", intent_id="social")
+            for i in range(3)]
+    r.answer(more)
+    assert r.page_utterances() == [o.utterance for o in more]
+
+
+def test_the_confirm_screen_never_waits_for_the_llm():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.answer()
+    r.pick_and_confirm_screen("s1")
+    assert r.last(r.ui, ShowPage).mode == "confirm" and r.o.state is St.MENU_CUE
+
+
+def test_spoken_reply_joins_the_conversation_and_logs_its_rank(tmp_path):
+    from app.log import EventLog, read_events
+
+    log = EventLog(tmp_path)
+    r = LLMRig()
+    r.o.log = log
+    r.to_trial()
+    r.partner()
+    r.answer()
+    r.pick_and_confirm_screen("s2")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    assert r.spoken() == [LLM_OPTIONS[1].utterance]
+    spoken = [e for e in read_events(log.path) if e["event"] == "spoken"]
+    assert spoken[-1]["rank"] == 2 and spoken[-1]["list"] == "llm"
+    r.o.on_ui_message(TTSDone(utterance_id=r.last(r.ui, Speak).utterance_id))
+    asked = len(r.requests)
+    r.run_out()  # REST -> MENU_CUE: after a spoken reply the home page, without asking Claude
+    assert r.o.state is St.MENU_CUE and len(r.requests) == asked
+    assert r.page_utterances() == [o.utterance for o in HOME]
+    next_req = r.partner("Great, where to?")
+    assert [t.text for t in next_req.history][-3:] == [QUESTION, LLM_OPTIONS[1].utterance,
+                                                      "Great, where to?"]
+    log.close()
+
+
+def test_without_an_llm_partner_text_shows_the_fallback_at_once():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text=QUESTION, source="typed"))
+    assert r.o.state is St.MENU_CUE and not r.last(r.ui, UIStatus).llm_ok
+
+
+def fresh(tag: str) -> list[Option]:
+    """Three LLM options no fallback list has."""
+    return [Option(label=f"{tag} {i}", utterance=f"{tag} reply {i}.", intent_id="social")
+            for i in range(3)]
+
+
+def page_options(show: ShowPage) -> list[str]:
+    """The option sentences on a page or list screen."""
+    if show.mode == "list":
+        return [o.utterance for o in show.options]
+    return [s.utterance for s in show.slots if s.role == "option"]
+
+
+def statuses(r: Rig) -> list[UIStatus]:
+    return [m for m in r.ui if isinstance(m, UIStatus)]
+
+
+@pytest.mark.parametrize("answer", ["llm", "timeout"])
+def test_partner_line_right_after_next_wins_over_more_options(answer):
+    r = LLMRig()
+    r.to_trial()
+    r.select(NEXT)
+    assert r.o.state is St.SELECTED
+    req = r.partner()
+    r.run_out()  # SELECTED -> REST: no "more" request on top of the partner's
+    assert r.requests == [req] and r.o.awaiting == req.request_id
+    r.run_out()  # REST -> PREPARING
+    assert r.o.state is St.PREPARING
+    if answer == "llm":
+        r.answer()
+        expected = [o.utterance for o in LLM_OPTIONS]
+    else:
+        r.run_out()
+        expected = [o.utterance for o in YES_NO]  # the question fallback, not the "more" page
+    assert r.o.state is St.MENU_CUE and r.page_utterances() == expected
+    r.to_trial()
+    r.select(NEXT)  # the first NEXT on the answer page: more answers, not home
+    r.run_out()
+    assert r.requests[-1].reason == "more"
+
+
+def test_partner_line_right_after_next_without_an_llm_shows_the_question_page():
+    r = Rig()
+    r.to_trial()
+    r.select(NEXT)
+    r.o.on_ui_message(PartnerText(text=QUESTION, source="typed"))
+    r.to_trial()
+    assert [s.utterance for s in r.last(r.ui, ShowPage).slots[:3]] == [o.utterance for o in YES_NO]
+    r.select(NEXT)
+    r.run_out()
+    r.to_trial()
+    assert [s.utterance for s in r.last(r.ui, ShowPage).slots[:3]] == [o.utterance for o in MORE]
+
+
+def test_llm_ok_follows_the_last_page():
+    r = LLMRig()
+    r.to_trial()
+    for text, answer, ok, change in [
+        (QUESTION, LLM_OPTIONS, True, 1),
+        ("Again?", None, False, 1),  # a failed page turns the badge off
+        ("And now?", None, False, 0),  # still failing: no new status
+        ("Once more?", LLM_OPTIONS, True, 1),
+        ("Hello?", "timeout", False, 1),
+    ]:
+        req = r.partner(text)
+        n = len(statuses(r))
+        if answer == "timeout":
+            r.advance(CFG.llm.timeout_s)
+        else:
+            r.answer(answer)
+        assert len(statuses(r)) == n + change and statuses(r)[-1].llm_ok is ok
+        r.to_trial()
+    n = len(statuses(r))
+    r.answer(LLM_OPTIONS, req)  # nobody waits for it any more: ignored, the badge stays off
+    assert len(statuses(r)) == n and not r.o.llm_ok
+
+
+def test_partner_line_during_the_confirm_step_waits_for_the_new_page():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.answer()
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    assert r.o.state is St.CONFIRMING
+    req = r.partner("Are you cold?")
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.o.state is St.PREPARING and r.o.picked is None and r.spoken() == []
+    new = fresh("Cold")
+    r.answer(new, req)
+    assert r.o.state is St.MENU_CUE and r.page_utterances() == [o.utterance for o in new]
+
+
+@pytest.mark.parametrize("late", [False, True], ids=["in time", "late"])
+def test_page_arriving_during_the_confirm_trial_is_held_until_the_next_cue(late):
+    r = LLMRig()
+    r.to_trial()
+    r.select("s1")
+    req = r.partner()  # while SELECTED on an option
+    r.run_out()  # the confirm screen does not wait for Claude
+    assert r.o.state is St.MENU_CUE and r.last(r.ui, ShowPage).mode == "confirm"
+    r.to_trial()
+    if late:
+        r.advance(CFG.llm.timeout_s)  # still in the confirm trial, past llm.timeout_s
+    assert r.o.state is St.CONFIRMING
+    n_ui, n_decoder = len(r.ui), len(r.decoder)
+    new = fresh("Out")
+    r.answer(new, req)
+    assert r.o.state is St.CONFIRMING  # rule 3: the screen does not change during the trial
+    assert not [m for m in r.ui[n_ui:] if isinstance(m, ShowPage)]
+    assert not [m for m in r.decoder[n_decoder:] if isinstance(m, Display)]
+    r.select(SAY_IT)
+    r.run_out()
+    assert r.spoken() == [HOME[0].utterance]
+    r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
+    r.to_trial()
+    # A page after llm.timeout_s is dropped (the fixed list stays), even when it came mid-trial.
+    expected = YES_NO if late else new
+    assert r.page_utterances() == [o.utterance for o in expected]
+    assert r.o.llm_ok is not late
+
+
+def test_more_options_twice_goes_home_without_asking_again():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.answer()
+    r.to_trial()
+    r.select(NEXT)
+    r.run_out()
+    r.run_out()  # REST -> PREPARING
+    r.answer(fresh("More"))
+    r.to_trial()
+    r.select(NEXT)  # the second NEXT in a row
+    r.run_out()
+    asked, n = len(r.requests), len(r.ui)
+    r.to_trial()
+    assert len(r.requests) == asked
+    assert St.PREPARING.value not in [m.name for m in r.ui[n:] if isinstance(m, State)]
+    assert r.page_utterances() == [o.utterance for o in HOME]
+
+
+@pytest.mark.parametrize("more_page", ["llm", "timeout"])
+def test_list_mode_uses_llm_pages_and_starts_each_at_the_top(more_page):
+    r = LLMRig(CFG_LIST)
+    r.to_trial()
+    r.partner()
+    assert r.o.state is St.PREPARING
+    r.answer()
+    shown = r.last(r.ui, ShowPage)
+    assert shown.mode == "list" and shown.highlight_index == 0 and shown.options == LLM_OPTIONS
+    for _ in LLM_OPTIONS:  # NEXT through the list; on the last option ("MORE") it asks Claude
+        r.to_trial()
+        r.select("s2")
+        r.run_out()
+    req = r.requests[-1]
+    assert req.reason == "more" and req.shown == tuple(o.utterance for o in LLM_OPTIONS)
+    r.run_out()  # REST -> PREPARING
+    assert r.o.state is St.PREPARING
+    if more_page == "llm":
+        new = fresh("New")
+        r.answer(new)
+        expected = [o.utterance for o in new]
+    else:
+        r.run_out()
+        expected = [o.utterance for o in MORE]
+    shown = r.last(r.ui, ShowPage)
+    assert r.o.state is St.MENU_CUE and shown.highlight_index == 0 and shown.text == expected[0]
+    assert [o.utterance for o in shown.options] == expected
+
+
+def run_unattended_llm(cfg, trials: int = 30, seed: int = 5):
+    """run_unattended with a flaky fake Claude and partner lines at random moments.
+
+    Each request gets one fate: a fresh page in time, a failure (None), a page after
+    llm.timeout_s, or no answer at all. Returns the rig, the request reason behind each LLM
+    sentence, the sentences that came too late, and the states partner lines arrived in.
+    """
+    rng = random.Random(seed)
+    r = LLMRig(cfg)
+    timeout = cfg.llm.timeout_s
+    due: list[tuple[float, int, list[Option] | None]] = []  # (when, request_id, options)
+    reason_of: dict[str, str] = {}
+    late: set[str] = set()
+    partner_states: set[St] = set()
+    planned = 0
+
+    def plan_answers() -> None:
+        nonlocal planned
+        for req in r.requests[planned:]:
+            fate = rng.choice(["in time", "in time", "in time", "failed", "late", "never"])
+            options = fresh(f"R{req.request_id}")
+            if fate == "in time":
+                reason_of.update({o.utterance: req.reason for o in options})
+                due.append((r.clock.t + rng.uniform(0.0, 0.9 * timeout), req.request_id, options))
+            elif fate == "failed":
+                due.append((r.clock.t + rng.uniform(0.0, 0.9 * timeout), req.request_id, None))
+            elif fate == "late":
+                late.update(o.utterance for o in options)
+                due.append((r.clock.t + timeout + rng.uniform(0.0, 3.0), req.request_id, options))
+        planned = len(r.requests)
+
+    def advance_to(t: float) -> None:
+        """Move the clock to ``t``, delivering answers and firing deadlines in time order."""
+        while True:
+            plan_answers()
+            pending = [d[0] for d in due] + ([r.o.deadline] if r.o.deadline is not None else [])
+            r.clock.t = max(r.clock.t, min([t] + pending))
+            for d in [d for d in due if d[0] <= r.clock.t]:
+                due.remove(d)
+                r.o.on_page_ready(d[1], d[2])
+            r.o.tick()
+            if r.clock.t >= t:
+                plan_answers()
+                return
+
+    r.o.on_ui_message(Resume())
+    for _ in range(20_000):
+        if r.o.trial_id >= trials and r.o.state is St.REST:
+            return r, reason_of, late, partner_states
+        if rng.random() < 0.1:
+            partner_states.add(r.o.state)
+            r.partner(rng.choice([QUESTION, "Are you hungry?", "I'm back.", "Nice day today."]))
+        if r.o.state in (St.STIMULATING, St.CONFIRMING):
+            advance_to(r.clock.t + rng.uniform(0.1, 3.0))
+            if r.o.state in (St.STIMULATING, St.CONFIRMING) and rng.random() < 0.85:
+                r.select(rng.choice(list(r.o.screen.roles)))
+        elif r.o.state is St.SPEAKING:
+            if rng.random() < 0.5:
+                advance_to(r.clock.t + rng.uniform(0.2, 1.0))  # still speaking
+            else:
+                r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
+        elif r.o.state is St.BASELINE:
+            r.finish_baseline()
+        else:  # in small steps, so partner lines also land in the middle of waits
+            advance_to(min(r.o.deadline, r.clock.t + rng.uniform(0.2, 1.5)))
+        assert r.o.deadline is not None, f"stuck in {r.o.state}"
+    raise AssertionError("did not finish")
+
+
+@pytest.mark.parametrize("cfg", [CFG, CFG_LIST], ids=["page", "list"])
+def test_unattended_with_a_flaky_llm_and_partner_lines_at_any_moment(cfg):
+    r, reason_of, late, partner_states = run_unattended_llm(cfg)
+    assert r.spoken()
+    # Every spoken sentence was on screen right before: the confirm text, or the highlighted option.
+    for i, msg in enumerate(r.ui):
+        if isinstance(msg, Speak):
+            before = [m for m in r.ui[:i] if isinstance(m, ShowPage)][-1]
+            assert before.mode == ("confirm" if cfg.menus.mode == "page" else "list")
+            assert before.text == msg.text
+    shown = {u for m in r.ui if isinstance(m, ShowPage) and m.mode != "confirm"
+             for u in page_options(m)}
+    assert not shown & late  # a page after llm.timeout_s is never shown
+    assert {reason_of[u] for u in shown if u in reason_of} == {"partner", "more"}
+    fallbacks = {o.utterance for name in ("yes_no", "more") for o in INTENTS.fallback_lists[name]}
+    assert shown & fallbacks  # Claude failed or was too late at least once
+    trial_states = {St.STIMULATING, St.CONFIRMING} if cfg.menus.mode == "page" else {St.STIMULATING}
+    assert trial_states | {St.SELECTED, St.SPEAKING, St.PREPARING} <= partner_states
+    starts = [m.trial_id for m in r.decoder if isinstance(m, StimStart)]
+    stops = [m.trial_id for m in r.decoder if isinstance(m, StimStop)]
+    assert starts == sorted(set(starts)) and stops == starts[: len(stops)]

@@ -121,7 +121,8 @@ function markPicked(slot) {
 
 function renderState(msg) {
   const labels = {
-    IDLE: "Waiting to start", BASELINE: "Baseline: keep still", MENU_CUE: "Read the option",
+    IDLE: "Waiting to start", BASELINE: "Baseline: keep still", PREPARING: "Finding replies…",
+    MENU_CUE: "Read the option",
     STIMULATING: shown && shown.mode === "list" ? "Look at SAY or NEXT" : "Look at a reply or More options",
     CONFIRMING: "Look at Say it or Back", SELECTED: "Selected", SPEAKING: "Speaking",
     REST: "Rest", NOT_CAUGHT: "Didn't catch that", PAUSED: "Paused",

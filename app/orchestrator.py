@@ -7,8 +7,10 @@ options listed with one highlighted, SAY speaks it and NEXT moves the highlight.
 
 The orchestrator owns all state. It is driven by events (decoder and browser messages, plus
 ``tick()``), reads time from an injectable clock and sends messages through two callbacks, so tests
-run it without timers, sockets or threads. Option lists come from the fallback lists in
-``config/intents.yaml`` until the LLM menus land (V3). The decoder side speaks protocol 2
+run it without timers, sockets or threads. Pages of options come from the LLM (V3: a
+``request_page`` hook, answered by ``on_page_ready``) after each partner line and for "More
+options"; the next MENU_CUE waits for it in PREPARING for up to ``llm.timeout_s``, then uses the
+fallback lists in ``config/intents.yaml``. The decoder side speaks protocol 2
 (INTERFACE-v2-draft.md).
 """
 
@@ -21,6 +23,7 @@ from enum import Enum
 from typing import Callable
 
 from app.config import AppConfig, IntentsConfig
+from app.context import Conversation, PageRequest
 from app.log import EventLog
 from app.schemas import (
     PROTOCOL,
@@ -63,6 +66,8 @@ NOT_CONFIRMED = "Not confirmed: nothing was said"
 HOME_LIST = "home"
 QUESTION_LIST = "yes_no"
 MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
+LLM_LIST = "llm"  # name of a page the LLM wrote
+FINDING_REPLIES = "Finding replies"
 NEXT_PAGE_LABEL = "More options"
 SAY_IT, BACK = "Say it", "Back"
 LIST_LABELS = {"say": "SAY", "next": "NEXT"}
@@ -72,6 +77,7 @@ LIST_MORE_LABEL = "MORE"  # list mode: NEXT on the last option asks for new opti
 class St(str, Enum):
     IDLE = "IDLE"
     BASELINE = "BASELINE"
+    PREPARING = "PREPARING"  # waiting for the LLM's page (up to llm.timeout_s), screen still
     MENU_CUE = "MENU_CUE"
     STIMULATING = "STIMULATING"  # a page or list trial
     CONFIRMING = "CONFIRMING"  # the confirm trial: Say it / Back
@@ -88,7 +94,7 @@ TRIAL_STATES = (St.STIMULATING, St.CONFIRMING)
 @dataclass
 class OptionList:
     list_id: str
-    name: str  # fallback list name, later "llm"
+    name: str  # fallback list name, or "llm"
     options: list[Option]
 
 
@@ -116,9 +122,12 @@ class Orchestrator:
         fake_decoder: bool = False,
         on_page: Callable[[list[str]], None] | None = None,
         audio_url: Callable[[str], str | None] | None = None,
+        request_page: Callable[[PageRequest], None] | None = None,
     ) -> None:
         """``on_page(utterances)`` runs whenever a new page of options is set (TTS prefetch);
-        ``audio_url(text)`` returns a ready clip for ``text`` or None (the browser speaks it)."""
+        ``audio_url(text)`` returns a ready clip for ``text`` or None (the browser speaks it);
+        ``request_page(req)`` asks the LLM for a page, answered later by ``on_page_ready``. Without
+        it, every page comes from the fallback lists."""
         self.cfg = cfg
         self.intents = intents
         self._send_ui_cb = send_ui
@@ -129,6 +138,13 @@ class Orchestrator:
         self.fake_decoder = fake_decoder
         self.on_page = on_page
         self.audio_url = audio_url
+        self.request_page = request_page
+        self.conversation = Conversation(cfg.context.history_turns)
+        self._request_ids = itertools.count(1)
+        self.awaiting: int | None = None  # the LLM page request the next MENU_CUE waits for
+        self.awaiting_until = 0.0  # when that wait ends (llm.timeout_s after the request)
+        # The last LLM page arrived in time and valid; False until one has (no badge before proof).
+        self.llm_ok = False
 
         self.mode = cfg.menus.mode
         self.slots = [s.slot for s in cfg.stim.slots]
@@ -184,6 +200,9 @@ class Orchestrator:
                 self._record("baseline_timeout", baseline_id=self.expected_baseline)
                 self._pause_session(f"Baseline failed: no baseline_done within "
                                     f"{self.cfg.baseline.timeout_s:g} s", "baseline_failed")
+        elif self.state is St.PREPARING:
+            self._give_up_on_llm()
+            self._enter_menu_cue()  # with the fallback list
         elif self.state is St.MENU_CUE:
             self._start_trial()
         elif self.state in TRIAL_STATES:
@@ -343,17 +362,59 @@ class Orchestrator:
 
     def _on_partner_text(self, text: str) -> None:
         self._send_ui(Transcript(who="partner", text=text))
+        self.conversation.partner_said(text)
         name = QUESTION_LIST if text.rstrip().endswith("?") else HOME_LIST
-        self.pending_list = self._fallback(name)
+        self.pending_list = self._fallback(name)  # shown if the LLM's page does not come in time
         self.more_in_a_row = 0
+        self._ask_llm("partner")
         if self.state in TRIAL_STATES:
             self._stop_trial("context_changed")
             self.picked = None
             self._enter_menu_cue()
-        elif self.state is St.MENU_CUE:
+        elif self.state in (St.MENU_CUE, St.PREPARING):
             self.picked = None
             self._enter_menu_cue()  # not in a trial yet, so the screen may still change
         # In every other state the new page is shown at the next MENU_CUE.
+
+    # -------------------------------------------------------------- events: LLM pages
+
+    def on_page_ready(self, request_id: int, options: list[Option] | None) -> None:
+        """The LLM's answer to ``request_page``: ranked options, or None (it failed)."""
+        if request_id != self.awaiting:
+            self._record("llm_page_ignored", request_id=request_id,
+                         why="late" if options is not None else "late failure")
+            return
+        if self.clock() >= self.awaiting_until:
+            # Still awaited only because the confirm trial does not wait: too late all the same.
+            self._give_up_on_llm()  # keep the fallback list already pending
+            options = None
+        self.awaiting = None
+        if options is None:
+            self._set_llm_ok(False)  # keep the fallback list already pending
+        else:
+            self.pending_list = OptionList(list_id=f"m{next(self._list_ids)}", name=LLM_LIST,
+                                           options=list(options))
+            self._set_llm_ok(True)
+        if self.state is St.PREPARING:
+            self._enter_menu_cue()
+
+    def _ask_llm(self, reason: str) -> None:
+        """Ask for an LLM page; the next MENU_CUE waits for it (up to llm.timeout_s)."""
+        if self.request_page is None:
+            return
+        self.awaiting = next(self._request_ids)
+        self.awaiting_until = self.clock() + self.cfg.llm.timeout_s
+        self.request_page(self.conversation.page_request(self.awaiting, reason, self.clock()))
+
+    def _give_up_on_llm(self) -> None:
+        self._record("llm_page_timeout", request_id=self.awaiting)
+        self.awaiting = None
+        self._set_llm_ok(False)
+
+    def _set_llm_ok(self, ok: bool) -> None:
+        if ok != self.llm_ok:
+            self.llm_ok = ok
+            self._send_status()
 
     # ------------------------------------------------------------------ transitions
 
@@ -378,7 +439,17 @@ class Orchestrator:
         self._send_status()  # resume_ready changes
 
     def _enter_menu_cue(self) -> None:
-        """Show the next screen (page, confirm or list), still, for cue_s before its trial."""
+        """Show the next screen (page, confirm or list), still, for cue_s before its trial.
+
+        If an LLM page is on its way, wait for it first in PREPARING (until llm.timeout_s after
+        the request); the confirm screen never waits.
+        """
+        if self.awaiting is not None and self.picked is None:
+            remaining = self.awaiting_until - self.clock()
+            if remaining > 0:
+                self._enter(St.PREPARING, remaining, FINDING_REPLIES)
+                return
+            self._give_up_on_llm()
         if self.pending_list is not None and self.picked is None:
             self._set_list(self.pending_list)
             self.pending_list = None
@@ -454,6 +525,8 @@ class Orchestrator:
 
     def _more_options(self) -> None:
         """NEXT for a new page: the "more" page first, then others; twice in a row goes home."""
+        if self.pending_list is not None:
+            return  # a partner line came in after the pick: its page (or fallback) comes next
         self.more_in_a_row += 1
         if self.more_in_a_row >= 2:
             self.more_in_a_row = 0
@@ -465,10 +538,19 @@ class Orchestrator:
         else:
             others = [n for n in names if n != self.options.name]
             name = others[0] if others else HOME_LIST
-        self._set_list(self._fallback(name))
+        if self.request_page is None:
+            self._set_list(self._fallback(name))
+            return
+        self.pending_list = self._fallback(name)  # if the LLM's new page does not come in time
+        self._ask_llm("more")
 
     def _speak(self, text: str) -> None:
         self.speaking_id = f"u{next(self._utterance_ids)}"
+        utterances = [o.utterance for o in self.options.options]
+        # Rank 1 = the option the LLM (or the fallback list) put first; for the log summary.
+        self._record("spoken", utterance_id=self.speaking_id, text=text, list=self.options.name,
+                     rank=utterances.index(text) + 1 if text in utterances else None)
+        self.conversation.user_said(text)
         self._enter(St.SPEAKING, self.cfg.speech.max_speak_s, text)
         url = self.audio_url(text) if self.audio_url is not None else None
         self._send_ui(Speak(text=text, utterance_id=self.speaking_id, audio_url=url))
@@ -563,6 +645,7 @@ class Orchestrator:
     def _set_list(self, options: OptionList) -> None:
         self.options, self.index = options, 0
         self.page_no += 1
+        self.conversation.showed([o.utterance for o in options.options])
         if self.on_page is not None:
             self.on_page([o.utterance for o in options.options])
 
@@ -575,7 +658,7 @@ class Orchestrator:
             decoder_message=(f"Rejected: {self.decoder_error}" if self.decoder_error
                              else self.bridge_message),
             resume_ready=self.state in (St.IDLE, St.PAUSED) and not self.resume_problem(),
-            llm_ok=False,  # no LLM until V3
+            llm_ok=self.request_page is not None and self.llm_ok,
             fake_decoder=self.fake_decoder,
             keyboard_mode=self.keyboard_mode,
         )
