@@ -1,0 +1,63 @@
+Reviewed version of cerelog-serial-timeout.patch, for Shared_brainflow-cerelog 932b3944.
+
+Hunk 2 (connect_v1, after the re-open) is the reconstructed change. It was checked
+against the vendored macOS libBoardController.dylib by disassembling
+Cerelog_X8::connect_v1: after the re-open the original calls Serial vtable slot 0x20
+(set_serial_port_settings) with w1=1000, w2=0, before slot 0x28 (set_custom_baudrate);
+on failure it logs "Failed to configure re-opened serial port." and returns 4
+(BOARD_WRITE_ERROR). The only difference is that the original does not call
+close_serial_port() on that error path; prepare_session's close_serial() closes and
+deletes the port either way. Only the comment above the call is reworded (Linux
+semantics: a canonical read with VMIN=1, VTIME=0 blocks until a line terminator).
+
+Hunk 1 is NOT in the original. It applies the same raw-mode call on the first open,
+before the 9600 handshake. On a tty nothing has configured yet (on Linux: the first
+open after the device appears, since Linux keeps termios across close/re-open), the
+handshake is written with OPOST|ONLCR, so a 0x0A in the timestamp or checksum bytes is
+sent as 0x0D 0x0A, and ECHO sends the board's own bytes back to it. Drop hunk 1 to stay
+byte-identical in behaviour with the vendored macOS dylibs.
+
+Apply from the repository root:  git apply cerelog-serial-timeout.reviewed.patch
+                              or  patch -p1 < cerelog-serial-timeout.reviewed.patch
+
+diff --git a/src/board_controller/cerelog/cerelog.cpp b/src/board_controller/cerelog/cerelog.cpp
+--- a/src/board_controller/cerelog/cerelog.cpp
++++ b/src/board_controller/cerelog/cerelog.cpp
+@@ -147,6 +147,17 @@
+     safe_logger (spdlog::level::info, "Port opened. Waiting 5 seconds for board to boot...");
+     std::this_thread::sleep_for (std::chrono::milliseconds (5000));
+ 
++    // Raw 8N1 for the handshake as well. A tty that nothing has configured yet is cooked
++    // (OPOST|ONLCR, ECHO, ICANON): a 0x0A in the timestamp or checksum of the handshake packet
++    // would go out as 0x0D 0x0A, and bytes from the board would be echoed back to it. On Linux
++    // the tty keeps its termios across close/re-open, so this also carries to the re-open.
++    if (serial->set_serial_port_settings (1000, false) < 0)
++    {
++        safe_logger (spdlog::level::err, "Failed to configure serial port for the handshake.");
++        serial->close_serial_port ();
++        return (int)BrainFlowExitCodes::BOARD_WRITE_ERROR;
++    }
++
+     // Configure for 9600 baud handshake
+     if (serial->set_custom_baudrate (info.default_baudrate) < 0)
+     {
+@@ -179,6 +190,19 @@
+         safe_logger (
+             spdlog::level::err, "Failed to re-open serial port for high-speed connection.");
+         return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
++    }
++
++    // Raw 8N1 with a 1 s read timeout (VMIN=0, VTIME=10) on the re-opened port. In canonical
++    // mode with VMIN=1, VTIME=0 the verification read below only returns at a line terminator,
++    // so a silent port blocks it indefinitely instead of failing over to the V2 strategy, and
++    // read_thread would get line-edited binary data.
++    // Must run before set_custom_baudrate: it sets 115200, the custom baud call then overrides
++    // only the speed and keeps the raw flags and timeout.
++    if (serial->set_serial_port_settings (1000, false) < 0)
++    {
++        safe_logger (spdlog::level::err, "Failed to configure re-opened serial port.");
++        serial->close_serial_port ();
++        return (int)BrainFlowExitCodes::BOARD_WRITE_ERROR;
+     }
+ 
+     safe_logger (spdlog::level::info, "Setting host to target baud rate: {}", info.baudrate);

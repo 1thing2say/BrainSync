@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>BrainSync</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <canvas id="stage" aria-label="Flickering targets"></canvas>
+  <div id="safe" aria-hidden="true"></div>
+  <pre id="hud" aria-label="Status"></pre>
+  <div id="dock">
+    <div id="banner" role="status" aria-live="polite"></div>
+    <div class="buttons">
+      <button id="pause" type="button" hidden>Pause</button>
+      <button id="resume" type="button" hidden>Resume</button>
+      <button id="fullscreen" type="button" class="secondary" hidden>Full screen</button>
+    </div>
+  </div>
+
+  <div id="warning" role="dialog" aria-modal="true" aria-labelledby="warning-title">
+    <div class="card">
+      <h1 id="warning-title">Photosensitivity warning</h1>
+      <p>This page shows squares that flicker at 12 to 20 times a second. Flicker between 15 and
+        25 Hz is the range most likely to trigger a seizure in people with photosensitive
+        epilepsy.</p>
+      <p>Do not continue if you or anyone who can see this screen has epilepsy or has had a
+        seizure. Stop at once if you feel unwell, dizzy or see strange visual effects.</p>
+      <p>Press <kbd>Esc</kbd> or the <strong>Pause</strong> button at any time to stop the
+        flicker. It also stops when you lock the screen or switch away from this page, and it
+        does not start again until you press <strong>Resume</strong>.</p>
+      <button id="accept" type="button">I understand, start</button>
+    </div>
+  </div>
+
+  <script src="/static/flicker.js"></script>
+  <script src="/static/brainsync-client.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
