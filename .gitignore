@@ -1,0 +1,8 @@
+# BrainSyncOS build cache/output and any ISO images (the base ISO is user-supplied)
+brainsyncos/build/
+brainsyncos/**/*.iso
+
+# Tool-local session state (Claude Code / dmux): absolute paths, pane ids,
+# transcript snippets. Never commit.
+.claude/
+.dmux/
