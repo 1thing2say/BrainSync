@@ -1,0 +1,54 @@
+# systemd unit for the BrainSync server on a Jetson Orin Nano (see deploy/jetson/README.md).
+#
+#   sudo cp deploy/jetson/brainsync-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now brainsync-server
+#   journalctl -u brainsync-server -f
+#
+# The server listens on 127.0.0.1:8765 only; `tailscale serve` puts HTTPS/wss in front of it.
+# The token is made on the first start in /var/lib/brainsync/token (mode 0600). The API key
+# for point mode goes in /etc/brainsync/env as ANTHROPIC_API_KEY=... (mode 0600, root-owned);
+# without it point mode is off and slots mode still works.
+
+[Unit]
+Description=BrainSync server (EEG headset and decoder, PROTOCOL-v3)
+Documentation=file:/opt/brainsync/PROTOCOL-v3.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brainsync
+Group=brainsync
+# dialout owns /dev/ttyUSB* and /dev/ttyACM*, the Cerelog's USB serial port
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/brainsync
+EnvironmentFile=-/etc/brainsync/env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=brainsync
+StateDirectoryMode=0700
+LogsDirectory=brainsync
+LogsDirectoryMode=0700
+# --board cerelog needs the Cerelog BrainFlow wheel for Linux aarch64 in the venv:
+# deploy/jetson/brainflow/INSTALL.md. Without it, use --board fake.
+ExecStart=/opt/brainsync/.venv/bin/python -m brainsync.server \
+    --board cerelog --host 127.0.0.1 --port 8765 \
+    --token-file /var/lib/brainsync/token \
+    --log /var/log/brainsync/session.jsonl
+# SIGTERM sends "phase stop" to every client, closes the board and exits 0.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+# Exit 2 is a bad argument: restarting cannot fix it.
+RestartPreventExitStatus=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

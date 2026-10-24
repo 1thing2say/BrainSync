@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# A stand-in for qrencode in tests/test_jetson_tunnel.py: reads the text on stdin (as
+# brainsync-tunnel.sh passes it, never as an argument) and prints a marker with its length.
+set -euo pipefail
+[[ "$*" == "-t utf8 -m 2" ]] || { echo "fake-qrencode: unexpected arguments: $*" >&2; exit 2; }
+text="$(cat)"
+printf 'FAKE-QR-START %d bytes\n##  ##\n  ##  \nFAKE-QR-END\n' "${#text}"

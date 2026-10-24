@@ -1,0 +1,41 @@
+RECONSTRUCTION - check against the original before trusting it.
+
+The macOS dylibs vendored in third_party/brainflow-cerelog were built from
+Shared_brainflow-cerelog 932b3944 plus an UNCOMMITTED change to
+src/board_controller/cerelog/cerelog.cpp that was never pushed. VENDORED.md
+describes it only as: "sets the re-opened serial port to raw mode with a 1 s
+read timeout in connect_v1". This patch re-creates that behaviour from the
+description, using the fork's own OSSerial::set_serial_port_settings
+(src/utils/os_serial.cpp, POSIX branch): raw 8N1 (c_lflag=0, c_oflag=0,
+CS8|CREAD|CLOCAL), VMIN=0, VTIME=ms_timeout/100 = 10 (1 s), then tcflush.
+It runs before set_custom_baudrate, which on Linux uses TCGETS2/TCSETS2
+(BOTHER) and on macOS tcgetattr/tcsetattr, so both keep the raw flags and
+the timeout and change only the speed. connect_v2 already makes the same
+call; this mirrors it. If the original diff turns up, diff it against this.
+
+Apply from the repository root:  git apply cerelog-serial-timeout.patch
+                              or  patch -p1 < cerelog-serial-timeout.patch
+
+diff --git a/src/board_controller/cerelog/cerelog.cpp b/src/board_controller/cerelog/cerelog.cpp
+index 8a038d5..f0e78b4 100644
+--- a/src/board_controller/cerelog/cerelog.cpp
++++ b/src/board_controller/cerelog/cerelog.cpp
+@@ -181,6 +181,18 @@ int Cerelog_X8::connect_v1 (const std::string &port_path)
+         return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
+     }
+ 
++    // Raw 8N1 with a 1 s read timeout (VMIN=0, VTIME=10) on the re-opened port. Left at the
++    // OS defaults (canonical mode, blocking reads) the verification read below can block for
++    // minutes on a board that is not a V1, instead of failing over to the V2 strategy.
++    // Must run before set_custom_baudrate: it sets 115200, the custom baud call then overrides
++    // only the speed and keeps the raw flags and timeout.
++    if (serial->set_serial_port_settings (1000, false) < 0)
++    {
++        safe_logger (spdlog::level::err, "Failed to configure re-opened serial port.");
++        serial->close_serial_port ();
++        return (int)BrainFlowExitCodes::BOARD_WRITE_ERROR;
++    }
++
+     safe_logger (spdlog::level::info, "Setting host to target baud rate: {}", info.baudrate);
+     if (serial->set_custom_baudrate (info.baudrate) < 0)
+     {

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# A stand-in for `cloudflared tunnel --url ...` in tests/test_jetson_tunnel.py: it prints
+# cloudflared-like log lines to stderr and never contacts Cloudflare.
+#
+# Environment:
+#   FAKE_CF_MODE      url (default): prints the quick-tunnel banner, then runs until killed
+#                     nourl: prints a request error and runs without ever giving an address
+#                     exit: prints the banner, then exits 1 after FAKE_CF_EXIT_AFTER s (1)
+#   FAKE_CF_HOST      the host it announces (default fake-tunnel-test.trycloudflare.com)
+#   FAKE_CF_DELAY     seconds before the banner (default 0.3)
+#   FAKE_CF_PIDFILE   when set, its pid goes here
+#   FAKE_CF_ARGSFILE  when set, its arguments go here, one per line
+set -euo pipefail
+MODE="${FAKE_CF_MODE:-url}"
+HOST="${FAKE_CF_HOST:-fake-tunnel-test.trycloudflare.com}"
+[[ -z "${FAKE_CF_PIDFILE:-}" ]] || echo $$ >"$FAKE_CF_PIDFILE"
+[[ -z "${FAKE_CF_ARGSFILE:-}" ]] || printf '%s\n' "$@" >"$FAKE_CF_ARGSFILE"
+trap 'echo "2026-10-24T00:00:09Z INF Initiating graceful shutdown due to signal terminated ..." >&2; exit 0' TERM INT
+
+line() { printf '2026-10-24T00:00:0%sZ INF %s\n' "$1" "$2" >&2; }
+line 0 "Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare account, is a quick way to experiment and try it out."
+line 0 "Requesting new quick Tunnel on trycloudflare.com..."
+sleep "${FAKE_CF_DELAY:-0.3}"
+if [[ "$MODE" == nourl ]]; then
+    printf '%s\n' '2026-10-24T00:00:01Z ERR failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com: no such host' >&2
+else
+    line 1 "+--------------------------------------------------------------------------------------------+"
+    line 1 "|  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |"
+    line 1 "|  https://$HOST                                             |"
+    line 1 "+--------------------------------------------------------------------------------------------+"
+    line 2 "Registered tunnel connection connIndex=0 connection=00000000-0000-0000-0000-000000000000 event=0 ip=198.41.200.13 location=sjc01 protocol=quic"
+fi
+if [[ "$MODE" == exit ]]; then
+    sleep "${FAKE_CF_EXIT_AFTER:-1}"
+    printf '%s\n' "2026-10-24T00:00:05Z ERR Serve tunnel error error=\"connection lost\"" >&2
+    exit 1
+fi
+while :; do sleep 1 & wait $!; done
