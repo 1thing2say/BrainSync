@@ -46,7 +46,7 @@ from app.config import (
     save_user_profile,
 )
 from app.log import DEFAULT_LOG_DIR, EventLog
-from app.menus import Create, MenuMaker
+from app.menus import Create, MenuMaker, first_name
 from app.orchestrator import Orchestrator
 from app.schemas import Message, parse_decoder_to_server, parse_ui_to_server, to_json
 from app.tts import AUDIO_ROUTE, CartesiaTTS
@@ -180,11 +180,13 @@ def create_app(
 
     @app.get("/api/config")
     def page_config() -> dict:
-        """The few settings the partner page needs."""
+        """The few settings the partner page needs (``user_name``: the profile's first name, for
+        the conversation panel)."""
         return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
                 "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
-                "stt_echo_s": cfg.speech.stt_echo_s}
+                "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
+                "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile)}
 
     @app.get("/api/health")
     async def health() -> dict:
@@ -375,7 +377,9 @@ def main(argv: list[str] | None = None) -> None:
         # It retries every second until the server is up, so starting it first is fine.
         # Its hello uses this server's config, so it passes the handshake check.
         slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+        # --parent-pid: it exits once this server is gone, however the server was stopped.
         fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
+                                 "--parent-pid", str(os.getpid()),
                                  "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
                                  "--slots", slots, "--waveform", cfg.stim.waveform,
                                  "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],

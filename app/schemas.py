@@ -351,6 +351,9 @@ class UIStatus(Message):
     not (a rejected hello), or the bridge's own status message. ``resume_ready``: Resume would
     start a session now. ``fake_decoder``: selections are not EEG (``--fake-decoder``, or the acked
     hello's name starts with "fake"). ``decoder_name``: the acked hello's name, "" before an ack.
+    ``llm_ok``: Claude's last page came in time and valid. ``llm``: the same, telling "not asked
+    yet" apart from "failed": ``off`` (no key, or ``menus.dynamic`` false), ``waiting`` (no page
+    yet), ``ok``, ``failed`` (the last page fell back to the fixed list).
     """
 
     type: Literal["status"] = "status"
@@ -363,6 +366,7 @@ class UIStatus(Message):
     board_ok: bool = False
     decoder_message: str = ""
     decoder_name: str = ""
+    llm: Literal["off", "waiting", "ok", "failed"] = "off"
     mic_muted: bool = False  # the partner's Mute
     mic: str = ""  # the page's last mic_report state ("listening", "offline", "denied", ...)
     resume_ready: bool = False

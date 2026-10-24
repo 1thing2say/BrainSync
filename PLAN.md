@@ -121,6 +121,17 @@ pull requests.
   "fake" counts as fake even when started by hand: FAKE DECODER badge, preflight WARN,
   `decoder_acked` in the log. `/api/health` uses public properties only.
 
+- **Partner page refresh (2026-10-24, branch `feat/ui-refresh`):** the mirror shows each option's
+  sentence as the big text (its label is a tag), a coloured status banner, a selection timer that
+  fills to `stim.max_trial_s`, a stronger picked box and the spoken sentence while it plays. The
+  panel puts Stop on top, then a mic card with the partner's words as they talk, the
+  conversation (the user's lines under their first name), and an operator footer: one health line
+  ("Ready" or what is wrong, details on a click), Correct / Wrong, the profile link. FAKE DECODER /
+  KEYBOARD stay on the mirror. Phone layout (≤ 600 px): partner's part first, Stop fixed at the
+  bottom. Logic in `ui/view_core.js` (node-tested); `python tools/ui_shots.py` screenshots every
+  state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root`, palette
+  still to choose.
+
 ## System design
 
 ```
@@ -289,11 +300,13 @@ BrainSync/
     app.js              # websocket client: conversation, status, STOP, mirror of the user's screen
     speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
     voice_core.js       # picks the fallback voice: local Premium / Enhanced English first
+    view_core.js        # banner, health line, mic card, selection timer (pure, node-tested)
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
     prerender_tts.py    # Cartesia clips for every fixed-list sentence, into speech.cache_dir
+    ui_shots.py         # screenshots of the partner page's states (headless Chrome)
     log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
   docs/
     DEMO.md             # operator's demo runbook (V6 items 2-3)
@@ -641,6 +654,7 @@ python tools/contract_check.py              # stand-in server for the bridge (in
 python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
 python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
 python tools/prerender_tts.py               # fixed-list clips to disk while the network is good
+python tools/ui_shots.py                    # partner page screenshots into cache/ui_shots/
 python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
 
 # demo runbook: docs/DEMO.md
