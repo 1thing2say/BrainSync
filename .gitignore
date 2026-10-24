@@ -1,1 +1,12 @@
-/ssvep/
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+build/
+dist/
+.dmux/
+.claude/
+data/*
+!data/README.md
