@@ -140,9 +140,12 @@ def test_cartesia_clip_is_prefetched_spoken_and_served(tmp_path):
         assert speak["audio_url"] and speak["audio_url"].startswith("/audio/")
         r = client.get(speak["audio_url"])
         assert r.status_code == 200 and r.headers["content-type"] == MP3 and r.content == CLIP
-    # The first page's 3 options were requested once each; NEXT needs no audio.
-    assert sorted(json.loads(q.content)["transcript"] for q in fake.requests) == sorted(
-        s["utterance"] for s in shown["slots"] if s["role"] == "option")
+    # The first page's 3 options were requested first, once each (NEXT needs no audio); the
+    # other fixed sentences are pre-generated behind them.
+    asked = [json.loads(q.content)["transcript"] for q in fake.requests]
+    options = [s["utterance"] for s in shown["slots"] if s["role"] == "option"]
+    assert sorted(asked[:3]) == sorted(options) and len(asked) == len(set(asked))
+    assert set(asked) <= set(app.state.intents.utterances)
     assert KEY not in next(tmp_path.glob("*.jsonl")).read_text()
 
 
@@ -348,3 +351,52 @@ def test_profile_page_is_served(client):
     assert r.status_code == 200 and "How they talk" in r.text
     assert client.get("/profile.js").status_code == 200
     assert 'href="/profile.html"' in client.get("/").text
+
+
+# -- /api/health (tools/preflight.py) ------------------------------------------------------
+
+
+def test_health_without_keys_bridge_or_page(client):
+    h = client.get("/api/health").json()
+    assert h["state"] == "IDLE"
+    assert h["decoder"] == {"connected": False, "ok": False, "display_ok": False, "board_ok": False,
+                            "message": "", "keyboard_mode": False, "fake_decoder": False}
+    assert h["partner_page"] == {"connected": False, "mic": "", "mic_muted": False,
+                                 "stt_mode": BASE.speech.stt_mode}
+    assert h["llm"]["enabled"] is False and "ANTHROPIC_API_KEY" in h["llm"]["why_disabled"]
+    assert h["llm"]["model"] == BASE.llm.model and h["llm"]["warm_ok"] is None
+    assert h["llm"]["dynamic"] is BASE.menus.dynamic
+    assert h["tts"]["enabled"] is False and "CARTESIA_API_KEY" in h["tts"]["why_disabled"]
+    assert h["tts"]["model"] == BASE.speech.model
+
+
+def test_health_follows_the_bridge_page_and_mic(client):
+    with client.websocket_connect("/ws/ui") as ui, client.websocket_connect("/ws/decoder") as dec:
+        recv_until(ui, "status")
+        dec.send_text(to_json(HELLO))
+        recv_until(dec, "hello_ack")
+        ui.send_text(json.dumps({"type": "mic_report", "state": "listening"}))
+        while not recv_until(ui, "status")["mic"]:
+            pass
+        h = client.get("/api/health").json()
+        assert h["decoder"]["connected"] and h["decoder"]["ok"] and h["decoder"]["display_ok"]
+        assert h["partner_page"]["connected"] and h["partner_page"]["mic"] == "listening"
+        assert h["resume_ready"]
+    # The page is gone: its last mic report no longer counts.
+    h = client.get("/api/health").json()
+    assert h["partner_page"] == {**h["partner_page"], "connected": False, "mic": ""}
+
+
+def test_health_with_keys_carries_no_secrets_or_conversation(tmp_path):
+    app = create_app(fast_config(), keyboard_mode=True, log_dir=tmp_path, cartesia_api_key=KEY,
+                     tts_transport=FakeCartesia().transport, llm_create=FakeClaude(reply(GOOD)))
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.send_text(json.dumps({"type": "resume"}))
+            ui.send_text(json.dumps({"type": "partner_text", "text": "Do you want to go outside?",
+                                     "source": "typed"}))
+            recv_until(ui, "show_page")
+            r = client.get("/api/health")
+    h = r.json()
+    assert h["llm"]["enabled"] and h["tts"]["enabled"] and h["decoder"]["keyboard_mode"]
+    assert KEY not in r.text and "outside" not in r.text

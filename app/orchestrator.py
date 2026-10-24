@@ -68,7 +68,6 @@ Send = Callable[[Message], None]
 DIDNT_CATCH = "Didn't catch that"
 NOT_CONFIRMED = "Not confirmed: nothing was said"
 HOME_LIST = "home"
-QUESTION_LIST = "yes_no"
 MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
 LLM_LIST = "llm"  # name of a page the LLM wrote
 # How a spoken line starts when it is a question (speech-to-text adds no "?").
@@ -362,6 +361,9 @@ class Orchestrator:
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
+            # STOP means stopped until Resume, even if a lost decoder paused us first: without
+            # this the flicker came back by itself when the bridge reconnected (rule 10).
+            self.paused_by_decoder = False
             self._send_decoder(Pause(reason="stop_button"))
         elif isinstance(msg, PartnerText):
             self._on_partner_text(msg.text, msg.source)
@@ -405,7 +407,7 @@ class Orchestrator:
         self._send_ui(Transcript(who="partner", text=text))
         self.conversation.partner_said(text)
         question = is_question(text)
-        name = QUESTION_LIST if question else HOME_LIST
+        name = self.intents.fallback_for(text, question)
         self.pending_list = self._fallback(name)  # shown if the LLM's page does not come in time
         self.more_in_a_row = 0
         self._ask_llm("partner")

@@ -106,13 +106,16 @@ def create_app(
     llm_create: Create | None = None,
     profile: Profile | None = None,
     profile_path: str | Path | None = None,
+    tts_cache_dir: str | Path | None = None,
 ) -> FastAPI:
     """Build the app. Without ``cartesia_api_key`` every reply uses the browser voice, and without
     ``anthropic_api_key`` (or ``llm_create``) every page is a fixed list (tests).
     ``tts_transport`` replaces the network for Cartesia requests (an ``httpx`` transport);
     ``llm_create`` replaces ``AsyncAnthropic().messages.create``.
     ``profile_path`` is where the user's own profile is loaded from and saved to (``main`` passes
-    profiles/user.yaml); without it the profile page is read-only and the demo persona is used."""
+    profiles/user.yaml); without it the profile page is read-only and the demo persona is used.
+    ``tts_cache_dir`` keeps Cartesia clips on disk (``main`` passes ``speech.cache_dir``); without
+    it they live in memory only, so tests never write to the repo."""
     cfg = cfg or load_config()
     intents = intents or load_intents(
         option_count=cfg.menus.option_count,
@@ -122,7 +125,8 @@ def create_app(
     )
     hub = Hub()
     event_log = EventLog(log_dir, clock=clock)
-    tts = CartesiaTTS(cfg.speech, cartesia_api_key, log=event_log, transport=tts_transport)
+    tts = CartesiaTTS(cfg.speech, cartesia_api_key, log=event_log, transport=tts_transport,
+                      cache_dir=tts_cache_dir)
     demo = load_profile()
     source = "demo"
     if profile is None and profile_path is not None:
@@ -154,6 +158,7 @@ def create_app(
         task = asyncio.create_task(ticker())
         event_log.log("server_start", keyboard_mode=keyboard_mode, fake_decoder=fake_decoder)
         await tts.start()  # also fetches the first page, set before the loop ran
+        tts.request(intents.utterances)  # the fixed lists, behind it; cached ones cost nothing
         await menus.start()  # opens the Claude connection before the first partner line
         try:
             yield
@@ -169,6 +174,7 @@ def create_app(
     app.state.hub = hub
     app.state.event_log = event_log
     app.state.tts = tts
+    app.state.intents = intents
     app.state.menus = menus
     app.state.profile_source = source
 
@@ -179,6 +185,34 @@ def create_app(
                 "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
                 "stt_echo_s": cfg.speech.stt_echo_s}
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        """What tools/preflight.py checks: the decoder, the partner page, Claude and the voice.
+        Names, flags and reasons only: no keys, no conversation text. Async, so it reads the
+        orchestrator on the event loop, between ticks."""
+        status = orch.status()
+        page = hub.ui is not None
+        return {
+            "state": orch.state.value,
+            "resume_ready": status.resume_ready,
+            "decoder": {"connected": status.decoder_connected, "ok": status.decoder_ok,
+                        "display_ok": status.display_ok, "board_ok": status.board_ok,
+                        "message": status.decoder_message, "keyboard_mode": keyboard_mode,
+                        "fake_decoder": fake_decoder},
+            # A closed page's last mic report says nothing about the next one.
+            "partner_page": {"connected": page, "mic": status.mic if page else "",
+                             "mic_muted": status.mic_muted, "stt_mode": cfg.speech.stt_mode},
+            "llm": {"enabled": menus.enabled, "why_disabled": menus.why_disabled,
+                    "dynamic": cfg.menus.dynamic,
+                    "ok": status.llm_ok, "model": cfg.llm.model,
+                    "keepalive_s": cfg.llm.keepalive_s,
+                    # None until the first keep-alive call answered (or with keep-alive off)
+                    "warm_ok": menus._warm_ok, "keepalive_running": menus._keeper is not None},
+            "tts": {"enabled": tts.enabled, "why_disabled": tts.why_disabled,
+                    "provider": cfg.speech.provider, "model": cfg.speech.model,
+                    "voice_id": cfg.speech.voice_id, "format": cfg.speech.format},
+        }
 
     # -- the user's profile (ui/profile.html) ---------------------------------------------
 
@@ -319,10 +353,14 @@ def main(argv: list[str] | None = None) -> None:
     app = create_app(cfg, keyboard_mode=args.keyboard, fake_decoder=args.fake_decoder,
                      cartesia_api_key=os.environ.get("CARTESIA_API_KEY"),
                      anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
-                     profile_path=USER_PROFILE_PATH)
+                     profile_path=USER_PROFILE_PATH,
+                     tts_cache_dir=REPO_ROOT / cfg.speech.cache_dir if cfg.speech.cache_dir else None)
     tts, menus = app.state.tts, app.state.menus
     voice = (f"Cartesia {cfg.speech.model}" if tts.enabled
              else f"browser speechSynthesis only ({tts.why_disabled})")
+    if tts.enabled:
+        ready, total = tts.cached_count(app.state.intents.utterances)
+        voice += f", {ready}/{total} fixed clips on disk"
     replies = (f"Claude {cfg.llm.model}" if menus.enabled
                else f"fixed lists only ({menus.why_disabled})")
     who = ("your profile (profiles/user.yaml)" if app.state.profile_source == "user"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
@@ -127,6 +128,7 @@ class SpeechConfig(Strict):
     format: Literal["mp3", "wav"]
     sample_rate: Literal[8000, 16000, 22050, 24000, 44100, 48000]
     bit_rate: Literal[32000, 64000, 96000, 128000, 192000]
+    cache_dir: str = "cache/tts"  # clips on disk, relative to the repo (gitignored); "" = memory only
     tts_timeout_s: float = Field(gt=0)
     max_concurrent: int = Field(ge=1)
     tts_rate: float = Field(gt=0)
@@ -242,13 +244,35 @@ class FallbackOption(Option):
     model_config = ConfigDict(extra="forbid")
 
 
+class FallbackMatch(Strict):
+    """A keyword rule: a partner line matching ``when`` (a regex) gets the fixed list ``show``."""
+
+    when: str = Field(min_length=1)
+    show: str = Field(min_length=1)
+
+
 class IntentsConfig(Strict):
     intents: list[Intent] = Field(min_length=1)
     fallback_lists: dict[str, list[FallbackOption]]
+    fallback_match: list[FallbackMatch] = []
+
+    def fallback_for(self, text: str, question: bool) -> str:
+        """The fixed list for a partner line: the first matching rule, else ``yes_no`` for a
+        question and ``home`` for anything else."""
+        line = text.strip()
+        for rule in self.fallback_match:
+            if re.search(rule.when, line, re.IGNORECASE):
+                return rule.show
+        return "yes_no" if question else "home"
 
     @property
     def intent_ids(self) -> list[str]:
         return [i.id for i in self.intents]
+
+    @property
+    def utterances(self) -> list[str]:
+        """Every fixed sentence, each once (the clips pre-generated at startup)."""
+        return list(dict.fromkeys(o.utterance for opts in self.fallback_lists.values() for o in opts))
 
 
 def check_intents(
@@ -285,6 +309,15 @@ def check_intents(
         labels = [o.label.strip().lower() for o in options]
         if len(set(labels)) != len(labels):
             problems.append(f"{where}: duplicate labels")
+
+    for k, rule in enumerate(cfg.fallback_match):
+        where = f"fallback_match[{k}]"
+        if rule.show not in cfg.fallback_lists:
+            problems.append(f"{where}: shows unknown list '{rule.show}'")
+        try:
+            re.compile(rule.when)
+        except re.error as exc:
+            problems.append(f"{where}: bad regex ({exc})")
     return problems
 
 

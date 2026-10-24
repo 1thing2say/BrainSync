@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
+from pathlib import Path
 
 import httpx
 
@@ -38,9 +40,14 @@ RETRY_S = 0.5  # pause before retry n is n * RETRY_S
 KEEPALIVE_S = 60.0  # keep connections open between pages; on slow Wi-Fi connect + TLS took 1-2 s
 
 
-def audio_id(voice_id: str, text: str) -> str:
-    """Cache key for one utterance in one voice."""
-    return hashlib.sha256(f"{voice_id}\n{text}".encode()).hexdigest()[:32]
+def audio_id(voice_id: str, text: str, variant: str = "") -> str:
+    """Cache key for one utterance in one voice; ``variant`` names the model and audio format, so a
+    change of either never replays an old clip (the disk cache outlives the process)."""
+    return hashlib.sha256(f"{voice_id}\n{variant}\n{text}".encode()).hexdigest()[:32]
+
+
+CLIP_ID = re.compile(r"[0-9a-f]{32}")
+MEDIA = {"mp3": ("audio/mpeg", ".mp3"), "wav": ("audio/wav", ".wav")}
 
 
 class CartesiaTTS:
@@ -52,8 +59,12 @@ class CartesiaTTS:
         api_key: str | None,
         log: EventLog | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
+        """``cache_dir``: keep clips on disk too, so they survive a restart and the fixed lists
+        can be pre-generated while the Wi-Fi is good (tools/prerender_tts.py). None = memory only."""
         self.cfg = cfg
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         self._api_key = api_key or ""
         self.log = log
         self._transport = transport
@@ -104,16 +115,62 @@ class CartesiaTTS:
     # -- cache --------------------------------------------------------------
 
     def id_for(self, text: str) -> str:
-        return audio_id(self.cfg.voice_id, text)
+        c = self.cfg
+        variant = f"{c.model}|{c.format}|{c.sample_rate}|{c.bit_rate if c.format == 'mp3' else ''}"
+        return audio_id(c.voice_id, text, variant)
+
+    def _disk(self, clip_id: str) -> Path | None:
+        if self.cache_dir is None or not CLIP_ID.fullmatch(clip_id):
+            return None
+        return self.cache_dir / f"{clip_id}{MEDIA[self.cfg.format][1]}"
+
+    def _cached(self, clip_id: str) -> bool:
+        if clip_id in self._clips:
+            return True
+        path = self._disk(clip_id)
+        return path is not None and path.is_file()
 
     def get(self, clip_id: str) -> tuple[bytes, str] | None:
         """The cached clip and its media type (``audio/mpeg`` or ``audio/wav``), or None."""
-        return self._clips.get(clip_id)
+        clip = self._clips.get(clip_id)
+        if clip is None and self._cached(clip_id):
+            try:
+                clip = (self._disk(clip_id).read_bytes(), MEDIA[self.cfg.format][0])
+            except OSError:
+                return None
+            self._remember(clip_id, clip)
+        return clip
 
     def url_for(self, text: str) -> str | None:
-        """``/audio/{id}`` if this utterance's clip is cached, else None (the browser speaks it)."""
+        """``/audio/{id}`` if this utterance's clip is cached, else None (the browser speaks it).
+        A clip on disk plays even without a key or network; ``speech.provider: browser`` never
+        plays one."""
+        if self.cfg.provider != "cartesia":
+            return None
         clip_id = self.id_for(text)
-        return f"{AUDIO_ROUTE}/{clip_id}" if clip_id in self._clips else None
+        return f"{AUDIO_ROUTE}/{clip_id}" if self._cached(clip_id) else None
+
+    def cached_count(self, texts: Iterable[str]) -> tuple[int, int]:
+        """How many of ``texts`` (each counted once) have a clip ready: (cached, total)."""
+        unique = list(dict.fromkeys(texts))
+        return sum(self._cached(self.id_for(t)) for t in unique), len(unique)
+
+    def _remember(self, clip_id: str, clip: tuple[bytes, str]) -> None:
+        self._clips[clip_id] = clip
+        while len(self._clips) > MAX_CLIPS:
+            self._clips.popitem(last=False)
+
+    def _save(self, clip_id: str, content: bytes) -> None:
+        path = self._disk(clip_id)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(content)
+            tmp.replace(path)  # never half a file
+        except OSError as exc:
+            self._log("tts_cache_write_failed", audio_id=clip_id, reason=type(exc).__name__)
 
     # -- fetching -----------------------------------------------------------
 
@@ -126,7 +183,7 @@ class CartesiaTTS:
             return
         for text in dict.fromkeys(texts):
             clip_id = self.id_for(text)
-            if clip_id in self._clips or clip_id in self._inflight:
+            if self._cached(clip_id) or clip_id in self._inflight:
                 continue
             task = asyncio.get_running_loop().create_task(self._fetch(clip_id, text))
             self._inflight[clip_id] = task
@@ -155,9 +212,8 @@ class CartesiaTTS:
             if not reason:
                 assert response is not None
                 kind = response.headers["content-type"].split(";")[0].strip()
-                self._clips[clip_id] = (response.content, kind)
-                while len(self._clips) > MAX_CLIPS:
-                    self._clips.popitem(last=False)
+                self._remember(clip_id, (response.content, kind))
+                self._save(clip_id, response.content)
                 self._log("tts_ok", audio_id=clip_id, chars=len(text), bytes=len(response.content),
                           ms=ms, attempt=attempt)
                 return
