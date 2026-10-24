@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import load_config
+from app.config import REPO_ROOT, load_config
 from app.log import read_events
 from app.server import create_app
 from app.schemas import DecoderHello, Selection, to_json
@@ -97,6 +98,22 @@ def test_new_partner_page_replaces_the_old_one(client):
             assert recv_until(second, "show_option")["index"] == 0
     events = read_events(next(client.log_dir.glob("*.jsonl")))
     assert any(e["event"] == "ui_replaced" for e in events)
+
+
+def test_page_reconnect_after_stop_stays_paused(client):
+    """A reconnecting partner page gets the state again; it never restarts the flicker."""
+    with client.websocket_connect("/ws/ui") as ui:
+        ui.send_text(json.dumps({"type": "resume"}))
+        recv_until(ui, "show_option")
+        ui.send_text(json.dumps({"type": "stop"}))
+        while recv_until(ui, "state")["name"] != "PAUSED":
+            pass
+    with client.websocket_connect("/ws/ui") as ui:
+        assert recv_until(ui, "state")["name"] == "PAUSED"
+    assert client.app.state.orch.state.value == "PAUSED"
+    # The page side of the same rule: app.js must not send resume when the socket (re)opens.
+    app_js = (REPO_ROOT / "ui" / "app.js").read_text()
+    assert re.search(r"onopen\s*=[^;]*resume", app_js) is None
 
 
 def test_decoder_disconnect_pauses(client):

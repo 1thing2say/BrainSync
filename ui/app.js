@@ -16,7 +16,8 @@ function send(msg) {
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws/ui`);
-  ws.onopen = () => { if (accepted) send({ type: "resume" }); };
+  // No resume on (re)connect: the server re-sends its state, and a reconnect after STOP must
+  // never restart the flicker. Only the warning's start button and Resume send "resume".
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = () => {
     $("state").textContent = "Server disconnected, reconnecting…";
