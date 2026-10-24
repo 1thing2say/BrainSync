@@ -2,11 +2,12 @@
 # 20-hostname.sh - name the device HOSTNAME_PREFIX-<serial suffix>.
 #
 # Runs inside the installed system (hook.sh, curtin in-target). The suffix is
-# the last 6 characters of the board serial number (device.env, read by
-# hook.sh from the device tree), lowercased; without a serial the hostname is
-# just HOSTNAME_PREFIX. Sets /etc/hostname and the 127.0.1.1 line in
-# /etc/hosts, and tells cloud-init not to change it on first boot. avahi
-# (installed by NVIDIA's package list) then announces NAME.local.
+# the last 6 characters of the serial number in device.env (hook.sh reads it
+# from the device tree on a Jetson, from DMI on a VM), lowercased; without a
+# serial the hostname is just HOSTNAME_PREFIX. Sets /etc/hostname and the
+# 127.0.1.1 line in /etc/hosts, and tells cloud-init not to change it on first
+# boot. avahi (NVIDIA's package list; the VM edition's autoinstall packages)
+# then announces NAME.local.
 
 set -euo pipefail
 

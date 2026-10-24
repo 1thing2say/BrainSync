@@ -1,21 +1,26 @@
 #!/bin/bash
-# hook.sh - BrainSyncOS install hook, run by the Jetson ISO installer.
+# hook.sh - BrainSyncOS install hook, run by the installer of either edition.
 #
-# scripts/patch-autoinstall.py adds `/bin/bash /cdrom/brainsyncos/hook.sh` to
-# NVIDIA's autoinstall as a subiquity late-command, after all of NVIDIA's own
-# steps. It runs in the live installer: this payload is on the ISO at
+# Jetson edition: scripts/patch-autoinstall.py adds
+# `/bin/bash /cdrom/brainsyncos/hook.sh` to NVIDIA's autoinstall as a
+# subiquity late-command, after all of NVIDIA's own steps. VM edition: the
+# same line is a late-command of vm/autoinstall.yaml (stock Ubuntu installer).
+# It runs in the live installer: this payload is on the ISO at
 # /cdrom/brainsyncos and the installed system is mounted at
-# $TARGET_MOUNT_POINT (default /target).
+# $TARGET_MOUNT_POINT (default /target). The edition comes from the
+# release file (EDITION=orin-nano or vm-arm64).
 #
 # It copies the payload to /opt/brainsyncos/installer on the target, records
-# the board (device tree model and serial number) in device.env there, then
+# the machine (model, serial number, edition) in device.env there, then
 # runs every install.d/NN-*.sh inside the target (curtin in-target), in order,
 # with BSOS_INSTALL_DIR set. Any failure fails the installation: a
 # half-installed BrainSyncOS is worse than an installer error on screen.
 # Log: /var/log/brainsyncos/install.log, in the live system and on the target.
 #
 # Test overrides: BSOS_HOOK_SRC (payload dir), BSOS_HOOK_LOG (live log file),
-# BSOS_DT_DIR (device tree, default /sys/firmware/devicetree/base).
+# BSOS_DT_DIR (device tree, default /sys/firmware/devicetree/base),
+# BSOS_DMI_DIR (default /sys/class/dmi/id), BSOS_MACHINE_ID_FILE (default
+# /etc/machine-id).
 
 set -euo pipefail
 
@@ -53,18 +58,56 @@ echo "hook.sh: BrainSyncOS install hook, payload $src, target $target"
 [ -s "$src/release" ] || { echo "hook.sh: missing $src/release" >&2; exit 1; }
 cat "$src/release"
 
+edition="$(sed -n 's/^EDITION=//p' "$src/release" | head -1)"
+edition="${edition:-orin-nano}"
+
+# Machine identity. A Jetson has a device tree with model and serial-number
+# (used as before, whatever else exists). A VM (UEFI + ACPI) has none, or one
+# without a model: then SMBIOS/DMI gives the model and the first usable of
+# product_serial, product_uuid (UTM passes the VM's UUID) and, last, the live
+# system's machine-id (random per install).
 dt="${BSOS_DT_DIR:-/sys/firmware/devicetree/base}"
-model="$(tr -d '\0' < "$dt/model" 2>/dev/null || echo unknown)"
-serial="$(tr -d '\0' < "$dt/serial-number" 2>/dev/null | tr -cd 'A-Za-z0-9' || true)"
-case "$model" in
-    "NVIDIA Jetson Orin Nano"*) echo "hook.sh: board: $model, serial ${serial:-unknown}" ;;
-    *) echo "hook.sh: WARNING: BrainSyncOS is built for Jetson Orin Nano; this board is: $model" ;;
+dmi="${BSOS_DMI_DIR:-/sys/class/dmi/id}"
+dt_model="$(tr -d '\0' 2>/dev/null < "$dt/model" || true)"
+if [ -n "$dt_model" ]; then
+    model="$dt_model"
+    serial="$(tr -d '\0' 2>/dev/null < "$dt/serial-number" | tr -cd 'A-Za-z0-9' || true)"
+    id_source=devicetree
+else
+    dt_model=unknown
+    # dmi_value FILE: the DMI string, NULs dropped and blanks trimmed ("" if unreadable).
+    dmi_value() { tr -d '\0' 2>/dev/null < "$dmi/$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true; }
+    model="$(printf '%s %s' "$(dmi_value sys_vendor)" "$(dmi_value product_name)" | sed 's/^ *//; s/ *$//')"
+    model="${model:-unknown}"
+    serial=""
+    id_source=none
+    for f in product_serial product_uuid; do
+        s="$(dmi_value "$f" | tr -cd 'A-Za-z0-9')"
+        # Placeholders firmware writes when there is no real value.
+        case "$(printf '%s' "$s" | tr 'a-z' 'A-Z')" in
+            ''|NONE|NOTSPECIFIED|NOTAPPLICABLE|TOBEFILLEDBYOEM|DEFAULTSTRING|SYSTEMSERIALNUMBER|0123456789) continue ;;
+        esac
+        printf '%s' "$s" | grep -Eqv '^(0+|[Ff]+)$' || continue
+        serial="$s"
+        id_source="dmi $f"
+        break
+    done
+    if [ -z "$serial" ]; then
+        serial="$(tr -cd 'A-Za-z0-9' 2>/dev/null < "${BSOS_MACHINE_ID_FILE:-/etc/machine-id}" || true)"
+        [ -z "$serial" ] || id_source=machine-id
+    fi
+fi
+case "$edition:$model" in
+    orin-nano:"NVIDIA Jetson Orin Nano"*) echo "hook.sh: board: $model, serial ${serial:-unknown}" ;;
+    orin-nano:*) echo "hook.sh: WARNING: BrainSyncOS is built for Jetson Orin Nano; this board is: $model" ;;
+    *) echo "hook.sh: $edition edition on: $model, serial ${serial:-unknown} (from $id_source)" ;;
 esac
 
 rm -rf "${target:?}$dest"
 mkdir -p "$target$dest"
 cp -R "$src/." "$target$dest/"
-printf 'BSOS_DT_MODEL=%q\nBSOS_SERIAL=%q\n' "$model" "$serial" > "$target$dest/device.env"
+printf 'BSOS_DT_MODEL=%q\nBSOS_SERIAL=%q\nBSOS_EDITION=%q\nBSOS_MODEL=%q\nBSOS_ID_SOURCE=%q\n' \
+    "$dt_model" "$serial" "$edition" "$model" "$id_source" > "$target$dest/device.env"
 chown -R root:root "$target$dest"
 chmod -R u+rwX,go+rX,go-w "$target$dest"
 # Login credentials: readable by root only on the installed system.

@@ -8,11 +8,21 @@
 # This does the switch at install time and removes the OOBE target links and
 # the /etc/nv/nvautoconfig marker. nvpmodel, nvpower and nvfancontrol stay
 # enabled: their packages also link them into multi-user.target.wants.
+# Only when the OOBE is actually configured: a system whose default target is
+# anything else (the VM edition, a Jetson installed with nooemconfig) keeps it.
 
 set -euo pipefail
 
-ln -sfn /lib/systemd/system/graphical.target /etc/systemd/system/default.target
+link=/etc/systemd/system/default.target
+current="$(readlink "$link" 2>/dev/null || true)"
+case "$current" in
+    nv-oobe.target|*/nv-oobe.target)
+        ln -sfn /lib/systemd/system/graphical.target "$link"
+        echo "50-skip-oobe.sh: default target was $current (NVIDIA OOBE)"
+        ;;
+    *) echo "50-skip-oobe.sh: no NVIDIA OOBE default target; default target left as ${current:-the distribution default}" ;;
+esac
 rm -f /etc/systemd/system/nv-oobe.target
 rm -rf /etc/systemd/system/nv-oobe.target.wants
 rm -f /etc/nv/nvautoconfig
-echo "50-skip-oobe.sh: default target $(readlink /etc/systemd/system/default.target)"
+echo "50-skip-oobe.sh: default target $(readlink "$link" 2>/dev/null || echo '(distribution default)')"

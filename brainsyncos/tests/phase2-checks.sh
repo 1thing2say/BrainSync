@@ -157,6 +157,7 @@ EOF
     grep -qx "VERSION=$BRAINSYNCOS_VERSION" "$x/brainsyncos/release" || die "release VERSION wrong"
     grep -qx "BASE_ISO_SHA256=$BASE_ISO_SHA256" "$x/brainsyncos/release" || die "release BASE_ISO_SHA256 wrong"
     grep -qx "BOARD=$TARGET_BOARD" "$x/brainsyncos/release" || die "release BOARD wrong"
+    grep -qx "EDITION=$(jetson_edition)" "$x/brainsyncos/release" || die "release EDITION is not $(jetson_edition)"
     grep -qx "set timeout=$GRUB_TIMEOUT" "$x/boot/grub/grub.cfg" || die "grub timeout is not GRUB_TIMEOUT=$GRUB_TIMEOUT"
     grep -m1 '^menuentry' "$x/boot/grub/grub.cfg"
     cat "$x/brainsyncos/release"
@@ -310,6 +311,8 @@ check_identity() {
 
     [ "$(stat -c %a "$t/opt/brainsyncos/installer/config")" = 700 ] || die "installed credentials dir is not root-only"
     grep -qx 'BSOS_SERIAL=1421224ABC123456' "$t/opt/brainsyncos/installer/device.env" || die "device.env lacks the serial"
+    grep -qx 'BSOS_ID_SOURCE=devicetree' "$t/opt/brainsyncos/installer/device.env" || die "device.env: identity not from the device tree"
+    grep -q '50-skip-oobe.sh: default target was nv-oobe.target (NVIDIA OOBE)' "$t/var/log/brainsyncos/install.log" || die "50-skip-oobe.sh did not see the OOBE target"
 }
 
 c_hook() {
@@ -321,6 +324,7 @@ c_hook() {
     cat "$rel"
     grep -qx "VERSION=$BRAINSYNCOS_VERSION" "$rel" || die "VERSION missing in $rel"
     grep -qx "BASE_ISO_SHA256=$BASE_ISO_SHA256" "$rel" || die "BASE_ISO_SHA256 missing in $rel"
+    grep -qx "EDITION=orin-nano" "$rel" || die "EDITION=orin-nano missing in $rel"
     grep -Eqx 'INSTALLED=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' "$rel" || die "INSTALLED missing in $rel"
     [ "$(stat -c %a "$rel")" = 644 ] || die "$rel mode is $(stat -c %a "$rel")"
     head -1 "$t/etc/issue" | grep -qx "BrainSyncOS $BRAINSYNCOS_VERSION (build .*)" || die "/etc/issue line 1: $(head -1 "$t/etc/issue")"

@@ -2,7 +2,8 @@
 # 40-ssh.sh - SSH access for the appliance account only, by key only.
 #
 # Runs inside the installed system (hook.sh, curtin in-target). openssh-server
-# comes from NVIDIA's package list; this adds a drop-in that turns off
+# comes from NVIDIA's package list (Jetson) or the autoinstall's ssh section
+# (VM edition); this adds a drop-in that turns off
 # password and root logins and allows only BRAINSYNC_USER, enables Ubuntu's
 # socket-activated ssh, and checks the resulting config with sshd -t.
 

@@ -2,9 +2,10 @@
 # 00-release.sh - record the installed BrainSyncOS build in /etc/brainsyncos-release.
 #
 # Runs inside the installed system (hook.sh, curtin in-target). The file is the
-# build's release file (KEY=value, written by scripts/build-iso.sh) plus
-# INSTALLED=<UTC time>. /etc/os-release is left alone: it stays Ubuntu's, which
-# apt and NVIDIA's tools expect.
+# build's release file (KEY=value, written by scripts/build-iso.sh or
+# build-vm-iso.sh; EDITION=orin-nano or vm-arm64) plus INSTALLED=<UTC time>.
+# /etc/os-release is left alone: it stays Ubuntu's, which apt and NVIDIA's
+# tools expect.
 
 set -euo pipefail
 
@@ -14,6 +15,10 @@ if grep -Evq '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._,:/+@-]*$' "$src"; then
     echo "00-release.sh: malformed $src" >&2
     exit 1
 fi
+case "$(sed -n 's/^EDITION=//p' "$src")" in
+    orin-nano|vm-arm64) ;;
+    *) echo "00-release.sh: $src has no known EDITION (orin-nano, vm-arm64)" >&2; exit 1 ;;
+esac
 
 tmp=/etc/.brainsyncos-release.tmp
 {

@@ -23,6 +23,9 @@ export BRAINSYNCOS_ROOT
 
 BSOS_CONFIG="${BSOS_CONFIG:-$BRAINSYNCOS_ROOT/config/base-iso.env}"
 BSOS_PRODUCT_CONFIG="${BSOS_PRODUCT_CONFIG:-$BRAINSYNCOS_ROOT/config/brainsyncos.env}"
+# VM edition (stock Ubuntu arm64 for UTM): its own base ISO pins and product config.
+BSOS_VM_CONFIG="${BSOS_VM_CONFIG:-$BRAINSYNCOS_ROOT/config/vm-base-iso.env}"
+BSOS_VM_PRODUCT_CONFIG="${BSOS_VM_PRODUCT_CONFIG:-$BRAINSYNCOS_ROOT/config/vm.env}"
 BUILD_DIR="$BRAINSYNCOS_ROOT/build"
 ISO_ROOT="$BUILD_DIR/iso-root"
 META_DIR="$BUILD_DIR/meta"
@@ -30,6 +33,10 @@ REPORTS_DIR="$BUILD_DIR/reports"
 OUT_DIR="$BUILD_DIR/out"
 TMP_DIR="$BUILD_DIR/tmp"
 STAGE_DIR="$BUILD_DIR/stage"
+VM_STAGE_DIR="$BUILD_DIR/stage-vm"
+# Downloaded base ISOs (VM edition). Inside brainsyncos/, so the builder sees
+# them under /work without another mount.
+DOWNLOADS_DIR="$BUILD_DIR/downloads"
 
 BSOS_REQUIRED_KEYS="BASE_ISO_NAME BASE_ISO_SHA256 BASE_ISO_SIZE BASE_ISO_VOLID
 BASE_ISO_DISK_INFO_BUILD BASE_ESP_START_SECTOR BASE_ESP_SIZE_SECTORS
@@ -39,6 +46,13 @@ BUILDER_IMAGE_NAME BUILDER_PLATFORM MIN_FREE_GB"
 
 BSOS_PRODUCT_REQUIRED_KEYS="BRAINSYNCOS_VERSION TARGET_BOARD HOOKED_AUTOINSTALL
 INSTALL_TARGET_DEFAULT GRUB_TIMEOUT BRAINSYNC_USER HOSTNAME_PREFIX"
+
+BSOS_VM_REQUIRED_KEYS="BASE_ISO_NAME BASE_ISO_URL BASE_ISO_SHA256 BASE_ISO_SIZE BASE_ISO_VOLID
+BASE_ISO_DISK_INFO_BUILD BASE_ISO_ARCH BASE_ESP_START_SECTOR BASE_ESP_SIZE_SECTORS
+BASE_ESP_SHA256 BASE_SYSTEM_AREA_SHA256 ISO_COMPLIANCE UBUNTU_RELEASE UBUNTU_CODENAME MIN_FREE_GB"
+
+BSOS_VM_PRODUCT_REQUIRED_KEYS="EDITION VM_GRUB_TIMEOUT VM_INSTALL_KERNEL VM_CONSOLES
+VM_NAME VM_BACKEND VM_MEMORY_MB VM_CPU_CORES VM_DISK_GB"
 
 # load_env_file FILE KEYS: source FILE after checking every line is plain
 # KEY=value (so it stays usable as a docker --env-file and sourcing it cannot
@@ -89,8 +103,177 @@ load_product_config() {
 # product_iso_name: basename (no .iso) of the build-iso.sh output, e.g.
 # brainsyncos-0.1.0-orin-nano for TARGET_BOARD=jetson-orin-nano-devkit.
 product_iso_name() {
+    printf 'brainsyncos-%s-%s\n' "$BRAINSYNCOS_VERSION" "$(jetson_edition)"
+}
+
+# jetson_edition: the Jetson edition's name (release file EDITION=), e.g.
+# orin-nano for TARGET_BOARD=jetson-orin-nano-devkit.
+jetson_edition() {
     local board="${TARGET_BOARD#jetson-}"
-    printf 'brainsyncos-%s-%s\n' "$BRAINSYNCOS_VERSION" "${board%-devkit}"
+    printf '%s\n' "${board%-devkit}"
+}
+
+# --- VM edition (stock Ubuntu Server arm64, for UTM) ---------------------------
+# A script works on one edition: it calls load_config + load_product_config
+# (Jetson) or load_vm_config + load_vm_product_config (VM), never both.
+
+# config/vm-base-iso.env: the pinned Ubuntu ISO (same key names as base-iso.env).
+load_vm_config() {
+    load_env_file "$BSOS_VM_CONFIG" "$BSOS_VM_REQUIRED_KEYS"
+    case "$BASE_ISO_URL" in
+        https://*/"$BASE_ISO_NAME") ;;
+        *) die "BASE_ISO_URL must be an https URL ending in /$BASE_ISO_NAME, got $BASE_ISO_URL" ;;
+    esac
+}
+
+# config/brainsyncos.env (version, account, hostname prefix; shared with the
+# Jetson edition) and config/vm.env (the VM edition's own settings).
+load_vm_product_config() {
+    load_product_config
+    load_env_file "$BSOS_VM_PRODUCT_CONFIG" "$BSOS_VM_PRODUCT_REQUIRED_KEYS"
+    [ "$EDITION" = vm-arm64 ] || die "EDITION must be vm-arm64, got $EDITION"
+    printf '%s\n' "$VM_GRUB_TIMEOUT" | grep -Eq '^(-1|[0-9]+)$' \
+        || die "VM_GRUB_TIMEOUT must be -1 or a number of seconds, got $VM_GRUB_TIMEOUT"
+    case "$VM_INSTALL_KERNEL" in
+        ga|hwe) ;;
+        *) die "VM_INSTALL_KERNEL must be ga or hwe, got $VM_INSTALL_KERNEL" ;;
+    esac
+    printf '%s\n' "$VM_CONSOLES" | grep -Eq '^[a-zA-Z][a-zA-Z0-9]*(,[a-zA-Z][a-zA-Z0-9]*)*$' \
+        || die "VM_CONSOLES must be a comma-separated list of console devices, got $VM_CONSOLES"
+    check_vm_name "$VM_NAME"
+    case "$VM_BACKEND" in
+        apple|qemu) ;;
+        *) die "VM_BACKEND must be apple or qemu, got $VM_BACKEND" ;;
+    esac
+    check_vm_number VM_MEMORY_MB "$VM_MEMORY_MB" 2048 65536
+    check_vm_number VM_CPU_CORES "$VM_CPU_CORES" 1 64
+    check_vm_number VM_DISK_GB "$VM_DISK_GB" 16 2048
+}
+
+# check_vm_name NAME: a UTM VM name BrainSyncOS scripts may create or touch.
+check_vm_name() {
+    printf '%s\n' "$1" | grep -Eq '^BrainSyncOS[A-Za-z0-9._-]{0,48}$' \
+        || die "VM name must start with BrainSyncOS (letters, digits, . _ - only), got '$1'"
+}
+
+# check_vm_number KEY VALUE MIN MAX
+check_vm_number() {
+    printf '%s\n' "$2" | grep -Eq '^[0-9]+$' && [ "$2" -ge "$3" ] && [ "$2" -le "$4" ] \
+        || die "$1 must be a number from $3 to $4, got $2"
+}
+
+# vm_iso_name: basename (no .iso) of the build-vm-iso.sh output, e.g.
+# brainsyncos-0.1.0-vm-arm64.
+vm_iso_name() {
+    printf 'brainsyncos-%s-%s\n' "$BRAINSYNCOS_VERSION" "$EDITION"
+}
+
+# resolve_vm_base_iso: the downloaded Ubuntu ISO (scripts/fetch-vm-base.sh),
+# build/downloads/<name>; on the host and in the builder (/work/build/...).
+# Deliberately not $BASE_ISO: builder.sh sets that to the Jetson ISO.
+resolve_vm_base_iso() {
+    local p="$DOWNLOADS_DIR/$BASE_ISO_NAME"
+    [ -f "$p" ] || die "VM base ISO not found at $p (run scripts/fetch-vm-base.sh)"
+    [ -r "$p" ] || die "VM base ISO not readable: $p"
+    printf '%s\n' "$p"
+}
+
+# config_volid: BASE_ISO_VOLID with _ turned back into spaces (config values
+# cannot contain spaces; Ubuntu's volume id has them, NVIDIA's has neither).
+config_volid() {
+    printf '%s\n' "$BASE_ISO_VOLID" | tr '_' ' '
+}
+
+# --- product ISO builds (build-iso.sh, build-vm-iso.sh) --------------------------
+
+# parse_build_args DEFAULT_NAME ARG...: the options both product builds take.
+# Sets BUILD_ID, BUILD_NAME, KEYS_FILE, HASH_FILE.
+parse_build_args() {
+    BUILD_NAME="$1"
+    shift
+    BUILD_ID="${BSOS_GIT_REV:-unknown}"
+    KEYS_FILE="$BRAINSYNCOS_ROOT/config/authorized_keys"
+    HASH_FILE="$BRAINSYNCOS_ROOT/config/brainsync-password.hash"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --build-id) BUILD_ID="${2:?--build-id needs a value}"; shift 2 ;;
+            --name) BUILD_NAME="${2:?--name needs a value}"; shift 2 ;;
+            --authorized-keys) KEYS_FILE="${2:?--authorized-keys needs a file}"; shift 2 ;;
+            --password-hash) HASH_FILE="${2:?--password-hash needs a file}"; shift 2 ;;
+            -h|--help) usage_from_header; exit 0 ;;
+            *) die "unknown argument: $1" ;;
+        esac
+    done
+    printf '%s\n' "$BUILD_ID" | grep -Eq '^[A-Za-z0-9._+-]+$' || die "invalid build id: $BUILD_ID"
+    case "$BUILD_NAME" in */*|.*|'') die "invalid --name: $BUILD_NAME" ;; esac
+}
+
+# validate_logins: check KEYS_FILE / HASH_FILE (either may be absent or
+# empty, not both). Sets HAVE_KEYS and HAVE_HASH to 0 or 1.
+validate_logins() {
+    HAVE_KEYS=0
+    HAVE_HASH=0
+    if [ -s "$KEYS_FILE" ]; then
+        ! grep -q 'PRIVATE KEY' "$KEYS_FILE" || die "$KEYS_FILE contains a PRIVATE key; use the .pub file"
+        ssh-keygen -l -f "$KEYS_FILE" > /dev/null 2>&1 || die "$KEYS_FILE is not a valid authorized_keys file"
+        HAVE_KEYS=1
+        log "SSH keys for $BRAINSYNC_USER: $(ssh-keygen -l -f "$KEYS_FILE" | wc -l | tr -d ' ') from ${KEYS_FILE#$BRAINSYNCOS_ROOT/}"
+    fi
+    if [ -s "$HASH_FILE" ]; then
+        [ "$(grep -c . "$HASH_FILE")" = 1 ] && grep -Eqx '\$(6|5|y)\$[A-Za-z0-9./$]+' "$HASH_FILE" \
+            || die "$HASH_FILE is not a single crypt(3) hash line (\$6\$..., \$y\$...); make one with scripts/make-password-hash.sh"
+        HAVE_HASH=1
+        log "console password for $BRAINSYNC_USER: hash from ${HASH_FILE#$BRAINSYNCOS_ROOT/}"
+    fi
+    [ "$HAVE_KEYS" = 1 ] || [ "$HAVE_HASH" = 1 ] \
+        || die "no way to log in: add SSH public keys to config/authorized_keys and/or run scripts/make-password-hash.sh"
+}
+
+# stage_payload STAGE < RELEASE: payload/ -> STAGE/brainsyncos, with the
+# release file read from stdin, settings.env and the logins (validate_logins).
+stage_payload() {
+    local d="$1/brainsyncos"
+    cp -R "$BRAINSYNCOS_ROOT/payload" "$d"
+    cat > "$d/release"
+    cat > "$d/settings.env" <<EOF
+BRAINSYNC_USER=$BRAINSYNC_USER
+HOSTNAME_PREFIX=$HOSTNAME_PREFIX
+EOF
+    mkdir -p "$d/config"
+    [ "$HAVE_KEYS" = 0 ] || grep -v '^[[:space:]]*$' "$KEYS_FILE" > "$d/config/authorized_keys"
+    [ "$HAVE_HASH" = 0 ] || cp "$HASH_FILE" "$d/config/password.hash"
+}
+
+# merge_stage_md5sums VENDOR_MD5SUM_TXT STAGE: STAGE/md5sum.txt = the vendor
+# entries plus every staged file (scripts/merge-md5sums.py).
+merge_stage_md5sums() {
+    local vendor="$1" stage="$2" tmp="$2.md5sum.tmp"
+    python3 "$BRAINSYNCOS_ROOT/scripts/merge-md5sums.py" "$vendor" "$stage" > "$tmp"
+    mv "$tmp" "$stage/md5sum.txt"
+    log "md5sum.txt: $(wc -l < "$stage/md5sum.txt" | tr -d ' ') entries (vendor $(wc -l < "$vendor" | tr -d ' '))"
+}
+
+# write_stage_iso BASE STAGE NAME ISO_PATH...: OUT_DIR/NAME.iso = BASE with its
+# boot setup replayed and STAGE mapped over /; the given ISO paths (what STAGE
+# adds or replaces) get the vendor's 0:0 ownership and read-only modes. Then
+# finalize_iso and NAME.manifest.txt (sha256 of every staged file).
+write_stage_iso() {
+    local base="$1" stage="$2" name="$3"
+    shift 3
+    local out="$OUT_DIR/$name.iso" partial="$OUT_DIR/.$name.iso.partial" xlog="$OUT_DIR/$name.xorriso.log"
+    rm_released "$partial" "$out" "$out.sha256"
+    # shellcheck disable=SC2064  # expand the paths now: they are locals
+    trap "rm_released '$partial' '$partial.sfdisk-V'" EXIT
+    log "writing $out"
+    write_replayed_iso "$base" "$partial" "$xlog" \
+        -map "$stage" / \
+        -chown_r 0 "$@" -- \
+        -chgrp_r 0 "$@" -- \
+        -chmod_r a-w,a+r "$@" --
+    finalize_iso "$partial" "$out"
+    trap - EXIT
+    (cd "$stage" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$OUT_DIR/$name.manifest.txt"
+    log "manifest: $OUT_DIR/$name.manifest.txt ($(wc -l < "$OUT_DIR/$name.manifest.txt" | tr -d ' ') files)"
 }
 
 require_cmd() {

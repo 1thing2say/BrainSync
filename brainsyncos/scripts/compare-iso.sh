@@ -2,16 +2,23 @@
 # compare-iso.sh - check a repacked ISO's boot structure and file tree (builder only).
 #
 # Usage: scripts/builder.sh run scripts/compare-iso.sh NEW.iso [--tree DIR] [--boot-only]
-#                                    [--tree-only] [--extraction]
+#                                    [--tree-only] [--extraction] [--edition jetson|vm]
 #
 # Compares NEW.iso against the pinned base ISO and build/meta/ (from
 # extract-iso.sh), modulo the differences a rebuild is expected to introduce
-# (LBAs that move with the tree size, GPT GUIDs, image length):
+# (LBAs that move with the tree size, GPT GUIDs, image length).
+# --edition vm compares against the VM edition's Ubuntu ISO
+# (config/vm-base-iso.env) instead, reading its El Torito reports from the
+# base file itself (there is no extraction); it implies --boot-only, and its
+# partition table is an MBR (check name mbr) rather than a GPT:
 #   eltorito    El Torito catalog/boot entries equal except LBAs
 #   boot-esp    El Torito UEFI image == appended ESP partition (LBA*4 == start)
-#   mkisofs     as_mkisofs replay report equal except intervals/paths
+#   mkisofs     as_mkisofs replay report equal except intervals/paths (VM:
+#               also except the MBR geometry lines, see chs)
+#   chs         (VM only) MBR CHS fields encode each partition's LBAs in the
+#               base's geometry; the ESP is cylinder-aligned
 #   descriptors volume descriptor sequence (PVD, boot record, Joliet SVD) equal
-#   gpt         same partitions (type/name/attrs/order), p1 start, ESP and
+#   gpt/mbr     same partitions (type/name/attrs/order), p1 start, ESP and
 #               Gap1 sizes, contiguous; sfdisk -V clean; file length == image
 #   esp-bytes   ESP partition sha256 equals BASE_ESP_SHA256 (config pin)
 #   names       plain ISO9660 and Joliet directory trees (raw directory
@@ -29,9 +36,9 @@
 # Prints PASS/FAIL per check; exits non-zero if any check fails.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
-load_config
 
 new=""
+edition=jetson
 tree="$ISO_ROOT"
 tree_only=0
 boot_only=0
@@ -42,6 +49,7 @@ while [ "$#" -gt 0 ]; do
         --tree-only) tree_only=1; shift ;;
         --boot-only) boot_only=1; shift ;;
         --extraction) extraction=1; shift ;;
+        --edition) edition="${2:?--edition needs jetson or vm}"; shift 2 ;;
         -h|--help) usage_from_header; exit 0 ;;
         -*) die "unknown argument: $1" ;;
         *) new="$1"; shift ;;
@@ -49,11 +57,22 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$new" ] || die "usage: compare-iso.sh NEW.iso [--tree DIR]"
 [ "$tree_only" = 1 ] && [ "$boot_only" = 1 ] && die "--tree-only and --boot-only exclude each other"
+case "$edition" in
+    jetson) load_config ;;
+    vm) load_vm_config
+        [ "$tree_only" = 0 ] || die "--edition vm has no extracted tree to compare (--tree-only)"
+        boot_only=1 ;;
+    *) die "--edition must be jetson or vm, got $edition" ;;
+esac
 require_container
 require_cmd xorriso sfdisk python3 sha256sum
 [ -f "$new" ] || die "no such ISO: $new"
-[ -f "$META_DIR/el-torito.plain.txt" ] || die "missing $META_DIR (run extract-iso.sh first)"
-base="$(resolve_base_iso)"
+if [ "$edition" = vm ]; then
+    base="$(resolve_vm_base_iso)"
+else
+    [ -f "$META_DIR/el-torito.plain.txt" ] || die "missing $META_DIR (run extract-iso.sh first)"
+    base="$(resolve_base_iso)"
+fi
 
 fails=0
 pass() { printf 'PASS %-12s %s\n' "$1" "$2"; }
@@ -61,6 +80,16 @@ failc() { printf 'FAIL %-12s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+# Reference El Torito reports: from the extraction (Jetson) or the base file (VM).
+if [ "$edition" = vm ]; then
+    ref_et_plain="$work/base.et.plain"
+    ref_et_mkisofs="$work/base.et.mkisofs"
+    xorriso -indev "$base" -report_el_torito plain      2>/dev/null > "$ref_et_plain"
+    xorriso -indev "$base" -report_el_torito as_mkisofs 2>/dev/null > "$ref_et_mkisofs"
+else
+    ref_et_plain="$META_DIR/el-torito.plain.txt"
+    ref_et_mkisofs="$META_DIR/el-torito.as_mkisofs.txt"
+fi
 
 if [ "$tree_only" = 0 ]; then
 xorriso -indev "$new" -report_el_torito plain      2>/dev/null > "$work/et.plain"
@@ -73,7 +102,7 @@ norm_et() {
     sed -e 's/^\(El Torito catalog *: *\)[0-9]*/\1LBA/' \
         -e 's/^\(El Torito boot img *:.*[^0-9]\)[0-9][0-9]*$/\1LBA/' "$1"
 }
-if diff <(norm_et "$META_DIR/el-torito.plain.txt") <(norm_et "$work/et.plain") > "$work/d1"; then
+if diff <(norm_et "$ref_et_plain") <(norm_et "$work/et.plain") > "$work/d1"; then
     pass eltorito "$(grep -c '^El Torito' "$work/et.plain") El Torito lines match modulo LBAs"
 else
     failc eltorito "$(tr '\n' ' ' < "$work/d1")"
@@ -81,7 +110,7 @@ fi
 
 # boot-esp: the El Torito UEFI image must be the appended EFI System partition
 boot_lba="$(awk -F: '/^El Torito boot img/ {n=split($2, a, " "); print a[n]; exit}' "$work/et.plain")"
-esp_start="$(python3 -I -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["partitiontable"]["partitions"] if x["type"].upper()=="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"]; print(p[0]["start"] if p else "")' "$work/new.json")"
+esp_start="$(python3 -I -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["partitiontable"]["partitions"] if x["type"].upper() in ("C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "EF")]; print(p[0]["start"] if p else "")' "$work/new.json")"
 if [ -n "$boot_lba" ] && [ -n "$esp_start" ] && [ $((boot_lba * 4)) = "$esp_start" ]; then
     pass boot-esp "boot image LBA $boot_lba x4 = ESP start sector $esp_start"
 else
@@ -92,12 +121,67 @@ fi
 norm_mk() {
     sed -e "s/local_fs:[0-9]*d-[0-9]*d/local_fs:RANGE/" \
         -e "s/appended_partition_2_start_[0-9]*s/appended_partition_2_start_Xs/" \
-        -e "s/::'[^']*'/::'IMG'/" -e "s/:zero_mbrpt,zero_gpt:'[^']*'/:zero_mbrpt,zero_gpt:'IMG'/" "$1"
+        -e "s/::'[^']*'/::'IMG'/" -e "s/:zero_mbrpt,zero_gpt:'[^']*'/:zero_mbrpt,zero_gpt:'IMG'/" \
+        -e "s/:zero_mbrpt:'[^']*'/:zero_mbrpt:'IMG'/" "$1" |
+    if [ "$edition" = vm ]; then
+        # Re-derived by xorriso from the MBR's CHS fields on reading, which
+        # fails once a partition ends beyond cylinder 1023 (CHS saturates);
+        # the chs check below verifies the geometry and alignment directly.
+        grep -Ev '^-partition_(cyl_align|hd_cyl|sec_hd) '
+    else
+        cat
+    fi
 }
-if diff <(norm_mk "$META_DIR/el-torito.as_mkisofs.txt") <(norm_mk "$work/et.mkisofs") > "$work/d2"; then
-    pass mkisofs "$(wc -l < "$work/et.mkisofs" | tr -d ' ') replay options match modulo addresses"
+if diff <(norm_mk "$ref_et_mkisofs") <(norm_mk "$work/et.mkisofs") > "$work/d2"; then
+    pass mkisofs "$(norm_mk "$work/et.mkisofs" | wc -l | tr -d ' ') replay options match modulo addresses"
 else
     failc mkisofs "$(tr '\n' ' ' < "$work/d2")"
+fi
+
+# chs (VM edition: MBR with cylinder alignment): every MBR entry's CHS start
+# and end encode its LBAs in the base's geometry (saturated at cylinder 1023
+# as xorriso writes it), and the appended ESP starts and ends on a cylinder
+# boundary (-partition_cyl_align all). Checked on the base too, as a control.
+if [ "$edition" = vm ]; then
+    heads="$(awk '$1 == "-partition_hd_cyl" {print $2}' "$ref_et_mkisofs")"
+    secs="$(awk '$1 == "-partition_sec_hd" {print $2}' "$ref_et_mkisofs")"
+    chs_py='
+import struct, sys
+path, H, S = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+mbr = open(path, "rb").read(512)
+def chs(lba):
+    c = lba // (H * S)
+    if c > 1023:
+        return (1023, H - 1, S)
+    return (c, (lba // S) % H, lba % S + 1)
+def dec(b):
+    return (((b[1] & 0xC0) << 2) | b[2], b[0], b[1] & 0x3F)
+errs, parts = [], []
+for i in range(4):
+    e = mbr[446 + 16 * i:462 + 16 * i]
+    start, size = struct.unpack_from("<II", e, 8)
+    if e[4] == 0:
+        continue
+    parts.append((i + 1, e[4], start, size))
+    for what, lba, raw in (("start", start, e[1:4]), ("end", start + size - 1, e[5:8])):
+        if dec(raw) != chs(lba):
+            errs.append("p%d %s CHS %s != %s for LBA %d" % (i + 1, what, dec(raw), chs(lba), lba))
+for n, t, start, size in parts:
+    if t == 0xEF and (start % (H * S) or (start + size) % (H * S)):
+        errs.append("ESP p%d %d+%d not cylinder-aligned (%d sectors)" % (n, start, size, H * S))
+if errs:
+    print("; ".join(errs)); sys.exit(1)
+print("%d entries" % len(parts))
+'
+    if [ -z "$heads" ] || [ -z "$secs" ]; then
+        failc chs "base report has no MBR geometry"
+    elif ! b="$(python3 -I -c "$chs_py" "$base" "$heads" "$secs")"; then
+        failc chs "control failed, base MBR: $b"
+    elif out="$(python3 -I -c "$chs_py" "$new" "$heads" "$secs")"; then
+        pass chs "$out encode their LBAs in the base geometry ${heads}x${secs}; ESP cylinder-aligned (base: $b, same)"
+    else
+        failc chs "$out"
+    fi
 fi
 
 # descriptors: type byte of each volume descriptor from LBA 16 to the terminator
@@ -118,7 +202,10 @@ else
     failc descriptors "base [$vd_base] vs new [$vd_new]"
 fi
 
-# gpt: structure equal, sizes that must not change unchanged, layout contiguous
+# gpt (mbr for the VM edition's MBR-only base): structure equal, sizes that
+# must not change unchanged, layout contiguous
+pt=gpt
+[ "$edition" = vm ] && pt=mbr
 if out="$(python3 -I - "$work/base.json" "$work/new.json" <<'PY'
 import json, sys
 b = json.load(open(sys.argv[1]))["partitiontable"]
@@ -148,18 +235,18 @@ PY
     img_sectors="$(xorriso -indev "$new" -report_system_area plain 2>/dev/null | awk '/ISO image size\/512/ {print $NF}')"
     file_sectors=$(( $(file_size "$new") / 512 ))
     if ! sfdisk -V "$new" > "$work/v" 2>&1 || ! grep -q 'No errors detected' "$work/v"; then
-        failc gpt "sfdisk -V: $(tr '\n' ' ' < "$work/v")"
+        failc "$pt" "sfdisk -V: $(tr '\n' ' ' < "$work/v")"
     elif [ "$img_sectors" != "$file_sectors" ]; then
-        failc gpt "file is $file_sectors sectors, image is $img_sectors (not truncated?)"
+        failc "$pt" "file is $file_sectors sectors, image is $img_sectors (not truncated?)"
     else
-        pass gpt "$out; sfdisk -V clean; $file_sectors sectors"
+        pass "$pt" "$out; sfdisk -V clean; $file_sectors sectors"
     fi
 else
-    failc gpt "$out"
+    failc "$pt" "$out"
 fi
 
 # esp-bytes
-esp_size="$(python3 -I -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["partitiontable"]["partitions"] if x["type"].upper()=="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"]; print(p[0]["size"] if p else 0)' "$work/new.json")"
+esp_size="$(python3 -I -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["partitiontable"]["partitions"] if x["type"].upper() in ("C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "EF")]; print(p[0]["size"] if p else 0)' "$work/new.json")"
 esp_sum="$(dd if="$new" bs=4M iflag=skip_bytes,count_bytes skip=$(( ${esp_start:-0} * 512 )) \
     count=$((esp_size * 512)) 2>/dev/null | sha256sum | awk '{print $1}')"
 if [ "$esp_sum" = "$BASE_ESP_SHA256" ]; then

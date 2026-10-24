@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
 # verify-base-iso.sh - check the user-supplied base ISO against config/base-iso.env.
 #
-# Usage: scripts/verify-base-iso.sh [--iso PATH] [--no-cache]
+# Usage: scripts/verify-base-iso.sh [--edition jetson|vm] [--iso PATH] [--no-cache]
 #
 # Checks size, ISO9660 volume id, sha256, /.disk/info (Ubuntu release + build)
-# and that the kernel layer manifest lists nvidia-l4t-kernel $TEGRA_KERNEL.
+# and, for the Jetson ISO (config/base-iso.env, the default), that the kernel
+# layer manifest lists nvidia-l4t-kernel $TEGRA_KERNEL. --edition vm checks
+# the VM edition's Ubuntu ISO (config/vm-base-iso.env, default
+# build/downloads/NAME) instead: /.disk/info must also name the architecture,
+# and casper/install-sources.yaml must offer the ubuntu-server source.
 # Runs in the builder or on the host (shasum/bsdtar fallbacks). A passing sha256
-# is cached in build/meta/base-iso.verified keyed on name, size, mtime, inode
-# and ctime; pass --no-cache to always re-hash. Exits non-zero with the failing check named.
+# is cached in build/meta/base-iso.verified (vm-base-iso.verified) keyed on
+# name, size, mtime, inode and ctime; pass --no-cache to always re-hash.
+# Exits non-zero with the failing check named.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
-load_config
 
 iso=""
 use_cache=1
+edition=jetson
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --edition) edition="${2:?--edition needs jetson or vm}"; shift 2 ;;
         --iso) iso="${2:?--iso needs a path}"; shift 2 ;;
         --no-cache) use_cache=0; shift ;;
         -h|--help) usage_from_header; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
-[ -n "$iso" ] || iso="$(resolve_base_iso)"
+case "$edition" in
+    jetson) load_config; cache="$META_DIR/base-iso.verified" ;;
+    vm) load_vm_config; cache="$META_DIR/vm-base-iso.verified" ;;
+    *) die "--edition must be jetson or vm, got $edition" ;;
+esac
+if [ -z "$iso" ]; then
+    if [ "$edition" = vm ]; then iso="$(resolve_vm_base_iso)"; else iso="$(resolve_base_iso)"; fi
+fi
 [ -f "$iso" ] || die "ISO not found: $iso"
 
 fail() { die "verify FAILED [$1]: $2"; }
@@ -37,18 +50,17 @@ pvd="$(dd if="$iso" bs=2048 skip=16 count=1 2>/dev/null | dd bs=1 skip=1 count=7
 magic="$(printf '%s' "$pvd" | cut -c1-5)"
 [ "$magic" = "CD001" ] || fail volid "no ISO9660 primary volume descriptor (got '$magic')"
 volid="$(dd if="$iso" bs=2048 skip=16 count=1 2>/dev/null | dd bs=1 skip=40 count=32 2>/dev/null | tr -d '\000' | sed 's/ *$//')"
-[ "$volid" = "$BASE_ISO_VOLID" ] || fail volid "expected '$BASE_ISO_VOLID', got '$volid'"
+[ "$volid" = "$(config_volid)" ] || fail volid "expected '$(config_volid)', got '$volid'"
 log "ok volume id: $volid"
 
 # 3. sha256 (cached). The key includes inode and ctime, which touch/cp -p
 # cannot forge, so a different file with the same name/size/mtime re-hashes.
 # One line per environment: host and container see different inode numbers.
-cache="$META_DIR/base-iso.verified"
 key="$(basename "$iso") $size $(file_mtime "$iso") $(file_ident "$iso") $BASE_ISO_SHA256"
 if [ "$use_cache" = 1 ] && [ -f "$cache" ] && grep -qxF "$key" "$cache"; then
     log "ok sha256: $BASE_ISO_SHA256 (cached; --no-cache to re-hash)"
 else
-    log "hashing $iso (about 5 GB) ..."
+    log "hashing $iso ($((size / 1024 / 1024)) MiB) ..."
     sum="$(sha256_of "$iso")"
     [ "$sum" = "$BASE_ISO_SHA256" ] || fail sha256 "expected $BASE_ISO_SHA256, got $sum"
     log "ok sha256: $sum"
@@ -63,7 +75,21 @@ case "$info" in
     *"Ubuntu-Server $UBUNTU_RELEASE LTS"*"($BASE_ISO_DISK_INFO_BUILD)"*) ;;
     *) fail disk-info "expected 'Ubuntu-Server $UBUNTU_RELEASE LTS ... ($BASE_ISO_DISK_INFO_BUILD)', got '$info'" ;;
 esac
+if [ "$edition" = vm ]; then
+    case "$info" in
+        *"$BASE_ISO_ARCH"*) ;;
+        *) fail disk-info "expected the architecture '$BASE_ISO_ARCH' in '$info'" ;;
+    esac
+fi
 log "ok .disk/info: $info"
+
+if [ "$edition" = vm ]; then
+    sources="$(iso_cat "$iso" /casper/install-sources.yaml)" || fail sources "cannot read /casper/install-sources.yaml"
+    printf '%s\n' "$sources" | grep -qx '  id: ubuntu-server' || fail sources "install-sources.yaml offers no ubuntu-server source"
+    log "ok install sources: ubuntu-server"
+    log "PASS: $iso is the pinned VM base (Ubuntu $UBUNTU_RELEASE $BASE_ISO_ARCH)"
+    exit 0
+fi
 
 # 5. kernel layer manifest (lines are "[+]package<TAB>version")
 manifest="$(iso_cat "$iso" "/$KERNEL_LAYER_MANIFEST")" || fail kernel "cannot read /$KERNEL_LAYER_MANIFEST"

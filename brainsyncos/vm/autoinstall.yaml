@@ -1,0 +1,74 @@
+# BrainSyncOS VM edition: subiquity autoinstall for the stock Ubuntu Server
+# arm64 installer. scripts/build-vm-iso.sh puts it on the ISO at
+# /brainsyncos/autoinstall.yaml and checks it with scripts/check-autoinstall.py;
+# only the BrainSyncOS boot entries point subiquity at it
+# (subiquity.autoinstallpath=/cdrom/brainsyncos/autoinstall.yaml autoinstall).
+#
+# Nothing is interactive. The account, SSH policy and hostname are not made
+# here but by the same install hook as on the Jetson (payload/hook.sh ->
+# install.d/), from the logins baked into the build.
+# The installer needs a network (UTM's shared network has DHCP and NAT):
+# avahi-daemon, libnss-mdns and qemu-guest-agent are not on the ISO, and the
+# security updates are downloaded during the install.
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  timezone: Etc/UTC
+  source:
+    id: ubuntu-server
+  # The VM's only (virtual) disk: an ESP and one ext4 root, no LVM.
+  storage:
+    layout:
+      name: direct
+  # DHCP on the virtual NIC with the MAC as client identifier, in the
+  # installer and (subiquity writes this section to the target's netplan) on
+  # the installed system. netplan's default is a machine-id DUID, which macOS's
+  # DHCP server (bootpd) records instead of the MAC; scripts/utm-vm.sh finds
+  # the VM by its fixed MAC in /var/db/dhcpd_leases.
+  network:
+    version: 2
+    ethernets:
+      nics:
+        match:
+          name: "en*"
+        dhcp4: true
+        dhcp-identifier: mac
+  ssh:
+    install-server: true
+    # Our sshd drop-in (40-ssh.sh) forbids passwords anyway; this keeps
+    # cloud-init from writing PasswordAuthentication yes.
+    allow-pw: false
+  packages:
+    - openssh-server
+    # NAME.local from the Mac (mDNS on UTM's shared network).
+    - avahi-daemon
+    - libnss-mdns
+    # utmctl ip-address / exec / file (QEMU backend).
+    - qemu-guest-agent
+  updates: security
+  # No identity section, so no installer-made user: 30-user.sh creates the
+  # account. user-data satisfies subiquity's "identity or user-data" rule;
+  # users: [] stops cloud-init from adding the default "ubuntu" user on first
+  # boot, and preserve_hostname keeps 20-hostname.sh's name.
+  user-data:
+    users: []
+    preserve_hostname: true
+  late-commands:
+    - /bin/bash /cdrom/brainsyncos/hook.sh
+    # Belt and braces: subiquity already skips "remove the installation medium".
+    - touch /run/casper-no-prompt
+    # Last: tell scripts/utm-vm.sh install (which reads the serial console)
+    # that everything above succeeded, so a power-off means "installed" and
+    # not "stopped at the boot menu". The marker is assembled at run time so
+    # that a console showing this command line does not contain it.
+    - /bin/sh -c 'm=INSTALL-OK; for c in /dev/hvc0 /dev/ttyAMA0; do [ -c "$c" ] && timeout 5 sh -c "echo BRAINSYNCOS-$m > $c"; done; true'
+  # On any failure (the hook included) subiquity stays at its error screen and
+  # does not power off; this marker lets utm-vm.sh install fail at once.
+  error-commands:
+    - /bin/sh -c 'm=INSTALL-FAILED; for c in /dev/hvc0 /dev/ttyAMA0; do [ -c "$c" ] && timeout 5 sh -c "echo BRAINSYNCOS-$m > $c"; done; true'
+  # Power off when done (not reboot): the ISO is still attached, and booting
+  # it again would reinstall. scripts/utm-vm.sh install waits for the VM to
+  # stop, ejects the ISO and starts it from its disk.
+  shutdown: poweroff

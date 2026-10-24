@@ -32,6 +32,12 @@ without NVIDIA's first-boot setup (OOBE):
 - key-only SSH
 - NVIDIA's OOBE skipped
 
+The **VM edition** (`scripts/build-vm-iso.sh`) is a second build target for
+development without a Jetson: stock Ubuntu Server 24.04 arm64, remastered so
+that UTM on an Apple Silicon Mac installs it unattended with the same install
+hook, account, SSH policy and hostname scheme. See
+[VM edition (UTM on Apple Silicon)](#vm-edition-utm-on-apple-silicon).
+
 BrainSync itself is not installed yet; that is Phases 3 and 4.
 
 ## Base image (user-supplied)
@@ -151,26 +157,262 @@ If the hook fails, the installer stops with an error, on purpose. The log is in 
 
 **The hook only runs on NVIDIA's Orin autoinstall path** (`jetsoniso_orin-ai.yaml`). If `preseed.sh` cannot detect the board or the boot disk (for example, no NVMe drive behind the NVMe entry), or `run-subiquity`/`force-ai=`/`force-platform=` is on the kernel command line, it falls back to the interactive stock Ubuntu installer. That installs **without** BrainSync and without NVIDIA's L4T steps. If `/etc/brainsyncos-release` is missing after an install, that is what happened; check the disk and use the matching menu entry.
 
+## VM edition (UTM on Apple Silicon)
+
+A second build target for working on BrainSyncOS without a Jetson: the BrainSync
+app, the kiosk session and new `install.d` steps can be developed and tested in a
+UTM VM on the Mac, with the same `brainsync` account, key-only SSH, hostname
+scheme and `/etc/brainsyncos-release` as the device.
+
+**What it is:** stock **Ubuntu Server 24.04.5 arm64** (`config/vm-base-iso.env`),
+installed unattended by Ubuntu's own installer, then the same `payload/hook.sh`
+and `install.d/` steps as on the Jetson.
+**What it is not:**
+- no L4T, no CUDA/TensorRT, no NVIDIA services or OOBE, no Jetson kernel
+- the PsychoPy flicker timing is **not** representative: a virtual display has
+  no real vsync, so frame-locked stimulus timing must be validated on the device
+- the Cerelog EEG board only reaches the VM through USB passthrough, which on
+  macOS 26 needs the **QEMU backend** (see below)
+
+### Build it
+
+```sh
+cd brainsyncos
+scripts/fetch-vm-base.sh                          # once: 3.6 GB into build/downloads/, sha256 + signed SHA256SUMS
+scripts/builder.sh run scripts/build-vm-iso.sh    # -> build/out/brainsyncos-0.1.0-vm-arm64.iso (~20 s)
+tests/test_vm.sh                                  # 18 checks with a throwaway key (~3 min)
+```
+
+- `fetch-vm-base.sh` resumes an interrupted download (`.part`), checks the size
+  and sha256 pins, requires the pin to be the value in Canonical's `SHA256SUMS`, and
+  checks that file's signature with `gpgv` in the builder (the Ubuntu archive keyring
+  ships in the builder image; `--no-signature` skips it). A verified file is
+  stamped and never downloaded or hashed again. A mismatch is fatal; an existing
+  file is never deleted unless you pass `--force`.
+- `build-vm-iso.sh` takes the same login options as `build-iso.sh`
+  (`--authorized-keys`, `--password-hash`, `--name`, `--build-id`); by default your
+  `config/authorized_keys` and `config/brainsync-password.hash`.
+- Settings: `config/vm.env` (`EDITION=vm-arm64`, `VM_GRUB_TIMEOUT`, `VM_INSTALL_KERNEL`
+  ga|hwe, `VM_CONSOLES`, and the UTM defaults: `VM_NAME`, `VM_BACKEND`, memory,
+  CPUs, disk). Version, account and hostname prefix come from `config/brainsyncos.env`,
+  shared with the Jetson edition.
+
+### Run it in UTM
+
+`scripts/utm-vm.sh` drives UTM 4.7 by AppleScript. It only ever touches VMs whose
+names start with `BrainSyncOS`.
+
+```sh
+scripts/utm-vm.sh check                 # UTM found, Apple Events allowed (first run: answer OK)
+scripts/utm-vm.sh create                # VM "BrainSyncOS": Apple Virtualization, 4 GiB, 4 CPUs, 32 GiB, installer drive
+scripts/utm-vm.sh install               # boot -> pick "Install BrainSyncOS ..." -> waits -> ejects installer -> boots -> prints ssh
+ssh brainsync@<ip>                      # or: scripts/utm-vm.sh ssh-info
+scripts/utm-vm.sh stop | start | status | ip | eject-iso | list
+scripts/utm-vm.sh delete                # asks you to type the VM name
+scripts/utm-vm.sh create --backend qemu --name BrainSyncOS-usb   # for USB passthrough
+```
+
+- **The installer is an imported drive, not a removable CD.** Sandboxed UTM opens a
+  removable drive's file only when you picked it in UTM's own file dialog; one set by
+  script fails at start with "Cannot access resource". So `create` clones the ISO
+  (APFS clone, no extra disk space) into UTM's container and UTM imports it into the
+  VM bundle as `brainsyncos-installer.iso`. `eject-iso` (and `install`, after the
+  install) removes that drive, recognised by its file name in the bundle's
+  `config.plist`, and UTM deletes the file. `utmctl start` exits 0 even when UTM
+  refuses to start a VM, so `start` and `install` check that the VM is running and
+  print UTM's message if not.
+- **The install needs network access.** UTM's default shared network provides it.
+  `avahi-daemon`, `libnss-mdns` and `qemu-guest-agent` are not on the ISO, and the
+  security updates are downloaded during the install.
+- The boot menu waits for you (`VM_GRUB_TIMEOUT=-1`). The first entry, **Install
+  BrainSyncOS 0.1.0 (VM, erases the virtual disk)**, installs unattended (about 10
+  to 20 minutes) and then **powers the VM off**. It does not reboot, because the ISO
+  is still attached and would install again. `install` waits for that power-off,
+  ejects the ISO, starts the VM from its disk and waits for SSH. It reads the serial
+  console (`build/vm/NAME-install.log`): the last late-command prints
+  `BRAINSYNCOS-INSTALL-OK` there and `error-commands` print `BRAINSYNCOS-INSTALL-FAILED`.
+  A power-off without the success marker (stopped at the boot menu, window closed,
+  crash) keeps the ISO attached so `install` can simply run again; a failure marker
+  ends the wait at once (subiquity stays at its error screen and does not power off).
+  Without any console output it falls back to "ran at least 5 minutes". `install
+  --hide` is refused while the boot menu waits for a key (`VM_GRUB_TIMEOUT=-1`).
+  *Advanced options*
+  has the same install with the HWE kernel, plus Ubuntu's stock installer entries
+  unchanged (no BrainSyncOS).
+- **Logging in:** `ssh brainsync@<ip>` with the build's key (or the console password,
+  if you built one). The VM announces `brainsync-<suffix>.local` over mDNS. The
+  console login screen shows `BrainSyncOS 0.1.0 VM edition (build …), IP <address>`.
+  `utm-vm.sh ip` finds the address in macOS's DHCP leases (`/var/db/dhcpd_leases`,
+  newest lease wins): the NIC has a fixed MAC derived from the VM name, and the
+  autoinstall's `network` section sets `dhcp-identifier: mac` on the installer and
+  the installed system (netplan's default, a machine-id DUID, would be recorded
+  instead of the MAC). Else it uses the host's ARP cache, and on QEMU the guest agent.
+- AppleScript and `utmctl` calls time out after 120 s. A timeout usually means macOS
+  is still asking whether your terminal may control UTM: answer OK.
+- **Backends:**
+  - `apple` (default): Apple Virtualization, fast, serial console `hvc0`.
+  - `qemu`: QEMU with Hypervisor.framework. Serial console `ttyAMA0` on a local TCP
+    port (`utm-vm.sh create` prints it). Has the guest agent (`utmctl ip-address`) and
+    USB sharing.
+- **EEG board (USB passthrough):** QEMU backend only on macOS 26 (Apple
+  Virtualization gets USB in macOS 27). UTM 4.7 cannot enable it by script:
+  stop the VM, then *Edit → Input → USB Sharing* (USB 3.0), start it, and run
+  `utmctl usb list` / `utmctl usb connect BrainSyncOS-usb <VID:PID>`. Untested with
+  the real board: macOS may keep its own USB-serial driver on the device.
+- **Manual GUI fallback** (no automation permission): UTM → *Create a New Virtual
+  Machine* → *Virtualize* → *Linux*. Pick *Use Apple Virtualization* (or leave it
+  off for QEMU). Boot ISO image: `build/out/brainsyncos-0.1.0-vm-arm64.iso`. 4096 MiB,
+  4 cores, 32 GiB disk, shared network. Start it and pick the install entry. When the
+  VM has powered off, clear the ISO (*CD/DVD → Clear*) and start it again.
+- To reinstall, `delete` and `create` again (`install` refuses a VM without an
+  installer drive). After rebuilding the ISO, recreate the VM: the VM bundle holds
+  its own clone of the ISO it was created with.
+
+### How the VM ISO differs from Ubuntu's
+
+`build-vm-iso.sh` rebuilds nothing. It replays Ubuntu's boot setup (`-boot_image any
+replay`: MBR, El Torito EFI entry, the 7 MiB ESP with shim + signed GRUB, byte for
+byte) and maps three paths over it:
+
+| ISO path | Change |
+|---|---|
+| `/brainsyncos/` | the payload (`hook.sh`, `install.d/`), `release` (`EDITION=vm-arm64`), `settings.env`, `config/` logins, and `autoinstall.yaml` (from `vm/autoinstall.yaml`) |
+| `/boot/grub/grub.cfg` | the BrainSyncOS menu (`scripts/render-vm-grub.py`) |
+| `/md5sum.txt` | Ubuntu's entries, in Ubuntu's (not sorted) order, plus the staged files |
+
+- **The autoinstall is only used from our menu entries.** Their kernel line is
+  Ubuntu's plus `autoinstall subiquity.autoinstallpath=/cdrom/brainsyncos/autoinstall.yaml`
+  before `---`. `autoinstall` skips subiquity's "Continue with autoinstall?" prompt.
+  After `---` (which the installed system's kernel line inherits) come
+  `console=ttyAMA0 console=hvc0 console=tty0`. Nothing goes to `/cdrom/autoinstall.yaml`,
+  where subiquity would pick it up for every entry, so the stock entries stay stock.
+- **The autoinstall** (`vm/autoinstall.yaml`; checked at build time by
+  `scripts/check-autoinstall.py`):
+  - **storage:** `direct` layout on the one disk.
+  - **ssh:** `install-server: true`, `allow-pw: false`.
+  - **packages:** `openssh-server`, `avahi-daemon`, `libnss-mdns`, `qemu-guest-agent`.
+  - **updates:** `security`.
+  - **network:** DHCP on `en*` with `dhcp-identifier: mac` (see Logging in).
+  - **late-commands:** `/bin/bash /cdrom/brainsyncos/hook.sh` first; last, the
+    `BRAINSYNCOS-INSTALL-OK` console marker (assembled at run time, so a console
+    that echoes the command line does not show it). **error-commands:** the
+    `BRAINSYNCOS-INSTALL-FAILED` marker.
+  - **shutdown:** `poweroff`.
+  - **No `identity` section:** the account comes from `30-user.sh`, as on the Jetson.
+    Subiquity accepts a `user-data` section instead. `users: []` stops cloud-init
+    from creating Ubuntu's default `ubuntu` user on first boot, and
+    `preserve_hostname: true` keeps our hostname.
+- **Boot structure:**
+  - ISO9660 and Joliet names are kept exactly, with
+    `ISO_COMPLIANCE=iso_9660_level=3:joliet_long_names:allow_dir_id_ext:joliet_long_paths`.
+    That is Jetson's rule set without `lowercase`, found by trial as in Phase 1.
+  - Ubuntu's MBR uses cylinder alignment (228 heads × 32 sectors). The new image
+    is one cylinder larger, so the ESP now ends past cylinder 1023, and xorriso can
+    no longer re-derive the geometry from the saturated CHS fields. `compare-iso.sh
+    --edition vm` therefore checks the CHS fields and the ESP's cylinder alignment
+    directly (`chs`), with Ubuntu's own MBR as a control.
+
+**Shared with the Jetson edition, made edition-safe:**
+- `hook.sh` reads `EDITION` from the release file. A Jetson keeps its device-tree
+  identity, exactly as before. A VM has no device tree (UEFI + ACPI), so the model
+  comes from DMI, and the serial is the first usable of `product_serial`,
+  `product_uuid` (UTM's VM UUID on QEMU) and the live system's `machine-id`.
+  `device.env` records `BSOS_EDITION`, `BSOS_MODEL` and `BSOS_ID_SOURCE` as well.
+  The "built for Jetson Orin Nano" warning only applies to the Jetson edition.
+- `00-release.sh` requires a known `EDITION`. `10-issue.sh` shows `VM edition` and
+  the IP (agetty's `\4`) on the VM.
+- `50-skip-oobe.sh` only switches to `graphical.target` when the default target is
+  NVIDIA's `nv-oobe.target`. Otherwise it leaves the default alone, so a server VM
+  keeps its own.
+- The groups in `30-user.sh` are filtered to those that exist (no `gpio`/`i2c` on a VM).
+
+**Tested without UTM** (`tests/test_vm.sh`, 18 checks; the in-container halves are
+in `tests/vm-checks.sh`):
+- **Configs and fetch:** config validation, both configs in macOS bash 3.2, fetch
+  idempotency and wrong-pin refusal, base verification.
+- **Generators:** the boot menu and md5 generators on Ubuntu's real files.
+- **The autoinstall:** checked against the JSON schema that this ISO's own subiquity
+  (snap rev 7426) generates, plus seventeen broken variants that must be rejected. Its
+  `user-data` passes the target's own `cloud-init schema`.
+- **Login checks:** `build-vm-iso.sh` refuses bad or missing logins.
+- **`utm-vm.sh` without a VM:** name guard, `--dry-run` for both backends, and all
+  AppleScripts compiled against UTM's dictionary. With stub `osascript`/`utmctl`/`arp`:
+  captured AppleScript results come back at once (not after the 120 s watchdog),
+  the address lookup (newest `1,MAC` lease, DUID leases ignored, ARP fallback), the
+  timeout and `-1743` messages, and `install` refusing `--hide`, an immediate
+  power-off, a power-off without the success marker, and stopping at the failure
+  marker, each without ejecting the ISO. `create` hands UTM a clone staged in UTM's
+  container and removes it afterwards, `eject-iso` drops the drive whose bundle
+  file is `brainsyncos-installer.iso` (not the disk), and `start` fails with UTM's
+  message when utmctl exits 0 but the VM stays stopped.
+- **The built ISO:**
+  - its boot structure against Ubuntu's
+  - its contents, including every casper layer against Ubuntu's signed `casper/SHA256SUMS`
+- **The hook:** run against Ubuntu's real target layers.
+  - `ubuntu-server-minimal` and `ubuntu-server` are merged the way curtin copies
+    the overlay (163 whiteouts).
+  - `openssh-server` is `dpkg -i`'d from the ISO pool (it is not in the layers).
+  - A fake DMI supplies the model and serial, and there is no device tree.
+  - It covers: the release, issue and hostname; the serial fallbacks; the account;
+    Ubuntu's sshd effective config (`sshd -T`); the default target left alone; no
+    Jetson warning.
+  - The autoinstall's `network` section rendered by the target's own `netplan
+    generate` gives `Name=en*` with `ClientIdentifier=mac`.
+- **The boot chain:** `tests/boot-smoke.py` boots the ISO under plain QEMU (UEFI,
+  edk2) to the BrainSyncOS menu, presses Enter, and checks the kernel command line
+  and the start of the initramfs.
+
+**End to end in UTM 4.7.4 (macOS 26.6, M4), done by hand, not part of `test_vm.sh`:**
+a test ISO (throwaway key, test-only `VM_GRUB_TIMEOUT=5` via
+`BSOS_VM_PRODUCT_CONFIG`) went through `utm-vm.sh create` + `install` on both backends.
+Each run: unattended install in about 5 minutes, `BRAINSYNCOS-INSTALL-OK` read from
+the serial console (Apple PTY `hvc0`, QEMU TCP `ttyAMA0`), installer drive ejected,
+first boot, SSH with the key. The guest shows `EDITION=vm-arm64`, a
+`brainsync-<suffix>` hostname (Apple: DMI `product_serial`; QEMU: DMI
+`product_uuid`), passwordless sudo, `sshd -T` with `passwordauthentication no`,
+`permitrootlogin no` and `allowusers brainsync`, no `ubuntu`/`nvidia` user, `hook.sh:
+exit 0` in `/var/log/brainsyncos/install.log`, and no failed units. Root logins and
+password logins are refused (`Permission denied (publickey)`). The DHCP lease is
+recorded as `1,MAC`, so `utm-vm.sh ip` works; `NAME.local` resolves over mDNS; on
+QEMU `utmctl ip-address` works through the guest agent. Bugs this found and fixed in
+`utm-vm.sh`:
+- `POSIX file` inside UTM's `tell` block: UTM had to resolve it and failed (-1728).
+- `serial ports` in a configuration record compiled to the element class, so UTM
+  rejected the record (-1700); the script now uses `«class SrPt»`.
+- A scripted removable ISO cannot be opened by sandboxed UTM ("Cannot access
+  resource"), and `utmctl start` still exited 0. Fixed with the imported installer
+  drive, plus a status check after start.
+- The QEMU TCP console capture ran `nc` before QEMU was listening, and without `-d`,
+  so macOS `nc` dropped the connection at stdin's EOF. It now retries with `nc -d`.
+
 ## Layout
 
 ```
 brainsyncos/
   config/base-iso.env        pinned base ISO + release identity (KEY=value)
   config/brainsyncos.env     product: version, board, hooked autoinstall, boot menu
+  config/vm-base-iso.env     VM edition: pinned Ubuntu Server arm64 ISO (same keys + BASE_ISO_URL)
+  config/vm.env              VM edition: EDITION, boot menu, consoles, UTM VM defaults
   docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub tooling
   docs/base-iso-inventory.md tracked copy of the inventory report (deterministic)
   payload/                   copied to /brainsyncos on the ISO
     hook.sh                  late-command: installs the payload, runs install.d in-target
     install.d/NN-*.sh        install steps, run inside the installed system in order
+  vm/autoinstall.yaml        VM edition: subiquity autoinstall (-> /brainsyncos/autoinstall.yaml)
   scripts/
     lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO helpers
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
-    verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer
+    verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer (--edition vm)
+    fetch-vm-base.sh         VM edition: download + verify the Ubuntu ISO (host, resumable)
     extract-iso.sh           atomic, idempotent extraction + boot metadata
     inspect-iso.sh           inventory report
     repack-iso.sh            replay-preserving rebuild from build/iso-root
-    compare-iso.sh           El Torito / GPT / ESP / ISO9660+Joliet names / tree vs the base
+    compare-iso.sh           El Torito / GPT|MBR+CHS / ESP / ISO9660+Joliet names / tree vs the base
     build-iso.sh             the BrainSyncOS ISO (Phase 2)
+    build-vm-iso.sh          the BrainSyncOS VM edition ISO (UTM)
+    render-vm-grub.py        VM edition boot menu from Ubuntu's grub.cfg
+    check-autoinstall.py     validates vm/autoinstall.yaml (optionally against subiquity's schema)
+    utm-vm.sh                macOS: create/install/start/stop/delete BrainSyncOS* VMs in UTM
     patch-autoinstall.py     inserts the hook into an NVIDIA autoinstall file
     render-grub.py           BrainSyncOS boot menu from NVIDIA's grub.cfg
     merge-md5sums.py         md5sum.txt = vendor entries + staged files
@@ -181,6 +423,9 @@ brainsyncos/
     test_phase1.sh           end-to-end Phase-1 test
     test_phase2.sh           end-to-end Phase-2 test (host side)
     phase2-checks.sh         its in-container checks
+    test_vm.sh               end-to-end VM edition test (host side)
+    vm-checks.sh             its in-container checks
+    boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
     shims/curtin             `curtin in-target` as chroot, for the hook simulation
   build/                     gitignored cache and output
     iso-root/                the extracted ISO tree, owner-writable, symlinks kept
@@ -190,8 +435,11 @@ brainsyncos/
                              base-iso.verified
     reports/                 base-iso-inventory.md (copied to docs/ on a full run)
     stage/                   files build-iso.sh maps over the base ISO
+    stage-vm/                files build-vm-iso.sh maps over the Ubuntu ISO
+    downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg)
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
-    test-logs/phase{1,2}/    one log per test check
+    test-logs/{phase1,phase2,vm}/  one log per test check
+    vm/                      utm-vm.sh serial console captures
 ```
 
 ## How the repack works
@@ -293,7 +541,7 @@ Four more `install.d` steps run after `00-release.sh` and `10-issue.sh`. `hook.s
 | `20-hostname.sh` | `HOSTNAME_PREFIX-<last 6 of the serial>` in `/etc/hostname` and `/etc/hosts`. A cloud-init drop-in (`preserve_hostname: true`) keeps first boot from renaming it. |
 | `30-user.sh` | Creates `BRAINSYNC_USER` in NVIDIA's hardware groups plus `dialout` (the EEG board). It installs the SSH keys and, if built, the console password hash. Without a password the account is locked for password logins and gets passwordless sudo, checked with `visudo`. With one, sudo asks for it. It deletes NVIDIA's `nvidia`/`ubuntu` users, which have known passwords, if the `nooemconfig` path created them. It marks GNOME's first-login wizard done. |
 | `40-ssh.sh` | sshd drop-in: no root login, no passwords, `AllowUsers brainsync`. Enables `ssh.socket` and checks the result with `sshd -t`. |
-| `50-skip-oobe.sh` | `default.target` → `graphical.target`. Removes the `nv-oobe.target` links and `/etc/nv/nvautoconfig`. `nvpmodel`, `nvpower` and `nvfancontrol` stay enabled, because their packages also link them into `multi-user.target.wants`. |
+| `50-skip-oobe.sh` | `default.target` → `graphical.target` when NVIDIA's OOBE is the default target (a Jetson installed with `nooemconfig`, or the VM edition, keeps its default). Removes the `nv-oobe.target` links and `/etc/nv/nvautoconfig`. `nvpmodel`, `nvpower` and `nvfancontrol` stay enabled, because their packages also link them into `multi-user.target.wants`. |
 
 **What skipping OOBE skips:** NVIDIA's OOBE (`nv-oobe.sh`) only switches to `graphical.target`; GNOME Initial Setup then creates the user and shows **NVIDIA's Jetson software license**. A BrainSyncOS install never shows that license. Read it (`/usr/share/doc/nvidia-l4t-oobe/` on the device) and decide for yourself that you accept it, as you would on first boot of stock JetPack. Also not configured: Wi-Fi (Ethernet works out of the box; use `nmcli` over SSH), keyboard layout, time zone (UTC).
 
@@ -358,6 +606,8 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
 - **Phase 2.5: appliance identity. Done (see above).** Phases 2 and 2.5 are waiting on a hardware install on an Orin Nano.
   - Moved to Phase 4: dropping desktop extras. The kiosk session will replace GNOME, and removing packages now risks breaking NVIDIA's dependencies.
   - Open: Wi-Fi provisioning at build time.
+- **VM edition (UTM): done (see above).** Installed end to end in UTM on both backends. Not tried yet: USB passthrough of the real EEG board.
+  - Phase 3 and 4 `install.d` steps must run on both editions (or skip cleanly on the one they do not apply to).
 - **Phase 3: BrainSync payload.**
   - Build these in an arm64 chroot of the target layers:
     - the `ssvep` package
