@@ -180,6 +180,34 @@ def create_app(
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
                 "stt_echo_s": cfg.speech.stt_echo_s}
 
+    @app.get("/api/health")
+    async def health() -> dict:
+        """What tools/preflight.py checks: the decoder, the partner page, Claude and the voice.
+        Names, flags and reasons only: no keys, no conversation text. Async, so it reads the
+        orchestrator on the event loop, between ticks."""
+        status = orch.status()
+        page = hub.ui is not None
+        return {
+            "state": orch.state.value,
+            "resume_ready": status.resume_ready,
+            "decoder": {"connected": status.decoder_connected, "ok": status.decoder_ok,
+                        "display_ok": status.display_ok, "board_ok": status.board_ok,
+                        "message": status.decoder_message, "keyboard_mode": keyboard_mode,
+                        "fake_decoder": fake_decoder},
+            # A closed page's last mic report says nothing about the next one.
+            "partner_page": {"connected": page, "mic": status.mic if page else "",
+                             "mic_muted": status.mic_muted, "stt_mode": cfg.speech.stt_mode},
+            "llm": {"enabled": menus.enabled, "why_disabled": menus.why_disabled,
+                    "dynamic": cfg.menus.dynamic,
+                    "ok": status.llm_ok, "model": cfg.llm.model,
+                    "keepalive_s": cfg.llm.keepalive_s,
+                    # None until the first keep-alive call answered (or with keep-alive off)
+                    "warm_ok": menus._warm_ok, "keepalive_running": menus._keeper is not None},
+            "tts": {"enabled": tts.enabled, "why_disabled": tts.why_disabled,
+                    "provider": cfg.speech.provider, "model": cfg.speech.model,
+                    "voice_id": cfg.speech.voice_id, "format": cfg.speech.format},
+        }
+
     # -- the user's profile (ui/profile.html) ---------------------------------------------
 
     def profile_state() -> dict:

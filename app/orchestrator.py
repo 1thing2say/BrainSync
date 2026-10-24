@@ -362,6 +362,9 @@ class Orchestrator:
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
+            # STOP means stopped until Resume, even if a lost decoder paused us first: without
+            # this the flicker came back by itself when the bridge reconnected (rule 10).
+            self.paused_by_decoder = False
             self._send_decoder(Pause(reason="stop_button"))
         elif isinstance(msg, PartnerText):
             self._on_partner_text(msg.text, msg.source)

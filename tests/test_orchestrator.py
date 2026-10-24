@@ -1439,3 +1439,12 @@ def test_chatter_cannot_starve_the_trials():
                                   "I got tea. Do you want some"])
 def test_is_question_checks_each_sentence(text):
     assert is_question(text)
+
+
+def test_stop_after_a_decoder_loss_stays_stopped_when_the_bridge_returns():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()  # paused by the decoder: would resume by itself on reconnect
+    r.o.on_ui_message(Stop())  # the partner presses STOP while paused
+    r.connect()  # the bridge comes back and its hello passes
+    assert r.o.state is St.PAUSED  # STOP means stopped until Resume (rule 10)

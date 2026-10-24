@@ -97,6 +97,13 @@ pull requests.
 - **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
   mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
   draft describes 4 targets and 2-slot confirm trials.
+- **V6 hardening (2026-10-24, branch `feat/v6-hardening`):** `tools/preflight.py` prints PASS /
+  WARN / FAIL per demo check and a go / no-go line (`--url`, `--skip-network`, `--json`);
+  `tools/log_summary.py` reads the session logs (`--all`, `--json`, `--show-text`) for trials, the
+  C / W correct rate, seconds and selections per spoken reply, the option-1 rate and median / p95
+  Claude page latency (the V3 "Done when" numbers); `docs/DEMO.md` is the operator's runbook
+  (setup, start, preflight actions, headset checklist, demo script, fallbacks, honest claim).
+  Still to do: rehearse the script with the live decoder, and fill in the claim's numbers.
 
 ## System design
 
@@ -269,6 +276,9 @@ BrainSync/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
+    log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
+  docs/
+    DEMO.md             # operator's demo runbook (V6 items 2-3)
   logs/                 # gitignored
   tests/
 
@@ -608,7 +618,10 @@ python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Sa
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
-python tools/preflight.py
+python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
+python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
+
+# demo runbook: docs/DEMO.md
 
 # in ../ssvep (his venv), once he adds the bridge
 python -m ssvep.online.bridge               # headset + PsychoPy display, connects to our server
