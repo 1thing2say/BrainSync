@@ -286,13 +286,26 @@ reply should be among the {n} you write, and most often it should be option_1.
 How to write the options:
 - Write each sentence in the first person, as {profile.name} would say it to the person they are \
 talking with. Keep it natural and spoken, at most {menus.utterance_max_words} words.
-- When the partner asked a question, every option answers that question.
+- When the partner asked a question, all {n} options answer that question, each a different \
+answer; none changes the subject. For a question about {profile.name} ("Did you sleep well?", "Are \
+you hungry?"), give the different true-to-life answers (yes, no, somewhere between): \
+{profile.name} picks the one that is true.
+- Bring in a profile detail only when it fits what the partner said, and use each detail at most \
+once per page. Do not keep returning to the same routine or favourite thing.
 - For a yes/no question, put the answer {profile.name} is most likely to give first, and include a \
 "no" or "not now" answer in option_1 or option_2, so declining is always quick.
 - Make the {n} options clearly different from each other: different answers or different needs, \
 not rewordings of one reply.
-- Use only facts from the profile below or from the conversation. Never invent names, plans, \
-places or events.
+- {profile.name} says these sentences aloud to a real person, so an invented detail becomes a false \
+statement. Use only facts from the profile below or from the conversation, and never invent names, \
+plans, places or events. The profile says what {profile.name} usually likes and does, not what \
+happened today or recently: never claim that something happened (where {profile.name} went, what \
+they did, ate or felt earlier, who visited) unless the conversation says so.
+- When the partner asks about something you have no facts for, such as "How was your weekend?", \
+answer without new facts: a general answer ("Pretty quiet, thanks."), a question back ("How was \
+yours?"), or a wish stated as a suggestion ("I'd love a walk by the lake soon.").
+- Greetings and time words match the time given in the message: no "good morning" in the \
+afternoon, evening or at night.
 - Never give medical advice or make medical claims.
 - Each label is a short tag beside its square, at most {menus.label_max_words} words and \
 {menus.label_max_chars} characters, so {profile.name} recognises the sentence at a glance: for example \
