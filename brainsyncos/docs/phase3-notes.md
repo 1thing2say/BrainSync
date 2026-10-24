@@ -162,15 +162,15 @@ second key: a device only trusts the key its ISO came with.
 
 - `tests/test_phase3.sh`: **all 10 checks passed**: configs, builder caps, `build.sh`, key, packages, repo, apt helper, md5 maps, install hook, shellcheck.
 - `tests/test_phase2.sh`: **all 16 checks passed**. That includes the test ISO with the repository and the full 7-step hook in NVIDIA's target layer.
-- `tests/test_vm.sh`: the last *completed* run gave 18 of 19.
-  - The one failure was apt's `E: Can not write log (Is /dev/pts mounted?)` line in the install log.
-  - It is fixed (`Dpkg::Use-Pty=0` in `payload/lib/apt-repo.sh`), and the Phase 3 hook check now fails on any `E:`/`W:` line.
-  - The VM suite was re-running when this was pushed; **re-run `tests/test_vm.sh` to confirm**.
+- `tests/test_vm.sh`: **all 19 checks passed** (re-run after the `Dpkg::Use-Pty=0` fix).
+  - That includes the test ISO with the vm repository and the full 7-step hook in Ubuntu's target layers.
+  - It also includes the QEMU boot smoke test.
+  - The earlier run's only failure, apt's `/dev/pts` log line, is gone. The Phase 3 hook check now fails on any `E:`/`W:` line.
 - shellcheck v0.10.0 (`-x -S warning`) is clean over all BrainSyncOS scripts.
 
 ## Open items
 
-- **Confirm on the new machine:** re-run `tests/test_vm.sh` (see above), and run `tests/test_phase3.sh` under x86-64 emulation once.
+- **Confirm on the new machine:** run `tests/test_phase3.sh` once under x86-64 emulation.
 - **Review of 3a not finished.** A three-lens review (correctness, key handling and apt trust, install-time robustness on the real installers) was running when this was pushed; its results are not in this commit.
 - **Not exercised yet:** a real UTM install of a 3a ISO, i.e. the repository bind mount under real subiquity/curtin. The tests use a chroot shim for curtin.
 - **Clock risk:** the apt helper accepts a clock in the past (tested at 2001), and a clock past the key's expiry fails. That is correct, but a Jetson whose RTC jumps far ahead would fail the install.
