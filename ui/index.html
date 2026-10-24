@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BCI Voice</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
+  <div id="warning" class="overlay" role="dialog" aria-modal="true" aria-labelledby="warning-title">
+    <div class="card">
+      <h1 id="warning-title">Flicker warning</h1>
+      <p>The user's screen flickers at 15 and 17 Hz, the range most likely to trigger
+        photosensitive seizures. Nobody with photosensitive epilepsy or flicker sensitivity
+        should look at it.</p>
+      <p><kbd>Esc</kbd> on the flicker display or <strong>Stop</strong> here turns the flicker off
+        immediately.</p>
+      <button id="accept" class="primary">I understand, start</button>
+    </div>
+  </div>
+
+  <main class="layout">
+    <section class="mirror" aria-label="User's screen (mirror, no flicker)">
+      <header class="mirror-head">
+        <span id="state" class="state">Connecting…</span>
+        <span id="phase" class="phase"></span>
+      </header>
+      <div id="option" class="option">
+        <div id="option-count" class="option-count"></div>
+        <div id="option-text" class="option-text">Waiting for the server…</div>
+      </div>
+      <div id="targets" class="targets"></div>
+      <div id="speaking" class="speaking" hidden></div>
+    </section>
+
+    <aside class="panel">
+      <div class="badges" id="badges"></div>
+
+      <div class="controls">
+        <button id="stop" class="danger">Stop</button>
+        <button id="resume">Resume</button>
+      </div>
+
+      <h2>Conversation</h2>
+      <ol id="conversation" class="conversation" aria-live="polite"></ol>
+
+      <form id="say-form" class="say-form" autocomplete="off">
+        <input id="partner-input" type="text" placeholder="Type what the partner says, Enter to send"
+               aria-label="Partner says">
+        <button type="submit">Send</button>
+      </form>
+      <button id="ptt" class="ptt" disabled title="Push-to-talk arrives in V4">Hold to talk</button>
+
+      <p class="hint" id="hint"></p>
+    </aside>
+  </main>
+
+  <script src="speech.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
