@@ -10,13 +10,23 @@ Jetson ISO installer for JetPack 7.2.1 / Jetson Linux R39.2.1. That ISO is
 Ubuntu Server 24.04.3 with the subiquity installer and L4T added. We keep
 NVIDIA's boot chain and partition logic untouched and add BrainSync on top.
 
-Phase 1 (this tree) delivers five things:
+Phase 1 delivers five things:
 - a pinned, verified base ISO
 - an arm64 builder container (base image pinned by digest; apt packages are
   not snapshot-pinned, see below)
 - an idempotent extraction of the ISO
 - an inventory report, tracked at [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md)
 - a repack pipeline that is proven by a no-op roundtrip
+
+Phase 2 builds the first BrainSyncOS installer ISO for the **Jetson Orin
+Nano** (`scripts/build-iso.sh`):
+- a BrainSyncOS boot menu (NVMe / microSD / USB), with NVIDIA's kernel command lines unchanged
+- a BrainSync install hook in NVIDIA's autoinstall, which runs `/brainsyncos/install.d/*.sh` inside the freshly installed system
+- two install steps so far: `/etc/brainsyncos-release` and a BrainSyncOS line on the console login screen
+- a macOS USB writer (`scripts/write-usb.sh`)
+
+Phase 2 is still only the plumbing. NVIDIA's first-boot setup (OOBE) still
+runs, and BrainSync itself is not installed yet; those are Phases 3 and 4.
 
 ## Base image (user-supplied)
 
@@ -79,22 +89,83 @@ in-container job even when output is piped or redirected.
 When committing, add only `brainsyncos/` and `.gitignore`. The root
 `.gitignore` also excludes the tool-local `.claude/` and `.dmux/` directories.
 
+## Quickstart (Phase 2): build and install BrainSyncOS
+
+```sh
+cd brainsyncos
+export BASE_ISO=/path/to/jetsoninstaller-r39.2.1-2026-08-07-18-30-47-arm64.iso
+
+scripts/builder.sh run scripts/build-iso.sh          # -> build/out/brainsyncos-0.1.0-orin-nano.iso (~1 min)
+tests/test_phase2.sh                                  # builds it and runs 12 checks (~70 s; --reuse skips the build)
+
+scripts/write-usb.sh                                  # list external disks
+scripts/write-usb.sh build/out/brainsyncos-0.1.0-orin-nano.iso /dev/diskN   # ERASES diskN
+```
+
+Product settings live in `config/brainsyncos.env`:
+- `BRAINSYNCOS_VERSION`
+- `TARGET_BOARD`
+- `HOOKED_AUTOINSTALL`: which NVIDIA autoinstall files get the hook
+- `INSTALL_TARGET_DEFAULT`: `nvme`, `microsd` or `usb`, the boot-menu entry listed first
+- `GRUB_TIMEOUT`
+
+`GRUB_TIMEOUT=-1` (the default) waits at the boot menu for a key press, as NVIDIA's ISO does. A value of 0 or more makes the stick install unattended. Booting it then **erases the default disk with nobody at the keyboard**, so only set it for flashing several units in a row.
+
+The build id comes from the git revision of `brainsyncos/`, with `-dirty` appended for uncommitted changes. It ends up in the boot menu, on the ISO in `/brainsyncos/release`, and on the installed system in `/etc/brainsyncos-release`.
+
+## Installing on a Jetson Orin Nano
+
+1. **Firmware.** The board needs JetPack 6-era UEFI firmware (36.x) or newer before the r39 ISO can update it. A factory Orin Nano dev kit may need NVIDIA's JetPack 6 update path first; see the Orin Nano "update firmware" page. The ISO then updates QSPI itself with a UEFI capsule.
+2. **Write the stick.** Use `scripts/write-usb.sh` or balenaEtcher.
+3. **Boot it.**
+   1. Connect HDMI or DP, a keyboard and Ethernet. For the serial console, `sudo screen /dev/cu.usbmodem* 115200` on macOS.
+   2. Plug in the stick and power on. Press **Esc** at the NVIDIA logo, then pick the USB stick in the UEFI boot manager.
+4. **Pick the entry** for your disk: **Install BrainSyncOS … on NVMe SSD** or **… on microSD card**. The install erases that disk.
+5. **When the installer offers the firmware capsule update, press `Y` within about 30 s.** Skipping it breaks the install (NVIDIA known issue 6266271). The board reboots twice for the capsule, then the install continues for about 15 minutes. The second phase shows `BrainSyncOS - installing the BrainSync layer` just before `Step 13/13`.
+6. **First boot.** NVIDIA's OOBE asks for a user name and password, as stock JetPack does. Remove the stick when it is done.
+7. **Check the install:**
+
+   ```sh
+   cat /etc/brainsyncos-release            # VERSION, BUILD_ID, BASE_ISO_SHA256, INSTALLED=...
+   head -1 /etc/issue                      # BrainSyncOS 0.1.0 (build ...)
+   cat /var/log/brainsyncos/install.log    # ends with "hook.sh: exit 0"
+   cat /etc/nv_tegra_release               # R39 (release), REVISION: 2.1
+   ```
+
+If the hook fails, the installer stops with an error, on purpose. The log is in `/var/log/brainsyncos/install.log` on the live system (open a shell from the installer's error screen) and on the target disk.
+
+**The hook only runs on NVIDIA's Orin autoinstall path** (`jetsoniso_orin-ai.yaml`). If `preseed.sh` cannot detect the board or the boot disk (for example, no NVMe drive behind the NVMe entry), or `run-subiquity`/`force-ai=`/`force-platform=` is on the kernel command line, it falls back to the interactive stock Ubuntu installer. That installs **without** BrainSync and without NVIDIA's L4T steps. If `/etc/brainsyncos-release` is missing after an install, that is what happened; check the disk and use the matching menu entry.
+
 ## Layout
 
 ```
 brainsyncos/
   config/base-iso.env        pinned base ISO + release identity (KEY=value)
-  docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs tooling
+  config/brainsyncos.env     product: version, board, hooked autoinstall, boot menu
+  docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub tooling
   docs/base-iso-inventory.md tracked copy of the inventory report (deterministic)
+  payload/                   copied to /brainsyncos on the ISO
+    hook.sh                  late-command: installs the payload, runs install.d in-target
+    install.d/NN-*.sh        install steps, run inside the installed system in order
   scripts/
-    lib.sh                   strict mode, log/warn/die, paths, config loader, helpers
+    lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO helpers
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
     verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer
     extract-iso.sh           atomic, idempotent extraction + boot metadata
     inspect-iso.sh           inventory report
     repack-iso.sh            replay-preserving rebuild from build/iso-root
     compare-iso.sh           El Torito / GPT / ESP / ISO9660+Joliet names / tree vs the base
-  tests/test_phase1.sh       end-to-end Phase-1 test
+    build-iso.sh             the BrainSyncOS ISO (Phase 2)
+    patch-autoinstall.py     inserts the hook into an NVIDIA autoinstall file
+    render-grub.py           BrainSyncOS boot menu from NVIDIA's grub.cfg
+    merge-md5sums.py         md5sum.txt = vendor entries + staged files
+    write-usb.sh             macOS: guarded dd of an ISO to an external disk
+  tests/
+    testlib.sh               PASS/FAIL check runner
+    test_phase1.sh           end-to-end Phase-1 test
+    test_phase2.sh           end-to-end Phase-2 test (host side)
+    phase2-checks.sh         its in-container checks
+    shims/curtin             `curtin in-target` as chroot, for the hook simulation
   build/                     gitignored cache and output
     iso-root/                the extracted ISO tree, owner-writable, symlinks kept
     meta/                    el-torito.{plain,as_mkisofs}.txt, system-area.plain.txt,
@@ -102,8 +173,9 @@ brainsyncos/
                              md5sum.orig.txt, builder-packages.txt, extract.stamp,
                              base-iso.verified
     reports/                 base-iso-inventory.md (copied to docs/ on a full run)
-    out/                     repacked ISOs (+ .sha256, xorriso log, tree-changes.txt)
-    test-logs/phase1/        one log per test check
+    stage/                   files build-iso.sh maps over the base ISO
+    out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
+    test-logs/phase{1,2}/    one log per test check
 ```
 
 ## How the repack works
@@ -154,6 +226,61 @@ It also prunes host junk (`.DS_Store`, `._*`, Spotlight/fseventsd dirs) from
 - the ESP bytes, against the config pin
 - the full file tree (Rock Ridge), compared by content
 
+## How the BrainSyncOS build works (Phase 2)
+
+`build-iso.sh` never edits `build/iso-root`. It reads the three vendor files
+it changes straight from the base ISO and checks them against NVIDIA's
+`md5sum.txt`. It stages only what changes in `build/stage/`, then writes
+`xorriso -indev BASE ... -boot_image any replay -map build/stage /`, so every
+other file and all the boot bytes are NVIDIA's.
+
+| ISO path | Change |
+|---|---|
+| `/casper/…installer.kernel.nvidia.squashfs` | `ai/jetsoniso_orin-ai.yaml` gets 3 lines: a comment, a progress `logger` line, and `/bin/bash /cdrom/brainsyncos/hook.sh`. They go before NVIDIA's final `Step 13/13` line, after every vendor step. |
+| `/brainsyncos/` | the payload (`hook.sh`, `install.d/`) plus a `release` file |
+| `/boot/grub/grub.cfg` | the BrainSyncOS menu |
+| `/md5sum.txt` | vendor entries plus the staged files |
+
+**The rebuilt layer.**
+- It is unpacked in a tmpfs (`/scratch`), because its `trusted.overlay.*` xattrs need `CAP_SYS_ADMIN` and cannot live on the macOS bind mount.
+- Before patching, the build re-squashes the unmodified tree and requires a **byte-identical** match with NVIDIA's file (gzip, 1 MiB blocks, the original mkfs time). So the patched layer differs only in the one YAML file.
+- `tests/phase2-checks.sh layer` re-checks this on the finished ISO: content, mode, owner, mtime and xattrs of all 1430 paths.
+
+**The hook.** `patch-autoinstall.py` inserts the hook lines as text, so NVIDIA's formatting survives. It then parses both files with a YAML parser and requires:
+- every other key to be unchanged
+- `late-commands` to equal the vendor list plus exactly the hook
+
+That check caught a real bug during development. A `logger` message containing `: ` had turned the command into a YAML mapping, which subiquity would have rejected on the device.
+
+Our lines contain no `CHANGE_` text, so `preseed.sh`'s placeholder `sed`s cannot touch them. Anything `preseed.sh` appends (e.g. `offwhendone` → `poweroff`) still runs after the hook.
+
+**Design decision.** The Phase 1 roadmap suggested a `subiquity.autoinstallpath=` wrapper, which needs no squashfs change. Patching the overlay layer was chosen instead, because:
+- NVIDIA's Jetson ISO Customization Guide documents it
+- the byte-identical re-squash proves it changes only the one file
+- it does not depend on how subiquity re-reads its config after early-commands, which cannot be verified without hardware
+
+NVIDIA's built-in `oem-iso-cfg` hook was also rejected. It runs `/cdrom/oemdata/oem-iso-cfg.sh` *inside* the target, but this autoinstall bind-mounts the ISO at `/target/tmp/cdrom`, not `/target/cdrom`.
+
+**`hook.sh`** runs in the live installer (ISO at `/cdrom`, target at `$TARGET_MOUNT_POINT`, default `/target`). It:
+1. copies the payload to `/opt/brainsyncos/installer`
+2. runs each `install.d/NN-*.sh` with `curtin in-target`
+3. tees everything to `/var/log/brainsyncos/install.log`, which it copies to the target even on failure
+
+Any failing step fails the installation. It warns, but does not stop, if the board is not an Orin Nano.
+
+**Tested without hardware** (`tests/test_phase2.sh`, 12 checks):
+- **Generators:** the config validation, both generators against NVIDIA's real files including their failure modes, and the md5 merge identity.
+- **The built ISO:**
+  - its boot structure against the base: El Torito, GPT, ESP bytes, and every ISO9660/Joliet name unchanged with +6 added
+  - every staged file
+  - all 2463 untouched `md5sum.txt` entries
+  - read-only, root-owned payload modes
+- **The hook:** run from the built ISO against NVIDIA's real target base layer (`ubuntu-server-minimal.squashfs`), with `curtin in-target` simulated by `chroot`. That covers success, re-running, a failing step and a missing target.
+
+**Not tested yet:**
+- the real subiquity/curtin run on a Jetson
+- the firmware capsule path
+
 ## What the base ISO looks like (Phase 1 findings)
 
 The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `scripts/inspect-iso.sh` generates it into `build/reports/` and copies it to `docs/`. The output is deterministic and contains no host paths.
@@ -186,14 +313,12 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
 
 ## Roadmap
 
-- **Phase 2: unattended install hook.**
-  - Add a grub entry, set as the default with a timeout, that passes `subiquity.autoinstallpath=/cdrom/brainsyncos/autoinstall.yaml`.
-  - That wrapper's early-commands are:
-    1. `bash /ai/preseed.sh jetsoniso`, as its own list item, because the script ends with `exit 0`
-    2. a BrainSync patcher that appends late-commands to the generated `/autoinstall.yaml`
-  - The added late-commands create the appliance user `nooemconfig`-style, skip OOBE, and install BrainSync.
-  - This needs no squashfs change. Fallback: an extra layer `…nvidia.brainsync.squashfs` selected with `layerfs-path=`.
-  - Do not use `force-ai=/cdrom/...`, because `preseed.sh` runs `sed -i` on that file and the ISO is read-only.
+- **Phase 2: install hook. Done (see above).** Waiting on a hardware install on an Orin Nano.
+- **Phase 2.5: appliance identity** (more `install.d/` steps):
+  - a `brainsync` user with no default password, plus an SSH key from the build config
+  - skip NVIDIA's OOBE (`CHANGE_DOOEMCONFIG` path) without its `nvidia`/`ubuntu` users, which get known passwords
+  - hostname
+  - drop the desktop extras the kiosk does not need
 - **Phase 3: BrainSync payload.**
   - Build these in an arm64 chroot of the target layers:
     - the `ssvep` package
@@ -216,5 +341,6 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
   - A hardware test matrix: Orin Nano Super, AGX Orin and Thor; NVMe and microSD.
   - An update/OTA story; the apt upgrade path to r39.2 is not supported by NVIDIA.
 
-Nothing has been boot-tested on Jetson hardware yet. Phase 1 proves the
-structure and contents of the repacked ISO, not that it boots.
+Nothing has been boot-tested on Jetson hardware yet. Phases 1 and 2 prove the
+structure and contents of the ISO and run the hook against NVIDIA's real
+target filesystem in a container. They do not prove that it boots and installs.

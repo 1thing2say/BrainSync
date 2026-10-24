@@ -55,16 +55,9 @@ xlog="$OUT_DIR/$name.xorriso.log"
 changes="$OUT_DIR/$name.tree-changes.txt"
 rm_released "$partial" "$out" "$out.sha256"
 # Any failure or interrupt from here on drops the ~5 GB partial image.
-trap 'rm_released "$partial" "$OUT_DIR/.$name.sfdisk-V"' EXIT
+trap 'rm_released "$partial" "$partial.sfdisk-V"' EXIT
 
-# The replay copies the ESP and the system area from the base file itself;
-# check those bytes against the pins rather than trusting the sha256 cache.
-log "checking the base ISO boot bytes against the pinned hashes"
-esp_sum="$(dd if="$iso" bs=4M iflag=skip_bytes,count_bytes skip=$((BASE_ESP_START_SECTOR * 512)) \
-    count=$((BASE_ESP_SIZE_SECTORS * 512)) 2>/dev/null | sha256sum | awk '{print $1}')"
-[ "$esp_sum" = "$BASE_ESP_SHA256" ] || die "base ISO ESP sha256 is $esp_sum, expected $BASE_ESP_SHA256"
-sa_sum="$(dd if="$iso" bs=2048 count=16 2>/dev/null | sha256sum | awk '{print $1}')"
-[ "$sa_sum" = "$BASE_SYSTEM_AREA_SHA256" ] || die "base ISO system area sha256 is $sa_sum, expected $BASE_SYSTEM_AREA_SHA256"
+check_base_boot_bytes "$iso"
 
 # Host junk (Finder/Spotlight) must never reach the ISO or md5sum.txt.
 junk="$(cd "$ISO_ROOT" && find . \( -name .DS_Store -o -name '._*' -o -name .Spotlight-V100 \
@@ -101,27 +94,7 @@ if [ "$regen_md5" = 1 ]; then
 fi
 
 log "writing $out"
-if ! xorriso -indev "$iso" -outdev "$partial" \
-        -joliet on \
-        -compliance "$ISO_COMPLIANCE" \
-        -boot_image any replay \
-        -padding included \
-        -update_r "$ISO_ROOT" / \
-        -commit > "$xlog" 2>&1; then
-    tail -20 "$xlog" >&2
-    die "xorriso failed (log: $xlog)"
-fi
-grep -q 'Replayed [0-9]* boot related commands' "$xlog" || die "xorriso did not replay the boot setup (log: $xlog)"
-
-sectors="$(xorriso -indev "$partial" -report_system_area plain 2>/dev/null | awk '/ISO image size\/512/ {print $NF}')"
-[ -n "$sectors" ] || die "could not read the image size of $partial"
-truncate -s $((sectors * 512)) "$partial"
-sfdisk -V "$partial" > "$OUT_DIR/.$name.sfdisk-V" 2>&1 || true
-grep -q 'No errors detected' "$OUT_DIR/.$name.sfdisk-V" \
-    || { cat "$OUT_DIR/.$name.sfdisk-V" >&2; die "partition table of $partial is not valid"; }
-rm -f "$OUT_DIR/.$name.sfdisk-V"
-
-mv "$partial" "$out"
+# -update_r syncs the ISO tree to build/iso-root (adds, replaces and deletes).
+write_replayed_iso "$iso" "$partial" "$xlog" -update_r "$ISO_ROOT" /
+finalize_iso "$partial" "$out"
 trap - EXIT
-(cd "$OUT_DIR" && sha256sum "$name.iso" > "$name.iso.sha256")
-log "done: $out ($(file_size "$out") bytes, sha256 $(cut -d' ' -f1 "$out.sha256"))"

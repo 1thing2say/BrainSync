@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # compare-iso.sh - check a repacked ISO's boot structure and file tree (builder only).
 #
-# Usage: scripts/builder.sh run scripts/compare-iso.sh NEW.iso [--tree DIR]
+# Usage: scripts/builder.sh run scripts/compare-iso.sh NEW.iso [--tree DIR] [--boot-only]
 #                                    [--tree-only] [--extraction]
 #
 # Compares NEW.iso against the pinned base ISO and build/meta/ (from
@@ -21,6 +21,8 @@
 #   tree        xorriso -compare_r DIR (default build/iso-root) vs NEW.iso:
 #               content, type, mode, mtime, links; only /boot/boot.cat (the El
 #               Torito catalog, regenerated) and ctime may differ
+# --boot-only skips the tree check (for a BrainSyncOS build, whose tree differs
+# from the base on purpose; names then only requires every base name to stay);
 # --tree-only runs just the tree check (e.g. base ISO vs a fresh extraction);
 # --extraction also tolerates what extract-iso.sh changes on disk: permission
 # bits (it adds u+w) and symlink mtimes (osirrox cannot restore them).
@@ -32,11 +34,13 @@ load_config
 new=""
 tree="$ISO_ROOT"
 tree_only=0
+boot_only=0
 extraction=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --tree) tree="${2:?--tree needs a dir}"; shift 2 ;;
         --tree-only) tree_only=1; shift ;;
+        --boot-only) boot_only=1; shift ;;
         --extraction) extraction=1; shift ;;
         -h|--help) usage_from_header; exit 0 ;;
         -*) die "unknown argument: $1" ;;
@@ -44,6 +48,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$new" ] || die "usage: compare-iso.sh NEW.iso [--tree DIR]"
+[ "$tree_only" = 1 ] && [ "$boot_only" = 1 ] && die "--tree-only and --boot-only exclude each other"
 require_container
 require_cmd xorriso sfdisk python3 sha256sum
 [ -f "$new" ] || die "no such ISO: $new"
@@ -234,6 +239,7 @@ fi
 
 fi # tree_only
 
+if [ "$boot_only" = 0 ]; then
 # tree
 # Lines look like: <type> '<disk path>' (DISK) : <field> : <disk> <> <iso>
 xorriso -indev "$new" -compare_r "$tree" / > "$work/cmp" 2>&1 || true
@@ -256,6 +262,7 @@ if grep -q -e 'Differences detected' -e 'match as far as expectable' "$work/cmp"
 else
     failc tree "xorriso -compare_r produced no verdict: $(tail -3 "$work/cmp" | tr '\n' ' ')"
 fi
+fi # boot_only
 
 if [ "$fails" -gt 0 ]; then
     log "$fails check(s) failed for $new"

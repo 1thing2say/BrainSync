@@ -1,0 +1,14 @@
+#!/bin/sh
+# curtin shim for tests: implements only `curtin in-target [--target=DIR] -- CMD...`,
+# as chroot into DIR (default $TARGET_MOUNT_POINT). Real curtin also bind-mounts
+# /dev, /proc and /sys, which BrainSyncOS install steps must not depend on.
+set -eu
+[ "${1:-}" = in-target ] || { echo "curtin shim: only 'in-target' is supported" >&2; exit 2; }
+shift
+target="${TARGET_MOUNT_POINT:-}"
+case "${1:-}" in
+    --target=*) target="${1#--target=}"; shift ;;
+esac
+[ "${1:-}" = -- ] && shift
+[ -n "$target" ] || { echo "curtin shim: no target" >&2; exit 2; }
+exec chroot "$target" "$@"

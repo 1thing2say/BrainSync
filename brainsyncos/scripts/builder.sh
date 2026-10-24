@@ -8,7 +8,9 @@
 #   scripts/builder.sh image            print the image reference
 #   scripts/builder.sh clean [--all]    delete build/out (--all: all of build/)
 #
-# Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro).
+# Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro),
+# a 3 GiB tmpfs at /scratch (squashfs work; with CAP_SYS_ADMIN for xattrs).
+# BSOS_GIT_REV carries the host's git revision (build id) into the container.
 # The ISO is $BASE_ISO if set, else ~/Downloads/$BASE_ISO_NAME; symlinks are
 # resolved first and the real file's directory is mounted.
 # The image tag is derived from the Dockerfile hash, so editing the Dockerfile
@@ -41,6 +43,18 @@ cmd_build() {
     log "built $ref"
 }
 
+# host_git_rev: short commit of the brainsyncos/ tree, "-dirty" if it has
+# uncommitted changes (build/ is gitignored), "unknown" outside git. Computed
+# on the host: the worktree's .git file points outside the container's mount.
+host_git_rev() {
+    local rev
+    rev="$(git -C "$BRAINSYNCOS_ROOT" rev-parse --short=12 HEAD 2>/dev/null)" || { echo unknown; return 0; }
+    if [ -n "$(git -C "$BRAINSYNCOS_ROOT" status --porcelain -- . 2>/dev/null)" ]; then
+        rev="$rev-dirty"
+    fi
+    printf '%s\n' "$rev"
+}
+
 ensure_image() {
     docker image inspect "$(image_ref)" >/dev/null 2>&1 || cmd_build
 }
@@ -62,14 +76,20 @@ cmd_run() {
     elif [ ! -t 0 ]; then
         io_flags="-i"
     fi
+    # /scratch is a tmpfs for unpacking squashfs layers: NVIDIA's overlay layers
+    # carry trusted.overlay.* xattrs, which only CAP_SYS_ADMIN may write and the
+    # macOS bind mount cannot store at all.
     # shellcheck disable=SC2086
     exec docker run --rm $io_flags $INIT_FLAGS \
         --platform "$BUILDER_PLATFORM" \
+        --cap-add SYS_ADMIN \
+        --tmpfs /scratch:rw,exec,size=3g \
         -v "$BRAINSYNCOS_ROOT:/work" \
         -v "$iso_dir:/in:ro" \
         -e BRAINSYNCOS_IN_CONTAINER=1 \
         -e BRAINSYNCOS_ROOT=/work \
         -e BASE_ISO="/in/$iso_base" \
+        -e BSOS_GIT_REV="$(host_git_rev)" \
         -w /work \
         "$(image_ref)" "$@"
 }

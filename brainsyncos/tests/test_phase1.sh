@@ -32,31 +32,8 @@ RT_NAME=phase1-roundtrip
 RT_ISO="$OUT_DIR/$RT_NAME.iso"
 mkdir -p "$LOGS"
 rm -f "$LOGS"/*.log
-
-npass=0
-nfail=0
-failed=""
-# check NAME CMD...: run CMD with output in $LOGS/NAME.log, report PASS/FAIL.
-check() {
-    local name="$1" t0 rc
-    shift
-    t0="$(date +%s)"
-    # Subshell outside any if/&&/|| so set -e stays in force inside the check.
-    set +e
-    ( set -e; "$@" ) > "$LOGS/$name.log" 2>&1
-    rc=$?
-    set -e
-    if [ "$rc" = 0 ]; then
-        npass=$((npass + 1))
-        printf 'PASS  %-22s (%ss)\n' "$name" $(( $(date +%s) - t0 ))
-    else
-        nfail=$((nfail + 1))
-        failed="$failed $name"
-        printf 'FAIL  %-22s (rc=%s, log: %s)\n' "$name" "$rc" "${LOGS#$BRAINSYNCOS_ROOT/}/$name.log"
-        tail -5 "$LOGS/$name.log" | sed 's/^/      | /'
-    fi
-    return 0
-}
+# shellcheck source=tests/testlib.sh
+source "$BRAINSYNCOS_ROOT/tests/testlib.sh"
 
 # rm_released truncates before unlinking: Docker Desktop keeps deleted
 # bind-mounted files open, which would otherwise pin ~5 GB per run.
@@ -238,9 +215,4 @@ if [ -f "$RT_ISO" ]; then
 fi
 check cleanup-roundtrip    t_cleanup
 
-echo
-if [ "$nfail" -gt 0 ]; then
-    echo "Phase 1: $npass passed, $nfail FAILED:$failed"
-    exit 1
-fi
-echo "Phase 1: all $npass checks PASSED"
+finish "Phase 1"
