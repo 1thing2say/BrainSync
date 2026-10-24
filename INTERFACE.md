@@ -1,5 +1,9 @@
 # BCI Voice — Decoder ↔ UI Interface (v1)
 
+> **Superseded.** The server no longer speaks v1: since 2026-10-23 (`d4c1af9`) it speaks only
+> protocol 2, specified in **`INTERFACE-v2-draft.md`**, which replaces this file once the teammate
+> confirms it at SYNC 1. Build the bridge against the draft, not this file.
+
 The shared contract between the **SSVEP decoder** (teammate, `ssvep/`) and the **voice + UI server**
 (Elijah, `app/`). Both Claude Code sessions should load this file. Change it only when both people
 agree, and bump `protocol` when a change breaks the other side.

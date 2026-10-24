@@ -1,9 +1,11 @@
 # BCI Voice — Decoder ↔ UI Interface (v2 DRAFT)
 
-**Status: proposal, not agreed.** `INTERFACE.md` (v1) stays the contract until the teammate agrees
-at SYNC 1; then this file replaces it and `protocol` becomes 2. v1 is then dropped: the server
-speaks only protocol 2. Background: `PLAN.md` sections 12–14 and System design. Elijah's decisions
-of 2026-10-23 (`PLAN.md` section 13) are already written in.
+**Status: implemented on our side, waiting for the teammate's confirmation at SYNC 1.** Since
+2026-10-23 (`d4c1af9`) the server and the fake decoder speak only protocol 2 as written here; v1
+(`INTERFACE.md`) is superseded, and this file replaces it once confirmed. Not built yet on the
+server: waiting for `baseline_done` (the baseline runs on a timer), pausing on `display_ok: false`,
+and `tools/contract_check.py`. Background: `PLAN.md` sections 12–14 and System design. Elijah's
+decisions of 2026-10-23 (`PLAN.md` section 13) are already written in.
 
 **What changed from v1, and why:** the flicker moved from the browser to the teammate's PsychoPy
 display, so the decoder side now owns the screen the user looks at. Its process, the **bridge**

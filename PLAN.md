@@ -24,6 +24,9 @@ pull requests.
 - Done on `dev`: V0 (schemas, config, event log, fake decoder) and V1 (partner page with screen
   mirror), plus the V2 server, scan-mode orchestrator and speech out. Try it with
   `python -m app.server --fake-decoder` and open `http://127.0.0.1:8000`.
+- The server and fake decoder speak only protocol 2 (`INTERFACE-v2-draft.md`) since `d4c1af9`; v1
+  is gone from the code. Not built yet: `tools/contract_check.py`, waiting for `baseline_done`
+  (the baseline still runs on a timer), and pausing on `display_ok: false`.
 - Read the teammate's `ssvep` code (section 12). Three facts shape this plan:
   1. **2 targets, not 4.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at 78–86 %
      single-target, and 64–93 % with both squares flickering (section 14); 3 targets (12/15/17)
@@ -73,8 +76,9 @@ pull requests.
 | Chrome partner page (`ui/`) | Elijah | Rendering, TTS, STT, STOP | Server only |
 | Claude API | — | Ranked reply options | Server only (`app/menus.py`) |
 
-The server ↔ bridge contract is `INTERFACE.md` (v1, in force) and `INTERFACE-v2-draft.md` (the
-proposal for SYNC 1, written for this design). The server ↔ browser messages are in section 6.
+The server ↔ bridge contract is `INTERFACE-v2-draft.md` (protocol 2): the server speaks only
+this, pending the teammate's confirmation at SYNC 1. `INTERFACE.md` (v1) is superseded and stays
+only until the draft replaces it. The server ↔ browser messages are in section 6.
 
 Design risks to settle:
 
@@ -84,9 +88,10 @@ Design risks to settle:
    (`screen = 0`, locked at 60 Hz); or the partner page on a phone (section 10, `server.host:
    0.0.0.0`; check that the phone browser's speech recognition works). With Chrome, PsychoPy and
    the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
-2. **The contract is behind the design.** v1 has the browser drawing the flicker and 4 square-wave
-   slots; `app/orchestrator.py` still sends the v1 `hello`. The bridge cannot be built until v2
-   (`INTERFACE-v2-draft.md`) is agreed, so it gates SYNC 2.
+2. **The contract is not confirmed yet.** The server speaks only protocol 2
+   (`INTERFACE-v2-draft.md`), but the teammate has not agreed it, and the bridge cannot be built
+   until they do, so it gates SYNC 2. Server parts of v2 still missing: waiting for
+   `baseline_done`, pausing on `display_ok: false`, and `tools/contract_check.py`.
 3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
    a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
    demo script rehearses switching to it.
@@ -175,8 +180,8 @@ Two repos. The decoder and display live in `1thing2say/ssvep` (his); this repo i
 BrainSync/
   CLAUDE.md             # local only
   PLAN.md
-  INTERFACE.md          # v1, in force
-  INTERFACE-v2-draft.md # proposal for SYNC 1
+  INTERFACE.md          # v1, superseded; kept until the draft replaces it
+  INTERFACE-v2-draft.md # protocol 2: what the server speaks; teammate to confirm at SYNC 1
   pyproject.toml
   config/
     default.yaml        # all tunables (section 5)
@@ -196,7 +201,7 @@ BrainSync/
     speech.js           # TTS (speechSynthesis) + STT (Web Speech API)
   tools/
     fake_decoder.py     # speaks INTERFACE.md: keyboard / random / scripted modes
-    contract_check.py   # validates decoder messages against schemas
+    contract_check.py   # stand-in server on :8000 for the bridge; pass/fail per message (not built yet)
     preflight.py        # demo go/no-go checks
   logs/                 # gitignored
   tests/
@@ -256,9 +261,9 @@ so 3 or 4 targets is a config change on both sides if the decoder improves.
 
 ## 6. Shared messages
 
-The UI ↔ decoder contract is in **`INTERFACE.md`**; implement it in `app/schemas.py` exactly. Any
-change to it must be agreed with the teammate and made in that file first. Proposed changes are
-listed in section 13; until agreed, build against v1 and keep the proposals behind config flags.
+The UI ↔ decoder contract is protocol 2 in **`INTERFACE-v2-draft.md`** (it replaces `INTERFACE.md`
+once the teammate confirms it at SYNC 1); `app/schemas.py` implements it exactly. Any change to it
+must be agreed with the teammate and made in that file first.
 
 Internal browser ↔ server messages (`/ws/ui`, JSON with a `type` field):
 
@@ -301,7 +306,7 @@ Hours are from kickoff. Integration checkpoints with the teammate are marked **S
 
 1. Scaffold `pyproject.toml`, `.gitignore` (`logs/`, `.env`), `pytest`, folder layout.
 2. `app/schemas.py`: all `INTERFACE.md` v1 messages + internal messages, with round-trip tests.
-   Accept optional `score`/`scores`. Model the section 13 proposals too, off by default.
+   Accept optional `score`/`scores`. (Built against v1; moved to protocol 2 on 2026-10-23.)
 3. `config/*.yaml` and a loader with validation (unique slot ids, exactly one `say` and one `next`
    role, positive timings).
 4. `tools/fake_decoder.py`: connects to `/ws/decoder`, answers `stim_start` with a `selection` after a
@@ -354,8 +359,8 @@ Done when: with `fake_decoder.py --random`, the app runs 20 trials in a row unat
 each SAY, with no stuck states.
 
 **SYNC 2 (h6):** his bridge connects to `/ws/decoder` (with `FakeSource` if the headset is not on),
-shows our text on his display and completes 5 trials. `tools/contract_check.py` shows no schema
-errors.
+shows our text on his display and completes 5 trials, and passes `tools/contract_check.py`, the
+stand-in server (`INTERFACE-v2-draft.md` section 8).
 
 ### V3 — LLM option ranking (h8–12)
 
@@ -468,7 +473,7 @@ pytest
 python -m app.server                        # real decoder connects to /ws/decoder
 python -m app.server --keyboard             # keys 1–2 select
 python tools/fake_decoder.py --random       # in a second terminal
-python tools/contract_check.py              # watch decoder messages for schema errors
+python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/preflight.py
 
 # in ../ssvep (his venv), once he adds the bridge
