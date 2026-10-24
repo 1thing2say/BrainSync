@@ -6,11 +6,6 @@ that flicker, an 8-channel Cerelog X8 EEG board picks it up, and a training-free
 (CCA or filter-bank CCA) works out which square you are looking at. The cue box then moves
 onto it and the label is spoken.
 
-This repository is a from-scratch rebuild of an earlier demo. It reproduces each phase of
-the original work from the data already recorded. Every number below was measured with
-this code on 2026-10-23 (the phase 3 numbers on 2026-10-24, after the decoder gained its
-rest threshold).
-
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
 > trigger a seizure in people with photosensitive epilepsy. Both demo targets (15 and
 > 17 Hz) lie inside it. Ask about epilepsy before every session. Stop at once if anyone
