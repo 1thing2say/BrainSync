@@ -31,6 +31,12 @@ profiles/
 Thumbs.db
 desktop.ini
 
+# Local ssvep reference copy, local tool state and recordings
+/ssvep/
+.dmux/
+data/*
+!data/README.md
+
 # Claude Code: local instructions and settings (never committed)
 CLAUDE.md
 CLAUDE.local.md

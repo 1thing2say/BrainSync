@@ -1,0 +1,111 @@
+<!doctype html>
+<!--
+  Mock of desktop Instagram Reels for trying BrainScroll without logging in.
+
+      .venv/bin/python -m http.server -d extension 8000
+      open http://127.0.0.1:8000/test/reels_mock.html          (?ws=ws://host:port to change)
+
+  A centred 9:16 column, 100vh tall, that snaps one of 20 reels per screen
+  (scroll-snap-type: y mandatory), each with a <video> so BrainScrollScroller picks the
+  column the way it picks Instagram's feed. The overlay talks to the bridge directly over
+  a WebSocket (agent "page"); there is no debugger fallback here.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reels mock</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+               font-family: -apple-system, system-ui, sans-serif; }
+  #feed { height: 100vh; width: calc(100vh * 9 / 16); max-width: 100vw; margin: 0 auto;
+          overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; }
+  #feed::-webkit-scrollbar { display: none; }
+  .reel { position: relative; height: 100%; scroll-snap-align: start; overflow: hidden;
+          display: flex; align-items: center; justify-content: center; }
+  .reel video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .reel .num { position: relative; font-size: 22vh; font-weight: 800; color: rgba(255,255,255,0.92);
+               text-shadow: 0 4px 24px rgba(0,0,0,0.5); }
+  .reel .bar { position: absolute; left: 0; width: 100%; height: 6vh; top: 0;
+               background: rgba(255,255,255,0.18); animation: sweep 2.4s linear infinite; }
+  .reel .caption { position: absolute; left: 16px; bottom: 20px; color: #fff; font-size: 15px; }
+  @keyframes sweep { from { transform: translateY(-6vh); } to { transform: translateY(100vh); } }
+</style>
+</head>
+<body>
+<div id="feed" aria-label="Reels"></div>
+<script src="../flicker.js"></script>
+<script src="../scroller.js"></script>
+<script src="../overlay.js"></script>
+<script>
+  "use strict";
+  (function () {
+    const N_REELS = 20;
+    const feed = document.getElementById("feed");
+    for (let i = 1; i <= N_REELS; i++) {
+      const reel = document.createElement("section");
+      reel.className = "reel";
+      reel.dataset.reel = String(i);
+      reel.style.background = "hsl(" + ((i * 47) % 360) + ", 55%, 32%)";
+      // No src: a transparent <video> that only has to exist for the container heuristic;
+      // the sweeping bar is the motion.
+      reel.innerHTML = '<video muted loop playsinline></video><div class="bar"></div>' +
+        '<div class="num">' + i + '</div><div class="caption">mock reel ' + i + ' of ' + N_REELS + '</div>';
+      feed.appendChild(reel);
+    }
+
+    /** Number of the reel filling the column (for tests and the console). */
+    window.currentReel = function () {
+      return Math.round(feed.scrollTop / feed.clientHeight) + 1;
+    };
+
+    // Direct WebSocket transport with the background worker's backoff: 1, 2, 4, 5, 5 s.
+    function socketTransport(url) {
+      const msgCbs = [], stateCbs = [];
+      let ws = null, backoff = 1000;
+      const emit = (st) => stateCbs.forEach((cb) => cb(st));
+      function connect() {
+        emit("connecting");
+        try {
+          ws = new WebSocket(url);
+        } catch (e) {
+          console.warn("[BrainScroll] bad ws url", url, e.message);
+          emit("closed");
+          return;
+        }
+        ws.onopen = () => { backoff = 1000; emit("open"); };
+        ws.onmessage = (ev) => msgCbs.forEach((cb) => cb(ev.data));
+        ws.onerror = () => {};
+        ws.onclose = () => {
+          ws = null;
+          emit("closed");
+          const wait = backoff;
+          backoff = Math.min(backoff * 2, 5000);
+          setTimeout(connect, wait);
+        };
+      }
+      return {
+        send(obj) {
+          if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("socket not open");
+          ws.send(JSON.stringify(obj));
+        },
+        onMessage: (cb) => msgCbs.push(cb),
+        onState: (cb) => stateCbs.push(cb),
+        connect,
+      };
+    }
+
+    const url = new URLSearchParams(location.search).get("ws") || "ws://127.0.0.1:8765";
+    const transport = socketTransport(url);
+    const scroller = async (dir) => {
+      const r = await BrainScrollScroller.scroll(dir);
+      return { ok: r.ok, method: r.method };
+    };
+    window.brainScroll = BrainScrollOverlay.create({ transport, scroller, agent: "page" });
+    transport.connect();
+  })();
+</script>
+</body>
+</html>
