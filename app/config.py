@@ -16,10 +16,10 @@ import math
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from app.schemas import Option, SlotId, SlotSpec, Waveform, validate_option
 
@@ -27,7 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"
 DEFAULT_INTENTS_PATH = CONFIG_DIR / "intents.yaml"
-DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"
+DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"  # the fictional demo persona (committed)
+USER_PROFILE_PATH = REPO_ROOT / "profiles" / "user.yaml"  # a real user's profile: gitignored
 DEFAULT_ENV_PATH = REPO_ROOT / ".env"  # gitignored; secrets such as CARTESIA_API_KEY
 
 REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
@@ -279,22 +280,47 @@ def check_intents(
 # ---------------------------------------------------------------------------
 
 
+# Short free-text entries (a like, a phrase, a topic). The limits keep the LLM prompt small.
+Item = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=60)]
+Sentence = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+
+
 class Person(Strict):
-    name: str = Field(min_length=1)
-    relation: str
+    name: str = Field(min_length=1, max_length=40)
+    relation: str = Field(default="", max_length=40)
+
+
+class Personality(Strict):
+    """How the user talks (the "personality map"). It shapes the tone and length of every option,
+    never its facts."""
+
+    formality: Literal["casual", "neutral", "formal"] = "neutral"
+    length: Literal["brief", "medium", "chatty"] = "brief"
+    humour: Literal["none", "light", "playful"] = "none"
+    warmth: Literal["reserved", "warm"] = "warm"
+    directness: Literal["gentle", "direct"] = "gentle"
+    phrases: list[Item] = Field(default_factory=list, max_length=10)  # things they often say
+    avoid_phrases: list[Item] = Field(default_factory=list, max_length=10)
+    notes: str = Field(default="", max_length=300)  # "how I talk", in their own words
 
 
 class Profile(Strict):
-    """Fictional demo persona. ``fictional: true`` is required so nobody drops in a real person."""
+    """Who the user is and how they talk. Facts are used only when the partner asks about them.
 
-    fictional: Literal[True]
-    note: str
-    name: str = Field(min_length=1)
-    about: str
-    likes: list[str]
-    dislikes: list[str]
-    people: list[Person]
-    routines: list[str]
+    The committed demo persona (config/profile.yaml) must say ``fictional: true``, so nobody drops
+    a real person into the repo; a real user's profile lives in the gitignored ``profiles/``.
+    """
+
+    fictional: bool = False
+    note: str = ""
+    name: str = Field(min_length=1, max_length=40)
+    about: str = Field(default="", max_length=300)
+    likes: list[Item] = Field(default_factory=list, max_length=15)
+    dislikes: list[Item] = Field(default_factory=list, max_length=15)
+    people: list[Person] = Field(default_factory=list, max_length=15)
+    routines: list[Sentence] = Field(default_factory=list, max_length=10)
+    avoid_topics: list[Item] = Field(default_factory=list, max_length=10)  # never brought up
+    personality: Personality = Field(default_factory=Personality)
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +411,33 @@ def load_intents(
 
 
 def load_profile(path: str | Path | None = None) -> Profile:
-    """Load and validate profile.yaml (or ``path``). Raises ConfigError listing every problem."""
+    """Load and validate the demo persona, profile.yaml (or ``path``); it must be fictional.
+    Raises ConfigError listing every problem."""
     path = Path(path) if path is not None else DEFAULT_PROFILE_PATH
+    profile = _validate(Profile, _read_yaml(path), path)
+    if not profile.fictional:
+        raise ConfigError(path, ["fictional: the demo persona must say fictional: true "
+                                 "(a real user's profile belongs in profiles/user.yaml)"])
+    return profile
+
+
+def load_user_profile(path: str | Path = USER_PROFILE_PATH) -> Profile | None:
+    """The user's own profile, or None if there is none yet. Raises ConfigError if it is invalid."""
+    path = Path(path)
+    if not path.exists():
+        return None
     return _validate(Profile, _read_yaml(path), path)
+
+
+def save_user_profile(profile: Profile, path: str | Path = USER_PROFILE_PATH) -> None:
+    """Write the user's profile (a temp file, then replace, so a crash never leaves half a file)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(profile.model_dump(), sort_keys=False, allow_unicode=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("# Personal profile: stays on this computer (profiles/ is gitignored).\n" + body,
+                   encoding="utf-8")
+    os.replace(tmp, path)
 
 
 __all__ = [
@@ -416,10 +466,14 @@ __all__ = [
     "IntentsConfig",
     "check_intents",
     "Person",
+    "Personality",
     "Profile",
+    "USER_PROFILE_PATH",
     "load_config",
     "load_intents",
     "load_profile",
+    "load_user_profile",
+    "save_user_profile",
 ]
 
 

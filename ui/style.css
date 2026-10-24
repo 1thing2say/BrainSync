@@ -106,3 +106,22 @@ button.target:disabled { cursor: default; opacity: 1; }
   .layout { grid-template-columns: 1fr; }
   .panel { border-left: none; border-top: 1px solid var(--line); }
 }
+
+/* Profile page (ui/profile.html) */
+.profile-page { max-width: 46rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; display: flex;
+  flex-direction: column; gap: 1rem; }
+.profile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.profile-head h1 { margin: 0; }
+.back-link, .profile-link { color: var(--next); }
+.profile-page fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 1rem;
+  display: flex; flex-direction: column; gap: 0.75rem; margin: 0 0 1rem; }
+.profile-page legend { padding: 0 0.4rem; color: var(--muted); text-transform: uppercase;
+  font-size: 0.8rem; letter-spacing: 0.08em; }
+.profile-page label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.9rem; }
+.profile-page input:not([type="radio"]), .profile-page textarea { font: inherit; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.65rem; }
+.profile-page .choice { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem;
+  font-size: 0.9rem; }
+.profile-page .choice label { flex-direction: row; align-items: center; gap: 0.35rem; }
+.preview h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.preview .option-list li { color: var(--text); }

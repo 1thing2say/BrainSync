@@ -68,6 +68,13 @@ pull requests.
   `llm.timeout_s` (4 s), then shows the fixed list; a later page is dropped. The page after a
   spoken reply is the fixed home list. A failed "More options" falls back to the fixed "more"
   list. Needs `ANTHROPIC_API_KEY` in `.env`; the log summary (latency, option-1 rate) is V6.
+- **User profile and plain replies (2026-10-24, branch `feat/personality-profile`):** replies say
+  only basic things (the main answers to a question; profile facts only when asked about) in the
+  user's own voice. `/profile.html` edits the user's facts and a personality map (formality,
+  length, humour, warmth, directness, phrases), saved to the gitignored `profiles/user.yaml`;
+  the fictional demo persona is the default. `python tools/llm_eval.py [--profile file]` runs 12
+  fixed partner lines through Claude and flags unasked profile details, claimed events, long
+  sentences and questions without different answers.
 - **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
   mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
   draft describes 4 targets and 2-slot confirm trials.
@@ -569,6 +576,7 @@ python -m app.server                        # real decoder connects to /ws/decod
 python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
+python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
 python tools/preflight.py
 
 # in ../ssvep (his venv), once he adds the bridge

@@ -343,3 +343,74 @@ def test_invalid_profile_raises(tmp_path: Path, change: dict[str, Any], expected
     with pytest.raises(ConfigError) as exc:
         load_profile(_write(tmp_path, data, "profile.yaml"))
     assert expected in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The user's own profile (profiles/user.yaml) and the personality map
+# ---------------------------------------------------------------------------
+
+from app.config import (  # noqa: E402
+    REPO_ROOT,
+    USER_PROFILE_PATH,
+    Personality,
+    Profile,
+    load_user_profile,
+    save_user_profile,
+)
+from pydantic import ValidationError  # noqa: E402
+
+
+def test_demo_persona_has_a_personality():
+    p = load_profile().personality
+    assert p.length == "brief" and p.formality in ("casual", "neutral", "formal")
+
+
+def test_a_minimal_user_profile_gets_defaults():
+    p = Profile(name="Ana")
+    assert not p.fictional and p.likes == [] and p.personality == Personality()
+    assert p.personality.length == "brief"  # basic replies unless the user says otherwise
+
+
+@pytest.mark.parametrize("raw, fragment", [
+    ({"name": ""}, "name"),
+    ({"name": "Ana", "personality": {"humour": "sarcastic"}}, "humour"),
+    ({"name": "Ana", "likes": ["x" * 61]}, "likes.0"),
+    ({"name": "Ana", "likes": [f"thing {i}" for i in range(16)]}, "likes"),
+    ({"name": "Ana", "about": "x" * 301}, "about"),
+    ({"name": "Ana", "people": [{"name": "", "relation": "sister"}]}, "people.0.name"),
+    ({"name": "Ana", "hometown": "Oakland"}, "hometown"),
+], ids=["empty name", "unknown humour", "long like", "too many likes", "long about",
+        "nameless person", "unknown key"])
+def test_invalid_user_profile_is_rejected(raw, fragment):
+    with pytest.raises(ValidationError) as exc:
+        Profile.model_validate(raw)
+    assert any(fragment in ".".join(str(p) for p in e["loc"]) for e in exc.value.errors())
+
+
+def test_list_entries_are_trimmed_and_blank_ones_rejected():
+    assert Profile(name="Ana", likes=["  jazz  "]).likes == ["jazz"]
+    with pytest.raises(ValidationError):
+        Profile(name="Ana", likes=["   "])
+
+
+def test_user_profile_round_trips_and_is_absent_until_saved(tmp_path):
+    path = tmp_path / "profiles" / "user.yaml"
+    assert load_user_profile(path) is None
+    profile = Profile(name="Ana", likes=["jazz"], personality=Personality(humour="playful"))
+    save_user_profile(profile, path)
+    assert load_user_profile(path) == profile
+    assert path.read_text(encoding="utf-8").startswith("# Personal profile")
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_invalid_saved_user_profile_raises(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text("name: ''\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="name"):
+        load_user_profile(path)
+
+
+def test_user_profiles_are_gitignored():
+    assert USER_PROFILE_PATH.parent.name == "profiles"
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "profiles/" in ignored
