@@ -304,15 +304,38 @@ function setJudgment(text) {
 
 // --- controls -------------------------------------------------------------
 
+// A phone's screen would sleep mid-conversation and stop the mic: keep it on while the page shows
+// (the Screen Wake Lock API; Safari 16.4+, Chrome). Released by the browser when hidden.
+async function keepAwake() {
+  if (!accepted || document.hidden || !("wakeLock" in navigator)) return;
+  try {
+    await navigator.wakeLock.request("screen");
+  } catch (err) { /* not allowed now (battery saver): the screen just sleeps as usual */ }
+}
+
 $("accept").addEventListener("click", () => {
   accepted = true;
   $("warning").hidden = true;
+  Speech.unlock();  // this tap lets iOS play the replies later
+  keepAwake();
   send({ type: "resume" });
 });
 $("stop").addEventListener("click", () => {
   if (!send({ type: "stop" })) $("state").textContent = "Not connected: press Esc on the display";
 });
-$("resume").addEventListener("click", () => { if (accepted) send({ type: "resume" }); });
+$("resume").addEventListener("click", () => {
+  if (!accepted) return;
+  Speech.unlock();
+  keepAwake();
+  send({ type: "resume" });
+});
+// The laptop's page offers the phone link (python -m app.server --tunnel); a phone never gets it.
+$("copy-phone").addEventListener("click", () => {
+  const url = $("phone-url").textContent;
+  const done = (text) => { $("phone-copied").textContent = text; };
+  if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => done("Copied: send it to the phone"), () => done("Select the link and copy it"));
+  else done("Select the link and copy it");
+});
 $("take-over").addEventListener("click", connect);
 $("ptt").addEventListener("click", () => {
   if (speaking) return;
@@ -332,8 +355,9 @@ document.addEventListener("visibilitychange", () => {
     micText = "";
     renderMic();
     micReport("hidden");
-  } else if (Listener.wanted) {
-    Listener.kick();
+  } else {
+    keepAwake();
+    if (Listener.wanted) Listener.kick();
   }
 });
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
@@ -371,6 +395,10 @@ fetch("/api/config")
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
     if (c.user_name) userName = c.user_name;
+    if (c.phone_url) {
+      $("phone-url").textContent = c.phone_url;
+      $("phone").hidden = false;
+    }
     $("ptt").textContent = sttMode === "always" ? "Restart mic" : "Listen";
     Listener.configure({ gapMs: (c.stt_gap_s || 1.2) * 1000, maxLineMs: (c.stt_max_line_s || 15) * 1000,
                          echoMs: (c.stt_echo_s || 4) * 1000 });

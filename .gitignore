@@ -44,3 +44,6 @@ data/*
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+
+# dmux hook templates (tool config, not project code)
+.dmux-hooks/

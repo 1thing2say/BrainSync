@@ -19,11 +19,8 @@ slower.
       Refresh rate: 60 Hz). With ProMotion on there is no SSVEP at all, and our server rejects any
       `hello` more than 1 Hz from 60 Hz.
 - [ ] **Partner page on its own screen:** an external monitor for Chrome with PsychoPy on the
-      built-in panel, or the partner's phone (set `server.host: 0.0.0.0` in
-      `config/default.yaml`, open `http://<mac-ip>:8000`). Chrome allows the microphone only on
-      https or localhost, so on the phone expect speech recognition to be blocked: test it first,
-      and plan to type the partner's lines there. The flicker is always full screen, so it cannot
-      share a screen with Chrome.
+      built-in panel, or **the partner's phone** (section 2, "On a phone"). The flicker is always
+      full screen, so it cannot share a screen with Chrome.
 - [ ] **Lapel mic on the partner**, set as the macOS default input (System Settings > Sound >
       Input). Chrome uses the default input; plug it in before opening the page.
 - [ ] **Speaker** set as the default output, loud enough for the room. A Bluetooth speaker lags:
@@ -69,6 +66,30 @@ python -m app.server --keyboard         # keys 1-4 on the partner page select (n
 ```
 
 Both show a FAKE DECODER or KEYBOARD badge on the partner page. Say so out loud if you use them.
+
+### On a phone (iPhone Safari or Android Chrome)
+
+```
+python -m app.server --tunnel           # add --fake-decoder / --keyboard as above
+```
+
+`--tunnel` starts a Cloudflare quick tunnel (`cloudflared`, no account: `brew install cloudflared`)
+and prints a **phone link**, `https://….trycloudflare.com/?key=…`. The laptop's partner page shows
+it too: **Copy phone link** in the footer. Send it to the phone (AirDrop, Messages) and open it in
+Safari. Then:
+
+- The phone link is new every start and carries a secret key: share it only with the partner's
+  phone. Without the key the address answers 403; the decoder socket never works through it.
+- The phone takes over the session from the laptop's page (only one partner page at a time):
+  the laptop shows "Open on another page". The phone speaks the replies now: turn its volume up,
+  and keep it off silent mode (the ring/silent switch mutes web audio on an iPhone).
+- Tap **I understand, start** on the phone: that tap lets Safari play the replies, and asks for
+  the microphone. Allow it. The screen stays on while the page is open.
+- iPhone speech recognition stops more often than Chrome's: if the mic card says "Tap to start
+  the mic", tap anywhere. Typing always works.
+- "Add to Home Screen" from Safari's share menu opens it full screen next time (same link).
+- It needs internet on both ends; on a slow network the tunnel adds a little delay to each
+  message, not to the decoding (the bridge stays local).
 The fake decoder is for rehearsing only: its picks (and confirms) are random, so never present
 them as the user's choices.
 

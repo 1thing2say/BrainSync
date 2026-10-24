@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -104,6 +108,12 @@
           <span id="judged" class="judged" aria-live="polite"></span>
         </div>
         <p class="hint" id="hint"></p>
+        <!-- With --tunnel: the link for the partner's phone (it carries the access key). -->
+        <div id="phone" class="phone-link" hidden>
+          <button id="copy-phone" type="button">Copy phone link</button>
+          <span id="phone-copied" class="judged" aria-live="polite"></span>
+          <code id="phone-url" class="phone-url"></code>
+        </div>
         <a href="/profile.html" class="profile-link">Edit the user's profile</a>
       </footer>
     </aside>

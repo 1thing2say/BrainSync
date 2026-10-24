@@ -132,6 +132,15 @@ pull requests.
   state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root`, palette
   still to choose.
 
+- **Phone version (2026-10-24, branch `feat/mobile`):** `python -m app.server --tunnel` opens a
+  Cloudflare quick tunnel (`app/tunnel.py`, `cloudflared`, no account) and prints a phone link
+  with a per-start access key; the laptop page offers **Copy phone link**. `app/remote.py` gates
+  every request from outside this computer: the key (link once, then an HttpOnly cookie), else
+  403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
+  (one reused audio element), the screen stays awake (Wake Lock), safe-area insets, 16 px inputs.
+  Checked through a real tunnel; the iPhone test itself is still to do. Server shutdown now runs
+  `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan.
+
 ## System design
 
 ```
@@ -649,6 +658,7 @@ pip install -e ".[dev]"
 pytest
 python -m app.server                        # real decoder connects to /ws/decoder
 python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
+python -m app.server --tunnel               # + a phone link (https, access key) via cloudflared
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
