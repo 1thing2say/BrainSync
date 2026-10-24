@@ -43,6 +43,12 @@ crashed, the extension reloaded) they are held still until a server sends a flic
 phase again. On any other Instagram page (Home, Messages) the squares are hidden and
 scrolls are refused. Only a visible tab where Start was pressed scrolls.
 
+The server is told whether the squares are in view: in the hello (`showing`) and in a
+`{"type": "view", "showing": true|false}` message each time that changes (the page's
+`visibilitychange`, leaving or coming back to Reels, the stop phase). While no tab shows
+them the decoder's decisions are ignored, because with nothing on screen to look at they
+are noise.
+
 The HUD in the bottom-left corner shows the server connection, the phase and its prompt,
 the measured refresh and dropped frames, the last scroll result, and the EEG board:
 "EEG: not connected" (no USB receiver), "connecting…", "connected, waiting for data",
@@ -93,9 +99,11 @@ other reel shows, the worker presses ArrowUp or ArrowDown as a trusted key throu
 `chrome.debugger`, and the ack says `debugger`. On the first reel an "up" is not tried
 at all (`ok: false`), so the debugger is not attached for nothing.
 
-The tab must be the active tab of a window in front: Chrome marks a covered or
-background tab hidden, and a hidden tab neither flickers nor scrolls (its ack is
-`ok: false`, method `none`).
+The tab must be the active tab of a window that can be seen. Chrome marks a covered or
+background tab hidden (also a window on another Space). A hidden tab neither flickers nor
+scrolls (its ack is `ok: false`, method `none`), and the decoder pauses until it is back.
+Put Chrome and the terminal side by side rather than switching between them: the tab only
+needs to be visible, not focused.
 
 ## Permissions
 

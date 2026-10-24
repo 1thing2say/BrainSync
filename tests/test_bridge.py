@@ -229,6 +229,31 @@ def test_wait_hello_and_latest_hello(bridge):
     assert bridge.events() == []
 
 
+def test_showing_follows_each_clients_hello_and_view(bridge, capsys):
+    hello = {"type": "hello", "agent": "extension", "refresh_hz": 60.0, "accepted": True}
+
+    async def main():
+        assert not bridge.showing                           # nobody connected
+        async with connect(bridge.url) as a, connect(bridge.url) as b:
+            await joined(a)
+            await joined(b)
+            await a.send(json.dumps(hello))                 # older extension: no "showing"
+            await until(lambda: bridge.showing)
+            await a.send(json.dumps({"type": "view", "showing": False}))
+            await until(lambda: not bridge.showing)
+            await b.send(json.dumps({**hello, "showing": False}))
+            await b.send(json.dumps({"type": "view", "showing": "yes"}))   # ignored
+            await b.send(json.dumps({"type": "view", "showing": True}))
+            await until(lambda: bridge.showing)
+        await until(lambda: bridge.n_clients == 0)
+        assert not bridge.showing                           # gone clients stop counting
+
+    asyncio.run(main())
+    views = [e["showing"] for e in bridge.events() if e["type"] == "view"]
+    assert views == [False, True]
+    assert "without a true/false \"showing\"" in capsys.readouterr().err and bridge.ignored == 1
+
+
 def test_malformed_messages_are_ignored_and_the_connection_survives(bridge, capsys):
     async def main():
         async with connect(bridge.url) as ws:

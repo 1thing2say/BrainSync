@@ -6,8 +6,8 @@
  *       transport = {send(obj), onMessage(cb), onState(cb)}   // cb(state): connecting|open|closed
  *       scroller  = async (dir) => ({ok, method})             // dir: "up" | "down"
  *
- * The protocol (config, phase, cue, scroll, status, eeg, ping from the server; hello, frames,
- * scrolled, bye from here) is the one brainsync/bridge.py serves on ws://127.0.0.1:8765.
+ * The protocol (config, phase, cue, scroll, status, eeg, ping from the server; hello, view,
+ * frames, scrolled, bye from here) is the one brainsync/bridge.py serves on ws://127.0.0.1:8765.
  *
  * Timing follows brainsync/stimulus/flicker.py: luminance is a function of the frame
  * index, never of free-running wall-clock time. The frame index is the vsync count since
@@ -31,8 +31,11 @@
  * later it would reach a new run, not the one the viewer left. The squares never flicker without a server: when the
  * socket drops they are held still until the bridge, which sends the current phase to
  * every new connection, says to flicker again. Only an accepted, visible tab on Reels
- * scrolls; any other acks ok false, method "none". The canvas and HUD never take pointer
- * events, so the page underneath keeps every click and its focus.
+ * scrolls; any other acks ok false, method "none". The server is told whether the squares
+ * are in view (that, and the tab visible) in the hello and in a "view" message each time it
+ * changes, and ignores the decoder while no tab shows them: with nothing on screen to look
+ * at, its decisions are noise. The canvas and HUD never take pointer events, so the page
+ * underneath keeps every click and its focus.
  *
  * The pure parts (geometry, frame index, refresh meter, message parsing and the
  * controller state machine) are exported for extension/test/overlay.test.mjs.
@@ -264,13 +267,13 @@
       text: "", phaseAt: null, cue: -1, status: "", eeg: "unknown", eegText: "",
       accepted: false, cancelled: false,
       quit: false, quitAt: null, refreshHz: null, dropped: 0, helloSent: false, byeSent: false,
-      paused: false, lastScroll: null, sent: 0, ignored: 0, version: 0,
+      viewSent: null, paused: false, lastScroll: null, sent: 0, ignored: 0, version: 0,
     };
     let lum = new Float64Array(state.config.targets.length).fill(STILL_LUM);
     let t0 = null, period = null, lastTs = null, lastFramesAt = null;
     let scrollChain = Promise.resolve();
 
-    function changed() { state.version++; }
+    function changed() { state.version++; maybeView(); }
 
     function send(obj) {
       try { transport.send(obj); state.sent++; } catch (e) { warn("send failed:", e && e.message); }
@@ -278,6 +281,11 @@
 
     function showSquares() {
       return state.accepted && !state.quit && !state.paused && state.phase !== "stop";
+    }
+
+    /** The squares are in front of the viewer: drawn, and the tab can be seen. */
+    function showing() {
+      return showSquares() && visible();
     }
 
     function flickering() {
@@ -293,8 +301,18 @@
       if (!state.accepted || state.quit || state.refreshHz === null) return;
       if (state.conn !== "open" || state.helloSent) return;
       state.helloSent = true;
+      state.viewSent = showing();
       send({ type: "hello", agent, url: getUrl(), refresh_hz: round3(state.refreshHz),
-             dropped: state.dropped, accepted: true });
+             dropped: state.dropped, accepted: true, showing: state.viewSent });
+    }
+
+    /** Tell the server when the squares come into or go out of view (after the hello). */
+    function maybeView() {
+      if (state.conn !== "open" || !state.helloSent || state.quit) return;
+      const inView = showing();
+      if (inView === state.viewSent) return;
+      state.viewSent = inView;
+      send({ type: "view", showing: inView });
     }
 
     function maybeBye() {
@@ -418,6 +436,7 @@
       // Each new socket is a new server connection: it needs its own hello. A bye goes
       // out once per page (maybeBye).
       state.helloSent = false;
+      state.viewSent = null;
       if (wasOpen && state.phase !== null && state.phase !== "stop") {
         // No server drives the decoder now (killed, crashed, extension reloaded): hold the
         // squares still. On reconnect the bridge sends config and its current phase, and
@@ -509,7 +528,8 @@
 
     return {
       state, handle, setConnection, accept, cancel, quit, setPaused, frame, showSquares,
-      flickering, refreshOff, remaining,
+      showing, flickering, refreshOff, remaining,
+      checkView: maybeView,   // the view calls it when the page's visibility changes
       lum: () => lum,
       onset: () => t0,
       idle: () => scrollChain,
@@ -719,6 +739,10 @@
       layout();
     }
 
+    function onVisibility() {
+      controller.checkView();
+    }
+
     modal.addEventListener("click", (e) => {
       const button = e.target.closest ? e.target.closest("button") : null;
       if (!button) return;
@@ -743,6 +767,7 @@
     }
     win.addEventListener("keydown", onKey, true);
     win.addEventListener("resize", onResize);
+    doc.addEventListener("visibilitychange", onVisibility);
     layout();
     updateHud();
     hudTimer = win.setInterval(() => { refreshWarning(); updateHud(); }, 250);
@@ -754,6 +779,7 @@
       win.clearInterval(hudTimer);
       win.removeEventListener("keydown", onKey, true);
       win.removeEventListener("resize", onResize);
+      doc.removeEventListener("visibilitychange", onVisibility);
       host.remove();
     }
 
