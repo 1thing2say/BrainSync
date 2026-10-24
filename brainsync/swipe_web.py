@@ -423,6 +423,10 @@ def build_engine(deck: Sequence[Profile], *, seed: int = 0, match_rate: float = 
 
 # -- HTTP ---------------------------------------------------------------------------------
 
+SPEECH_MAX_CHARS = 300      # a voice line is one short sentence
+SPEECH_TIMEOUT_S = 10.0     # Cartesia's own timeout is 8 s a try
+
+
 class SwipeServer(ThreadingHTTPServer):
     """The HTTP server; ``engine`` and ``cards`` (PNG paths by image index) are attached
     once startup is done, after the port is bound."""
@@ -433,12 +437,22 @@ class SwipeServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], engine: Engine | None = None,
                  cards: Sequence[Path] = (), web_dir: Path = WEB_DIR,
-                 ping_s: float = PING_S) -> None:
+                 ping_s: float = PING_S, speaker: Any = None) -> None:
         super().__init__(address, Handler)
         self.engine = engine
         self.cards = list(cards)
         self.web_dir = Path(web_dir)
         self.ping_s = float(ping_s)
+        self._speaker = speaker
+
+    @property
+    def speaker(self) -> Any:
+        """What /api/speech synthesises with: the given speaker, else the process-wide
+        Cartesia one (None when BRAINSYNC_TTS=off)."""
+        if self._speaker is None:
+            from . import voice
+            self._speaker = voice.default_speaker()
+        return self._speaker
 
     @property
     def url(self) -> str:
@@ -511,6 +525,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, engine.state())
         elif path == "/api/events" and engine is not None:
             self._events(engine)
+        elif path == "/api/speech":
+            self._speech(urllib.parse.urlsplit(self.path).query)
         elif path.startswith("/api/"):
             self._error(404, "not found")
         else:
@@ -534,6 +550,24 @@ class Handler(BaseHTTPRequestHandler):
             self._not_found()
             return
         self._send(200, body, STATIC_TYPES[Path(name).suffix.lower()], cache="no-cache")
+
+    def _speech(self, query: str) -> None:
+        """A swipe's voice line as WAV from Cartesia (the key stays on the server); 503
+        when there is no voice, and the page then shows the line without speaking it."""
+        text = " ".join(urllib.parse.parse_qs(query).get("text", [""])[0].split())
+        if not text or len(text) > SPEECH_MAX_CHARS:
+            self._error(400, f"text must be 1..{SPEECH_MAX_CHARS} characters")
+            return
+        speaker = self.server.speaker
+        try:
+            clip = speaker.clip(text, timeout=SPEECH_TIMEOUT_S) if speaker is not None else None
+            body = clip.read_bytes() if clip is not None else None
+        except Exception:  # noqa: BLE001 - timeout or a vanished cache file: no voice
+            body = None
+        if body is None:
+            self._error(503, "no voice (Cartesia unavailable)")
+            return
+        self._send(200, body, "audio/wav", cache="private, max-age=3600")
 
     def _card(self, k: int) -> None:
         cards = self.server.cards

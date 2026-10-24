@@ -558,7 +558,7 @@ def test_end_to_end_fake_fast_three_moves(capsys):
     game = read_pgn(cap.out)
     moves = list(game.mainline_moves())
     assert len(moves) == 5                  # 3 user moves and the 2 replies between them
-    assert "[say] Keep still and look at the middle of the board." in cap.err
+    assert "[speak] Keep still and look at the middle of the board." in cap.err
     assert "fake board:" in cap.out
     assert "baseline from" in cap.err
 
