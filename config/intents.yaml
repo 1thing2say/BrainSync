@@ -25,7 +25,7 @@ fallback_lists:
     - {label: "Need help", utterance: "Could you help me with something, please?", intent_id: need}
     - {label: "Drink", utterance: "Could I have something to drink, please?", intent_id: food_drink}
 
-  # Used when the partner's last line ends with "?".
+  # Used when the partner's last line is a question that no fallback_match rule below caught.
   yes_no:
     - {label: "Yes", utterance: "Yes, please.", intent_id: "yes"}
     - {label: "No", utterance: "No, thank you.", intent_id: "no"}
@@ -36,3 +36,37 @@ fallback_lists:
     - {label: "Thank you", utterance: "Thank you, I really appreciate it.", intent_id: thanks}
     - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
     - {label: "One moment", utterance: "Please give me a moment.", intent_id: later}
+
+  # "How are you?", "How's it going?", "You okay?"
+  feeling:
+    - {label: "Good", utterance: "I'm doing well, thank you.", intent_id: feeling}
+    - {label: "Okay", utterance: "I'm okay, thanks for asking.", intent_id: feeling}
+    - {label: "Not great", utterance: "Not so great today, honestly.", intent_id: feeling}
+
+  # "How was your weekend?", "How did it go?"
+  how_was:
+    - {label: "Pretty good", utterance: "It was pretty good, thanks.", intent_id: feeling}
+    - {label: "Quiet", utterance: "It was quiet, nothing much happened.", intent_id: feeling}
+    - {label: "Not great", utterance: "Honestly, it wasn't great.", intent_id: feeling}
+
+  # "Hi", "Good morning"
+  greeting:
+    - {label: "Hello", utterance: "Hello, it's good to see you.", intent_id: greeting}
+    - {label: "Hi there", utterance: "Hi! How are you?", intent_id: greeting}
+    - {label: "Thanks", utterance: "Thanks for coming to see me.", intent_id: thanks}
+
+  # "What would you like?", "Where should we go?": yes / no does not answer these.
+  open_question:
+    - {label: "Not sure", utterance: "I'm not sure, let me think about it.", intent_id: maybe}
+    - {label: "You choose", utterance: "You choose, anything is fine with me.", intent_id: maybe}
+    - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
+
+# Which fallback list a partner line gets while the LLM is slow or down: the first rule whose
+# regex (case-insensitive) matches the line wins; with none, a question gets yes_no and anything
+# else home. Speech-to-text adds no punctuation, so no rule relies on "?". Each rule's
+# optional leading part skips a name ("Sam, ") and filler ("so", "well").
+fallback_match:
+  - {show: feeling, when: "\\bhow (are|r) (you|ya)\\b|\\bhow('s| is) it going\\b|\\bhow do you feel\\b|\\bhow are you feeling\\b|^(\\w+,\\s*)?(are )?(you|u) (ok|okay|alright|all right)\\b"}
+  - {show: how_was, when: "\\bhow (was|were|did) (your|you|the|it)\\b"}
+  - {show: greeting, when: "^(\\w+,\\s*)?(hi|hello|hey|good (morning|afternoon|evening))\\b"}
+  - {show: open_question, when: "^(\\w+,\\s*)?((so|well|and|um|uh|okay|ok)\\b[\\s,]*)*(what|where|when|which|who|why)\\b"}

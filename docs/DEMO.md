@@ -33,6 +33,9 @@ slower.
       `CARTESIA_API_KEY` (voice). Never show the file on screen.
 - [ ] **Venue Wi-Fi check:** congested Wi-Fi made every Claude page time out on 2026-10-24
       (1-4 s ping, 3-9 s TLS setup). Preflight (section 3) tests it; a phone hotspot is the fix.
+- [ ] **Fixed-list clips on disk:** `python tools/prerender_tts.py` while the network is good.
+      Then the fixed pages (shown whenever Claude is slow) speak in the Cartesia voice even with
+      the Wi-Fi down. Run it again after changing the voice, model or `config/intents.yaml`.
 - [ ] Repo on the demo branch, `pip install -e ".[dev]"` done in our venv; the teammate's venv
       for `../ssvep`.
 
@@ -89,7 +92,8 @@ exits 0 only if nothing failed. `--json` prints one JSON object instead. What to
 | `decoder` | FAIL "no bridge connected": start the bridge and read its terminal. FAIL "not ok": the bridge's `hello` was rejected (slots, waveform or refresh rate; the reason is on the partner page): fix the bridge's config, not ours. WARN keyboard / fake decoder: accepted only if you say so in the pitch. Out of time: restart with `--keyboard`. |
 | `display` | FAIL "display down": relaunch the display (restart the bridge), then **Resume**. A refresh-rate mismatch shows up as a rejected `hello` under `decoder`: ProMotion off, 60 Hz, restart the bridge. Never run the flicker at another rate. |
 | `ANTHROPIC_API_KEY`, `claude`, `claude (server)` | FAIL: add the key to `.env` and restart the server; on a network error, see `net` below. To go without Claude, set `menus.dynamic: false` and restart: the pages are the fixed lists (`config/intents.yaml`, LLM OFF badge) and preflight skips these checks. WARN keep-alive: rerun in 20 s. |
-| `CARTESIA_API_KEY`, `cartesia`, `voice (server)` | WARN: the browser voice speaks every reply. Add the key to `.env` and restart, or accept it. |
+| `CARTESIA_API_KEY`, `cartesia`, `voice (server)` | WARN: the browser voice speaks every reply. Add the key to `.env` and restart, or accept it. Clips already on disk still play. |
+| `clips` | WARN: some fixed-list sentences have no clip on disk yet. Run `python tools/prerender_tts.py` (the server also fetches them at start, slowly on a busy network). |
 | `net api.anthropic.com`, `net api.cartesia.ai` | FAIL unreachable / WARN congested: switch to a phone hotspot or a wired network. Without internet Chrome's speech recognition also stops: type the partner's lines. To accept the browser voice instead, set `speech.provider: browser` and restart (preflight then skips Cartesia). |
 | `partner page` | FAIL: open the server's address in Chrome. Leave the flicker warning up: **I understand, start** starts the baseline and then the flicker. |
 | `mic` | WARN before the session starts is normal (no report yet). Otherwise follow its `fix:` line (allow the mic, unmute, bring the page to the front); after **I understand, start**, check for the MIC ON badge. Check the macOS default input and output too. |

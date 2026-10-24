@@ -140,9 +140,12 @@ def test_cartesia_clip_is_prefetched_spoken_and_served(tmp_path):
         assert speak["audio_url"] and speak["audio_url"].startswith("/audio/")
         r = client.get(speak["audio_url"])
         assert r.status_code == 200 and r.headers["content-type"] == MP3 and r.content == CLIP
-    # The first page's 3 options were requested once each; NEXT needs no audio.
-    assert sorted(json.loads(q.content)["transcript"] for q in fake.requests) == sorted(
-        s["utterance"] for s in shown["slots"] if s["role"] == "option")
+    # The first page's 3 options were requested first, once each (NEXT needs no audio); the
+    # other fixed sentences are pre-generated behind them.
+    asked = [json.loads(q.content)["transcript"] for q in fake.requests]
+    options = [s["utterance"] for s in shown["slots"] if s["role"] == "option"]
+    assert sorted(asked[:3]) == sorted(options) and len(asked) == len(set(asked))
+    assert set(asked) <= set(app.state.intents.utterances)
     assert KEY not in next(tmp_path.glob("*.jsonl")).read_text()
 
 

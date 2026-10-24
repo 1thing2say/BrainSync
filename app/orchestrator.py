@@ -68,7 +68,6 @@ Send = Callable[[Message], None]
 DIDNT_CATCH = "Didn't catch that"
 NOT_CONFIRMED = "Not confirmed: nothing was said"
 HOME_LIST = "home"
-QUESTION_LIST = "yes_no"
 MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
 LLM_LIST = "llm"  # name of a page the LLM wrote
 # How a spoken line starts when it is a question (speech-to-text adds no "?").
@@ -408,7 +407,7 @@ class Orchestrator:
         self._send_ui(Transcript(who="partner", text=text))
         self.conversation.partner_said(text)
         question = is_question(text)
-        name = QUESTION_LIST if question else HOME_LIST
+        name = self.intents.fallback_for(text, question)
         self.pending_list = self._fallback(name)  # shown if the LLM's page does not come in time
         self.more_in_a_row = 0
         self._ask_llm("partner")

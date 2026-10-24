@@ -61,6 +61,8 @@ speech:
                                # 44.1 kHz); venue Wi-Fi slowed to ~30 KB/s at times (2026-10-24)
   sample_rate: 22050
   bit_rate: 64000              # mp3 only
+  cache_dir: cache/tts         # clips kept on disk (gitignored): they survive a restart, and the
+                               # fixed lists are pre-generated (python tools/prerender_tts.py)
   tts_timeout_s: 8.0           # per clip, once sent; slower or failed -> the browser speaks it.
                                # A clip is needed >= 13 s after its page appears; venue Wi-Fi alone
                                # took 1-3 s per request (2026-10-24), so 2 s timed every clip out.

@@ -13,8 +13,10 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
-def test_listen_core_node_tests_pass():
-    r = subprocess.run([NODE, "--test", "tests/js/listen_core.test.js"], cwd=REPO_ROOT,
+@pytest.mark.parametrize("path", sorted((REPO_ROOT / "tests" / "js").glob("*.test.js")),
+                         ids=lambda p: p.name)
+def test_node_tests_pass(path):
+    r = subprocess.run([NODE, "--test", str(path.relative_to(REPO_ROOT))], cwd=REPO_ROOT,
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
 

@@ -8,11 +8,12 @@ import socket
 import httpx
 import pytest
 
-from app.config import load_config
+from app.config import load_config, load_intents
+from app.tts import CartesiaTTS
 from tools import preflight
 from tools.preflight import (
-    FAIL, PASS, SKIP, WARN, Result, Timing, check_cartesia, check_claude, check_health,
-    check_keys, check_network, fetch_server, probe_host, redact, report, run_checks,
+    FAIL, PASS, SKIP, WARN, Result, Timing, check_cartesia, check_claude, check_clips,
+    check_health, check_keys, check_network, fetch_server, probe_host, redact, report, run_checks,
 )
 
 CFG = load_config()
@@ -285,17 +286,50 @@ def test_a_bridge_that_is_not_ok_gets_the_matching_fix(message, fix):
     assert result.level == FAIL and fix in result.fix
 
 
+# -- fixed-list clips on disk ----------------------------------------------------------------
+
+
+def write_clips(folder, count: int | None = None) -> int:
+    """Put a clip for the first ``count`` fixed sentences (all by default) in ``folder``."""
+    texts = load_intents().utterances
+    tts = CartesiaTTS(CFG.speech, None, cache_dir=folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    for text in texts[:count]:
+        (folder / f"{tts.id_for(text)}.mp3").write_bytes(MP3)
+    return len(texts)
+
+
+def test_clips_pass_when_every_fixed_sentence_is_on_disk(tmp_path):
+    total = write_clips(tmp_path)
+    result = check_clips(CFG, tmp_path)
+    assert result.level == PASS and result.data == {"cached": total, "total": total}
+
+
+def test_missing_clips_warn_with_the_prerender_command(tmp_path):
+    total = write_clips(tmp_path, 2)
+    result = check_clips(CFG, tmp_path)
+    assert result.level == WARN and f"2/{total}" in result.reason
+    assert "prerender_tts.py" in result.fix
+
+
+@pytest.mark.parametrize("speech", [{"provider": "browser"}, {"cache_dir": ""}])
+def test_clips_skip_without_cartesia_or_a_cache(speech):
+    cfg = CFG.model_copy(update={"speech": CFG.speech.model_copy(update=speech)})
+    assert check_clips(cfg).level == SKIP
+
+
 # -- the whole run ---------------------------------------------------------------------------
 
 
-def test_run_with_everything_fine_is_a_go():
+def test_run_with_everything_fine_is_a_go(tmp_path):
+    write_clips(tmp_path)
     results = run_checks("http://127.0.0.1:8013", env=ENV, transport=FakeNet().transport,
-                         probe=fast_probe)
+                         probe=fast_probe, clips_dir=tmp_path)
     assert {r.level for r in results} == {PASS}
     names = [r.name for r in results]
     assert names[:3] == ["config", "ANTHROPIC_API_KEY", "CARTESIA_API_KEY"]
-    assert {"net api.anthropic.com", "net api.cartesia.ai", "claude", "cartesia", "server",
-            "decoder", "mic"} <= set(names)
+    assert {"net api.anthropic.com", "net api.cartesia.ai", "claude", "cartesia", "clips",
+            "server", "decoder", "mic"} <= set(names)
 
 
 def test_skip_network_makes_no_api_calls():

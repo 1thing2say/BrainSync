@@ -10,7 +10,8 @@ browser voice, keyboard mode) or something to look at.
    api.cartesia.ai. A congested link (1-4 s ping on 2026-10-24) timed out every Claude page.
 4. One free Claude call (GET /v1/models/{llm.model}, no tokens): the key and the model work.
 5. One short Cartesia synthesis in the configured voice and format; WARN if it fails, since the
-   browser voice then speaks every reply.
+   browser voice then speaks every reply. Then how many fixed-list clips are already on disk
+   (speech.cache_dir); WARN if some are missing (python tools/prerender_tts.py fetches them).
 6. The running server (GET /api/health and /api/config at --url): decoder, display, partner page,
    mic, Claude keep-alive, Cartesia.
 Then the headset checklist is printed as a reminder (manual, not checked).
@@ -41,7 +42,14 @@ if __package__ in (None, ""):
 
 import httpx  # noqa: E402
 
-from app.config import AppConfig, ConfigError, load_config, load_env  # noqa: E402
+from app.config import (  # noqa: E402
+    REPO_ROOT,
+    AppConfig,
+    ConfigError,
+    load_config,
+    load_env,
+    load_intents,
+)
 from app.tts import TTS_URL, CartesiaTTS  # noqa: E402
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
@@ -300,6 +308,32 @@ def check_cartesia(cfg: AppConfig, api_key: str | None, *, transport: httpx.Base
     return Result("cartesia", WARN, f"HTTP {r.status_code}: {detail}", fix, data)
 
 
+def check_clips(cfg: AppConfig, clips_dir: str | Path | None = None) -> Result:
+    """How many fixed-list sentences (intents.yaml) already have a Cartesia clip on disk. Missing
+    ones are fetched when the server starts, which is slow on a busy network: WARN."""
+    speech = cfg.speech
+    if speech.provider != "cartesia":
+        return Result("clips", SKIP, "speech.provider is browser")
+    if clips_dir is None and not speech.cache_dir:
+        return Result("clips", SKIP, "speech.cache_dir is empty: clips live in memory only")
+    clips_dir = Path(clips_dir) if clips_dir is not None else REPO_ROOT / speech.cache_dir
+    m = cfg.menus
+    try:
+        intents = load_intents(option_count=m.option_count, label_max_chars=m.label_max_chars,
+                               utterance_max_words=m.utterance_max_words,
+                               label_max_words=m.label_max_words)
+    except ConfigError as exc:
+        return Result("clips", FAIL, f"config/intents.yaml is invalid: {exc}",
+                      "fix the problems listed above")
+    ready, total = CartesiaTTS(speech, None, cache_dir=clips_dir).cached_count(intents.utterances)
+    reason = f"{ready}/{total} fixed-list clips on disk ({speech.model}, voice {speech.voice_id[:8]})"
+    data = {"cached": ready, "total": total}
+    if ready < total:
+        return Result("clips", WARN, reason,
+                      "python tools/prerender_tts.py (else the server fetches them at startup)", data)
+    return Result("clips", PASS, reason, data=data)
+
+
 # ---------------------------------------------------------------------------
 # 6. The running server
 # ---------------------------------------------------------------------------
@@ -453,9 +487,9 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
 def run_checks(url: str, *, skip_network: bool = False, env: Mapping[str, str] | None = None,
                config_path: str | Path | None = None, transport: httpx.BaseTransport | None = None,
                probe: Callable[[str], Timing] | None = None, timeout: float = 10.0,
-               slow_ms: float = 1000.0) -> list[Result]:
+               slow_ms: float = 1000.0, clips_dir: str | Path | None = None) -> list[Result]:
     """Every check in order. ``transport`` replaces the network for all HTTP and ``probe`` the
-    DNS/TCP/TLS probe (tests)."""
+    DNS/TCP/TLS probe (tests); ``clips_dir`` replaces ``speech.cache_dir``."""
     env = os.environ if env is None else env
     result, cfg = check_config(config_path)
     results = [result]
@@ -472,6 +506,7 @@ def run_checks(url: str, *, skip_network: bool = False, env: Mapping[str, str] |
         results += check_network(hosts, probe, slow_ms)
         results.append(check_claude(cfg, anthropic_key, timeout=timeout, transport=transport))
         results.append(check_cartesia(cfg, cartesia_key, transport=transport))
+    results.append(check_clips(cfg, clips_dir))
     health, page_cfg, result = fetch_server(url, transport=transport)
     results.append(result)
     if health is not None:

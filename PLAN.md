@@ -104,6 +104,15 @@ pull requests.
   Claude page latency (the V3 "Done when" numbers); `docs/DEMO.md` is the operator's runbook
   (setup, start, preflight actions, headset checklist, demo script, fallbacks, honest claim).
   Still to do: rehearse the script with the live decoder, and fill in the claim's numbers.
+- **From Lucid-Voice (2026-10-24, `feat/v6-hardening`):** Cartesia clips are also kept on disk
+  (`speech.cache_dir`, gitignored `cache/tts`, keyed by voice, model and format), so they survive a
+  restart and play with the network down; the server pre-generates every fixed-list sentence at
+  start, `tools/prerender_tts.py` does it ahead of time and preflight's `clips` line counts them.
+  `fallback_match` in `config/intents.yaml` picks the fixed page by keyword when Claude is slow
+  or down ("How are you?" → feeling, "How was your weekend?" → how_was, "Hi" → greeting,
+  "What…/Where…" → open_question; otherwise yes_no for a question, home for the rest). The
+  browser fallback voice (`ui/voice_core.js`) prefers local Premium / Enhanced English voices
+  and never a network voice.
 
 ## System design
 
@@ -272,10 +281,12 @@ BrainSync/
     style.css
     app.js              # websocket client: conversation, status, STOP, mirror of the user's screen
     speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
+    voice_core.js       # picks the fallback voice: local Premium / Enhanced English first
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
+    prerender_tts.py    # Cartesia clips for every fixed-list sentence, into speech.cache_dir
     log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
   docs/
     DEMO.md             # operator's demo runbook (V6 items 2-3)
@@ -337,6 +348,7 @@ BrainSync/
 | `speech.language` / `speech.format` | `en` / `mp3` | MP3 22050 Hz, 64 kbps: about 17 KB a sentence, 10x smaller than 44.1 kHz WAV, which the venue Wi-Fi needed; `wav` (`pcm_s16le`) still works |
 | `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
 | `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
+| `speech.cache_dir` | `cache/tts` | Clips on disk (gitignored), reused across restarts and offline; `""` = memory only |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
 | `speech.stt_mode` | `always` | Hands-free: the mic listens the whole session except while a reply plays, paused, idle or muted. `turn` = only at the start and after each reply (`listen_window_s`); `push_to_talk` = only the button |
 | `speech.listen_window_s` / `speech.stt_tail_s` | 10.0 / 0.5 | Turn mode and the Listen button while paused; the wait after a reply ends before the mic reopens (≈0.8 for a Bluetooth speaker) |
@@ -619,6 +631,7 @@ python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
 python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
+python tools/prerender_tts.py               # fixed-list clips to disk while the network is good
 python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
 
 # demo runbook: docs/DEMO.md

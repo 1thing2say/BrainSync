@@ -308,6 +308,12 @@ INVALID_INTENTS = [
     ("duplicate labels", _intents(home=THREE + [_opt("Opt 0")]), "duplicate labels"),
     ("unknown option key", _intents(home=THREE + [{**_opt("X"), "rank": 1}]), "rank"),
     ("yaml boolean id", _with_intents([{"id": True, "description": "a"}]), "intents.0.id"),
+    ("match shows an unknown list", {**_intents(), "fallback_match": [{"when": "hi", "show": "nope"}]},
+     "unknown list 'nope'"),
+    ("match with a bad regex", {**_intents(), "fallback_match": [{"when": "(hi", "show": "home"}]},
+     "bad regex"),
+    ("match with an unknown key", {**_intents(), "fallback_match": [{"when": "hi", "show": "home",
+                                                                     "rank": 1}]}, "rank"),
 ]
 
 
