@@ -18,11 +18,14 @@ bridge. Background: `PLAN.md` sections 12–14 and System design. Elijah's decis
 **Confirm the contract**
 
 1. Is protocol 2 as written in this file OK for the bridge, and are the section 6 values right
-   (2 targets, 15/17 Hz, sine, cue 1 s, rest 1 s, max trial 10 s, baseline 10 s, scores sent)?
+   (4 targets at 15/17/20/12 Hz in page mode, 2 at 15/17 Hz as the list-mode fallback, sine, cue
+   1 s, rest 1 s, max trial 10 s, baseline 10 s, scores sent)?
 2. Where does the bridge live: `ssvep/online/bridge.py` in `1thing2say/ssvep`, or the `brainsync/`
    rebuild on branch `check-implemtation-calhacks-desktop` (`PLAN.md` section 13, item 9)?
-3. Decoder window: 4 s, or 2 s if the replay tuning agrees? Keep 15/17 Hz, or test 12/17 first
-   (`PLAN.md` section 14)?
+3. Decoder window: 4 s, or 2 s if the replay tuning agrees? Can you run the 4-target gate
+   recording (12/15/17/20 Hz in the diamond, `PLAN.md` section 14) first? Its result decides page
+   mode or the list-mode fallback. Your existing `four_targets.toml` is the 2x2 pipeline test at
+   8/10/12/15 Hz, so the page-mode config needs another name (for example `page_targets.toml`).
 
 **What the display needs to do (section 7)**
 
@@ -35,9 +38,9 @@ bridge. Background: `PLAN.md` sections 12–14 and System design. Elijah's decis
    again afterwards (the refresh rate may change)? Proposed: the bridge sends `status` with
    `display_ok: false`, relaunches the display, then `display_ok: true`; our server waits for the
    partner to press Resume and never restarts the flicker by itself.
-7. Can option text be drawn during the flicker without dropping frames (SYNC 1.5)? If not, the
-   display hides the text on `{"flicker": true}` itself, because the server never sends `display`
-   during a trial.
+7. Can option text be drawn during the flicker without dropping frames (SYNC 1.5)? Page mode
+   draws 4 labels, one full sentence beside each square. If not, the display hides the text on
+   `{"flicker": true}` itself, because the server never sends `display` during a trial.
 
 **Proposed rule additions (say yes, no, or change them)**
 
@@ -52,8 +55,10 @@ bridge. Background: `PLAN.md` sections 12–14 and System design. Elijah's decis
     (`stim_stop` paused), checks it again, and runs a new baseline before the next trial.
 12. A baseline cut short by `pause` or a disconnect answers `baseline_done` with `ok: false` and
     message `interrupted`; `baseline_done` never comes before `seconds` have passed.
-13. In protocol 2, `active_slots` always lists every slot from `hello` (the display flickers all
-    targets at once).
+13. `active_slots` lists the slots that flicker in this trial: every slot on a page, but only two
+    on the confirm screen ("Say it" on s1, "Back" on s4). The other squares stay drawn still, and
+    the decoder classifies only among the active slots, so a `selection` is always one of them.
+    `tools/contract_check.py` fails a selection of an inactive slot.
 14. `refresh_hz` in `hello` is the rate the display's frame counts use. With `--refresh auto` a
     120 Hz (ProMotion) screen would pass the display's own check, but our server rejects anything
     more than 1 Hz from 60 Hz.
@@ -82,7 +87,8 @@ what is shown and when trials start and stop; the bridge does it and reports bac
 | Text on the user's screen | browser | `display` message, drawn by PsychoPy |
 | Resting baseline | not in the contract | `baseline` / `baseline_done` |
 | STOP | — | `pause`; flicker off until the next `baseline` |
-| Targets | 4, square, 15/12/10/8.57 Hz | 2, sine, 15/17 Hz (section 6) |
+| Targets | 4, square, 15/12/10/8.57 Hz | 4, sine, 15/17/20/12 Hz in page mode; 2 (15/17 Hz) in list mode (section 6) |
+| Active targets per trial | all | all on a page; 2 on the confirm screen (`active_slots`) |
 
 ## 1. Connection
 
@@ -104,7 +110,9 @@ display's refresh check:
  "waveform": "sine",
  "slots": [
    {"slot": "s1", "freq_hz": 15.0, "phase_deg": 0},
-   {"slot": "s2", "freq_hz": 17.0, "phase_deg": 0}],
+   {"slot": "s2", "freq_hz": 17.0, "phase_deg": 0},
+   {"slot": "s3", "freq_hz": 20.0, "phase_deg": 0},
+   {"slot": "s4", "freq_hz": 12.0, "phase_deg": 0}],
  "decoder": {"window_s": 4.0, "step_s": 0.5, "votes": 3},
  "score_kind": "fbcca_minus_baseline"}
 ```
@@ -115,9 +123,13 @@ Server → bridge, in reply:
 
 ```json
 {"type": "hello_ack", "protocol": 2,
- "roles": {"s1": "say", "s2": "next"},
- "labels": {"s1": "SAY", "s2": "NEXT"}}
+ "roles": {"s1": "option", "s2": "option", "s3": "option", "s4": "next"},
+ "labels": {"s1": "I'm doing well, thanks for asking.", "s2": "Could you help me with something, please?",
+            "s3": "Could I have something to drink, please?", "s4": "More options"}}
 ```
+
+Roles are for logging and the display's layout only; the bridge never needs them to decode. In list
+mode (the fallback) they are `{"s1": "say", "s2": "next"}` with labels `SAY` / `NEXT`.
 
 The server checks the bridge's `hello` against `config/default.yaml`:
 
@@ -147,12 +159,22 @@ The bridge answers with `baseline_done` (section 4). Sent after `hello_ack` and 
 **`display`**: what the user's screen shows. Any field left out is unchanged.
 
 ```json
-{"type": "display", "text": "Yes, let's go outside",
- "labels": {"s1": "SAY", "s2": "NEXT"}, "highlight": null}
+{"type": "display", "text": "",
+ "labels": {"s1": "Yes, let's go outside.", "s2": "Not right now.",
+            "s3": "Maybe after lunch.", "s4": "More options"}, "highlight": null}
 ```
 
-- `text`: the current option, drawn above the targets. `""` clears it.
-- `labels`: per-slot labels inside or under the targets.
+The confirm screen after a pick of s1:
+
+```json
+{"type": "display", "text": "Yes, let's go outside.",
+ "labels": {"s1": "Say it", "s2": "", "s3": "", "s4": "Back"}, "highlight": null}
+```
+
+- `text`: one line drawn at the centre (the picked sentence on the confirm screen, the highlighted
+  option in list mode). `""` clears it.
+- `labels`: per-slot text beside each target (page mode: each option's full sentence). `""`
+  clears a slot's label.
 - `highlight`: a slot to draw the box on (the picked target), or `null` to clear it.
 - Never sent between `stim_start` and `stim_stop`, so the shown option cannot change during a
   trial.
@@ -160,11 +182,13 @@ The bridge answers with `baseline_done` (section 4). Sent after `hello_ack` and 
 **`stim_start`**: start flickering now and start decoding.
 
 ```json
-{"type": "stim_start", "trial_id": 42, "active_slots": ["s1", "s2"]}
+{"type": "stim_start", "trial_id": 42, "active_slots": ["s1", "s2", "s3", "s4"]}
 ```
 
-- The bridge turns the flicker on, calls `decoder.reset()`, drops samples read before this
-  message, and steps the decoder until `stim_stop`.
+- The bridge turns the flicker on for `active_slots` only, calls `decoder.reset()`, drops samples
+  read before this message, and steps the decoder until `stim_stop`.
+- The confirm screen sends `"active_slots": ["s1", "s4"]`: the other squares stay drawn still, and
+  the decoder chooses only between s1 and s4.
 
 **`stim_stop`**: stop flickering and stop decoding.
 
@@ -197,8 +221,10 @@ STOP during a trial sends `stim_stop` (reason `paused`) and then `pause`; outsid
 
 ```json
 {"type": "selection", "trial_id": 42, "slot": "s1", "t_unix": 1792809206.530,
- "score": 0.041, "scores": {"s1": 0.041, "s2": 0.008}}
+ "score": 0.041, "scores": {"s1": 0.041, "s2": 0.008, "s3": -0.004, "s4": 0.012}}
 ```
+
+`slot` is always one of that trial's `active_slots`; `scores` cover at least the active slots.
 
 `score` and `scores` are optional: `Decision.scores` after the baseline is subtracted. They are
 not probabilities.
@@ -232,8 +258,8 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 ## 5. Rules
 
 1. Only answer the current `trial_id`. Late answers for old trials are logged and ignored.
-2. The flicker is on only between `stim_start` and `stim_stop`. Outside a trial the targets are
-   drawn still.
+2. The flicker is on only between `stim_start` and `stim_stop`, and only for `active_slots`.
+   Outside a trial the targets are drawn still.
 3. **Safety:** if the server connection drops, the bridge turns the flicker off at once and keeps
    it off until a new `hello_ack` and `stim_start`. `Esc` on the display always stops the flicker
    locally, whatever the server says.
@@ -246,8 +272,9 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 
 | Question | Proposed | Decoder owner's answer |
 | --- | --- | --- |
-| Number of targets | 2 (SAY, NEXT) | |
-| Frequencies | 15 and 17 Hz (12/17 under test, `PLAN.md` section 14) | |
+| Number of targets | 4 in page mode (s1–s3 options, s4 NEXT; confirm: s1 Say it, s4 Back); 2 in list mode (SAY, NEXT), if the 4-target gate fails | |
+| Frequencies | s1 15, s2 17, s3 20, s4 12 Hz (NEXT on 12 Hz); list mode 15 / 17 Hz (`PLAN.md` section 14) | |
+| Layout | diamond: s1 top, s2 left, s3 right, s4 bottom; fixation mark in each square, sentence beside it | |
 | Waveform | sine (17 Hz does not divide 60) | |
 | Decoder window | 4 s now; 2 s if the replay tuning agrees | |
 | Cue before each trial | 1.0 s | |
@@ -255,7 +282,7 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 | Max trial length | 10.0 s | |
 | Baseline length | 10.0 s | |
 | `score` / `scores` sent | yes, `fbcca_minus_baseline` | |
-| Display text during the flicker | yes, unless it drops frames (SYNC 1.5) | |
+| Display text during the flicker | yes (4 sentences), unless it drops frames (SYNC 1.5) | |
 
 ## 7. Bridge ↔ display (informational, the teammate's side)
 
@@ -264,11 +291,15 @@ free-run feedback reads one integer per line (target index, `-1` clears) and ign
 Proposed additions, one JSON object per line, alongside the integers:
 
 ```
-{"text": "Yes, let's go outside"}
-{"labels": ["SAY", "NEXT"]}
+{"text": "Yes, let's go outside."}
+{"labels": ["Yes, let's go outside.", "Not right now.", "Maybe after lunch.", "More options"]}
+{"active": [0, 3]}
 {"flicker": true}
 {"flicker": false}
 ```
+
+- `{"active": [...]}`: which squares flicker on the next `{"flicker": true}` (target indices, from
+  `stim_start.active_slots`); the others stay still.
 
 - After `{"flicker": true}` the display prints the Unix time of the first flickering frame, which
   the bridge sends as `stim_onset`.
@@ -281,6 +312,7 @@ Proposed additions, one JSON object per line, alongside the integers:
   speak v2: send `hello` first, answer `baseline` with `baseline_done`, send `stim_onset`.
 - The bridge without our server: `python tools/contract_check.py` is a stand-in server on
   `:8000/ws/decoder`. Start it, then the bridge (`python -m ssvep.online.bridge --fake` uses
-  `FakeSource` instead of the headset). It runs a handshake, a baseline and a few trials, checks
+  `FakeSource` instead of the headset). It runs a handshake, a baseline and a few trials (every
+  second one a confirm trial with only s1 and s4 active), checks
   every message the bridge sends against the v2 schemas and the rules above, and prints pass or
   fail per message. Passing it is the SYNC 2 gate.

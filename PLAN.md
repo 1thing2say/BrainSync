@@ -34,10 +34,12 @@ pull requests.
   decoder passes it (`python tools/fake_decoder.py` in a second terminal shows what a passing run
   looks like).
 - Read the teammate's `ssvep` code (section 12). Three facts shape this plan:
-  1. **2 targets, not 4.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at 78–86 %
-     single-target, and 64–93 % with both squares flickering (section 14); 3 targets (12/15/17)
-     only reach 61–66 %; 10 Hz is unusable (alpha). **Keep 15/17 for now**; 12/17 is the only
-     alternative worth one test recording (section 14).
+  1. **Accuracy drops with every target.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at
+     78–86 % single-target, and 64–93 % with both squares flickering (section 14); 3 targets
+     (12/15/17) only reach 61–66 %; 4 targets were never recorded; 10 Hz is unusable (alpha).
+     **Decision (2026-10-24): try 4 targets first** (3 options + NEXT at 12/15/17/20 Hz), so the
+     user sees 3 options at once. A cued 4-target recording decides whether it stays; if not, fall
+     back to a list with a moving highlight decoded with 2 targets (section 14, "4-target gate").
   2. **His decoder is continuous, not per trial.** `SlidingDecoder` classifies a 4 s window every
      0.5 s and commits after 3 wins in a row, so a selection takes about 5 s from the start of the
      flicker at best. In the only live run most windows abstained (section 12), so expect longer.
@@ -52,9 +54,13 @@ pull requests.
     recordings is what section 14 reports.
   - `custom-operating-brain-seperate`: BrainSyncOS, a Jetson appliance OS (phase 1: base ISO
     extract/repack only). See section 10.
-- **Next up:** SYNC 1 to settle section 13 and agree `INTERFACE-v2-draft.md` (teammate: please read
-  System design, sections 12, 13 and 14, and the draft), then V3 (LLM option ranking) and V4
-  (partner speech input).
+- **Next up:** the 4-target gate recording (section 14) and SYNC 1 to settle section 13 and agree
+  `INTERFACE-v2-draft.md` (teammate: please read System design, sections 12, 13 and 14, and the
+  draft), then Cartesia TTS (V2 items 3–4), V3 (LLM option ranking) and V4 (partner speech
+  input).
+- **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
+  mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
+  draft describes 4 targets and 2-slot confirm trials.
 
 ## System design
 
@@ -101,13 +107,17 @@ Design risks to settle:
 3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
    a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
    demo script rehearses switching to it.
-4. **Time per reply.** One SAY is cue 1 s + decode ≥ 5 s + highlight 0.6 s + speech + rest 1 s,
-   about 8–9 s at best. Each NEXT adds about 7 s, and each abstained trial repeats. Ranking quality
-   (V3) and the decoder's abstain rate (section 13, item 10) matter more than any other choice.
-   Showing the decoder's scores on the partner page makes waiting look like progress.
+4. **Time per reply.** One pick is cue 1 s + decode ≥ 5 s + highlight 0.6 s, then the confirm
+   step (decode ≥ 5 s), then speech + rest 1 s: about 13–14 s at best. Each NEXT (new page of 3)
+   adds about 7 s, and each abstained trial repeats. Ranking quality (V3) and the decoder's abstain
+   rate (section 13, item 10) matter more than any other choice. Showing the decoder's scores on
+   the partner page makes waiting look like progress.
 5. **STOP takes three hops** (Chrome → server → bridge → display stdin). `Esc` on the display is
    local and immediate, so it is the primary stop, and the bridge turns the flicker off whenever it
    loses the server (v2 draft, rule 3).
+6. **4 targets may not decode well enough.** Untested on this headset; 3 targets already fall to
+   61–66 %. The 4-target gate (section 14) runs before the teammate builds per-target text, and
+   the fallback keeps all options visible.
 
 ## 0. Event constraints
 
@@ -121,43 +131,54 @@ Design risks to settle:
 
 ## 1. What this side does
 
-The decoder tells us which of **2** targets the user looked at. This side does everything else:
+The decoder tells us which of **4** targets the user looked at. This side does everything else:
 
-1. Decides what the user's screen shows: the current reply option in large text with two
-   flickering targets, **SAY** (speak this option) and **NEXT** (show the next option). His PsychoPy
+1. Decides what the user's screen shows: **3 reply options at once**, each next to its own
+   flickering target, plus a fourth target, **NEXT** (show the next page of options). His PsychoPy
    display draws it; we send it the text and when to flicker, through the bridge.
 2. Tells the decoder when each selection period (trial) starts and stops, and when the screen must
    be still for its baseline.
-3. Receives the selected target; on SAY, speaks that option's sentence aloud.
+3. Receives the selected target; on an option, asks the user to confirm it ("Say it" / "Back"),
+   then speaks that option's sentence aloud.
 4. Listens to the conversation partner (speech-to-text or typed) and asks the LLM for a **ranked**
    list of replies that fit what was just said, most likely first.
 5. Runs the **partner page** in Chrome: conversation, typed input, push-to-talk, status, STOP,
    speech output, and a mirror of the user's screen (no flicker).
 
-**Scan mode (default).** The LLM returns 4 options ranked by likelihood. The screen shows option 1.
-SAY speaks it; NEXT moves to option 2, and so on. NEXT on the last option asks for new options
-("More options"). With good ranking, most replies take one selection: about 5 s when the decoder
-commits on the first try. The live decoder abstains often today (section 12), so some trials will
-end as "Didn't catch that" and repeat; the teammate's tuning (section 13, item 10) should shorten
-this.
+**Page mode (default, decided 2026-10-24).** The LLM returns 3 options ranked by likelihood. All 3
+are on screen at once, each beside its own flickering target, so the user never picks an option
+just because they can't see what comes next. The fourth target is NEXT, which asks for a new page
+of 3 ("More options"). Looking at an option opens a confirm step: the same screen shows the
+picked sentence with two targets, "Say it" and "Back". Only "Say it" speaks. With good ranking,
+most replies take two selections (pick + confirm). The live decoder abstains often today
+(section 12), so some trials will end as "Didn't catch that" and repeat; the teammate's tuning
+(section 13, item 10) should shorten this.
 
-Demo story: a partner asks "Do you want to go outside?", the top option becomes "Yes, let's go
-outside", the user looks at SAY, and the laptop speaks it.
+**Fallback if the 4-target gate fails (section 14): list mode.** Same page of options on screen,
+one highlighted; 2 targets, SAY (speak the highlighted option) and NEXT (move the highlight; past
+the last option, new page), at 15/17 Hz. The user still sees every option; it costs speed, not
+visibility. No confirm step needed, since SAY is already a deliberate 2-class choice.
 
-**Pitch claim:** an LLM that ranks context-aware replies turns a 2-target SSVEP BCI, the most a
-dry-electrode headset separates reliably, into a conversation. If the decoder sends scores
-(section 13, item 6), low-confidence picks can be confirmed first.
+Demo story: a partner asks "Do you want to go outside?", the options become "Yes, let's go
+outside", "Not right now" and "Maybe after lunch", the user looks at the first, confirms, and the
+laptop speaks it.
+
+**Pitch claim:** an LLM that writes context-aware replies turns a few-target SSVEP BCI on a
+dry-electrode headset into a conversation, with every option visible and nothing spoken without a
+confirmation. State the measured accuracy for the target count actually used.
 
 ## 2. Non-negotiable rules
 
 1. **Only the decoder (or keyboard mode) decides what was selected.** The LLM never picks, guesses
    or changes a selection.
-2. **Speak exactly the selected option's `utterance`.** No rewriting after selection. The sentence
-   is on the user's screen during the cue, and during the flicker unless that drops frames
-   (SYNC 1.5), before it can be spoken.
-3. **The shown option never changes during a trial.** It changes only in `MENU_CUE`. Enforce with
+2. **Speak exactly the selected option's `utterance`, and only after "Say it".** No rewriting after
+   selection. The full sentence (not just the label) is on the user's screen during the cue and the
+   confirm step, and during the flicker unless that drops frames (SYNC 1.5), before it can be
+   spoken.
+3. **The shown options never change during a trial.** They change only in `MENU_CUE`. Enforce with
    an assertion and a test.
-4. **One target is always NEXT.** The LLM only fills the option list; it never controls navigation.
+4. **One target is always NEXT, on the same slot (s4).** The LLM only fills the 3 option slots; it
+   never controls navigation.
 5. **Every LLM response is validated** (pydantic). On timeout, error or invalid output, use a
    fallback list from `config/intents.yaml`. The app must keep working with the LLM or internet down.
 6. **The server owns all state.** His display only draws what it is told and reports onsets; the
@@ -165,15 +186,17 @@ dry-electrode headset separates reliably, into a conversation. If the decoder se
    phone client possible later.
 7. **Stimulus timing and layout belong to his display** (frame-locked, from frame counts).
    Frequencies, phases, waveform and sizes live in his stimulus config (`two_targets.toml` or a
-   copy). Our config only names the slots and their roles, and is checked against what his `hello`
+   copy; a new `four_targets.toml` for page mode). Our config only names the slots and their roles, and is checked against what his `hello`
    reports.
 8. **No hardware or decoder guessing.** Anything about the decoder's internals, window length or
    frequencies: ask, read `INTERFACE.md`, or read `../ssvep`.
-9. **Secrets** only from environment variables (`ANTHROPIC_API_KEY`). Never commit them.
+9. **Secrets** only from environment variables (`ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`), loaded
+   from the gitignored `.env` at the repo root if set there. Never commit, print or log them.
 10. **Safety:** flicker warning before the first trial (partner page and his display's start
     screen), `Esc` in his display stops all flicker immediately, and the partner page's STOP does
-    the same through the bridge. 15 and 17 Hz are in the 15–25 Hz range most likely to trigger
-    photosensitive seizures: nobody with photosensitive epilepsy or flicker sensitivity uses it.
+    the same through the bridge. 15, 17 and 20 Hz are in the 15–25 Hz range most likely to
+    trigger photosensitive seizures, and 4 flickering squares cover more of the screen than 2:
+    nobody with photosensitive epilepsy or flicker sensitivity uses it.
 11. Ask before adding dependencies outside section 4. All tunable numbers live in
     `config/default.yaml`.
 
@@ -199,12 +222,13 @@ BrainSync/
     schemas.py          # pydantic models, incl. the INTERFACE.md messages
     menus.py            # LLM option ranking, validation, fallback
     context.py          # conversation history
+    tts.py              # Cartesia client, audio cache, /audio route helper
     log.py              # JSONL event log
   ui/                   # partner page; no flicker
     index.html
     style.css
     app.js              # websocket client: conversation, status, STOP, mirror of the user's screen
-    speech.js           # TTS (speechSynthesis) + STT (Web Speech API)
+    speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
@@ -226,7 +250,9 @@ BrainSync/
 - Flicker: his PsychoPy display (`python -m ssvep.stimulus`), in his venv.
 - Browser: **Chrome** (needed for the Web Speech API), for the partner page only. Plain
   HTML/JS/CSS, no framework, no build step.
-- TTS: browser `speechSynthesis` (works offline, zero setup). *Stretch:* a hosted voice.
+- TTS: Cartesia sonic-3.5 via REST `/tts/bytes`, pre-generated per menu; browser `speechSynthesis`
+  (local voice) as fallback. Called with `httpx`, not the `cartesia` SDK (older examples use
+  outdated model names such as `sonic-english`).
 - STT: Web Speech API (`webkitSpeechRecognition`). It needs internet in Chrome, so a typed text box
   is always available as fallback.
 - LLM: Anthropic Messages API, default `claude-haiku-5-5` for speed; force a single tool call whose
@@ -241,30 +267,40 @@ BrainSync/
 | Key | Default | Notes |
 | --- | --- | --- |
 | `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` later for phone or Jetson |
-| `stim.slots` | s1 15 Hz, s2 17 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. 12/17 under test (section 14) |
-| `stim.roles` | s1 `say`, s2 `next` | Which slot does what |
+| `stim.slots` | s1 15 Hz, s2 17 Hz, s3 20 Hz, s4 12 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
+| `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 12 Hz, the weakest and alpha-biased frequency, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
+| `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
 | `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
 | `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
 | `stim.rest_s` | 1.0 | Still screen after a trial |
 | `baseline.seconds` | 10.0 | Still screen at start for the decoder's resting baseline |
 | `baseline.timeout_s` | 15.0 | No `baseline_done` from the bridge by then → pause |
 | `menus.dynamic` | true | false = fallback lists only |
-| `menus.option_count` | 4 | Ranked options per list |
+| `menus.option_count` | 3 | Ranked options per page (one per option slot). List mode may use 3 or 4 |
 | `menus.label_max_chars` | 18 | |
 | `menus.label_max_words` | 3 | |
 | `menus.utterance_max_words` | 14 | |
 | `llm.model` | `claude-haiku-5-5` | |
 | `llm.timeout_s` | 4.0 | One retry, then fallback |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
-| `speech.tts_rate` | 1.0 | |
+| `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
+| `speech.voice_id` | | Cartesia voice id |
+| `speech.model` | `sonic-3.5` | Pinned; never `sonic-latest` |
+| `speech.tts_timeout_s` | 2.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it |
+| `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
 | `speech.stt_mode` | `push_to_talk` | Mic is off while TTS is speaking |
 | `speech.max_speak_s` | 15.0 | Move on if the page never reports `tts_done` |
-| `selection.confirm_mode` | `never` | `never` / `always` / `low_score` (needs decoder scores) |
+| `selection.confirm_mode` | `always` | `never` / `always` / `low_score` (needs decoder scores). `always` in page mode, so a wrong pick is never spoken; `never` in list mode |
 | `selection.chosen_highlight_s` | 0.6 | Show which target was picked |
 
 Layout, sizes, waveform and the refresh check live in his stimulus config (`two_targets.toml`:
-sine, 0.4 screen-height squares one screen height apart). The server supports any number of slots,
-so 3 or 4 targets is a config change on both sides if the decoder improves.
+sine, 0.4 screen-height squares one screen height apart; `four_targets.toml` for page mode). The
+server supports any number of slots, so switching between page mode and list mode is a config
+change on both sides.
+
+Page-mode layout (his config, our mirror copies it): a diamond, squares as far apart as the screen
+allows, a small fixation mark at the centre of each square (gaze drifts after about 2 s without
+one, section 12), each option's full sentence right beside its square, NEXT at the bottom.
 
 ## 6. Shared messages
 
@@ -274,9 +310,11 @@ must be agreed with the teammate and made in that file first.
 
 Internal browser ↔ server messages (`/ws/ui`, JSON with a `type` field):
 
-- Server → browser: `show_option` {list_id, index, count, label, utterance, slots[{slot, role,
-  label}]}, `trial` {trial_id, phase: cue|flicker|rest|baseline}, `highlight` {slot},
-  `speak` {text, utterance_id}, `state` {name, detail}, `transcript` {who, text},
+- Server → browser: `show_page` {list_id, page, mode: page|list|confirm, highlight_index,
+  slots[{slot, role: option|next|say|back, label, utterance}]} (one entry per target; in list mode
+  the options ride along as `options[{label, utterance}]`), `trial` {trial_id, phase:
+  cue|flicker|rest|baseline}, `highlight` {slot},
+  `speak` {text, utterance_id, audio_url?}, `state` {name, detail}, `transcript` {who, text},
   `status` {decoder_connected, decoder_ok, display_ok, llm_ok, fake_decoder, keyboard_mode}.
 - Browser → server: `tts_done` {utterance_id}, `partner_text` {text, source: stt|typed},
   `key` {key}, `stop` {}, `resume` {}, `judgment` {utterance_id, correct}.
@@ -290,18 +328,24 @@ live decoding.
 
 ```
 IDLE --(warning accepted)--> BASELINE (still screen, baseline.seconds) --> MENU_CUE
-MENU_CUE --(cue_s, list ready)--> STIMULATING
-STIMULATING --selection(say)-->  SELECTED --> SPEAKING --(tts_done)--> REST --> MENU_CUE (new list)
-STIMULATING --selection(next)--> SELECTED --> REST --> MENU_CUE (next option; past the last: new list)
-STIMULATING --no_selection/timeout--> NOT_CAUGHT ("Didn't catch that") --> REST --> MENU_CUE (same option)
-STIMULATING --partner_text--> stop trial (reason context_changed) --> MENU_CUE (new list, option 1)
+MENU_CUE --(cue_s, page ready)--> STIMULATING
+STIMULATING --selection(option k)--> SELECTED --> CONFIRMING (sentence k shown; targets "Say it" / "Back")
+CONFIRMING --selection(say)-->  SPEAKING --(tts_done)--> REST --> MENU_CUE (new page)
+CONFIRMING --selection(back) / no_selection / timeout--> REST --> MENU_CUE (same page)
+STIMULATING --selection(next)--> SELECTED --> REST --> MENU_CUE (next page of 3)
+STIMULATING --no_selection/timeout--> NOT_CAUGHT ("Didn't catch that") --> REST --> MENU_CUE (same page)
+STIMULATING --partner_text--> stop trial (reason context_changed) --> MENU_CUE (new page)
 any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)--> BASELINE
 ```
 
-- `MENU_CUE` waits for the next list up to `llm.timeout_s`, then uses a fallback list.
-- `confirm_mode: always` adds `CONFIRMING` after a SAY: the same two targets become "Say it" /
-  "Back".
-- NEXT twice past the end of a list (two "More options" in a row) → home list.
+- `MENU_CUE` waits for the next page up to `llm.timeout_s`, then uses a fallback page.
+- `CONFIRMING` is its own trial (new `trial_id`) with only two active slots: "Say it" on s1
+  (15 Hz) and "Back" on s4 (12 Hz), so the confirm step is a 2-class decision. A timeout counts as
+  Back: nothing is ever spoken by default.
+- NEXT twice in a row on a "More options" page → home page.
+- **List mode** (fallback, `menus.mode: list`): `STIMULATING --selection(say)--> SPEAKING`;
+  `--selection(next)-->` moves the highlight, past the last option loads a new page. No
+  `CONFIRMING` (`confirm_mode: never`).
 - Each trial has a new `trial_id`. Selections with an old `trial_id` are logged and ignored.
 - Implement as a class driven by events plus an injectable clock, so tests run without timers.
 
@@ -314,10 +358,12 @@ Hours are from kickoff. Integration checkpoints with the teammate are marked **S
 1. Scaffold `pyproject.toml`, `.gitignore` (`logs/`, `.env`), `pytest`, folder layout.
 2. `app/schemas.py`: all `INTERFACE.md` v1 messages + internal messages, with round-trip tests.
    Accept optional `score`/`scores`. (Built against v1; moved to protocol 2 on 2026-10-23.)
-3. `config/*.yaml` and a loader with validation (unique slot ids, exactly one `say` and one `next`
-   role, positive timings).
+3. `config/*.yaml` and a loader with validation (unique slot ids, positive timings; page mode:
+   exactly one `next` and `option_count` `option` slots; list mode: exactly one `say` and one
+   `next`). *Update 2026-10-24: add page mode and its roles.*
 4. `tools/fake_decoder.py`: connects to `/ws/decoder`, answers `stim_start` with a `selection` after a
-   delay. Modes: `--keyboard` (type 1–2), `--random`, `--script file.yaml`, `--fail-rate 0.2`
+   delay. Modes: `--keyboard` (type 1–4, or 1–2 when only two slots are active), `--random`,
+   `--script file.yaml`, `--fail-rate 0.2`
    (sends `no_selection` sometimes), `--latency 5` (default; mimics the real decoder's commit
    time), `--scores` (sends fake `scores`). Logs any display commands it receives.
 5. `app/log.py`: JSONL, one file per session, flush per event.
@@ -332,38 +378,63 @@ commit) and `config/default.yaml` to match.
 
 1. `ui/app.js` partner page: conversation panel, typed input, push-to-talk button (wired in V4),
    status badges (decoder, display, LLM, FAKE DECODER, KEYBOARD), a big STOP button and resume.
-2. Mirror of the user's screen: the current option text and the SAY / NEXT boxes, static (no
-   flicker), with the trial phase and the picked box highlighted. Used for development without
-   PsychoPy and so the audience can follow along.
+2. Mirror of the user's screen: the 4 boxes in the diamond with each option's sentence and NEXT
+   (or the confirm screen, or list mode's highlighted list), static (no flicker), with the trial
+   phase and the picked box highlighted. Used for development without PsychoPy and so the audience
+   can follow along. *Update 2026-10-24: built for SAY / NEXT; rework for page mode.*
 3. Flicker warning in the partner page; the first trial waits until it is accepted.
-4. Keyboard mode: keys 1–2 select a target (demo fallback if the decoder fails).
+4. Keyboard mode: keys 1–4 select a target (1 = Say it, 4 = Back on the confirm screen); demo
+   fallback if the decoder fails.
 
 Done when: the mirror follows the server through 20 fake-decoder trials.
 
 **Teammate, in parallel (h2–6):** display commands in his PsychoPy display (section 13, item 2)
 and the bridge (item 3). Elijah can take either as a PR to his repo if he prefers.
 
+**Teammate, first (before the display work): the 4-target gate recording** (section 14). Its
+result decides whether the display needs per-target text on 4 squares (page mode) or one list with
+a highlight (list mode).
+
 **SYNC 1.5 (h5): text on the PsychoPy screen.** Drive his display with the new commands through
-60 s of cue/flicker/rest cycles with changing text; his session log shows no more dropped frames
-than plain `--free`. If drawing text during the flicker drops frames, show it only during the cue
+60 s of cue/flicker/rest cycles with changing text (4 sentences in page mode); his session log
+shows no more dropped frames than plain `--free`. If drawing text during the flicker drops frames, show it only during the cue
 and rest (his `labels_during_stim = false` rule exists for this reason).
 
 ### V2 — Orchestrator and speech out (h4–8)
 
 1. `app/server.py`: FastAPI serving `ui/`, websocket endpoints `/ws/ui` and `/ws/decoder`, reconnect
    handling, one active UI and one active decoder.
-2. `app/orchestrator.py`: section 7 state machine (scan mode) with a static list from `intents.yaml`;
-   sends display commands (text, flicker on/off, highlight) to the decoder connection.
-3. `ui/speech.js`: TTS with `speechSynthesis`; pick an English voice; report `tts_done`. Show the
-   sentence on screen while speaking.
-4. Log every event.
+2. `app/orchestrator.py`: section 7 state machine with a static list from `intents.yaml`; sends
+   display commands (text, flicker on/off, highlight) to the decoder connection. *Update
+   2026-10-24: built as scan mode; add page mode with `CONFIRMING`, keep list mode as the
+   fallback.*
+3. `app/tts.py`: as soon as a page passes validation, request audio for its 3 option utterances
+   concurrently (NEXT / "More options" needs none): `POST https://api.cartesia.ai/tts/bytes` with
+   headers `Authorization: Bearer $CARTESIA_API_KEY`, `Cartesia-Version: 2026-03-01`,
+   `Content-Type: application/json`, and body `model_id` (`speech.model`), `transcript` (the exact
+   utterance, rule 2), `voice` {`id`: `speech.voice_id`} and an `output_format` of a WAV container
+   with `pcm_s16le`, so a plain `<audio>` element plays it (check the current docs for the exact
+   `output_format` field names before implementing). Cache the bytes keyed by a hash of utterance
+   text + voice_id and serve them at `/audio/{id}`; the clip is cached before the selection arrives,
+   so playback is instant. A request that fails or takes longer than `speech.tts_timeout_s` leaves
+   that slot without audio.
+4. `ui/speech.js`: when `speak` has an `audio_url`, play it with an `<audio>` element and send
+   `tts_done` on `ended`; with no URL, or if playback errors, speak with `speechSynthesis` (in
+   Chrome a voice with `localService === true`; the "Google" voices are network voices and fail
+   offline) and send `tts_done` when it finishes. Show the sentence on screen while speaking.
+5. Log every event.
+6. *Stretch (after the demo works end to end):* voice cloning for a "voice banking" story, with the
+   person's consent only, noted in the README as a demo voice.
 
-Tests: table-driven transition tests (say, next, next past the end, timeout, stale trial_id,
-context change, STOP → baseline); `show_option` and display text are never sent while
-`STIMULATING`.
+Tests: table-driven transition tests (option → confirm → say, option → back, confirm timeout
+speaks nothing, next, next twice → home page, timeout, stale trial_id, context change, STOP →
+baseline, and the list-mode set); `show_page` and display text are never sent while
+`STIMULATING`; nothing reaches `SPEAKING` in page mode without passing through `CONFIRMING`.
+TTS: a mocked Cartesia success caches the audio; a timeout or error leaves `audio_url` empty; the
+cache is reused for identical utterances.
 
-Done when: with `fake_decoder.py --random`, the app runs 20 trials in a row unattended, speaking
-each SAY, with no stuck states.
+Done when: with `fake_decoder.py --random`, the app runs 20 trials in a row unattended in each
+mode, speaking only confirmed picks, with no stuck states.
 
 **SYNC 2 (h6):** his bridge connects to `/ws/decoder` (with `FakeSource` if the headset is not on),
 shows our text on his display and completes 5 trials, and passes `tools/contract_check.py`, the
@@ -372,9 +443,10 @@ stand-in server (`INTERFACE-v2-draft.md` section 8).
 ### V3 — LLM option ranking (h8–12)
 
 1. `app/context.py`: last `history_turns` turns (partner and user), time of day, profile.
-2. `app/menus.py`: one LLM call per list. Input: what the partner last said, recent turns, time,
+2. `app/menus.py`: one LLM call per page. Input: what the partner last said, recent turns, time,
    profile, allowed intents, utterances already shown (for "More options"). Output: exactly
-   `option_count` options **ranked most likely first**, each `{label, utterance, intent_id}`.
+   `option_count` (3) options **ranked most likely first**, each `{label, utterance, intent_id}`.
+   Option 1 goes on s1 (15 Hz), which also carries "Say it" on the confirm screen.
 3. Prompt rules: first person, as the user; utterance up to 14 words; label up to 3 words and 18
    characters; options clearly different from each other; answer what the partner just said when
    there is a question; for yes/no questions put the likelier answer first and include a "no / not
@@ -409,7 +481,7 @@ panel.
    times line up with board timestamps (both Unix time on the same machine).
 2. Agree on final `max_trial_s`, `rest_s` and the decoder's `window_s` (4 s default; 2 s scored as
    well or better in 2 of 3 cued recordings, and would cut each selection to about 3 s), and on
-   the frequency pair (section 14).
+   the frequency set and mode (section 14, 4-target gate).
 3. Handle decoder or display loss mid-trial: pause, show "Decoder disconnected", resume on
    reconnect (through `BASELINE`).
 4. If the decoder sends scores, enable `confirm_mode: low_score` (*stretch*).
@@ -426,8 +498,9 @@ Take shifts with the teammate. Commit a working state before sleeping.
 ### V6 — Hardening and demo mode (h24–28)
 
 1. `tools/preflight.py`: decoder connected and `status.ok`, display up (refresh check passed, fixed
-   60 Hz, ProMotion off), Chrome partner page open, API key, internet, audio out, mic; prints
-   go/no-go. Headset checklist, from the teammate's sessions:
+   60 Hz, ProMotion off), Chrome partner page open, API key, internet, audio out, mic,
+   `CARTESIA_API_KEY` set and one test synthesis succeeding (if not, report fallback-only mode:
+   browser speech); prints go/no-go. Headset checklist, from the teammate's sessions:
    - Headset on at least 20 minutes before recording or demoing; unsettled contacts ruined the
      first trials of the first two-target recording.
    - One eyes-closed alpha check (`spectrum_check -t 10`): a posterior 9–10 Hz peak and RMS under
@@ -436,7 +509,8 @@ Take shifts with the teammate. Commit a working state before sleeping.
    - Allow about 16 s for the board to connect; the "Handshake verification failed" line it logs
      first is harmless.
 2. One command to start: `python -m app.server` (+ `--fake-decoder`, `--keyboard`).
-3. Demo script: 3–4 partner questions where the right reply is option 1, plus one that needs NEXT.
+3. Demo script: 3–4 partner questions where the right reply is on the first page, plus one that
+   needs NEXT, and one deliberate "Back" to show that nothing is spoken without confirmation.
    Rehearse with the live decoder.
 4. Log summary: trials, correct/wrong rate from `C`/`W` marks, seconds per spoken reply, selections
    per spoken reply, median list latency.
@@ -445,7 +519,8 @@ Take shifts with the teammate. Commit a working state before sleeping.
 
 ### V7 — Submission (h28–36)
 
-1. `README.md`: what it is, honest claim (2 targets, dry electrodes, measured accuracy), how to run,
+1. `README.md`: what it is, honest claim (target count and mode used, dry electrodes, measured
+   accuracy from the gate recording and the live log), how to run,
    safety notes, numbers from the log summary.
 2. Devpost write-up and a screen recording of a full live run (backup: keyboard mode, clearly labeled).
 3. Two clean rehearsals with the teammate.
@@ -478,7 +553,7 @@ Take shifts with the teammate. Commit a working state before sleeping.
 pip install -e ".[dev]"
 pytest
 python -m app.server                        # real decoder connects to /ws/decoder
-python -m app.server --keyboard             # keys 1–2 select
+python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/preflight.py
@@ -529,7 +604,7 @@ fullscreen.
   gaze drifts to the other target after about 2 s unless a cue box stays on the target; ProMotion
   on = no SSVEP; drawing text every frame can cost frames on slow machines. Re-analysed on
   2026-10-23 with stricter run selection: section 14. The held cue box fixed gaze drift in cued
-  recordings (last 2 s: 7/20 → 13/20), but scan mode cannot hold a box on a target nobody knows in
+  recordings (last 2 s: 7/20 → 13/20), but live use cannot hold a box on a target nobody knows in
   advance; a fixation mark inside each square, or the 2 s window, has to do that job. Gel or paste
   on O1/O2 is the biggest remaining gain, ahead of any software change. One verified run dropped 7
   frames in 160 s (the baseline for SYNC 1.5).
@@ -561,8 +636,10 @@ questions for the teammate"), with a note asking the teammate's Claude session t
 
 1. **Flicker: settled.** His PsychoPy display draws the targets; the browser draws no flicker.
 2. **Getting the option text onto his display.** *Recommended:* extend his free-run feedback so
-   stdin also takes JSON lines next to the existing target index: `{"text": "..."}` (option text
-   above the targets), `{"labels": ["SAY", "NEXT"]}` and `{"flicker": false}` (hold frame 0 during
+   stdin also takes JSON lines next to the existing target index: `{"text": "..."}` (one line of
+   text, for list mode and the confirm screen), `{"labels": ["...", "...", "...", "More options"]}`
+   (one sentence per target, beside each square, for page mode), `{"active": [0, 3]}` (which
+   squares flicker; the confirm screen uses two) and `{"flicker": false}` (hold frame 0 during
    cue, rest and baseline). Roughly 40 lines in `stimulus/feedback.py` and `display.py`. The display
    prints the Unix time of the first flickering frame after `{"flicker": true}` (`--markers unix`),
    and the bridge sends it to us. *Fallback:* his display in a window (`--windowed`) with our
@@ -578,11 +655,10 @@ questions for the teammate"), with a note asking the teammate's Claude session t
    `Esc` or exit as a `status` with `ok: false`. Reconnects to our server every 1 s; the board
    itself takes about 16 s to connect, so it connects once at startup, not per reconnect. `--fake`
    uses `FakeSource`.
-4. **Menu style.** *Recommended: scan* (SAY / NEXT, section 1). *Alternative: pair*: both targets
-   carry an option, the LLM's top two side by side, and looking at neither until `max_trial_s`
-   shows the next pair. Faster when the answer is in the top two, but a false commit speaks
-   something; scan only ever speaks after an explicit SAY. Pair needs per-target text on his
-   display.
+4. **Menu style. Decided (Elijah, 2026-10-24): page mode**, 3 options + NEXT on 4 targets, with
+   a confirm step before anything is spoken, so the user sees all options at once. Fallback: list
+   mode (all options visible, moving highlight, SAY / NEXT on 2 targets) if the 4-target gate
+   fails (section 14). Needs per-target text and a 4-square layout on his display.
 5. **`INTERFACE.md` changes.** Flicker ownership moves to his side, so these are more than additive;
    bump `protocol` to 2. Written out in full in `INTERFACE-v2-draft.md` (adds `hello_ack`, `error`,
    `baseline_done` and `pause` to the list below); once agreed it replaces `INTERFACE.md`:
@@ -594,14 +670,17 @@ questions for the teammate"), with a note asking the teammate's Claude session t
    - `stim_start` from the server means "start flickering now"; the decoder answers with
      `stim_onset` {trial_id, t_unix} from the display's first flickering frame.
    - `stim_stop` turns the flicker off; `reason` gains `no_selection`.
-   - Section 6 table filled in: 2 targets, 15 / 17 Hz, sine, rest 1 s, max trial 10 s, baseline 10 s.
+   - Section 6 table filled in: 4 targets (s1–s3 options, s4 NEXT), 15 / 17 / 20 / 12 Hz, sine,
+     rest 1 s, max trial 10 s, baseline 10 s; `stim_start.active_slots` can be 2 of them (confirm
+     screen). Fallback: 2 targets, 15 / 17 Hz. (Done in the draft, 2026-10-24.)
 6. **Scores.** His `Decision.scores` exist already: send `scores` (and `score` for the chosen slot)
    with each `selection`, and `"score_kind": "fbcca_minus_baseline"` in `hello`. Not probabilities;
    `confirm_mode: low_score` would use a margin threshold he picks.
 7. **Window length.** 4 s or 2 s. In the three cued 15/17 recordings the best 2 s cell was 13/14,
    17/19 and 12/17, against 10/14, 14/19 and 14/17 at 3.86 s (section 14). Shorter windows make
    each selection about 3 s instead of 5 s. *Recommended:* 2 s, if a live check agrees.
-8. **Frequency pair.** Keep 15/17 or test 12/17 (section 14).
+8. **Frequency set.** 12/15/17/20 Hz for page mode, NEXT on 12 Hz; 15/17 for the list-mode
+   fallback. Settled by the 4-target gate (section 14).
 9. **Where the decoder lives.** `../ssvep` (his repo) or the `brainsync/` rebuild on branch
    `check-implemtation-calhacks-desktop`. The bridge (item 3) has to be written against one of them.
 10. **The teammate's demo-improvement plan** (`../ssvep/.claude/plans/demo-improvements.plan.md`,
@@ -612,7 +691,21 @@ questions for the teammate"), with a note asking the teammate's Claude session t
     - **C** (TRCA, calibrated on the user's own trials) only if it beats tuned FBCCA.
     - **D** (confidence bars) extends the same display stdin as item 2: agree one line format.
     - **E** ("make the choice do something") is this app; skip it on their side.
-    *Recommended order for them:* A and B first, then items 2 and 3 here, then D.
+    *Recommended order for them:* the 4-target gate recording (item 11) first, then A and B, then
+    items 2 and 3 here, then D.
+11. **4-target gate and a trained classifier (added 2026-10-24).** CCA/FBCCA need no training, so
+    more data does not improve them; only window, votes and margin can be tuned. A classifier
+    trained on the user's own trials (TRCA / eTRCA, stubs in his repo, his plan C) usually beats
+    CCA clearly with more targets and short windows, which is this case. Plan:
+    - Fix the hardware first: gel or paste on O1/O2, C3/C4 tied to CH1+ or moved to Oz/POz. A
+      trained classifier learns noise if the signal is poor.
+    - The gate recording (section 14) doubles as TRCA training data.
+    - TRCA is about 100 lines of numpy; Elijah can write it as a PR to his repo if the teammate is
+      on the bridge. Judge it only on held-out trials, never on its training trials.
+    - Recalibrate every session (dry electrodes move each time the headset goes on): about
+      6–8 cued trials per target, 2–3 minutes, with `cued_trials`.
+    - *Stretch:* every confirmed "Say it" is a labelled trial; log its EEG window with the label
+      and retrain between turns, so accuracy can improve during the demo.
 
 ## 14. Frequency choice (re-analysis 2026-10-23)
 
@@ -675,7 +768,24 @@ What this means:
   79 % in one cell (label-permutation p = 0.18). Gaps under about 10 points are not evidence.
 - **Safety does not change.** 12, 15 and 17 Hz are all in the photosensitive range (rule 10).
 
-**To decide (teammate, before SYNC 3):** one cued two-target recording at 12/17 with the same
-layout and cue box as the 15/17 runs (`cued_trials -c` with a 12/17 copy of `two_targets.toml`,
-about 3 minutes). Switch only if it beats 15/17 by more than 10 points at the chosen window. A
-switch is a config change on both sides: his stimulus config, and `stim.slots` here.
+**4-target gate (decided 2026-10-24; teammate, as early as possible, before the display work).**
+One cued recording with all 4 squares flickering at 12/15/17/20 Hz in the real page-mode layout
+(diamond, fixation marks, text beside each square), using `cued_trials -c` with a
+`four_targets.toml`: about 6–8 trials per target, roughly 5 minutes, headset settled for 20
+minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
+
+| 4-class accuracy | Decision |
+| --- | --- |
+| About 70 % or more | Keep page mode (4 targets) |
+| 55–70 % | Train TRCA on the same recording (section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
+| Below that | List mode: options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
+
+Why 12/15/17/20 and not 11/13/15/17: wider spacing (3–5 Hz instead of 2 Hz), and it keeps the two
+strongest measured frequencies. 20 Hz is exactly 3 frames at 60 Hz and was the most phase-locked
+response seen, but has no direct recording, so the gate is its first real test. NEXT goes on 12 Hz
+because the still screen already favours it (alpha), so its errors turn a page instead of picking
+an option.
+
+The 12/17 two-target test above is now only relevant to the list-mode fallback: switch from 15/17
+only if it beats it by more than 10 points. Any switch is a config change on both sides: his
+stimulus config, and `stim.slots` here.
