@@ -9,15 +9,16 @@ display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
 
 stim:
-  # Mirrors the teammate's stimulus config (ssvep two_targets.toml); the bridge's hello must match.
+  # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.
   # Page mode: a diamond, s1 top, s2 left, s3 right, s4 bottom (PLAN.md section 14, 4-target gate).
-  # NEXT sits on 12 Hz, the weakest frequency, so the likeliest error only turns a page.
+  # All four sit clear of the user's alpha (9.25 Hz) and the 18-21 Hz venue interference.
+  # NEXT sits on 11 Hz, the lowest (nearest alpha), so the likeliest error only turns a page.
   # List-mode fallback: s1 15 Hz (say) and s2 17 Hz (next) only.
   slots:
-    - {slot: s1, freq_hz: 15.0, phase_deg: 0}
-    - {slot: s2, freq_hz: 17.0, phase_deg: 0}
-    - {slot: s3, freq_hz: 20.0, phase_deg: 0}
-    - {slot: s4, freq_hz: 12.0, phase_deg: 0}
+    - {slot: s1, freq_hz: 13.0, phase_deg: 0}
+    - {slot: s2, freq_hz: 15.0, phase_deg: 0}
+    - {slot: s3, freq_hz: 17.0, phase_deg: 0}
+    - {slot: s4, freq_hz: 11.0, phase_deg: 0}
   roles:                       # page mode: option_count "option" slots + one "next"
     s1: option
     s2: option
@@ -46,6 +47,7 @@ menus:
 llm:
   model: claude-haiku-5-5
   timeout_s: 4.0               # one retry, then fallback list
+  keepalive_s: 20.0            # while idle, a free API call this often keeps the connection open; 0 = off
 
 context:
   history_turns: 8             # partner + user turns sent to the LLM
@@ -60,12 +62,27 @@ speech:
                                # 44.1 kHz); venue Wi-Fi slowed to ~30 KB/s at times (2026-10-24)
   sample_rate: 22050
   bit_rate: 64000              # mp3 only
+  cache_dir: cache/tts         # clips kept on disk (gitignored): they survive a restart, and the
+                               # fixed lists are pre-generated (python tools/prerender_tts.py)
   tts_timeout_s: 8.0           # per clip, once sent; slower or failed -> the browser speaks it.
                                # A clip is needed >= 13 s after its page appears; venue Wi-Fi alone
                                # took 1-3 s per request (2026-10-24), so 2 s timed every clip out.
   max_concurrent: 2            # Cartesia plan limit (HTTP 429 concurrency_limited above it)
   tts_rate: 1.0                # speechSynthesis fallback only
-  stt_mode: push_to_talk       # mic is off while TTS is speaking
+  stt_mode: always             # always: the mic listens the whole session, hands-free, except while
+                               # a reply plays, paused, idle or muted; turn: listen_window_s at the
+                               # start and after each reply; push_to_talk: only the Listen button
+  listen_window_s: 10.0        # turn mode, and the Listen button while paused
+  stt_tail_s: 0.5              # wait after a reply ends before listening (raise to ~0.8 for a
+                               # Bluetooth speaker), so it never hears itself
+  stt_interrupts: question     # question: a spoken question may stop a page trial (never a pick in
+                               # progress); never: every spoken line waits for the next cue.
+                               # Typed text always interrupts
+  stt_interrupt_cooldown_s: 20.0  # at most one spoken interrupt in this time; 0 = no limit
+  stt_gap_s: 1.2               # silence that ends a partner line
+  stt_max_line_s: 15.0         # a line is sent after this long even if the partner keeps talking
+  stt_echo_s: 4.0              # lines heard this soon after the mic reopens are checked for echo
+  start_muted: false           # true = the session starts with the mic muted
   max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
 
 selection:

@@ -97,7 +97,7 @@ async def test_valid_answer_gives_ranked_options_and_sends_a_forced_strict_call(
     assert params["tools"][0]["strict"] is True
     assert not {"temperature", "top_p", "top_k"} & set(params)  # a 400 on Claude Haiku 5.5
     assert "Do you want to go outside?" in params["messages"][0]["content"]
-    assert PROFILE.name in params["system"] and "medical" in params["system"]
+    assert "You write reply options for Sam," in params["system"] and "medical" in params["system"]
     ok = llm_events(event_log)[-1]
     assert ok["event"] == "llm_ok" and ok["options"][0] == "Yes, let's go outside."
 
@@ -161,7 +161,7 @@ async def test_the_retry_names_what_was_wrong():
 
 
 @pytest.mark.parametrize("label, short", [
-    ("Not sure about dinner", "Not sure about"),  # 4 words: the first 3
+    ("Not sure about dinner", "Not sure"),  # 4 words: the first 3, then no dangling "about"
     ("Something comfortable tonight", "Something"),  # 3 words but 29 chars: cut at a word
     ("Unbelievablyfantastic", "Unbelievablyfantas"),  # one long word: cut to 18 chars
     ("Let's go", "Let's go"),
@@ -169,6 +169,8 @@ async def test_the_retry_names_what_was_wrong():
     ("A walk by the lake", "A walk"),
     ("Not yet, too early", "Not yet"),
     ("Up to you", "Up to you"),  # fits already: never changed
+    ("No one, I think", "No one"),
+    ("So-so. How about you?", "So-so"),
 ])
 def test_shorten_label(label, short):
     assert shorten_label(label, 3, 18) == short
@@ -177,10 +179,10 @@ def test_shorten_label(label, short):
 async def test_a_long_label_is_shortened_and_the_page_kept(event_log):
     fake = FakeClaude(reply(_with("option_2", label="Not sure about dinner")))
     options = await maker(fake, event_log).make_page(request())
-    assert len(fake.calls) == 1 and options[1].label == "Not sure about"
+    assert len(fake.calls) == 1 and options[1].label == "Not sure"
     assert options[1].utterance == GOOD["option_2"]["utterance"]  # what is spoken never changes
     ok = llm_events(event_log)[-1]
-    assert ok["event"] == "llm_ok" and ok["labels_shortened"] == ["'Not sure about dinner' -> 'Not sure about'"]
+    assert ok["event"] == "llm_ok" and ok["labels_shortened"] == ["'Not sure about dinner' -> 'Not sure'"]
 
 
 async def test_two_invalid_answers_give_none(event_log):
@@ -211,6 +213,96 @@ async def test_a_slow_answer_times_out_within_llm_timeout(event_log):
     assert await maker(fake, event_log, timeout_s=0.2).make_page(request()) is None
     assert loop.time() - started < 0.6
     assert llm_events(event_log)[-1]["reason"] == "timeout"
+
+
+async def test_a_failed_call_logs_how_long_it_ran(event_log):
+    fake = FakeClaude(reply(GOOD), delay=1.0)
+    await maker(fake, event_log, timeout_s=0.2).make_page(request())
+    assert 150 <= llm_events(event_log)[-1]["ms"] < 600
+
+
+class FakeWarm:
+    """Stands in for the keep-alive call (``models.retrieve``); fails while ``fail`` is set."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.fail = False
+
+    async def __call__(self):
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("offline")
+
+
+def warm_maker(fake, warm, event_log=None, keepalive_s: float = 0.1, timeout_s: float = 4.0):
+    return MenuMaker(CFG.menus, CFG.llm.model_copy(update={"timeout_s": timeout_s,
+                                                          "keepalive_s": keepalive_s}),
+                     INTENTS, PROFILE, api_key=None, log=event_log, create=fake, warm=warm)
+
+
+async def test_start_opens_the_connection_at_once_and_keeps_it_open(event_log):
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD)), warm, event_log, keepalive_s=0.1)
+    await m.start()
+    await asyncio.sleep(0.02)
+    assert warm.calls == 1  # before any partner line
+    await asyncio.sleep(0.25)
+    assert warm.calls >= 3
+    await m.stop()
+    calls = warm.calls
+    await asyncio.sleep(0.15)
+    assert warm.calls == calls  # stopped
+    assert [e["event"] for e in llm_events(event_log)] == ["llm_warm"]  # logged once, not per call
+
+
+async def test_a_failed_page_reopens_the_connection_at_once():
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD), delay=1.0), warm, keepalive_s=60.0, timeout_s=0.1)
+    await m.start()
+    await asyncio.sleep(0.02)
+    assert warm.calls == 1
+    assert await m.make_page(request()) is None  # cut off by the time limit
+    await asyncio.sleep(0.02)
+    assert warm.calls == 2  # not 60 s later
+    await m.stop()
+
+
+async def test_no_keep_alive_call_while_a_page_call_is_in_flight():
+    warm = FakeWarm()
+    m = warm_maker(FakeClaude(reply(GOOD), delay=0.3), warm, keepalive_s=0.05)
+    await m.start()
+    await asyncio.sleep(0.02)
+    page = asyncio.create_task(m.make_page(request()))
+    await asyncio.sleep(0.01)
+    calls = warm.calls
+    await asyncio.sleep(0.2)
+    assert warm.calls == calls
+    assert await page is not None
+    await m.stop()
+
+
+async def test_a_failing_keep_alive_is_logged_on_change_and_never_stops(event_log):
+    warm = FakeWarm()
+    warm.fail = True
+    m = warm_maker(FakeClaude(reply(GOOD)), warm, event_log, keepalive_s=0.05)
+    await m.start()
+    await asyncio.sleep(0.12)
+    warm.fail = False
+    await asyncio.sleep(0.1)
+    await m.stop()
+    events = llm_events(event_log)
+    assert [e["event"] for e in events] == ["llm_warm_failed", "llm_warm"]
+    assert events[0]["reason"] == "ConnectionError" and warm.calls >= 4
+
+
+async def test_no_keep_alive_when_off_or_without_claude():
+    warm = FakeWarm()
+    for m in (warm_maker(FakeClaude(reply(GOOD)), warm, keepalive_s=0.0),
+              MenuMaker(CFG.menus, CFG.llm, INTENTS, PROFILE, api_key=None, warm=warm)):
+        await m.start()
+        await asyncio.sleep(0.02)
+        await m.stop()
+    assert warm.calls == 0
 
 
 async def test_a_connection_error_is_retried():
@@ -280,3 +372,81 @@ def test_conversation_keeps_recent_turns_and_shown_since_the_partner_spoke():
 def test_time_of_day_names_the_part_of_the_day():
     afternoon = dt.datetime(2026, 10, 24, 15, 40).timestamp()
     assert time_of_day(afternoon) == "Saturday, 3:40 PM (afternoon)"
+
+
+# ---------------------------------------------------------------------------
+# Plain replies and the personality map in the prompt
+# ---------------------------------------------------------------------------
+
+from app.config import Person, Personality, Profile  # noqa: E402
+from app.menus import system_prompt, voice_sample  # noqa: E402
+
+ANA = Profile(name="Ana Lopez", about="Ana lives in Fresno.", likes=["salsa music"],
+              people=[Person(name="Rosa", relation="mother")], avoid_topics=["her old job"],
+              personality=Personality(formality="formal", length="medium", humour="playful",
+                                      warmth="reserved", directness="direct",
+                                      phrases=["No worries"], avoid_phrases=["awesome"],
+                                      notes="Dry wit, short sentences."))
+
+
+def test_prompt_keeps_replies_basic_and_facts_for_when_asked():
+    text = system_prompt(PROFILE, INTENTS, CFG.menus)
+    assert "keep what the replies say basic" in text
+    # Sam is casual, light humour, warm: the weekend answers in that voice.
+    assert '"Pretty good, thanks!" / "Not great, honestly." / "Alright. No complaints! How about you?"' in text
+    assert "only when the partner asks about exactly that thing" in text
+    assert "(a fictional demo persona)" in text and "iced coffee" in text
+
+
+def test_prompt_carries_the_personality_map():
+    text = system_prompt(ANA, INTENTS, CFG.menus)
+    assert "You write reply options for Ana," in text
+    assert "polite and a little formal" in text and "reserved" in text and "playful" in text
+    assert "usually 5 to 10 words" in text and 'says no plainly ("No.")' in text
+    assert '"No worries"' in text and '"awesome"' in text and "Dry wit, short sentences." in text
+    assert "Never bring up: her old job." in text
+    assert "Rosa (mother)" in text and "fictional" not in text
+
+
+@pytest.mark.parametrize("personality, sample", [
+    (Personality(formality="neutral", humour="none", warmth="reserved"),
+     ("It was good, thanks.", "Not great, honestly.", "It was okay.")),
+    (Personality(formality="formal", humour="none", warmth="reserved", directness="direct"),
+     ("It was very pleasant, thank you.", "It was not good.", "Quite ordinary, thank you.")),
+    (Personality(formality="casual", humour="playful", warmth="warm", directness="direct",
+                 length="chatty", phrases=["no cap"]),
+     ("Honestly? Pretty awesome, no cap.", "Rough one, not gonna lie.",
+      "Meh. Could've been worse! How about you?")),
+], ids=["plain", "formal and direct", "playful with a phrase"])
+def test_voice_sample_follows_the_personality(personality, sample):
+    assert voice_sample(Profile(name="X", personality=personality)) == sample
+
+
+def test_the_voice_sample_is_in_the_prompt():
+    text = system_prompt(ANA, INTENTS, CFG.menus)
+    good, bad, middle = voice_sample(ANA)
+    assert f'"{good}" / "{bad}" / "{middle}"' in text
+
+
+def test_chatty_length_names_the_word_limit():
+    chatty = ANA.model_copy(update={"personality": Personality(length="chatty")})
+    assert f"up to {CFG.menus.utterance_max_words} words" in system_prompt(chatty, INTENTS, CFG.menus)
+
+
+async def test_set_profile_changes_the_next_request():
+    fake = FakeClaude(reply(GOOD))
+    m = maker(fake)
+    m.set_profile(ANA)
+    await m.make_page(request())
+    assert "You write reply options for Ana," in fake.calls[0]["system"]
+    assert "Never bring up: her old job." in fake.calls[0]["system"]
+
+
+async def test_preview_uses_the_given_profile_without_keeping_it():
+    fake = FakeClaude(reply(GOOD))
+    m = maker(fake)
+    options = await m.preview(ANA, "How was your weekend?", 0.0)
+    assert len(options) == 3
+    assert "for Ana," in fake.calls[0]["system"]
+    assert "<partner>How was your weekend?</partner>" in fake.calls[0]["messages"][0]["content"]
+    assert m.profile is PROFILE and "for Sam," in m.system  # the active profile is unchanged

@@ -10,9 +10,13 @@ Only the integer lines count as "heard": card and flash lines may arrive while t
 targets are still held still. Bad lines are ignored with a note. EOF ends the free run.
 The stream is read on a daemon thread; the display polls ``current``, ``card`` and
 ``flash`` once per frame, so a chatty decoder never stalls the flicker.
+
+A cued session with ``--status stdin`` reads ``{"text": "..."}`` JSON lines instead
+(StatusReader): the latest text is shown under the targets between flickers.
 """
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from collections.abc import Callable
@@ -150,6 +154,59 @@ class FeedbackReader:
     def start(self) -> FeedbackReader:
         if self._thread is None:
             self._thread = threading.Thread(target=self.run, name="feedback-reader", daemon=True)
+            self._thread.start()
+        return self
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until EOF or timeout; True when EOF was reached."""
+        return self._eof.wait(timeout)
+
+
+class StatusReader:
+    """Holds the latest status text a cued session shows under its targets.
+
+    Each line on ``stream`` is a JSON object ``{"text": "..."}`` (newlines inside the
+    string make several screen lines); it replaces the text shown. Other lines are ignored
+    with a note. EOF sets ``done``. Read on a daemon thread, like FeedbackReader.
+    """
+
+    def __init__(self, stream: TextIO, note: Callable[[str], None] = _stderr_note) -> None:
+        self.stream = stream
+        self._note = note
+        self._text = ""
+        self._eof = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.n_lines = 0
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    @property
+    def done(self) -> bool:
+        return self._eof.is_set()
+
+    def run(self) -> None:
+        try:
+            for line in iter(self.stream.readline, ""):
+                self.n_lines += 1
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    msg = None
+                if not isinstance(msg, dict) or not isinstance(msg.get("text"), str):
+                    self._note(f"ignored status line {self.n_lines}: expected "
+                               '{"text": "..."}')
+                    continue
+                self._text = msg["text"]
+        except (OSError, ValueError) as exc:  # closed stream
+            self._note(f"stopped reading: {exc}")
+        finally:
+            self._eof.set()
+
+    def start(self) -> StatusReader:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self.run, name="status-reader", daemon=True)
             self._thread.start()
         return self
 

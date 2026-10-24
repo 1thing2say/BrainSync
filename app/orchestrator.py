@@ -17,6 +17,7 @@ fallback lists in ``config/intents.yaml``. The decoder side speaks protocol 2
 from __future__ import annotations
 
 import itertools
+import re
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -36,6 +37,9 @@ from app.schemas import (
     Highlight,
     Judgment,
     Key,
+    Listen,
+    MicReport,
+    MicSet,
     Message,
     NoSelection,
     Option,
@@ -64,9 +68,16 @@ Send = Callable[[Message], None]
 DIDNT_CATCH = "Didn't catch that"
 NOT_CONFIRMED = "Not confirmed: nothing was said"
 HOME_LIST = "home"
-QUESTION_LIST = "yes_no"
 MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
 LLM_LIST = "llm"  # name of a page the LLM wrote
+# How a spoken line starts when it is a question (speech-to-text adds no "?").
+QUESTION_STARTS = {
+    "who", "what", "when", "where", "why", "how", "which", "whose", "whom", "do", "does", "did",
+    "are", "is", "was", "were", "am", "can", "could", "would", "will", "should", "shall", "have",
+    "has", "had", "may", "might", "must", "want", "wanna", "you", "any", "anything", "shouldn't",
+    "don't", "doesn't", "didn't", "aren't", "isn't", "won't", "wouldn't", "can't", "couldn't",
+}
+FILLER = {"so", "um", "uh", "hey", "hi", "ok", "okay", "well", "oh", "and", "but"}
 FINDING_REPLIES = "Finding replies"
 NEXT_PAGE_LABEL = "More options"
 SAY_IT, BACK = "Say it", "Back"
@@ -143,6 +154,12 @@ class Orchestrator:
         self._request_ids = itertools.count(1)
         self.awaiting: int | None = None  # the LLM page request the next MENU_CUE waits for
         self.awaiting_until = 0.0  # when that wait ends (llm.timeout_s after the request)
+        # The partner's mic (PLAN V4). In always mode it follows the state (see _mic_wanted).
+        self.mic_muted = cfg.speech.start_muted
+        self.mic_key: tuple[bool, bool] | None = None  # last (on, muted) sent in always mode
+        self.mic_tail_until = 0.0  # the mic reopens after this, once a reply has ended
+        self.mic_report = ""  # what the page says its recognition is doing
+        self.last_stt_interrupt = float("-inf")
         # The last LLM page arrived in time and valid; False until one has (no badge before proof).
         self.llm_ok = False
 
@@ -326,6 +343,11 @@ class Orchestrator:
         if self.shown is not None:
             self._send_ui(self.shown)
         self._send_state()
+        # A reloaded or reconnected page gets the mic state again and resumes by itself.
+        if self.cfg.speech.stt_mode == "always":
+            self._sync_mic(force=True, reason="reconnect")
+        else:
+            self._send_ui(Listen(seconds=0.0, muted=self.mic_muted, reason="reconnect"))
 
     def on_ui_message(self, msg: Message) -> None:
         self._record("from_ui", message=msg)
@@ -339,9 +361,12 @@ class Orchestrator:
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
+            # STOP means stopped until Resume, even if a lost decoder paused us first: without
+            # this the flicker came back by itself when the bridge reconnected (rule 10).
+            self.paused_by_decoder = False
             self._send_decoder(Pause(reason="stop_button"))
         elif isinstance(msg, PartnerText):
-            self._on_partner_text(msg.text)
+            self._on_partner_text(msg.text, msg.source)
         elif isinstance(msg, TTSDone):
             if self.state is St.SPEAKING and msg.utterance_id == self.speaking_id:
                 self._finish_speaking()
@@ -349,6 +374,21 @@ class Orchestrator:
             self._on_key(msg.key)
         elif isinstance(msg, Judgment):
             pass  # logged above; read by the log summary
+        elif isinstance(msg, MicSet):
+            if msg.muted != self.mic_muted:
+                self._record("mic_muted", muted=msg.muted)
+                self.mic_muted = msg.muted
+                if self.cfg.speech.stt_mode == "always":
+                    self._sync_mic(force=True)
+                elif msg.muted:
+                    self._listen(False, "muted")
+                else:
+                    self._send_ui(Listen(seconds=0.0, muted=False, reason="muted"))
+            self._send_status()
+        elif isinstance(msg, MicReport):
+            if msg.state != self.mic_report:
+                self.mic_report = msg.state
+                self._send_status()
 
     def _on_key(self, key: str) -> None:
         """Keyboard mode: digit n selects slot n (1 = top, 4 = bottom) if it flickers now."""
@@ -360,13 +400,22 @@ class Orchestrator:
         elif key in ("c", "w") and self.last_spoken_id is not None:
             self._record("judgment", utterance_id=self.last_spoken_id, correct=key == "c")
 
-    def _on_partner_text(self, text: str) -> None:
+    def _on_partner_text(self, text: str, source: str = "typed") -> None:
+        if source == "stt" and self.mic_muted:
+            self._record("stt_ignored_muted")  # heard just before Mute took effect
+            return
         self._send_ui(Transcript(who="partner", text=text))
         self.conversation.partner_said(text)
-        name = QUESTION_LIST if text.rstrip().endswith("?") else HOME_LIST
+        question = is_question(text)
+        name = self.intents.fallback_for(text, question)
         self.pending_list = self._fallback(name)  # shown if the LLM's page does not come in time
         self.more_in_a_row = 0
         self._ask_llm("partner")
+        if source == "stt" and self._queue_spoken(question):
+            # Spoken lines never throw away the BCI user's work: the replies are prepared now and
+            # shown at the next cue. Typed text is deliberate, so it always interrupts.
+            self._record("partner_text_queued", trial_id=self.active_trial, question=question)
+            return
         if self.state in TRIAL_STATES:
             self._stop_trial("context_changed")
             self.picked = None
@@ -375,6 +424,20 @@ class Orchestrator:
             self.picked = None
             self._enter_menu_cue()  # not in a trial yet, so the screen may still change
         # In every other state the new page is shown at the next MENU_CUE.
+
+    def _queue_spoken(self, question: bool) -> bool:
+        """Whether a spoken line waits for the next cue instead of changing the screen now."""
+        if self.picked is not None:
+            return True  # a pick in progress (the Say it / Back screen) is never interrupted
+        if self.state not in (*TRIAL_STATES, St.MENU_CUE):
+            return False  # nothing on screen to protect (PREPARING takes the newest line)
+        speech = self.cfg.speech
+        now = self.clock()
+        interrupts = (question and speech.stt_interrupts == "question"
+                      and now - self.last_stt_interrupt >= speech.stt_interrupt_cooldown_s)
+        if interrupts:
+            self.last_stt_interrupt = now  # at most one spoken interrupt per cooldown
+        return not interrupts
 
     # -------------------------------------------------------------- events: LLM pages
 
@@ -422,6 +485,7 @@ class Orchestrator:
         self.state = state
         self.deadline = None if seconds is None else self.clock() + seconds
         self._send_state(detail)
+        self._sync_mic()  # every way into SPEAKING or PAUSED closes the mic, every way out opens it
 
     def _enter_baseline(self) -> None:
         """Still screen while the bridge records the resting baseline (draft section 3).
@@ -437,6 +501,7 @@ class Orchestrator:
         self._send_ui(Trial(trial_id=self.trial_id, phase="baseline"))
         self._send_decoder(Baseline(baseline_id=self.baseline_id, seconds=self.cfg.baseline.seconds))
         self._send_status()  # resume_ready changes
+        self._listen(True, "start")  # turn mode: the partner may speak first (also after a reconnect)
 
     def _enter_menu_cue(self) -> None:
         """Show the next screen (page, confirm or list), still, for cue_s before its trial.
@@ -544,7 +609,40 @@ class Orchestrator:
         self.pending_list = self._fallback(name)  # if the LLM's new page does not come in time
         self._ask_llm("more")
 
+    def _listen(self, on: bool, reason: str) -> None:
+        """Tell the partner page to listen (the partner's turn) or to stop (rule: never hear
+        itself). Only in ``turn`` mode; in ``push_to_talk`` the partner opens the mic by hand."""
+        speech = self.cfg.speech
+        if speech.stt_mode == "always" or (on and (speech.stt_mode != "turn" or self.mic_muted)):
+            return  # always mode: _sync_mic owns the mic
+        self._send_ui(Listen(seconds=speech.listen_window_s if on else 0.0, muted=self.mic_muted,
+                             delay_s=speech.stt_tail_s if reason == "turn" else 0.0, reason=reason))
+
+    def _mic_wanted(self) -> bool:
+        return not self.mic_muted and self.state not in (St.IDLE, St.PAUSED, St.SPEAKING)
+
+    def _sync_mic(self, force: bool = False, reason: str | None = None) -> None:
+        """Always mode: send the mic state when it changes (or to a reconnected page)."""
+        if self.cfg.speech.stt_mode != "always":
+            return
+        on = self._mic_wanted()
+        key = (on, self.mic_muted)
+        if key == self.mic_key and not force:
+            return
+        self.mic_key = key
+        delay = max(0.0, self.mic_tail_until - self.clock()) if on else 0.0
+        if reason is None:
+            if on:
+                reason = "turn" if delay > 0 else "start"
+            elif self.mic_muted:
+                reason = "muted"
+            else:
+                reason = {St.SPEAKING: "speaking", St.PAUSED: "paused"}.get(self.state, "idle")
+        self._send_ui(Listen(seconds=0.0, until_stopped=on, delay_s=round(delay, 3),
+                             muted=self.mic_muted, reason=reason))
+
     def _speak(self, text: str) -> None:
+        self._listen(False, "speaking")
         self.speaking_id = f"u{next(self._utterance_ids)}"
         utterances = [o.utterance for o in self.options.options]
         # Rank 1 = the option the LLM (or the fallback list) put first; for the log summary.
@@ -561,7 +659,9 @@ class Orchestrator:
         self.more_in_a_row = 0
         if self.pending_list is None:
             self.pending_list = self._fallback(HOME_LIST)  # V3: the LLM's next page
+        self.mic_tail_until = self.clock() + self.cfg.speech.stt_tail_s  # never hear the reply
         self._enter_rest()
+        self._listen(True, "turn")  # the partner usually answers now
 
     def _not_caught(self, why: str) -> None:
         confirming = self.state is St.CONFIRMING
@@ -577,6 +677,7 @@ class Orchestrator:
         self._send_ui(Trial(trial_id=self.trial_id, phase="rest"))
 
     def _pause(self, detail: str) -> None:
+        self._listen(False, "paused")
         self._stop_trial("paused")
         self.picked = None
         self.expected_baseline = None
@@ -661,6 +762,8 @@ class Orchestrator:
             llm_ok=self.request_page is not None and self.llm_ok,
             fake_decoder=self.fake_decoder,
             keyboard_mode=self.keyboard_mode,
+            mic_muted=self.mic_muted,
+            mic=self.mic_report,
         )
 
     def _send_status(self) -> None:
@@ -673,6 +776,9 @@ class Orchestrator:
         # PLAN rule 3: the shown options never change during a trial.
         if isinstance(msg, ShowPage) and self.state in TRIAL_STATES:
             assert msg == self.shown, "show_page changed during a trial"
+        # The app never hears itself, and Mute means muted.
+        if isinstance(msg, Listen) and (msg.until_stopped or msg.seconds > 0):
+            assert self.state is not St.SPEAKING and not self.mic_muted, "mic opened while speaking or muted"
         self._record("to_ui", message=msg)
         self._send_ui_cb(msg)
 
@@ -690,3 +796,21 @@ class Orchestrator:
     def _record(self, event: str, **fields: object) -> None:
         if self.log is not None:
             self.log.log(event, state=self.state.value, **fields)
+
+
+def is_question(text: str) -> bool:
+    """A question, typed or spoken: any sentence that is one ("It might rain. Do you want tea")."""
+    if "?" in text:
+        return True
+    return any(_sentence_is_question(s) for s in re.split(r"(?<=[.!;])\s+", text))
+
+
+def _sentence_is_question(text: str) -> bool:
+    """Speech-to-text adds no "?", so the first word decides."""
+    raw = text.split()
+    if len(raw) > 1 and raw[0].endswith(","):  # a name first: "Ana, do you want tea"
+        raw = raw[1:]
+    words = [w for w in (r.strip(".,!;:").lower() for r in raw) if w]
+    while words and words[0] in FILLER:  # "So, are you hungry"
+        words.pop(0)
+    return bool(words) and words[0] in QUESTION_STARTS
