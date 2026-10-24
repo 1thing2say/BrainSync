@@ -21,12 +21,14 @@ import asyncio
 import contextlib
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs, quote, urlsplit
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -56,8 +58,40 @@ from app.tts import AUDIO_ROUTE, CartesiaTTS
 UI_DIR = REPO_ROOT / "ui"
 TICK_S = 0.02  # how often deadlines are checked; well below the shortest timing in config
 REPLACED = 4000  # websocket close code sent to a connection that a newer one replaced
+UI_CLIENTS = ("browser", "ios")  # /ws/ui?client=...: the iPhone app says ios; anything else is a browser
+APP_SCHEME = "brainsync"  # the BrainSync Partner iPhone app's pairing link: brainsync://pair?url=...&key=...
 
 log = logging.getLogger("app.server")
+
+
+def ui_client(raw: str | None) -> str:
+    """The /ws/ui ``client`` query parameter: "ios" or "browser" (anything else, or none)."""
+    return raw if raw in UI_CLIENTS else "browser"
+
+
+def app_link(phone_url: str) -> str:
+    """The iPhone app's pairing link for a phone link ``<base>/?key=K``:
+    ``brainsync://pair?url=<percent-encoded base>&key=K``; "" when there is no phone link (or it
+    has no key)."""
+    if not phone_url:
+        return ""
+    parts = urlsplit(phone_url)
+    key = (parse_qs(parts.query).get("key") or [""])[0]
+    if not (parts.scheme and parts.netloc and key):
+        return ""
+    base = f"{parts.scheme}://{parts.netloc}"
+    return f"{APP_SCHEME}://pair?url={quote(base, safe='')}&key={quote(key, safe='')}"
+
+
+def lan_ip() -> str:
+    """This computer's address on the local network, or "" if there is none. Connecting a UDP
+    socket only picks the outgoing interface: no packet is sent."""
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith(("127.", "0.")):
+            return ip
+    return ""
 
 
 @dataclass
@@ -67,6 +101,7 @@ class Conn:
     ws: WebSocket
     queue: asyncio.Queue[Message] = field(default_factory=asyncio.Queue)
     task: asyncio.Task | None = None
+    client: str = "browser"  # partner pages only: "ios" (the iPhone app) or "browser"
 
     def send(self, msg: Message) -> None:
         self.queue.put_nowait(msg)
@@ -194,14 +229,17 @@ def create_app(
     @app.get("/api/config")
     def page_config(request: Request) -> dict:
         """The few settings the partner page needs (``user_name``: the profile's first name, for
-        the conversation panel)."""
+        the conversation panel). ``phone_url`` / ``app_link``: the web link and the iPhone app's
+        pairing link for the partner's phone, to this computer's own page only."""
+        remote = is_remote(request.scope)
         return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
                 "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
                 "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
                 "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile),
-                # The phone link carries the access key: only this computer's page gets it.
-                "phone_url": "" if is_remote(request.scope) else app.state.phone_url}
+                # The phone links carry the access key: only this computer's page gets them.
+                "phone_url": "" if remote else app.state.phone_url,
+                "app_link": "" if remote else app_link(app.state.phone_url)}
 
     @app.get("/api/health")
     async def health() -> dict:
@@ -213,6 +251,8 @@ def create_app(
         return {
             "state": orch.state.value,
             "resume_ready": status.resume_ready,
+            # Which partner page is connected: "ios" (the iPhone app), "browser", or "" (none).
+            "ui_client": hub.ui.client if page else "",
             "decoder": {"connected": status.decoder_connected, "ok": status.decoder_ok,
                         "display_ok": status.display_ok, "board_ok": status.board_ok,
                         "message": status.decoder_message, "keyboard_mode": keyboard_mode,
@@ -296,9 +336,9 @@ def create_app(
         content, media_type = clip
         return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
 
-    async def attach(ws: WebSocket, role: str) -> Conn:
+    async def attach(ws: WebSocket, role: str, client: str = "browser") -> Conn:
         await ws.accept()
-        conn = Conn(ws)
+        conn = Conn(ws, client=client)
         old = getattr(hub, role)
         setattr(hub, role, conn)
         if old is not None:
@@ -330,7 +370,9 @@ def create_app(
 
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:
-        conn = await attach(ws, "ui")
+        client = ui_client(ws.query_params.get("client"))
+        conn = await attach(ws, "ui", client)
+        event_log.log("ui_client", client=client)
         orch.on_ui_connected()
         try:
             await receive(ws, parse_ui_to_server, orch.on_ui_message, "ui")
@@ -428,8 +470,17 @@ def main(argv: list[str] | None = None) -> None:
             print("tunnel: cloudflared printed no address within 30 s (no internet?); the laptop "
                   "page still works", file=sys.stderr)
     elif access_key is not None:
-        print(f"other devices: http://<this computer's address>:{cfg.server.port}/?key={access_key} "
-              "(no microphone on a phone over http: use --tunnel)", file=sys.stderr)
+        ip = lan_ip() if host in ("0.0.0.0", "::") else host
+        if ip:
+            app.state.phone_url = f"http://{ip}:{cfg.server.port}/?key={access_key}"
+            print(f"phone link (secret; no microphone in a phone browser over http: use --tunnel "
+                  f"or the app): {app.state.phone_url}", file=sys.stderr)
+        else:
+            print(f"other devices: http://<this computer's address>:{cfg.server.port}/?key={access_key} "
+                  "(no microphone on a phone over http: use --tunnel)", file=sys.stderr)
+    if app.state.phone_url:
+        print(f"iPhone app link (secret, open it on the iPhone or paste it into the app): "
+              f"{app_link(app.state.phone_url)}", file=sys.stderr)
     try:
         import uvicorn
 

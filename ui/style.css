@@ -180,6 +180,7 @@ button.target:disabled { cursor: default; opacity: 1; }
 .judged { color: var(--say); }
 .phone-link { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .phone-link[hidden] { display: none; }
+.phone-link [hidden] { display: none; }
 .phone-url { flex-basis: 100%; font-size: 0.75rem; color: var(--muted); word-break: break-all;
   user-select: all; }
 .hint { font-size: 0.8rem; color: var(--muted); margin: 0; }

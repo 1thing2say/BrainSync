@@ -25,7 +25,7 @@ MP3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xf3" * 100
 
 def health(**over) -> dict:
     """A healthy /api/health answer; ``over`` replaces whole sections or top-level keys."""
-    h = {"state": "IDLE", "resume_ready": True,
+    h = {"state": "IDLE", "resume_ready": True, "ui_client": "browser",
          "decoder": {"connected": True, "ok": True, "display_ok": True, "board_ok": True,
                      "message": "", "keyboard_mode": False, "fake_decoder": False,
                      "name": "ssvep-fbcca", "fake_flag": False},
@@ -263,6 +263,9 @@ def test_a_healthy_live_server_passes_everything():
     ({"decoder": {"board_ok": False}}, "decoder", WARN, "board_ok"),
     ({"partner_page": {"connected": False, "mic": ""}}, "partner page", FAIL, "not open"),
     ({"partner_page": {"connected": False, "mic": ""}}, "mic", WARN, "no partner page"),
+    ({"ui_client": "ios"}, "partner page", PASS, "connected (iPhone app)"),
+    ({"ui_client": "browser"}, "partner page", PASS, "connected (browser)"),
+    ({"ui_client": ""}, "partner page", PASS, "connected"),
     ({"partner_page": {"mic_muted": True}}, "mic", WARN, "muted"),
     ({"partner_page": {"mic": "denied"}}, "mic", WARN, "denied"),
     ({"partner_page": {"mic": "offline"}}, "mic", WARN, "offline"),

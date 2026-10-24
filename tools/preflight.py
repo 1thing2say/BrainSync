@@ -441,7 +441,10 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               "start the bridge (it launches the display)"))
 
     if p["connected"]:
-        results.append(Result("partner page", PASS, "connected"))
+        # Which partner client: the iPhone app (/ws/ui?client=ios) or a browser; older servers
+        # report nothing. Information only, never a failure.
+        client = {"ios": "iPhone app", "browser": "browser"}.get(h.get("ui_client", ""), "")
+        results.append(Result("partner page", PASS, f"connected ({client})" if client else "connected"))
     else:
         results.append(Result("partner page", FAIL, "not open",
                               "open the server's address in Chrome"))

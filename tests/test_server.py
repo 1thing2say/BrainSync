@@ -71,7 +71,8 @@ def test_partner_page_is_served(client):
         "stt_mode": "always", "listen_window_s": BASE.speech.listen_window_s,
         "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
         "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
-        "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": ""}
+        "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
+        "app_link": ""}
 
 
 def test_a_connecting_page_gets_the_mic_state(kb_client):
@@ -359,7 +360,7 @@ def test_profile_page_is_served(client):
 
 def test_health_without_keys_bridge_or_page(client):
     h = client.get("/api/health").json()
-    assert h["state"] == "IDLE"
+    assert h["state"] == "IDLE" and h["ui_client"] == ""
     assert h["decoder"] == {"connected": False, "ok": False, "display_ok": False, "board_ok": False,
                             "message": "", "keyboard_mode": False, "fake_decoder": False,
                             "name": "", "fake_flag": False}
@@ -384,9 +385,10 @@ def test_health_follows_the_bridge_page_and_mic(client):
         assert h["decoder"]["connected"] and h["decoder"]["ok"] and h["decoder"]["display_ok"]
         assert (h["decoder"]["name"], h["decoder"]["fake_decoder"]) == ("test", False)
         assert h["partner_page"]["connected"] and h["partner_page"]["mic"] == "listening"
-        assert h["resume_ready"]
+        assert h["resume_ready"] and h["ui_client"] == "browser"  # no client parameter: a browser
     # The page is gone: its last mic report no longer counts.
     h = client.get("/api/health").json()
+    assert h["ui_client"] == ""
     assert h["partner_page"] == {**h["partner_page"], "connected": False, "mic": ""}
 
 
@@ -418,3 +420,44 @@ def test_health_with_keys_carries_no_secrets_or_conversation(tmp_path):
     h = r.json()
     assert h["llm"]["enabled"] and h["tts"]["enabled"] and h["decoder"]["keyboard_mode"]
     assert KEY not in r.text and "outside" not in r.text
+
+
+@pytest.mark.parametrize("query, want", [("?client=ios", "ios"), ("?client=browser", "browser"),
+                                         ("?client=android", "browser"), ("", "browser")])
+def test_health_says_which_partner_client_is_connected(client, query, want):
+    with client.websocket_connect("/ws/ui" + query) as ui:
+        recv_until(ui, "status")
+        assert client.get("/api/health").json()["ui_client"] == want
+    events = [e for e in read_events(next(client.log_dir.glob("*.jsonl"))) if e["event"] == "ui_client"]
+    assert [e["client"] for e in events] == [want]
+
+
+def test_the_iphone_app_replacing_a_browser_tab_closes_it_with_4000(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    with client.websocket_connect("/ws/ui") as tab:
+        recv_until(tab, "status")
+        with client.websocket_connect("/ws/ui?client=ios") as app:
+            recv_until(app, "status")
+            with pytest.raises(WebSocketDisconnect) as closed:
+                for _ in range(200):
+                    tab.receive_text()
+            assert closed.value.code == 4000
+            assert client.get("/api/health").json()["ui_client"] == "ios"
+
+
+def test_app_link_is_built_from_the_phone_link():
+    from app.server import app_link
+
+    assert app_link("https://abc.trycloudflare.com/?key=K-1_x") == (
+        "brainsync://pair?url=https%3A%2F%2Fabc.trycloudflare.com&key=K-1_x")
+    assert app_link("http://192.168.1.5:8000/?key=abc") == (
+        "brainsync://pair?url=http%3A%2F%2F192.168.1.5%3A8000&key=abc")
+    assert app_link("") == "" and app_link("http://192.168.1.5:8000/") == ""
+
+
+def test_lan_ip_is_an_address_or_empty():
+    from app.server import lan_ip
+
+    ip = lan_ip()
+    assert ip == "" or (ip.count(".") == 3 and not ip.startswith("127."))

@@ -329,13 +329,16 @@ $("resume").addEventListener("click", () => {
   keepAwake();
   send({ type: "resume" });
 });
-// The laptop's page offers the phone link (python -m app.server --tunnel); a phone never gets it.
-$("copy-phone").addEventListener("click", () => {
-  const url = $("phone-url").textContent;
+// The laptop's page offers the phone links (python -m app.server --tunnel, or on the LAN): the web
+// page and the iPhone app's pairing link. A phone never gets them.
+function copyLink(sourceId, copiedText) {
+  const url = $(sourceId).textContent;
   const done = (text) => { $("phone-copied").textContent = text; };
-  if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => done("Copied: send it to the phone"), () => done("Select the link and copy it"));
+  if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => done(copiedText), () => done("Select the link and copy it"));
   else done("Select the link and copy it");
-});
+}
+$("copy-phone").addEventListener("click", () => copyLink("phone-url", "Copied: send it to the phone"));
+$("copy-app").addEventListener("click", () => copyLink("app-url", "Copied: open it on the iPhone"));
 $("take-over").addEventListener("click", connect);
 $("ptt").addEventListener("click", () => {
   if (speaking) return;
@@ -398,6 +401,11 @@ fetch("/api/config")
     if (c.phone_url) {
       $("phone-url").textContent = c.phone_url;
       $("phone").hidden = false;
+    }
+    if (c.app_link) {
+      $("app-url").textContent = c.app_link;
+      $("app-url").hidden = false;
+      $("copy-app").hidden = false;
     }
     $("ptt").textContent = sttMode === "always" ? "Restart mic" : "Listen";
     Listener.configure({ gapMs: (c.stt_gap_s || 1.2) * 1000, maxLineMs: (c.stt_max_line_s || 15) * 1000,

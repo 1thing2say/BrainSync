@@ -89,6 +89,48 @@ def test_shutdown_hooks_run_when_the_server_stops(app):
     assert stopped == [True]
 
 
+def test_the_iphone_app_connects_with_the_key_in_its_socket_url(app):
+    with TestClient(app, client=LOCAL, headers=TUNNEL) as c:  # no cookie: the app sends ?key=
+        with c.websocket_connect(f"/ws/ui?key={KEY}&client=ios") as ws:
+            assert ws.receive_json()["type"]
+            assert c.get(f"/api/health?key={KEY}").json()["ui_client"] == "ios"
+
+
+def test_the_iphone_app_without_the_key_is_closed_with_4403(app):
+    with TestClient(app, client=LOCAL, headers=TUNNEL) as c:
+        with pytest.raises(WebSocketDisconnect) as closed, c.websocket_connect("/ws/ui?client=ios") as ws:
+            ws.receive_json()
+        assert closed.value.code == FORBIDDEN
+        assert c.get("/api/config?key=wrong").status_code == 403
+
+
+def test_the_iphone_app_fetches_audio_and_config_with_the_key(app):
+    app.state.tts._remember("abc123", (b"ID3fake-mp3", "audio/mpeg"))
+    app.state.phone_url = f"https://abc.trycloudflare.com/?key={KEY}"
+    with TestClient(app, client=LOCAL, headers=TUNNEL) as c:
+        assert c.get("/audio/abc123").status_code == 403
+        r = c.get(f"/audio/abc123?key={KEY}")
+        assert r.status_code == 200 and r.content == b"ID3fake-mp3"
+        config = c.get(f"/api/config?key={KEY}").json()
+        assert config["phone_url"] == "" and config["app_link"] == ""  # never to a remote request
+
+
+def test_the_laptop_page_gets_the_iphone_app_link(app):
+    app.state.phone_url = f"https://abc.trycloudflare.com/?key={KEY}"
+    with TestClient(app, client=LOCAL) as c:
+        assert c.get("/api/config").json()["app_link"] == (
+            f"brainsync://pair?url=https%3A%2F%2Fabc.trycloudflare.com&key={KEY}")
+        app.state.phone_url = ""
+        assert c.get("/api/config").json()["app_link"] == ""
+
+
+def test_a_lan_phone_link_gets_an_app_link_too(app):
+    app.state.phone_url = f"http://192.168.1.5:8000/?key={KEY}"
+    with TestClient(app, client=LOCAL) as c:
+        assert c.get("/api/config").json()["app_link"] == (
+            f"brainsync://pair?url=http%3A%2F%2F192.168.1.5%3A8000&key={KEY}")
+
+
 @pytest.mark.parametrize("scope, remote", [
     ({"client": ("127.0.0.1", 1), "headers": []}, False),
     ({"client": ("::1", 1), "headers": []}, False),

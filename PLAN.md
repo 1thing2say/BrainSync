@@ -11,7 +11,8 @@ only (in `.git/info/exclude`) and loads both:
 This plan covers **only the voice and UI side**, built by Elijah. His teammate builds the SSVEP
 decoder and the flicker display in a separate repo, `1thing2say/ssvep` (cloned at `../ssvep`,
 branch `feat/spectrum-check`). The two sides meet only at the message contract in `INTERFACE.md`.
-**Laptop only for now**; phone support comes later (section 10).
+The partner page runs on the laptop, an iPhone (Safari or the native app in `ios/`) or Android
+Chrome (section 10).
 
 At the start of each session, ask Elijah whether he wants code written or only the approach
 explained. All work happens on `dev` (or another non-`main` branch); `main` changes only through
@@ -139,7 +140,22 @@ pull requests.
   403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
   (one reused audio element), the screen stays awake (Wake Lock), safe-area insets, 16 px inputs.
   Checked through a real tunnel; the iPhone test itself is still to do. Server shutdown now runs
-  `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan.
+  `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan. The native app below is now
+  the main phone client; this Safari page stays its fallback.
+- **iOS partner app (2026-10-24, branch `feat/mobile`):** `ios/BrainSyncPartner`, a SwiftUI app
+  (iOS 17+, no dependencies) that replaces the Safari page. It is a `/ws/ui` client like the
+  browser (`?client=ios`): mirror, Stop, mic card, typing, conversation, Correct / Wrong. Pairing:
+  the server prints an app link, `brainsync://pair?url=…&key=…` (`--tunnel`, or `server.host:
+  0.0.0.0` for plain LAN http, where `main()` finds the LAN address), and the laptop page offers
+  **Copy iPhone app link**; the web phone link pasted into the app works too. Native parts:
+  on-device speech recognition (`SFSpeechRecognizer`, echo cancellation, the `listen_core.js`
+  rules ported), Cartesia clips through `AVPlayer` with the built-in `AVSpeechSynthesizer` voice
+  as fallback, screen kept awake. While it is connected it is the one partner page: the laptop's
+  page shows "Open on another page" (close code 4000), and `/api/health` / preflight say which
+  client is connected (`ui_client`). `ios/BrainSyncKit` (Swift package: links, messages, socket,
+  `ListenCore`) is tested against `ui_messages.json`, written from `app/schemas.py` by
+  `tools/ui_fixture.py` (`--check` fails when stale). Built on the teammate's Mac with Xcode 16
+  (`ios/README.md`); not yet compiled or run on a device.
 
 ## System design
 
@@ -165,6 +181,7 @@ pull requests.
 | Bridge (`ssvep/online/bridge.py`) | Teammate | The board connection, the decoder, the display process | Server (websocket client), display (stdin/stderr) |
 | PsychoPy display (`ssvep.stimulus`) | Teammate | Frame-locked flicker, option text, the box, `Esc` | Bridge only |
 | Chrome partner page (`ui/`) | Elijah | Rendering, TTS, STT, STOP | Server only |
+| iPhone partner app (`ios/`), optional | Elijah | The same as the Chrome page, natively; replaces it while connected | Server only (`/ws/ui?client=ios`) |
 | Claude API | — | Ranked reply options | Server only (`app/menus.py`) |
 
 The server ↔ bridge contract is `INTERFACE-v2-draft.md` (protocol 2): the server speaks only
@@ -176,8 +193,8 @@ Design risks to settle:
 1. **One screen cannot show both windows.** The flicker must be full screen (the teammate's rule,
    enforced by PsychoPy), but the partner page needs a visible Chrome window for push-to-talk and
    STOP. Options: an external monitor for Chrome, with PsychoPy pinned to the built-in panel
-   (`screen = 0`, locked at 60 Hz); or the partner page on a phone (section 10, `server.host:
-   0.0.0.0`; check that the phone browser's speech recognition works). With Chrome, PsychoPy and
+   (`screen = 0`, locked at 60 Hz); or the partner page on the partner's iPhone (section 10:
+   the native app, Safari as fallback; speech recognition still to check on a device). With Chrome, PsychoPy and
    the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
 2. **The contract is not confirmed yet.** The server speaks only protocol 2
    (`INTERFACE-v2-draft.md`), but the teammate has not agreed it, and the bridge cannot be built
@@ -310,12 +327,19 @@ BrainSync/
     speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
     voice_core.js       # picks the fallback voice: local Premium / Enhanced English first
     view_core.js        # banner, health line, mic card, selection timer (pure, node-tested)
+  ios/                  # native iPhone partner app; ios/README.md (install, pair)
+    BrainSyncPartner.xcodeproj   # Xcode 16+, iOS 17+
+    BrainSyncPartner/            # SwiftUI app: pair screen, warning, partner view, mirror,
+                                 #   Listener (on-device STT), Speaker (AVPlayer + system voice)
+    BrainSyncKit/                # Swift package: ServerLink, messages, UIConnection, ListenCore
+      Tests/BrainSyncKitTests/Fixtures/ui_messages.json   # every /ws/ui message, from schemas.py
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
     prerender_tts.py    # Cartesia clips for every fixed-list sentence, into speech.cache_dir
     ui_shots.py         # screenshots of the partner page's states (headless Chrome)
+    ui_fixture.py       # writes ios/.../ui_messages.json from app/schemas.py (--check: stale?)
     log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
   docs/
     DEMO.md             # operator's demo runbook (V6 items 2-3)
@@ -352,7 +376,7 @@ BrainSync/
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` later for phone or Jetson |
+| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` for the iPhone app on the LAN (or use `--tunnel`), later the Jetson |
 | `stim.slots` | s1 15 Hz, s2 17 Hz, s3 20 Hz, s4 12 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
 | `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 12 Hz, the weakest and alpha-biased frequency, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
@@ -638,12 +662,18 @@ Take shifts with the teammate. Commit a working state before sleeping.
 - LLM calls are mocked in tests; one optional live smoke test behind `RUN_LLM_TESTS=1`.
 - The flicker is his: dropped frames come from his display's session log (SYNC 1.5).
 
-## 10. Later: phone and Jetson (not now)
+## 10. Phone (built) and Jetson (later)
 
-- The partner page is already a web page served by the laptop, so a phone can join over the local
-  network by setting `server.host: 0.0.0.0` and opening `http://<laptop-ip>:8000`.
-- Planned split: the partner page on the partner's phone (mic, transcript, conversation), while the
-  laptop runs his display for the user.
+- The partner page can run on the partner's phone (mic, transcript, conversation, Stop) while the
+  laptop runs his display for the user. Only one partner page is active; a new one replaces the
+  old (close code 4000).
+- **iPhone: the native app** (`ios/`, `ios/README.md`), installed from Xcode on the teammate's
+  Mac. It pairs with the app link the server prints. Two ways to reach the server:
+  `python -m app.server --tunnel` (Cloudflare https, any network) or `server.host: 0.0.0.0`
+  (plain http on the same Wi-Fi; the app allows local http, a phone browser gets no mic there).
+- Fallback: the web page in iPhone Safari or Android Chrome through the `--tunnel` phone link.
+- Remote requests always need the per-start access key (`app/remote.py`, 403 / 4403);
+  `/ws/decoder` is never remote.
 - The decoder could later run on a Jetson and connect to `/ws/decoder` over the network; the
   contract does not change. The vendored BrainFlow would need Linux ARM builds first.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
@@ -665,6 +695,8 @@ python tools/llm_eval.py                    # live check of Claude's replies (ne
 python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
 python tools/prerender_tts.py               # fixed-list clips to disk while the network is good
 python tools/ui_shots.py                    # partner page screenshots into cache/ui_shots/
+python tools/ui_fixture.py                  # rewrite the iOS message fixture (--check: exit 1 if stale)
+(cd ios/BrainSyncKit && swift test)         # BrainSyncKit tests (Mac or Linux Swift toolchain)
 python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
 
 # demo runbook: docs/DEMO.md

@@ -108,11 +108,14 @@
           <span id="judged" class="judged" aria-live="polite"></span>
         </div>
         <p class="hint" id="hint"></p>
-        <!-- With --tunnel: the link for the partner's phone (it carries the access key). -->
+        <!-- With --tunnel (or on the LAN): the links for the partner's phone (they carry the
+             access key): the web page, and the pairing link for the BrainSync Partner iPhone app. -->
         <div id="phone" class="phone-link" hidden>
           <button id="copy-phone" type="button">Copy phone link</button>
+          <button id="copy-app" type="button" hidden>Copy iPhone app link</button>
           <span id="phone-copied" class="judged" aria-live="polite"></span>
           <code id="phone-url" class="phone-url"></code>
+          <code id="app-url" class="phone-url" hidden></code>
         </div>
         <a href="/profile.html" class="profile-link">Edit the user's profile</a>
       </footer>
