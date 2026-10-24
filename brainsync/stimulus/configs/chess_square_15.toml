@@ -1,0 +1,32 @@
+# One 15 Hz square the size of a BrainChess board square (0.1125 screen heights) in the
+# middle of the screen, for the electrode check: does a target this small still give a
+# clear SSVEP? Compare its SNR with one_target_15 (0.7 high). Nothing to choose, so no cue.
+name = "chess_square_15"
+
+[targets]
+freqs = [15.0]
+phases_pi = [0.0]
+labels = ["15"]
+
+[layout]
+rows = 1
+cols = 1
+size = 0.1125   # one board square, screen heights
+
+[stimulus]
+waveform = "sine"
+hold_cue = false
+
+[display]
+refresh_hz = 60.0
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 20
+cue_s = 0.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = false
