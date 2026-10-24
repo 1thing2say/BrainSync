@@ -60,6 +60,8 @@ kbd { border: 1px solid var(--muted); border-radius: 4px; padding: 0 0.3rem; }
 .badge.ok { border-color: var(--say); color: var(--say); }
 .badge.bad { border-color: var(--danger); color: var(--danger); }
 .badge.flag { border-color: var(--warn); color: var(--warn); }
+.decoder-message { margin: 0; font-size: 0.85rem; color: var(--warn); min-height: 1em; }
+.decoder-message:empty { display: none; }
 .controls { display: flex; gap: 0.5rem; }
 .controls button { flex: 1; }
 

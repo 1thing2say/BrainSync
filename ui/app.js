@@ -102,7 +102,8 @@ function renderStatus(s) {
   const badges = [
     [s.decoder_connected ? (s.decoder_ok ? "ok" : "bad") : "bad",
       s.decoder_connected ? (s.decoder_ok ? "DECODER OK" : "DECODER NOT OK") : "NO DECODER"],
-    [s.display_ok ? "ok" : "bad", s.display_ok ? "DISPLAY OK" : "DISPLAY ?"],
+    [s.display_ok ? "ok" : "bad", s.display_ok ? "DISPLAY OK" : "DISPLAY OFF"],
+    [s.board_ok ? "ok" : "bad", s.board_ok ? "BOARD OK" : "BOARD ?"],
     [s.llm_ok ? "ok" : "", s.llm_ok ? "LLM OK" : "LLM OFF"],
   ];
   if (s.fake_decoder) badges.push(["flag", "FAKE DECODER"]);
@@ -113,6 +114,10 @@ function renderStatus(s) {
     b.textContent = text;
     return b;
   }));
+  $("decoder-message").textContent = s.decoder_message || "";
+  const resume = $("resume");
+  resume.disabled = !s.resume_ready;
+  resume.title = s.resume_ready ? "" : "Not ready: see the state line";
   $("hint").textContent = s.keyboard_mode
     ? "Keyboard mode: 1 = SAY, 2 = NEXT while flickering. C / W mark the last reply correct / wrong."
     : "C / W mark the last spoken reply correct / wrong.";
