@@ -43,6 +43,7 @@ context:
 speech:
   tts_rate: 1.0                # speechSynthesis rate
   stt_mode: push_to_talk       # mic is off while TTS is speaking
+  max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
 
 selection:
   confirm_mode: never          # never / always / low_score (low_score needs decoder scores)

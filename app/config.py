@@ -105,6 +105,7 @@ class ContextConfig(Strict):
 class SpeechConfig(Strict):
     tts_rate: float = Field(gt=0)
     stt_mode: Literal["push_to_talk"]
+    max_speak_s: float = Field(gt=0)
 
 
 class SelectionConfig(Strict):
