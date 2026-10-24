@@ -5,9 +5,12 @@ config/default.yaml), waits for the bridge to connect, and plays one short sessi
 
     hello -> hello_ack, baseline 1, N trials, a trial stopped by STOP (pause), baseline 2
 
+In page mode (config/default.yaml) every second trial is a confirm trial: only the "Say it" and
+"Back" slots flicker (stim_start.active_slots has 2 of the 4), as after a real pick.
+
 Every message the bridge sends is checked against the v2 schemas, and the session checks the
 rules: hello matches our config, stim_onset before the answer, at most one answer per trial and
-only for the current trial, baseline_done echoes its id and does not come early, score_kind when
+only for the current trial, a selection only for a slot active in that trial, baseline_done echoes its id and does not come early, score_kind when
 scores are sent, a status about once a second. Each check prints PASS or FAIL; the exit status is
 0 only if nothing failed.
 
@@ -58,7 +61,8 @@ from app.schemas import (
     to_json,
 )
 
-ROLE_LABELS = {"say": "SAY", "next": "NEXT"}
+ROLE_LABELS = {"say": "SAY", "next": "NEXT"}  # list mode
+NEXT_PAGE_LABEL, SAY_IT, BACK = "More options", "Say it", "Back"  # page mode, as app/orchestrator.py
 REPLACED = 4000  # close code for a second bridge while a check is running
 
 
@@ -191,7 +195,13 @@ class ContractCheck:
         self.report = report
         self.slots = [s.slot for s in cfg.stim.slots]
         self.roles = dict(cfg.stim.roles)
-        self.labels = {slot: ROLE_LABELS[role] for slot, role in self.roles.items()}
+        self.page_mode = cfg.menus.mode == "page"
+        if self.page_mode:
+            options = iter(range(1, len(self.slots) + 1))
+            self.labels = {slot: NEXT_PAGE_LABEL if role == "next" else f"Option {next(options)}"
+                           for slot, role in self.roles.items()}
+        else:
+            self.labels = {slot: ROLE_LABELS[role] for slot, role in self.roles.items()}
         self.scores_seen = False
 
     async def run(self, ws: ServerConnection) -> None:
@@ -263,12 +273,22 @@ class ContractCheck:
                           f"{elapsed:.2f} s for {seconds:g} s")
         return done.ok
 
-    async def _start(self, ws: ServerConnection, inbox: Inbox, trial_id: int) -> float:
-        await self._send(ws, Display(text=f"Contract check, trial {trial_id}", labels=self.labels,
-                                     highlight=None))
+    def _screen(self, trial_id: int, confirm: bool) -> tuple[list[str], Display]:
+        """Active slots and display for a trial: every slot, or the confirm screen's two."""
+        if not confirm:
+            return self.slots, Display(text=f"Contract check, trial {trial_id}", labels=self.labels,
+                                       highlight=None)
+        say, back = self.cfg.stim.confirm.say, self.cfg.stim.confirm.back
+        labels = {slot: "" for slot in self.slots} | {say: SAY_IT, back: BACK}
+        return [say, back], Display(text=f"Contract check, trial {trial_id}: say this?",
+                                    labels=labels, highlight=None)
+
+    async def _start(self, ws: ServerConnection, inbox: Inbox, trial_id: int,
+                     active: list[str], display: Display) -> float:
+        await self._send(ws, display)
         await asyncio.sleep(self.cfg.stim.cue_s)
         inbox.active = trial_id
-        await self._send(ws, StimStart(trial_id=trial_id, active_slots=self.slots))
+        await self._send(ws, StimStart(trial_id=trial_id, active_slots=active))
         return time.time()
 
     async def _stop(self, ws: ServerConnection, inbox: Inbox, trial_id: int, reason: str) -> list[Message]:
@@ -278,7 +298,11 @@ class ContractCheck:
         return inbox.drop_answers(trial_id)
 
     async def _trial(self, ws: ServerConnection, inbox: Inbox, trial_id: int) -> None:
-        started = await self._start(ws, inbox, trial_id)
+        confirm = self.page_mode and trial_id % 2 == 0
+        active, display = self._screen(trial_id, confirm)
+        if confirm:
+            self.report.info(f"trial {trial_id}: confirm trial", f"only {', '.join(active)} flicker")
+        started = await self._start(ws, inbox, trial_id, active, display)
         limit = self.cfg.stim.max_trial_s
         first = await inbox.expect({"stim_onset", "selection", "no_selection"}, limit)
         if first is None:
@@ -300,7 +324,7 @@ class ContractCheck:
             self.report.info(f"trial {trial_id}: no answer within {limit:g} s (the server times it out)")
             reason = "timeout"
         elif isinstance(answer, Selection):
-            self._check_selection(answer, first, trial_id)
+            self._check_selection(answer, first, trial_id, active)
             reason = "selected"
         else:
             self.report.check(True, f"trial {trial_id}: no_selection", answer.reason)
@@ -308,19 +332,19 @@ class ContractCheck:
         await self._stop(ws, inbox, trial_id, reason)
         await asyncio.sleep(self.cfg.stim.rest_s)
 
-    def _check_selection(self, sel: Selection, onset: StimOnset, trial_id: int) -> None:
-        self.report.check(sel.slot in self.slots, f"trial {trial_id}: selection is an active slot",
-                          f"{sel.slot}, {sel.t_unix - onset.t_unix:.2f} s after the onset")
+    def _check_selection(self, sel: Selection, onset: StimOnset, trial_id: int, active: list[str]) -> None:
+        self.report.check(sel.slot in active, f"trial {trial_id}: selection is an active slot",
+                          f"{sel.slot} of {', '.join(active)}, {sel.t_unix - onset.t_unix:.2f} s after the onset")
         self.report.check(sel.t_unix >= onset.t_unix, f"trial {trial_id}: selection time after the onset")
         if sel.scores is not None:
-            self.report.check(set(sel.scores) == set(self.slots),
-                              f"trial {trial_id}: scores cover every slot", str(sorted(sel.scores)))
+            self.report.check(set(active) <= set(sel.scores) <= set(self.slots),
+                              f"trial {trial_id}: scores cover the active slots", str(sorted(sel.scores)))
         if sel.score is not None or sel.scores is not None:
             self.scores_seen = True
 
     async def _paused_trial(self, ws: ServerConnection, inbox: Inbox, trial_id: int) -> None:
         """STOP during a trial: stim_stop (paused) then pause; nothing may answer it afterwards."""
-        await self._start(ws, inbox, trial_id)
+        await self._start(ws, inbox, trial_id, *self._screen(trial_id, confirm=False))
         onset = await inbox.expect({"stim_onset"}, self.args.onset_timeout)
         self.report.check(onset is not None, f"trial {trial_id}: stim_onset before the pause")
         early = await self._stop(ws, inbox, trial_id, "paused")

@@ -5,11 +5,17 @@
 #   {timeout: true}            send nothing; the server ends the trial as not caught
 # Optional per step: latency (seconds), overriding --latency.
 #
+# Page mode (config/default.yaml): s1-s3 are the options, s4 is NEXT. After an option the server
+# runs a confirm trial with only s1 ("Say it") and s4 ("Back") active.
+#
 #   python tools/fake_decoder.py --script tools/scripts/demo.yaml
-- slot: s1
-- slot: s2
+- slot: s1                     # pick option 1
+- slot: s1                     # confirm: Say it (spoken)
+- slot: s4                     # NEXT: a new page of 3
   latency: 3.0
-- no_selection: low_signal
-- slot: s1
+- slot: s2                     # pick option 2
+- slot: s4                     # confirm: Back (nothing spoken)
   latency: 2.0
-- timeout: true
+- no_selection: low_signal     # "Didn't catch that", same page again
+- slot: s3                     # pick option 3
+- timeout: true                # confirm times out: counts as Back, nothing spoken

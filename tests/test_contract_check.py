@@ -29,7 +29,7 @@ CFG = BASE.model_copy(update={
     "stim": BASE.stim.model_copy(update={"cue_s": 0.02, "rest_s": 0.02, "max_trial_s": 1.0}),
 })
 HELLO = DecoderHello(protocol=PROTOCOL, name="test-bridge", refresh_hz=60.0, waveform="sine",
-                     slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+                     slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in BASE.stim.slots])
 STATUS = DecoderStatus(ok=True, board_ok=True, display_ok=True)
 
 
@@ -69,6 +69,7 @@ async def test_fake_decoder_passes():
     assert report.ok, out
     assert "PASS  hello matches config/default.yaml" in out
     assert "PASS  baseline 1 recorded" in out and "PASS  baseline 2 recorded" in out
+    assert "INFO  trial 2: confirm trial: only s1, s4 flicker" in out
     assert "PASS  trial 2: selection is an active slot" in out
     assert "PASS  nothing answers the paused trial" in out
 
@@ -96,7 +97,7 @@ async def test_no_bridge_within_wait_fails():
 
 
 def scripted_bridge(*, onset: bool = True, wrong_baseline_id: bool = False, scores: bool = False,
-                    v1_status: bool = False, late_answer: bool = False):
+                    v1_status: bool = False, late_answer: bool = False, slot: str = "s1"):
     """A hand-written bridge that breaks one rule at a time (or none)."""
 
     async def run(url: str) -> None:
@@ -113,8 +114,9 @@ def scripted_bridge(*, onset: bool = True, wrong_baseline_id: bool = False, scor
                     tid = msg["trial_id"]
                     if onset:
                         await ws.send(to_json(StimOnset(trial_id=tid, t_unix=time.time())))
-                    extra = {"score": 0.5, "scores": {"s1": 0.5, "s2": 0.1}} if scores else {}
-                    await ws.send(to_json(Selection(trial_id=tid, slot="s1", t_unix=time.time(), **extra)))
+                    extra = ({"score": 0.5, "scores": {s: 0.5 if s == slot else 0.1 for s in msg["active_slots"]}}
+                             if scores else {})
+                    await ws.send(to_json(Selection(trial_id=tid, slot=slot, t_unix=time.time(), **extra)))
                 elif msg["type"] == "stim_stop" and late_answer:
                     await ws.send(to_json(Selection(trial_id=msg["trial_id"], slot="s2", t_unix=time.time())))
                 await ws.send(to_json(STATUS))
@@ -128,6 +130,8 @@ def scripted_bridge(*, onset: bool = True, wrong_baseline_id: bool = False, scor
     ({"scores": True}, "score_kind in hello when selections carry scores"),
     ({"v1_status": True}, "message matches the v2 schema"),
     ({"late_answer": True}, "selection only for the current trial (rule 1)"),
+    # s2 is an option slot: fine on a page trial, but not active on the confirm trial (s1 / s4).
+    ({"slot": "s2"}, "trial 2: selection is an active slot: s2 of s1, s4"),
 ])
 async def test_rule_breaking_bridges_fail(kwargs, fragment):
     report, out = await run_check(scripted_bridge(**kwargs))

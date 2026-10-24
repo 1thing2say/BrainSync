@@ -37,16 +37,28 @@ kbd { border: 1px solid var(--muted); border-radius: 4px; padding: 0 0.3rem; }
 .option-count { color: var(--muted); margin-bottom: 0.5rem; }
 .option-text { font-size: clamp(1.8rem, 4vw, 3.2rem); font-weight: 600; line-height: 1.2; min-height: 2.4em; }
 
-.targets { display: flex; justify-content: space-around; gap: 2rem; flex: 1; align-items: center; }
-.target { width: min(28vw, 260px); aspect-ratio: 1; border-radius: 12px; display: flex;
-  flex-direction: column; justify-content: center; align-items: center; gap: 0.4rem;
-  border: 4px solid transparent; background: #232833; }
-.target .role { font-size: 2rem; font-weight: 800; letter-spacing: 0.06em; }
-.target .slot { color: var(--muted); font-size: 0.9rem; }
-.target.say .role { color: var(--say); }
-.target.next .role { color: var(--next); }
+.targets { flex: 1; gap: 1rem; }
+.targets.row { display: flex; justify-content: space-around; align-items: center; }
+/* Page and confirm screens: the diamond the user sees (s1 top, s2 left, s3 right, s4 bottom). */
+.targets.diamond { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-areas: ". top ." "left . right" ". bottom ."; align-items: center; justify-items: center; }
+.pos-top { grid-area: top; } .pos-left { grid-area: left; }
+.pos-right { grid-area: right; } .pos-bottom { grid-area: bottom; }
+.target { width: min(22vw, 230px); min-height: 9rem; border-radius: 12px; display: flex;
+  flex-direction: column; justify-content: center; align-items: center; gap: 0.35rem; padding: 0.75rem;
+  border: 4px solid transparent; background: #232833; text-align: center; }
+.target .role { font-size: 1.35rem; font-weight: 800; letter-spacing: 0.03em; }
+.target .sentence { font-size: 0.9rem; line-height: 1.3; color: var(--text); }
+.target .sentence:empty { display: none; }
+.target .slot { color: var(--muted); font-size: 0.8rem; }
+.target.option .role, .target.say .role { color: var(--say); }
+.target.next .role, .target.back .role { color: var(--next); }
 .target.active { background: #2b3140; }
 .target.picked { border-color: var(--pick); }
+
+.option-list { margin: 0 auto; padding-left: 1.5rem; max-width: 40rem; font-size: 1.2rem; }
+.option-list li { padding: 0.25rem 0.5rem; color: var(--muted); }
+.option-list li.current { color: var(--text); font-weight: 700; background: #232833; border-radius: 8px; }
 
 .speaking { text-align: center; font-size: 1.4rem; color: var(--say); }
 

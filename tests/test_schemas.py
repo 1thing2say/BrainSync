@@ -53,16 +53,38 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     (s.Pause(reason="stop_button"), s.parse_server_to_decoder),
     # server -> browser
     (
-        s.ShowOption(
+        s.ShowPage(
             list_id="l1",
-            index=0,
-            count=4,
-            label="Water",
-            utterance="Could I have some water, please?",
+            page=1,
+            mode="page",
             slots=[
-                s.UISlot(slot="s1", role="say", label="SAY"),
-                s.UISlot(slot="s2", role="next", label="NEXT"),
+                s.UISlot(slot="s1", role="option", label="Go outside", utterance="Yes, let's go outside."),
+                s.UISlot(slot="s2", role="option", label="Not now", utterance="Not right now."),
+                s.UISlot(slot="s3", role="option", label="After lunch", utterance="Maybe after lunch."),
+                s.UISlot(slot="s4", role="next", label="More options"),
             ],
+        ),
+        s.parse_server_to_ui,
+    ),
+    (
+        s.ShowPage(
+            list_id="l1",
+            page=1,
+            mode="confirm",
+            text="Yes, let's go outside.",
+            slots=[s.UISlot(slot="s1", role="say", label="Say it"), s.UISlot(slot="s4", role="back", label="Back")],
+        ),
+        s.parse_server_to_ui,
+    ),
+    (
+        s.ShowPage(
+            list_id="l1",
+            page=2,
+            mode="list",
+            text="Not right now.",
+            options=[s.Option(label="Go outside", utterance="Yes.", intent_id="yes"), s.Option(label="Not now", utterance="Not right now.", intent_id="no")],
+            highlight_index=1,
+            slots=[s.UISlot(slot="s1", role="say", label="SAY"), s.UISlot(slot="s2", role="next", label="NEXT")],
         ),
         s.parse_server_to_ui,
     ),
@@ -121,7 +143,7 @@ DECODER_TYPES = {"hello", "stim_onset", "selection", "no_selection", "baseline_d
 
 def test_draft_has_all_its_examples() -> None:
     types = [json.loads(raw)["type"] for raw in DRAFT_EXAMPLES]
-    assert len(types) == 12
+    assert len(types) == 13  # two display examples: a page and the confirm screen
     assert set(types) == DECODER_TYPES | {
         "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause"
     }
@@ -224,24 +246,29 @@ INVALID_CASES: list[tuple[object, object]] = [
     (s.parse_decoder_to_server, {**V2_HELLO, "refresh_hz": float("inf")}),
     (s.parse_decoder_to_server, '{"type":"stim_onset","trial_id":1,"t_unix":Infinity}'),
     (s.parse_server_to_decoder, {"type": "baseline", "baseline_id": 1, "seconds": float("inf")}),
-    # show_option: index must be < count, slots must not be empty
+    # show_page: highlight_index must point at an option, slots must not be empty, page starts at 1
     (
         s.parse_server_to_ui,
         {
-            "type": "show_option", "list_id": "l1", "index": 5, "count": 1, "label": "a", "utterance": "b",
-            "slots": [{"slot": "s1", "role": "say", "label": "SAY"}],
+            "type": "show_page", "list_id": "l1", "page": 1, "mode": "list", "highlight_index": 1,
+            "options": [{"label": "a", "utterance": "b", "intent_id": "i"}], "slots": [{"slot": "s1", "role": "say", "label": "SAY"}],
         },
     ),
     (
         s.parse_server_to_ui,
         {
-            "type": "show_option", "list_id": "l1", "index": 1, "count": 1, "label": "a", "utterance": "b",
-            "slots": [{"slot": "s1", "role": "say", "label": "SAY"}],
+            "type": "show_page", "list_id": "l1", "page": 1, "mode": "page", "highlight_index": 0,
+            "slots": [{"slot": "s1", "role": "option", "label": "a"}],
         },
+    ),
+    (s.parse_server_to_ui, {"type": "show_page", "list_id": "l1", "page": 1, "mode": "page", "slots": []}),
+    (
+        s.parse_server_to_ui,
+        {"type": "show_page", "list_id": "l1", "page": 0, "mode": "page", "slots": [{"slot": "s1", "role": "next", "label": "x"}]},
     ),
     (
         s.parse_server_to_ui,
-        {"type": "show_option", "list_id": "l1", "index": 0, "count": 1, "label": "a", "utterance": "b", "slots": []},
+        {"type": "show_page", "list_id": "l1", "page": 1, "mode": "grid", "slots": [{"slot": "s1", "role": "next", "label": "x"}]},
     ),
     # wrong direction / unknown type / no type
     (s.parse_ui_to_server, {"type": "speak", "text": "hi", "utterance_id": "u1"}),

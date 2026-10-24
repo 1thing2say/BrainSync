@@ -6,7 +6,7 @@ const RECONNECT_MS = 1000;
 const REPLACED = 4000;  // close code: another partner page took over (app/server.py)
 
 let ws = null;
-let shown = null;        // last show_option
+let shown = null;        // last show_page
 let phase = "";          // last trial phase
 let accepted = false;    // flicker warning accepted
 let keyboardMode = false;
@@ -49,7 +49,7 @@ function setConnected(up) {
 
 function handle(msg) {
   switch (msg.type) {
-    case "show_option": renderOption(msg); break;
+    case "show_page": renderPage(msg); break;
     case "trial": renderPhase(msg.phase); break;
     case "highlight": markPicked(msg.slot); break;
     case "speak": speakOut(msg); break;
@@ -59,27 +59,48 @@ function handle(msg) {
   }
 }
 
-function renderOption(msg) {
+// Diamond positions by slot (s1 top, s2 left, s3 right, s4 bottom, as on the user's screen).
+const POSITIONS = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
+const HEADINGS = { page: "Pick a reply", confirm: "Say this?", list: "Highlighted reply" };
+
+function renderPage(msg) {
   shown = msg;
-  $("option-count").textContent = `Option ${msg.index + 1} of ${msg.count}`;
-  $("option-text").textContent = msg.utterance;
+  $("option-count").textContent = msg.mode === "list"
+    ? `Page ${msg.page} · option ${msg.highlight_index + 1} of ${msg.options.length}`
+    : `Page ${msg.page} · ${HEADINGS[msg.mode]}`;
+  $("option-text").textContent = msg.mode === "page" ? "" : msg.text;
+  renderList(msg);
   const targets = $("targets");
-  targets.replaceChildren(...msg.slots.map((s, i) => {
-    // In keyboard mode the boxes are buttons too (a click = key 1 or 2), for touch screens.
+  targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
+  targets.replaceChildren(...msg.slots.map((s) => {
+    // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
-    el.className = `target ${s.role}`;
+    const key = s.slot.replace("s", "");
+    el.className = `target ${s.role} pos-${POSITIONS[s.slot] || "top"}`;
     el.dataset.slot = s.slot;
-    const key = keyboardMode ? ` · key ${i + 1}` : "";
-    el.innerHTML = `<span class="role"></span><span class="slot"></span>`;
+    el.innerHTML = `<span class="role"></span><span class="sentence"></span><span class="slot"></span>`;
     el.querySelector(".role").textContent = s.label;
-    el.querySelector(".slot").textContent = `${s.slot}${key}`;
+    el.querySelector(".sentence").textContent = s.utterance;
+    el.querySelector(".slot").textContent = s.slot + (keyboardMode ? ` · key ${key}` : "");
     if (keyboardMode) {
       el.type = "button";
-      el.addEventListener("click", () => send({ type: "key", key: String(i + 1) }));
+      el.addEventListener("click", () => send({ type: "key", key }));
     }
     return el;
   }));
   renderPhase(phase);
+}
+
+// List mode (the 2-target fallback): every option on the page, the highlighted one marked.
+function renderList(msg) {
+  const list = $("list");
+  list.hidden = msg.mode !== "list";
+  list.replaceChildren(...(msg.options || []).map((o, i) => {
+    const li = document.createElement("li");
+    li.textContent = o.utterance;
+    li.classList.toggle("current", i === msg.highlight_index);
+    return li;
+  }));
 }
 
 function renderPhase(next) {
@@ -101,7 +122,8 @@ function markPicked(slot) {
 function renderState(msg) {
   const labels = {
     IDLE: "Waiting to start", BASELINE: "Baseline: keep still", MENU_CUE: "Read the option",
-    STIMULATING: "Look at SAY or NEXT", SELECTED: "Selected", SPEAKING: "Speaking",
+    STIMULATING: shown && shown.mode === "list" ? "Look at SAY or NEXT" : "Look at a reply or More options",
+    CONFIRMING: "Look at Say it or Back", SELECTED: "Selected", SPEAKING: "Speaking",
     REST: "Rest", NOT_CAUGHT: "Didn't catch that", PAUSED: "Paused",
   };
   const base = labels[msg.name] || msg.name;
@@ -152,9 +174,9 @@ function renderStatus(s) {
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
   $("hint").textContent = s.keyboard_mode
-    ? "Keyboard mode: tap SAY / NEXT (or keys 1 / 2) while flickering. C / W mark the last reply."
+    ? "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply."
     : "C / W mark the last spoken reply correct / wrong.";
-  if (shown && modeChanged) renderOption(shown);
+  if (shown && modeChanged) renderPage(shown);
 }
 
 // Correct / Wrong: the partner's mark for the last spoken reply (logged for the summary).
@@ -196,7 +218,7 @@ document.addEventListener("keydown", (ev) => {
   if (ev.target.closest("input, textarea") || ev.repeat || !accepted) return;
   const key = ev.key.toLowerCase();
   if (key === "c" || key === "w") judge(key);
-  else if (key === "1" || key === "2") send({ type: "key", key });
+  else if (["1", "2", "3", "4"].includes(key)) send({ type: "key", key });
 });
 
 fetch("/api/config")

@@ -32,7 +32,9 @@ REFRESH_TOLERANCE_HZ = 1.0
 
 SlotId = Annotated[str, StringConstraints(pattern=r"^s[0-9]+$")]
 Waveform = Literal["sine", "square"]
-Role = Literal["say", "next"]
+# option: one reply (page mode); next: new page or move the highlight; say / back: the confirm
+# screen in page mode, or SAY in list mode.
+Role = Literal["option", "next", "say", "back"]
 
 
 class Message(BaseModel):
@@ -239,28 +241,36 @@ def hello_problems(
 
 
 class UISlot(Message):
-    """One on-screen box in the mirror: which slot, what it does, what it says."""
+    """One target on the user's screen: which slot, what it does, its label and full sentence."""
 
     slot: SlotId
     role: Role
     label: str
+    utterance: str = ""  # the sentence beside an option's target; empty for NEXT / Say it / Back
 
 
-class ShowOption(Message):
-    """The option currently offered (index of count in list list_id)."""
+class ShowPage(Message):
+    """What the user's screen shows now, for the partner page's mirror.
 
-    type: Literal["show_option"] = "show_option"
+    ``mode``: ``page`` (an option on each target plus NEXT), ``confirm`` (``text`` is the picked
+    sentence; the targets are Say it / Back) or ``list`` (all ``options`` with ``highlight_index``;
+    the targets are SAY / NEXT). ``slots`` lists only the targets that flicker in the next trial.
+    """
+
+    type: Literal["show_page"] = "show_page"
     list_id: str
-    index: int = Field(ge=0)
-    count: int = Field(ge=1)
-    label: str
-    utterance: str
+    page: int = Field(ge=1)
+    mode: Literal["page", "confirm", "list"]
     slots: list[UISlot] = Field(min_length=1)
+    text: str = ""
+    options: list[Option] = Field(default_factory=list)
+    highlight_index: int | None = None
 
     @model_validator(mode="after")
-    def _index_in_range(self) -> ShowOption:
-        if self.index >= self.count:
-            raise ValueError(f"index {self.index} out of range for count {self.count}")
+    def _highlight_in_range(self) -> ShowPage:
+        if self.highlight_index is not None and not 0 <= self.highlight_index < len(self.options):
+            raise ValueError(f"highlight_index {self.highlight_index} out of range for "
+                             f"{len(self.options)} options")
         return self
 
 
@@ -424,8 +434,10 @@ ServerToDecoder = Annotated[
     Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause],
     Field(discriminator="type"),
 ]
+ShowPage.model_rebuild()
+
 ServerToUI = Annotated[
-    Union[ShowOption, Trial, Highlight, Speak, State, Transcript, UIStatus],
+    Union[ShowPage, Trial, Highlight, Speak, State, Transcript, UIStatus],
     Field(discriminator="type"),
 ]
 UIToServer = Annotated[
@@ -504,7 +516,7 @@ __all__ = [
     "Pause",
     "hello_problems",
     "UISlot",
-    "ShowOption",
+    "ShowPage",
     "Trial",
     "Highlight",
     "Speak",

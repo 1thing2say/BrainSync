@@ -1,4 +1,8 @@
-"""Orchestrator transitions with a fake clock: no timers, sockets or threads (PLAN.md section 9)."""
+"""Orchestrator transitions with a fake clock: no timers, sockets or threads (PLAN.md section 9).
+
+Page mode (the default config): 3 options on s1-s3 and NEXT on s4, a confirm screen with "Say it"
+on s1 and "Back" on s4. List mode (the 2-target fallback): SAY on s1, NEXT on s2.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ import random
 import pytest
 
 from app.config import load_config, load_intents
-from app.orchestrator import DIDNT_CATCH, MORE_LABEL, Orchestrator, St
+from app.orchestrator import DIDNT_CATCH, NOT_CONFIRMED, Orchestrator, St
 from app.schemas import (
     PROTOCOL,
     Baseline,
@@ -24,7 +28,7 @@ from app.schemas import (
     ProtocolError,
     Resume,
     Selection,
-    ShowOption,
+    ShowPage,
     SlotSpec,
     Speak,
     State,
@@ -40,13 +44,27 @@ from app.schemas import (
 
 CFG = load_config()
 INTENTS = load_intents()
-SAY, NEXT = "s1", "s2"  # roles in config/default.yaml
+HOME = INTENTS.fallback_lists["home"]
+YES_NO = INTENTS.fallback_lists["yes_no"]
+MORE = INTENTS.fallback_lists["more"]
+OPTION_SLOTS, NEXT = ["s1", "s2", "s3"], "s4"
+SAY_IT, BACK = CFG.stim.confirm.say, CFG.stim.confirm.back  # s1, s4
+
+# List mode: two slots, SAY / NEXT, no confirm step.
+CFG_LIST = CFG.model_copy(update={
+    "stim": CFG.stim.model_copy(update={
+        "slots": CFG.stim.slots[:2], "roles": {"s1": "say", "s2": "next"}}),
+    "menus": CFG.menus.model_copy(update={"mode": "list"}),
+    "selection": CFG.selection.model_copy(update={"confirm_mode": "never"}),
+})
+CFG_NO_CONFIRM = CFG.model_copy(update={
+    "selection": CFG.selection.model_copy(update={"confirm_mode": "never"})})
 
 
-def bridge_hello(**changes) -> DecoderHello:
-    """A hello that matches config/default.yaml, as the teammate's bridge would send it."""
+def bridge_hello(cfg=CFG, **changes) -> DecoderHello:
+    """A hello that matches ``cfg``, as the teammate's bridge would send it."""
     fields = dict(protocol=PROTOCOL, name="bridge", refresh_hz=59.94, waveform="sine",
-                  slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+                  slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in cfg.stim.slots])
     fields.update(changes)
     return DecoderHello(**fields)
 
@@ -67,6 +85,7 @@ class Rig:
     """
 
     def __init__(self, cfg=CFG, keyboard_mode: bool = False, bridge: bool = True) -> None:
+        self.cfg = cfg
         self.clock = Clock()
         self.ui: list = []
         self.decoder: list = []
@@ -77,7 +96,7 @@ class Rig:
 
     def connect(self, **hello_changes) -> None:
         self.o.on_decoder_connected()
-        self.o.on_decoder_message(bridge_hello(**hello_changes))
+        self.o.on_decoder_message(bridge_hello(self.cfg, **hello_changes))
 
     def finish_baseline(self, ok: bool = True, message: str = "") -> None:
         assert self.o.state is St.BASELINE and self.o.expected_baseline is not None
@@ -99,21 +118,28 @@ class Rig:
         self.clock.t = self.o.deadline
         self.o.tick()
 
-    def to_trial(self) -> StimStart:
-        """From IDLE (or after a rest) to the next STIMULATING; returns its stim_start."""
+    def to_trial(self) -> StimStart | None:
+        """From IDLE / PAUSED / any wait to the next trial; returns its stim_start (None if no bridge)."""
         if self.o.state in (St.IDLE, St.PAUSED):
             self.o.on_ui_message(Resume())
-        while self.o.state is not St.STIMULATING:
+        while self.o.state not in (St.STIMULATING, St.CONFIRMING):
             if self.o.state is St.BASELINE and self.o.expected_baseline is not None:
                 self.finish_baseline()
             else:
                 self.run_out()
-        # None without a bridge: nothing is sent to the decoder then.
         return next((m for m in reversed(self.decoder) if isinstance(m, StimStart)), None)
 
     def select(self, slot: str) -> None:
-        start = self.last(self.decoder, StimStart)
-        self.o.on_decoder_message(Selection(trial_id=start.trial_id, slot=slot, t_unix=self.clock.t))
+        self.o.on_decoder_message(Selection(trial_id=self.o.active_trial or -1, slot=slot,
+                                            t_unix=self.clock.t))
+
+    def pick_and_confirm_screen(self, slot: str) -> ShowPage:
+        """Page trial -> pick ``slot`` -> the confirm screen's cue; returns the confirm show_page."""
+        self.to_trial()
+        self.select(slot)
+        self.run_out()  # SELECTED -> MENU_CUE with the confirm screen
+        assert self.o.state is St.MENU_CUE
+        return self.last(self.ui, ShowPage)
 
     @staticmethod
     def last(msgs: list, kind: type):
@@ -121,20 +147,30 @@ class Rig:
         assert found, f"no {kind.__name__} sent"
         return found[-1]
 
+    def spoken(self) -> list[str]:
+        return [m.text for m in self.ui if isinstance(m, Speak)]
+
+
+# ---------------------------------------------------------------------------
+# Handshake, baseline, status (mode-independent)
+# ---------------------------------------------------------------------------
+
 
 def test_matching_hello_gets_hello_ack_with_roles_and_labels():
     r = Rig()
     ack = r.last(r.decoder, HelloAck)
     assert ack.protocol == PROTOCOL
-    assert ack.roles == {"s1": "say", "s2": "next"}
-    assert ack.labels == {"s1": "SAY", "s2": "NEXT"}
+    assert ack.roles == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
+    # The initial labels are the first page: each option's sentence, and "More options".
+    assert ack.labels == {"s1": HOME[0].utterance, "s2": HOME[1].utterance,
+                          "s3": HOME[2].utterance, "s4": "More options"}
     assert r.last(r.ui, UIStatus).decoder_ok
 
 
 @pytest.mark.parametrize("changes, fragment", [
     ({"refresh_hz": 120.0}, "ProMotion"),
     ({"waveform": "square"}, "waveform square"),
-    ({"slots": [SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=12.0)]}, "s2 is 12 Hz"),
+    ({"slots": [SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)]}, "slots"),
     ({"protocol": 1}, "protocol 1"),
 ])
 def test_mismatched_hello_gets_error_and_pauses(changes, fragment):
@@ -247,197 +283,8 @@ def test_board_not_ok_is_a_badge_only():
     assert status.decoder_message == "posterior RMS 250 uV"
 
 
-def test_reconnect_needs_a_good_hello_before_the_baseline():
-    r = Rig()
-    r.to_trial()
-    r.o.on_decoder_disconnected()
-    assert r.o.state is St.PAUSED
-    r.o.on_decoder_connected()
-    assert r.o.state is St.PAUSED  # not before the hello
-    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
-    assert r.o.state is St.PAUSED
-    r.o.on_decoder_message(bridge_hello())
-    assert r.o.state is St.BASELINE
-
-
-def test_start_goes_through_baseline_and_cue():
-    r = Rig()
-    r.o.on_ui_message(Resume())
-    assert r.o.state is St.BASELINE
-    assert r.last(r.decoder, Baseline).seconds == CFG.baseline.seconds
-    r.finish_baseline()
-    assert r.o.state is St.MENU_CUE
-    shown = r.last(r.ui, ShowOption)
-    assert shown.index == 0 and shown.utterance == INTENTS.fallback_lists["home"][0].utterance
-    assert [(s.slot, s.label) for s in shown.slots] == [("s1", "SAY"), ("s2", "NEXT")]
-    r.advance(CFG.stim.cue_s)
-    assert r.o.state is St.STIMULATING
-    start = r.last(r.decoder, StimStart)
-    assert start.trial_id == 1 and start.active_slots == ["s1", "s2"]
-    assert r.last(r.ui, Trial).phase == "cue"  # the mirror waits for the display's onset
-    r.o.on_decoder_message(StimOnset(trial_id=1, t_unix=r.clock.t))
-    assert r.last(r.ui, Trial).phase == "flicker"
-
-
-def test_stale_onset_does_not_change_the_mirror():
-    r = Rig()
-    start = r.to_trial()
-    r.o.on_decoder_message(StimOnset(trial_id=start.trial_id - 1, t_unix=0))
-    assert r.last(r.ui, Trial).phase == "cue"
-
-
-def test_without_a_bridge_the_mirror_flickers_at_stim_start():
-    r = Rig(bridge=False, keyboard_mode=True)
-    r.to_trial()
-    assert r.last(r.ui, Trial).phase == "flicker"
-
-
-def test_say_speaks_exactly_the_shown_utterance():
-    r = Rig()
-    r.to_trial()
-    shown = r.last(r.ui, ShowOption)
-    r.select(SAY)
-    assert r.o.state is St.SELECTED
-    assert r.last(r.decoder, StimStop).reason == "selected"
-    assert r.last(r.ui, Highlight).slot == SAY
-    r.run_out()
-    speak = r.last(r.ui, Speak)
-    assert r.o.state is St.SPEAKING and speak.text == shown.utterance
-    assert r.last(r.ui, Transcript) == Transcript(who="user", text=shown.utterance)
-    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
-    assert r.o.state is St.REST
-
-
-def test_wrong_tts_done_is_ignored_and_speaking_times_out():
-    r = Rig()
-    r.to_trial()
-    r.select(SAY)
-    r.run_out()
-    r.o.on_ui_message(TTSDone(utterance_id="nope"))
-    assert r.o.state is St.SPEAKING
-    r.advance(CFG.speech.max_speak_s)
-    assert r.o.state is St.REST
-
-
-def test_next_moves_through_the_list_then_more_options():
-    r = Rig()
-    count = len(INTENTS.fallback_lists["home"])
-    for i in range(count - 1):
-        r.to_trial()
-        assert r.last(r.ui, ShowOption).index == i
-        r.select(NEXT)
-        r.run_out()  # SELECTED -> REST
-        assert r.o.state is St.REST
-    r.to_trial()
-    last = r.last(r.ui, ShowOption)
-    assert last.index == count - 1
-    assert [s.label for s in last.slots] == ["SAY", MORE_LABEL]
-    first_list = last.list_id
-    r.select(NEXT)  # past the end: "More options"
-    r.run_out()
-    r.to_trial()
-    shown = r.last(r.ui, ShowOption)
-    assert shown.list_id != first_list and shown.index == 0
-    assert shown.utterance == INTENTS.fallback_lists["yes_no"][0].utterance
-
-
-def test_more_options_twice_in_a_row_goes_home():
-    r = Rig()
-    count = len(INTENTS.fallback_lists["home"])
-    for _ in range(2 * count):
-        r.to_trial()
-        r.select(NEXT)
-        r.run_out()
-    r.to_trial()
-    shown = r.last(r.ui, ShowOption)
-    assert shown.index == 0 and shown.utterance == INTENTS.fallback_lists["home"][0].utterance
-
-
-def test_timeout_is_not_caught_and_repeats_the_same_option():
-    r = Rig()
-    r.to_trial()
-    r.select(NEXT)
-    r.run_out()
-    r.to_trial()
-    before = r.last(r.ui, ShowOption)
-    r.advance(CFG.stim.max_trial_s)
-    assert r.o.state is St.NOT_CAUGHT
-    assert r.last(r.decoder, StimStop).reason == "timeout"
-    assert r.last(r.ui, State).detail == DIDNT_CATCH
-    r.to_trial()
-    after = r.last(r.ui, ShowOption)
-    assert (after.list_id, after.index) == (before.list_id, before.index)
-
-
-def test_no_selection_is_not_caught():
-    r = Rig()
-    start = r.to_trial()
-    r.o.on_decoder_message(NoSelection(trial_id=start.trial_id, reason="low_signal"))
-    assert r.o.state is St.NOT_CAUGHT
-    assert r.last(r.decoder, StimStop).reason == "no_selection"
-
-
-def test_stale_and_unknown_selections_are_ignored():
-    r = Rig()
-    start = r.to_trial()
-    r.o.on_decoder_message(Selection(trial_id=start.trial_id - 1, slot=SAY, t_unix=0))
-    r.o.on_decoder_message(Selection(trial_id=start.trial_id + 1, slot=SAY, t_unix=0))
-    r.o.on_decoder_message(Selection(trial_id=start.trial_id, slot="s9", t_unix=0))
-    assert r.o.state is St.STIMULATING
-    r.select(SAY)
-    r.o.on_decoder_message(Selection(trial_id=start.trial_id, slot=NEXT, t_unix=0))  # second answer
-    assert r.o.state is St.SELECTED and r.o.selected_slot == SAY
-    assert len([m for m in r.decoder if isinstance(m, StimStop)]) == 1
-
-
-def test_selection_outside_a_trial_is_ignored():
-    r = Rig()
-    r.o.on_ui_message(Resume())
-    r.o.on_decoder_message(Selection(trial_id=0, slot=SAY, t_unix=0))
-    r.o.on_decoder_message(Selection(trial_id=1, slot=SAY, t_unix=0))
-    assert r.o.state is St.BASELINE
-
-
-def test_partner_question_during_trial_stops_it_and_shows_yes_no():
-    r = Rig()
-    r.to_trial()
-    r.o.on_ui_message(PartnerText(text="Do you want to go outside?", source="typed"))
-    assert r.last(r.decoder, StimStop).reason == "context_changed"
-    assert r.o.state is St.MENU_CUE
-    assert r.last(r.ui, ShowOption).utterance == INTENTS.fallback_lists["yes_no"][0].utterance
-    assert Transcript(who="partner", text="Do you want to go outside?") in r.ui
-
-
-def test_partner_text_while_speaking_waits_for_the_next_cue():
-    r = Rig()
-    r.to_trial()
-    r.select(SAY)
-    r.run_out()
-    speak = r.last(r.ui, Speak)
-    shows_before = len([m for m in r.ui if isinstance(m, ShowOption)])
-    r.o.on_ui_message(PartnerText(text="Are you hungry?", source="typed"))
-    assert r.o.state is St.SPEAKING
-    assert len([m for m in r.ui if isinstance(m, ShowOption)]) == shows_before
-    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
-    r.run_out()  # REST -> MENU_CUE
-    assert r.last(r.ui, ShowOption).utterance == INTENTS.fallback_lists["yes_no"][0].utterance
-
-
-def test_stop_pauses_and_resume_goes_through_baseline():
-    r = Rig()
-    r.to_trial()
-    r.o.on_ui_message(Stop())
-    assert r.o.state is St.PAUSED and r.o.deadline is None
-    assert r.last(r.decoder, StimStop).reason == "paused"
-    r.advance(100)
-    assert r.o.state is St.PAUSED
-    r.o.on_ui_message(Resume())
-    assert r.o.state is St.BASELINE
-
-
 def test_decoder_loss_pauses_and_reconnect_resumes():
     r = Rig()
-    r.o.on_decoder_connected()
     r.to_trial()
     r.o.on_decoder_disconnected()
     assert r.o.state is St.PAUSED
@@ -450,8 +297,6 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
 
 def test_reconnect_sends_baseline_only_after_hello_ack():
     r = Rig()
-    r.o.on_decoder_connected()
-    r.o.on_decoder_message(bridge_hello())
     r.to_trial()
     r.o.on_decoder_disconnected()
     r.decoder.clear()
@@ -474,22 +319,240 @@ def test_reconnect_with_rejected_hello_stays_paused_until_a_good_one():
     assert r.o.state is St.BASELINE
 
 
-def test_decoder_status_not_ok_is_reported():
+def test_stop_pauses_and_resume_goes_through_baseline():
     r = Rig()
-    r.o.on_decoder_connected()
-    r.o.on_decoder_message(bridge_hello())
-    r.o.on_decoder_message(DecoderStatus(ok=False, board_ok=True, display_ok=False, message="Esc"))
-    assert not r.last(r.ui, UIStatus).decoder_ok
+    r.to_trial()
+    r.o.on_ui_message(Stop())
+    assert r.o.state is St.PAUSED and r.o.deadline is None
+    assert [type(m) for m in r.decoder[-2:]] == [StimStop, Pause]
+    assert r.last(r.decoder, StimStop).reason == "paused"
+    r.advance(100)
+    assert r.o.state is St.PAUSED
+    r.o.on_ui_message(Resume())
+    assert r.o.state is St.BASELINE
+    r.o.on_ui_message(Stop())
+    assert isinstance(r.decoder[-1], Pause)  # outside a trial: pause only
 
 
-@pytest.mark.parametrize("keyboard_mode, expect", [(True, St.SELECTED), (False, St.STIMULATING)])
-def test_keyboard_selects_only_in_keyboard_mode(keyboard_mode, expect):
-    r = Rig(keyboard_mode=keyboard_mode)
+def test_baselines_are_numbered():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume())
+    assert [m.baseline_id for m in r.decoder if isinstance(m, Baseline)] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Page mode: the diamond of 3 options + NEXT
+# ---------------------------------------------------------------------------
+
+
+def test_the_page_shows_three_options_and_next_in_the_diamond():
+    r = Rig()
+    start = r.to_trial()
+    shown = r.last(r.ui, ShowPage)
+    assert shown.mode == "page" and shown.page == 1
+    assert [(s.slot, s.role, s.label, s.utterance) for s in shown.slots] == [
+        ("s1", "option", HOME[0].label, HOME[0].utterance),
+        ("s2", "option", HOME[1].label, HOME[1].utterance),
+        ("s3", "option", HOME[2].label, HOME[2].utterance),
+        ("s4", "next", "More options", ""),
+    ]
+    cue = [m for m in r.decoder if isinstance(m, Display)][-1]
+    assert cue.text == "" and cue.highlight is None and "highlight" in cue.model_fields_set
+    assert cue.labels == {"s1": HOME[0].utterance, "s2": HOME[1].utterance,
+                          "s3": HOME[2].utterance, "s4": "More options"}
+    assert start.active_slots == ["s1", "s2", "s3", "s4"]
+    assert r.last(r.ui, Trial).phase == "cue"  # the mirror waits for the display's onset
+    r.o.on_decoder_message(StimOnset(trial_id=start.trial_id, t_unix=r.clock.t))
+    assert r.last(r.ui, Trial).phase == "flicker"
+
+
+def test_option_opens_the_confirm_screen_with_only_say_it_and_back():
+    r = Rig()
+    confirm = r.pick_and_confirm_screen("s2")
+    assert r.last(r.ui, Highlight).slot == "s2"
+    assert r.last(r.decoder, StimStop).reason == "selected"
+    assert confirm.mode == "confirm" and confirm.text == HOME[1].utterance
+    assert [(s.slot, s.role, s.label) for s in confirm.slots] == [
+        (SAY_IT, "say", "Say it"), (BACK, "back", "Back")]
+    display = r.last(r.decoder, Display)
+    assert display.text == HOME[1].utterance
+    assert display.labels == {"s1": "Say it", "s2": "", "s3": "", "s4": "Back"}
+    assert r.spoken() == []  # nothing yet
+    r.run_out()
+    assert r.o.state is St.CONFIRMING
+    assert r.last(r.decoder, StimStart).active_slots == [SAY_IT, BACK]
+
+
+def test_say_it_speaks_exactly_the_picked_sentence():
+    r = Rig()
+    r.pick_and_confirm_screen("s3")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    speak = r.last(r.ui, Speak)
+    assert r.o.state is St.SPEAKING and speak.text == HOME[2].utterance
+    assert r.last(r.ui, Transcript) == Transcript(who="user", text=HOME[2].utterance)
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    assert r.o.state is St.REST
+
+
+@pytest.mark.parametrize("ending", ["back", "timeout", "no_selection"])
+def test_back_or_no_answer_on_the_confirm_screen_speaks_nothing(ending):
+    r = Rig()
+    r.pick_and_confirm_screen("s1")
+    first_page = [m for m in r.ui if isinstance(m, ShowPage) and m.mode == "page"][-1]
+    r.to_trial()
+    if ending == "back":
+        r.select(BACK)
+        r.run_out()
+    elif ending == "timeout":
+        r.advance(CFG.stim.max_trial_s)
+        assert r.last(r.ui, State).detail == NOT_CONFIRMED
+        r.run_out()
+    else:
+        r.o.on_decoder_message(NoSelection(trial_id=r.o.active_trial, reason="low_signal"))
+        assert r.last(r.decoder, StimStop).reason == "no_selection"
+        r.run_out()
+    assert r.spoken() == []
+    r.to_trial()
+    again = r.last(r.ui, ShowPage)
+    assert again.mode == "page" and again.list_id == first_page.list_id  # the same page
+
+
+def test_confirm_screen_ignores_targets_that_are_not_flickering():
+    r = Rig()
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    r.select("s2")  # still on screen but not active on the confirm screen
+    assert r.o.state is St.CONFIRMING
+
+
+def test_without_confirm_an_option_speaks_at_once():
+    r = Rig(CFG_NO_CONFIRM)
+    r.to_trial()
+    r.select("s2")
+    r.run_out()
+    assert r.o.state is St.SPEAKING and r.spoken() == [HOME[1].utterance]
+
+
+def test_next_loads_more_options_and_twice_goes_home():
+    r = Rig()
+    r.to_trial()
+    first = r.last(r.ui, ShowPage)
+    r.select(NEXT)
+    r.run_out()
+    assert r.o.state is St.REST and r.spoken() == []
+    r.to_trial()
+    second = r.last(r.ui, ShowPage)
+    assert second.page == first.page + 1 and second.list_id != first.list_id
+    assert [s.utterance for s in second.slots[:3]] == [o.utterance for o in MORE]
+    r.select(NEXT)
+    r.run_out()
+    r.to_trial()
+    third = r.last(r.ui, ShowPage)
+    assert [s.utterance for s in third.slots[:3]] == [o.utterance for o in HOME]
+
+
+def test_page_timeout_is_not_caught_and_repeats_the_same_page():
+    r = Rig()
+    r.to_trial()
+    before = r.last(r.ui, ShowPage)
+    r.advance(CFG.stim.max_trial_s)
+    assert r.o.state is St.NOT_CAUGHT
+    assert r.last(r.decoder, StimStop).reason == "timeout"
+    assert r.last(r.ui, State).detail == DIDNT_CATCH
+    r.to_trial()
+    assert r.last(r.ui, ShowPage).list_id == before.list_id
+
+
+def test_stale_and_unknown_selections_are_ignored():
+    r = Rig()
+    start = r.to_trial()
+    for trial_id, slot in [(start.trial_id - 1, "s1"), (start.trial_id + 1, "s1"),
+                           (start.trial_id, "s9")]:
+        r.o.on_decoder_message(Selection(trial_id=trial_id, slot=slot, t_unix=0))
+    assert r.o.state is St.STIMULATING
+    r.select("s1")
+    r.o.on_decoder_message(Selection(trial_id=start.trial_id, slot="s2", t_unix=0))  # second answer
+    assert r.o.state is St.SELECTED and r.o.selected_slot == "s1"
+    assert len([m for m in r.decoder if isinstance(m, StimStop)]) == 1
+
+
+def test_selection_outside_a_trial_is_ignored():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.o.on_decoder_message(Selection(trial_id=0, slot="s1", t_unix=0))
+    r.o.on_decoder_message(Selection(trial_id=1, slot="s1", t_unix=0))
+    assert r.o.state is St.BASELINE
+
+
+def test_partner_question_during_a_trial_shows_the_yes_no_page():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="Do you want to go outside?", source="typed"))
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.o.state is St.MENU_CUE
+    assert [s.utterance for s in r.last(r.ui, ShowPage).slots[:3]] == [o.utterance for o in YES_NO]
+    assert Transcript(who="partner", text="Do you want to go outside?") in r.ui
+
+
+def test_partner_question_on_the_confirm_screen_drops_the_pick():
+    r = Rig()
+    r.pick_and_confirm_screen("s2")
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="Are you cold?", source="typed"))
+    shown = r.last(r.ui, ShowPage)
+    assert shown.mode == "page" and shown.slots[0].utterance == YES_NO[0].utterance
+    assert r.o.picked is None
+
+
+def test_partner_text_while_speaking_waits_for_the_next_cue():
+    r = Rig()
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    speak = r.last(r.ui, Speak)
+    pages_before = len([m for m in r.ui if isinstance(m, ShowPage)])
+    r.o.on_ui_message(PartnerText(text="Are you hungry?", source="typed"))
+    assert r.o.state is St.SPEAKING
+    assert len([m for m in r.ui if isinstance(m, ShowPage)]) == pages_before
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    r.run_out()  # REST -> MENU_CUE
+    assert r.last(r.ui, ShowPage).slots[0].utterance == YES_NO[0].utterance
+
+
+def test_wrong_tts_done_is_ignored_and_speaking_times_out():
+    r = Rig(CFG_NO_CONFIRM)
+    r.to_trial()
+    r.select("s1")
+    r.run_out()
+    r.o.on_ui_message(TTSDone(utterance_id="nope"))
+    assert r.o.state is St.SPEAKING
+    r.advance(CFG.speech.max_speak_s)
+    assert r.o.state is St.REST
+
+
+def test_keyboard_keys_select_the_slot_with_that_number_when_it_flickers():
+    r = Rig(keyboard_mode=True)
+    r.to_trial()
+    r.o.on_ui_message(Key(key="3"))
+    assert r.o.selected_slot == "s3"
+    r.run_out()
+    r.to_trial()  # the confirm trial
+    r.o.on_ui_message(Key(key="2"))  # s2 is not flickering now
+    assert r.o.state is St.CONFIRMING
+    r.o.on_ui_message(Key(key="4"))  # Back
+    assert r.o.selected_slot == BACK
+
+
+def test_keys_do_nothing_outside_keyboard_mode():
+    r = Rig()
     r.to_trial()
     r.o.on_ui_message(Key(key="2"))
-    assert r.o.state is expect
-    if keyboard_mode:
-        assert r.o.selected_slot == NEXT
+    assert r.o.state is St.STIMULATING
 
 
 def test_keyboard_loss_of_decoder_does_not_pause():
@@ -499,56 +562,75 @@ def test_keyboard_loss_of_decoder_does_not_pause():
     assert r.o.state is St.STIMULATING
 
 
-def test_shown_option_never_changes_during_a_trial():
+def test_without_a_bridge_the_mirror_flickers_at_stim_start():
+    r = Rig(bridge=False, keyboard_mode=True)
+    r.to_trial()
+    assert r.last(r.ui, Trial).phase == "flicker"
+
+
+def test_stale_onset_does_not_change_the_mirror():
+    r = Rig()
+    start = r.to_trial()
+    r.o.on_decoder_message(StimOnset(trial_id=start.trial_id - 1, t_unix=0))
+    assert r.last(r.ui, Trial).phase == "cue"
+
+
+def test_shown_page_never_changes_during_a_trial():
     r = Rig()
     r.to_trial()
-    shown = r.last(r.ui, ShowOption)
-    r.o.on_ui_connected()  # a reconnecting page gets the same option again: allowed
-    assert r.last(r.ui, ShowOption) == shown
-    r.o.shown = shown.model_copy(update={"utterance": "something else"})
+    shown = r.last(r.ui, ShowPage)
+    r.o.on_ui_connected()  # a reconnecting page gets the same screen again: allowed
+    assert r.last(r.ui, ShowPage) == shown
     with pytest.raises(AssertionError):
-        r.o._send_ui(shown)
+        r.o._send_ui(shown.model_copy(update={"page": shown.page + 1}))
 
 
-def test_stop_sends_pause_after_stim_stop_and_also_outside_a_trial():
+def test_display_highlights_the_pick_after_stim_stop():
     r = Rig()
     r.to_trial()
-    r.o.on_ui_message(Stop())
-    assert [type(m) for m in r.decoder[-2:]] == [StimStop, Pause]
-    r.o.on_ui_message(Resume())
-    assert r.o.state is St.BASELINE
-    r.o.on_ui_message(Stop())
-    assert isinstance(r.decoder[-1], Pause)
-
-
-def test_baselines_are_numbered():
-    r = Rig()
-    r.o.on_ui_message(Resume())
-    r.o.on_ui_message(Stop())
-    r.o.on_ui_message(Resume())
-    ids = [m.baseline_id for m in r.decoder if isinstance(m, Baseline)]
-    assert ids == [1, 2]
-
-
-def test_display_follows_the_shown_option_and_the_pick():
-    r = Rig()
-    r.to_trial()
-    shown = r.last(r.ui, ShowOption)
-    cue = [m for m in r.decoder if isinstance(m, Display)][-1]
-    assert cue.text == shown.utterance
-    assert cue.labels == {"s1": "SAY", "s2": "NEXT"}
-    assert "highlight" in cue.model_fields_set and cue.highlight is None  # explicit null clears it
-    r.select(SAY)
+    r.select("s2")
+    assert [type(m) for m in r.decoder[-2:]] == [StimStop, Display]
     assert r.last(r.decoder, Display).model_fields_set == {"highlight"}
-    assert r.last(r.decoder, Display).highlight == SAY
+    assert r.last(r.decoder, Display).highlight == "s2"
+
+
+def run_unattended(cfg, trials: int = 20, seed: int = 7) -> Rig:
+    """Random decoder answers (some missing); the page reports tts_done. Fails if anything sticks."""
+    rng = random.Random(seed)
+    r = Rig(cfg)
+    r.o.on_ui_message(Resume())
+    for _ in range(20_000):
+        if r.o.trial_id >= trials and r.o.state is St.REST:
+            return r
+        if r.o.state in (St.STIMULATING, St.CONFIRMING):
+            r.advance(rng.uniform(0.1, 3.0))
+            if r.o.state in (St.STIMULATING, St.CONFIRMING) and rng.random() < 0.85:
+                r.select(rng.choice(list(r.o.screen.roles)))
+        elif r.o.state is St.SPEAKING:
+            r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
+        elif r.o.state is St.BASELINE:
+            r.finish_baseline()
+        else:
+            r.run_out()
+        assert r.o.deadline is not None, f"stuck in {r.o.state}"
+    raise AssertionError("did not finish")
+
+
+def test_twenty_trials_unattended_in_page_mode_speak_only_confirmed_picks():
+    r = run_unattended(CFG)
+    assert r.spoken()
+    # Every spoken sentence was the confirm screen's text right before it, picked with "Say it".
+    for i, msg in enumerate(r.ui):
+        if isinstance(msg, Speak):
+            confirm = [m for m in r.ui[:i] if isinstance(m, ShowPage)][-1]
+            assert confirm.mode == "confirm" and confirm.text == msg.text
+    starts = [m.trial_id for m in r.decoder if isinstance(m, StimStart)]
+    stops = [m.trial_id for m in r.decoder if isinstance(m, StimStop)]
+    assert starts == sorted(set(starts)) and stops == starts[: len(stops)]
 
 
 def test_no_display_between_stim_start_and_stim_stop():
-    r = Rig()
-    for _ in range(6):
-        r.to_trial()
-        r.select(NEXT)
-        r.run_out()
+    r = run_unattended(CFG, trials=12, seed=3)
     in_trial = False
     for m in r.decoder:
         if isinstance(m, StimStart):
@@ -559,29 +641,49 @@ def test_no_display_between_stim_start_and_stim_stop():
             assert not in_trial, "display sent during a trial"
 
 
-def test_twenty_trials_unattended_never_get_stuck():
-    """V2 done-check, headless: random decoder answers (some missing), the page reports tts_done."""
-    rng = random.Random(7)
-    r = Rig()
-    r.o.on_ui_message(Resume())
-    spoken = 0
-    for _ in range(10_000):
-        if r.o.trial_id >= 20 and r.o.state is St.REST:
-            break
-        if r.o.state is St.STIMULATING:
-            r.advance(rng.uniform(0.1, 3.0))
-            if r.o.state is St.STIMULATING and rng.random() < 0.85:
-                r.select(rng.choice([SAY, NEXT]))
-        elif r.o.state is St.SPEAKING:
-            r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
-            spoken += 1
-        elif r.o.state is St.BASELINE:
-            r.finish_baseline()
-        else:
-            r.run_out()
-        assert r.o.deadline is not None or r.o.state is St.SPEAKING, f"stuck in {r.o.state}"
-    assert r.o.trial_id >= 20
-    assert spoken > 0
-    starts = [m.trial_id for m in r.decoder if isinstance(m, StimStart)]
-    stops = [m.trial_id for m in r.decoder if isinstance(m, StimStop)]
-    assert starts == sorted(set(starts)) and stops == starts[: len(stops)]
+# ---------------------------------------------------------------------------
+# List mode: the 2-target fallback (SAY / NEXT, all options listed)
+# ---------------------------------------------------------------------------
+
+
+def test_list_mode_shows_every_option_with_one_highlighted():
+    r = Rig(CFG_LIST)
+    start = r.to_trial()
+    shown = r.last(r.ui, ShowPage)
+    assert shown.mode == "list" and shown.highlight_index == 0
+    assert [o.utterance for o in shown.options] == [o.utterance for o in HOME]
+    assert [(s.slot, s.label) for s in shown.slots] == [("s1", "SAY"), ("s2", "NEXT")]
+    assert start.active_slots == ["s1", "s2"]
+
+
+def test_list_mode_next_moves_the_highlight_and_say_speaks_it():
+    r = Rig(CFG_LIST)
+    r.to_trial()
+    r.select("s2")
+    r.run_out()
+    r.to_trial()
+    shown = r.last(r.ui, ShowPage)
+    assert shown.highlight_index == 1 and shown.text == HOME[1].utterance
+    r.select("s1")
+    r.run_out()
+    assert r.spoken() == [HOME[1].utterance]  # no confirm step in list mode
+
+
+def test_list_mode_next_on_the_last_option_says_more_then_loads_a_new_page():
+    r = Rig(CFG_LIST)
+    for _ in range(len(HOME) - 1):
+        r.to_trial()
+        r.select("s2")
+        r.run_out()
+    r.to_trial()
+    assert [s.label for s in r.last(r.ui, ShowPage).slots] == ["SAY", "MORE"]
+    r.select("s2")
+    r.run_out()
+    r.to_trial()
+    shown = r.last(r.ui, ShowPage)
+    assert shown.highlight_index == 0 and [o.utterance for o in shown.options] == [o.utterance for o in MORE]
+
+
+def test_twenty_trials_unattended_in_list_mode():
+    r = run_unattended(CFG_LIST)
+    assert r.spoken()

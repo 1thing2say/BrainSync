@@ -70,7 +70,7 @@ from app.schemas import (
 
 log = logging.getLogger("fake_decoder")
 
-FALLBACK_SLOTS = "s1=15,s2=17"  # only if config/default.yaml cannot be loaded
+FALLBACK_SLOTS = "s1=15,s2=17,s3=20,s4=12"  # only if config/default.yaml cannot be loaded
 
 
 def _load_config(path: str | None = None) -> AppConfig | None:

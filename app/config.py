@@ -30,7 +30,9 @@ DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"
 
 REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
 
-Role = Literal["say", "next"]
+# Page mode: "option" slots carry one reply each, "next" asks for a new page.
+# List mode (the 2-target fallback): "say" speaks the highlighted option, "next" moves the highlight.
+Role = Literal["option", "say", "next"]
 
 
 class ConfigError(Exception):
@@ -68,9 +70,17 @@ class DisplayConfig(Strict):
     expected_refresh_hz: float = Field(gt=0)
 
 
+class ConfirmSlots(Strict):
+    """The two targets of the confirm screen in page mode."""
+
+    say: SlotId
+    back: SlotId
+
+
 class StimConfig(Strict):
     slots: list[SlotConfig] = Field(min_length=1)
     roles: dict[SlotId, Role]
+    confirm: ConfirmSlots
     waveform: Waveform
     cue_s: float = Field(ge=0)
     max_trial_s: float = Field(gt=0)
@@ -87,6 +97,7 @@ class BaselineConfig(Strict):
 
 
 class MenusConfig(Strict):
+    mode: Literal["page", "list"]
     dynamic: bool
     option_count: int = Field(ge=1)
     label_max_chars: int = Field(ge=1)
@@ -104,6 +115,10 @@ class ContextConfig(Strict):
 
 
 class SpeechConfig(Strict):
+    provider: Literal["cartesia", "browser"]
+    voice_id: str = ""
+    model: str = Field(min_length=1)
+    tts_timeout_s: float = Field(gt=0)
     tts_rate: float = Field(gt=0)
     stt_mode: Literal["push_to_talk"]
     max_speak_s: float = Field(gt=0)
@@ -144,9 +159,25 @@ def check_app_config(cfg: AppConfig) -> list[str]:
         if slot not in stim.roles:
             problems.append(f"stim.roles: slot {slot} has no role")
     role_counts = Counter(stim.roles.values())
-    for role in ("say", "next"):
-        if role_counts[role] != 1:
-            problems.append(f"stim.roles: need exactly one '{role}' slot, found {role_counts[role]}")
+    mode = cfg.menus.mode
+    if mode == "page":
+        wanted = {"option": cfg.menus.option_count, "next": 1, "say": 0}
+    else:
+        wanted = {"option": 0, "say": 1, "next": 1}
+    for role, n in wanted.items():
+        if role_counts[role] != n:
+            problems.append(f"stim.roles: {mode} mode needs {n} '{role}' slot(s), found {role_counts[role]}")
+    if mode == "page":
+        for name in ("say", "back"):
+            if getattr(stim.confirm, name) not in slot_ids:
+                problems.append(f"stim.confirm.{name}: {getattr(stim.confirm, name)} is not a defined slot")
+        if stim.confirm.say == stim.confirm.back:
+            problems.append("stim.confirm: say and back must be different slots")
+    elif cfg.selection.confirm_mode != "never":
+        problems.append("selection.confirm_mode: list mode has no confirm step; use never")
+
+    if cfg.speech.model.endswith("-latest"):
+        problems.append(f"speech.model: pin a model version, not {cfg.speech.model}")
 
     nyquist = refresh / 2
     for s in stim.slots:

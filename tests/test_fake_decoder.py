@@ -59,8 +59,8 @@ class StubServer:
                     await ws.send(to_json(ProtocolError(message=self.reject_with)))
                 else:
                     await ws.send(to_json(HelloAck(
-                        protocol=PROTOCOL, roles={"s1": "say", "s2": "next"},
-                        labels={"s1": "SAY", "s2": "NEXT"},
+                        protocol=PROTOCOL, roles={"s1": "option", "s2": "option", "s3": "option", "s4": "next"},
+                        labels={"s1": "Yes", "s2": "No", "s3": "Maybe", "s4": "More options"},
                     )))
                 await self.hellos.put(msg)
             elif isinstance(msg, DecoderStatus):
@@ -143,9 +143,10 @@ async def test_hello_exchange(server: StubServer) -> None:
         assert hello.protocol == PROTOCOL
         assert hello.name == "fake-decoder"
         assert hello.refresh_hz == 60.0 and hello.waveform == "sine"
-        assert [(s.slot, s.freq_hz) for s in hello.slots] == [("s1", 15.0), ("s2", 17.0)]
+        assert [(s.slot, s.freq_hz) for s in hello.slots] == [
+            ("s1", 15.0), ("s2", 17.0), ("s3", 20.0), ("s4", 12.0)]
         await wait_until(lambda: decoder.acked)
-        assert decoder.ack.roles == {"s1": "say", "s2": "next"}
+        assert decoder.ack.roles["s4"] == "next"
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

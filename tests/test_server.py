@@ -15,7 +15,7 @@ from app.schemas import PROTOCOL, BaselineDone, DecoderHello, Selection, SlotSpe
 
 BASE = load_config()
 HELLO = DecoderHello(protocol=PROTOCOL, name="test", refresh_hz=60.0, waveform="sine",
-                     slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+                     slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in BASE.stim.slots])
 
 
 def fast_config():
@@ -71,8 +71,9 @@ def test_decoder_hello_exchange(client):
     with client.websocket_connect("/ws/decoder") as dec:
         dec.send_text(to_json(HELLO))
         ack = recv_until(dec, "hello_ack")
-    assert ack["roles"] == {"s1": "say", "s2": "next"}
-    assert ack["labels"] == {"s1": "SAY", "s2": "NEXT"}
+    assert ack["roles"] == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
+    assert ack["labels"]["s4"] == "More options"
+    assert set(ack["labels"]) == {"s1", "s2", "s3", "s4"}
 
 
 def test_full_trial_from_page_and_decoder(client):
@@ -82,13 +83,21 @@ def test_full_trial_from_page_and_decoder(client):
         recv_until(dec, "hello_ack")
         ui.send_text(json.dumps({"type": "resume"}))
         answer_baseline(dec)
-        shown = recv_until(ui, "show_option")
+        shown = recv_until(ui, "show_page")
+        assert shown["mode"] == "page"
         start = recv_until(dec, "stim_start")
+        assert start["active_slots"] == ["s1", "s2", "s3", "s4"]
         dec.send_text(to_json(Selection(trial_id=start["trial_id"], slot="s1", t_unix=0.0)))
         assert recv_until(dec, "stim_stop")["reason"] == "selected"
         assert recv_until(ui, "highlight")["slot"] == "s1"
+        # The confirm step: only Say it (s1) and Back (s4) flicker; nothing is spoken before it.
+        confirm = recv_until(ui, "show_page")
+        assert confirm["mode"] == "confirm" and confirm["text"] == shown["slots"][0]["utterance"]
+        start = recv_until(dec, "stim_start")
+        assert start["active_slots"] == ["s1", "s4"]
+        dec.send_text(to_json(Selection(trial_id=start["trial_id"], slot="s1", t_unix=0.0)))
         speak = recv_until(ui, "speak")
-        assert speak["text"] == shown["utterance"]
+        assert speak["text"] == shown["slots"][0]["utterance"]
         ui.send_text(json.dumps({"type": "tts_done", "utterance_id": speak["utterance_id"]}))
         assert recv_until(ui, "trial")["phase"] in ("rest", "cue")
     events = read_events(next(client.log_dir.glob("*.jsonl")))
@@ -125,7 +134,7 @@ def test_new_partner_page_replaces_the_old_one(kb_client):
             recv_until(second, "status")
             assert client.app.state.hub.ui is not None
             second.send_text(json.dumps({"type": "resume"}))
-            assert recv_until(second, "show_option")["index"] == 0
+            assert recv_until(second, "show_page")["page"] == 1
     events = read_events(next(client.log_dir.glob("*.jsonl")))
     assert any(e["event"] == "ui_replaced" for e in events)
 
@@ -135,7 +144,7 @@ def test_page_reconnect_after_stop_stays_paused(kb_client):
     client = kb_client
     with client.websocket_connect("/ws/ui") as ui:
         ui.send_text(json.dumps({"type": "resume"}))
-        recv_until(ui, "show_option")
+        recv_until(ui, "show_page")
         ui.send_text(json.dumps({"type": "stop"}))
         while recv_until(ui, "state")["name"] != "PAUSED":
             pass

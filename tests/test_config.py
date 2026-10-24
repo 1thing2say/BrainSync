@@ -41,18 +41,27 @@ def test_default_config_loads() -> None:
     cfg = load_config()
     assert isinstance(cfg, AppConfig)
     assert cfg.server.host == "127.0.0.1" and cfg.server.port == 8000
-    assert [(s.slot, s.freq_hz) for s in cfg.stim.slots] == [("s1", 15.0), ("s2", 17.0)]
-    assert cfg.stim.roles == {"s1": "say", "s2": "next"}
-    assert cfg.stim.slot_for("say") == "s1" and cfg.stim.slot_for("next") == "s2"
+    assert [(s.slot, s.freq_hz) for s in cfg.stim.slots] == [
+        ("s1", 15.0), ("s2", 17.0), ("s3", 20.0), ("s4", 12.0)]
+    assert cfg.stim.roles == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
+    assert cfg.stim.slot_for("next") == "s4"
+    assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s4")
     assert cfg.stim.waveform == "sine"
-    assert cfg.menus.option_count == 4
-    assert cfg.selection.confirm_mode == "never"
+    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3
+    assert cfg.selection.confirm_mode == "always"
+    assert cfg.speech.provider == "cartesia" and cfg.speech.model == "sonic-3.5"
+
+
+def test_list_mode_fallback_loads(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, _list_mode(_raw(DEFAULT_CONFIG_PATH))))
+    assert cfg.menus.mode == "list"
+    assert cfg.stim.slot_for("say") == "s1" and cfg.stim.slot_for("next") == "s2"
 
 
 def test_default_config_accepts_a_matching_bridge_hello() -> None:
     cfg = load_config()
     hello = DecoderHello(protocol=PROTOCOL, name="bridge", refresh_hz=59.94, waveform="sine",
-                         slots=[SlotSpec(slot="s1", freq_hz=15.0), SlotSpec(slot="s2", freq_hz=17.0)])
+                         slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in cfg.stim.slots])
     assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform,
                           cfg.display.expected_refresh_hz) == []
 
@@ -61,7 +70,7 @@ def test_default_intents_load() -> None:
     cfg = load_intents()
     menus = load_config().menus
     assert "yes" in cfg.intent_ids and "no" in cfg.intent_ids  # not parsed as YAML booleans
-    for name in ("home", "yes_no"):
+    for name in ("home", "yes_no", "more"):
         assert len(cfg.fallback_lists[name]) == menus.option_count
 
 
@@ -107,25 +116,55 @@ def _delete(*keys: str) -> Callable[[dict[str, Any]], None]:
 
 S1 = {"slot": "s1", "freq_hz": 15.0, "phase_deg": 0}
 S2 = {"slot": "s2", "freq_hz": 17.0, "phase_deg": 0}
+S3 = {"slot": "s3", "freq_hz": 20.0, "phase_deg": 0}
+S4 = {"slot": "s4", "freq_hz": 12.0, "phase_deg": 0}
+PAGE_ROLES = {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
+
+
+def _list_mode(raw: dict[str, Any]) -> dict[str, Any]:
+    """The 2-target fallback: SAY / NEXT on 15 / 17 Hz, no confirm step."""
+    raw["menus"]["mode"] = "list"
+    raw["stim"]["slots"] = [S1, S2]
+    raw["stim"]["roles"] = {"s1": "say", "s2": "next"}
+    raw["selection"]["confirm_mode"] = "never"
+    return raw
+
+
+def _in_list_mode(mutate: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], None]:
+    def apply(raw: dict[str, Any]) -> None:
+        mutate(_list_mode(raw))
+
+    return apply
 
 INVALID_CONFIGS = [
     ("unknown top-level key", _set("stim_typo", 1), "stim_typo"),
     ("unknown nested key", _set("stim", "cue_seconds", 1.0), "cue_seconds"),
-    ("unknown slot key", _set("stim", "slots", [{**S1, "freq": 15}, S2]), "freq"),
+    ("unknown slot key", _set("stim", "slots", [{**S1, "freq": 15}, S2, S3, S4]), "freq"),
     ("missing section", _delete("llm"), "llm"),
     ("missing key", _delete("stim", "rest_s"), "rest_s"),
-    ("duplicate slot ids", _set("stim", "slots", [S1, {**S2, "slot": "s1"}]), "duplicate slot"),
-    ("role for unknown slot", _set("stim", "roles", {"s1": "say", "s3": "next"}), "s3"),
-    ("slot without role", _set("stim", "roles", {"s1": "say"}), "s2 has no role"),
-    ("two say roles", _set("stim", "roles", {"s1": "say", "s2": "say"}), "exactly one 'next'"),
-    ("bad role name", _set("stim", "roles", {"s1": "say", "s2": "skip"}), "roles"),
-    ("bad slot id", _set("stim", "slots", [S1, {**S2, "slot": "x2"}]), "slot"),
-    ("zero frequency", _set("stim", "slots", [S1, {**S2, "freq_hz": 0}]), "freq_hz"),
-    ("frequency at nyquist", _set("stim", "slots", [S1, {**S2, "freq_hz": 30.0}]), "half the"),
-    ("same freq and phase", _set("stim", "slots", [S1, {**S2, "freq_hz": 15.0}]), "same frequency"),
+    ("duplicate slot ids", _set("stim", "slots", [S1, {**S2, "slot": "s1"}, S3, S4]), "duplicate slot"),
+    ("role for unknown slot", _set("stim", "roles", {**PAGE_ROLES, "s5": "option"}), "s5 is not a defined slot"),
+    ("slot without role", _set("stim", "roles", {"s1": "option", "s2": "option", "s4": "next"}), "s3 has no role"),
+    ("two next roles", _set("stim", "roles", {**PAGE_ROLES, "s3": "next"}), "needs 1 'next' slot(s), found 2"),
+    ("say role in page mode", _set("stim", "roles", {**PAGE_ROLES, "s3": "say"}), "needs 0 'say'"),
+    ("too few option slots", _set("menus", "option_count", 4), "needs 4 'option' slot(s), found 3"),
+    ("confirm on unknown slot", _set("stim", "confirm", {"say": "s1", "back": "s9"}), "stim.confirm.back"),
+    ("confirm say == back", _set("stim", "confirm", {"say": "s1", "back": "s1"}), "must be different"),
+    ("missing confirm", _delete("stim", "confirm"), "confirm"),
+    ("bad role name", _set("stim", "roles", {**PAGE_ROLES, "s2": "skip"}), "roles"),
+    ("bad menu mode", _set("menus", "mode", "grid"), "mode"),
+    ("list mode: two say roles", _in_list_mode(_set("stim", "roles", {"s1": "say", "s2": "say"})),
+     "list mode needs 1 'next' slot(s), found 0"),
+    ("list mode: option role", _in_list_mode(_set("stim", "roles", {"s1": "option", "s2": "next"})),
+     "list mode needs 0 'option'"),
+    ("list mode: confirm step", _in_list_mode(_set("selection", "confirm_mode", "always")), "use never"),
+    ("bad slot id", _set("stim", "slots", [S1, {**S2, "slot": "x2"}, S3, S4]), "slot"),
+    ("zero frequency", _set("stim", "slots", [S1, {**S2, "freq_hz": 0}, S3, S4]), "freq_hz"),
+    ("frequency at nyquist", _set("stim", "slots", [S1, {**S2, "freq_hz": 30.0}, S3, S4]), "half the"),
+    ("same freq and phase", _set("stim", "slots", [S1, {**S2, "freq_hz": 15.0}, S3, S4]), "same frequency"),
     (
         "same freq, phase 360 apart",
-        _set("stim", "slots", [S1, {**S2, "freq_hz": 15.0, "phase_deg": 360}]),
+        _set("stim", "slots", [S1, {**S2, "freq_hz": 15.0, "phase_deg": 360}, S3, S4]),
         "same frequency",
     ),
     ("square at 17 Hz on 60 Hz", _set("stim", "waveform", "square"), "does not divide"),
@@ -139,6 +178,9 @@ INVALID_CONFIGS = [
     ("negative history", _set("context", "history_turns", -1), "history_turns"),
     ("bad confirm mode", _set("selection", "confirm_mode", "sometimes"), "confirm_mode"),
     ("bad stt mode", _set("speech", "stt_mode", "always_on"), "stt_mode"),
+    ("unpinned tts model", _set("speech", "model", "sonic-latest"), "pin a model version"),
+    ("bad tts provider", _set("speech", "provider", "polly"), "provider"),
+    ("zero tts timeout", _set("speech", "tts_timeout_s", 0), "tts_timeout_s"),
     ("port zero", _set("server", "port", 0), "port"),
     ("port too high", _set("server", "port", 70000), "port"),
     ("zero refresh", _set("display", "expected_refresh_hz", 0), "expected_refresh_hz"),
@@ -161,7 +203,7 @@ def test_invalid_config_raises(
 def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:
     raw = _raw(DEFAULT_CONFIG_PATH)
     raw["stim"]["waveform"] = "square"
-    raw["stim"]["slots"] = [S1, {**S2, "freq_hz": 12.0}]
+    raw["stim"]["slots"] = [S1, {**S2, "freq_hz": 10.0}, S3, S4]  # 60 / f is a whole number of frames
     assert load_config(_write(tmp_path, raw)).stim.waveform == "square"
 
 
@@ -180,7 +222,7 @@ def test_every_problem_is_listed(tmp_path: Path) -> None:
 def test_every_cross_field_problem_is_listed(tmp_path: Path) -> None:
     raw = _raw(DEFAULT_CONFIG_PATH)
     raw["stim"]["waveform"] = "square"
-    raw["stim"]["roles"] = {"s1": "say"}
+    raw["stim"]["roles"] = {"s1": "option"}
     with pytest.raises(ConfigError) as exc:
         load_config(_write(tmp_path, raw))
     message = str(exc.value)

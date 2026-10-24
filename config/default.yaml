@@ -10,12 +10,22 @@ display:
 
 stim:
   # Mirrors the teammate's stimulus config (ssvep two_targets.toml); the bridge's hello must match.
+  # Page mode: a diamond, s1 top, s2 left, s3 right, s4 bottom (PLAN.md section 14, 4-target gate).
+  # NEXT sits on 12 Hz, the weakest frequency, so the likeliest error only turns a page.
+  # List-mode fallback: s1 15 Hz (say) and s2 17 Hz (next) only.
   slots:
     - {slot: s1, freq_hz: 15.0, phase_deg: 0}
     - {slot: s2, freq_hz: 17.0, phase_deg: 0}
-  roles:                       # which slot does what: exactly one say and one next
-    s1: say
-    s2: next
+    - {slot: s3, freq_hz: 20.0, phase_deg: 0}
+    - {slot: s4, freq_hz: 12.0, phase_deg: 0}
+  roles:                       # page mode: option_count "option" slots + one "next"
+    s1: option
+    s2: option
+    s3: option
+    s4: next
+  confirm:                     # page mode's confirm screen: only these two flicker
+    say: s1                    # "Say it"
+    back: s4                   # "Back"
   waveform: sine               # sine or square; 17 Hz does not divide 60 Hz, so square is rejected
   cue_s: 1.0                   # option shown, no flicker, before each trial
   max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (decoder needs about 5 s)
@@ -26,8 +36,9 @@ baseline:
   timeout_s: 15.0              # no baseline_done from the bridge by then -> pause
 
 menus:
+  mode: page                   # page: 3 options + NEXT, each on its own target; list: SAY / NEXT fallback
   dynamic: true                # false = fallback lists from intents.yaml only
-  option_count: 4              # ranked options per list, most likely first
+  option_count: 3              # ranked options per page, most likely first (one per option slot)
   label_max_chars: 18
   label_max_words: 3
   utterance_max_words: 14
@@ -40,10 +51,14 @@ context:
   history_turns: 8             # partner + user turns sent to the LLM
 
 speech:
-  tts_rate: 1.0                # speechSynthesis rate
+  provider: cartesia           # cartesia, or browser (speechSynthesis only); key from .env CARTESIA_API_KEY
+  voice_id: 47c38ca4-5f35-497b-b1a3-415245fb35e1   # Cartesia voice
+  model: sonic-3.5             # pinned; never sonic-latest
+  tts_timeout_s: 2.0           # per clip; slower or failed -> the browser speaks it
+  tts_rate: 1.0                # speechSynthesis fallback only
   stt_mode: push_to_talk       # mic is off while TTS is speaking
   max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
 
 selection:
-  confirm_mode: never          # never / always / low_score (low_score needs decoder scores)
+  confirm_mode: always         # always in page mode (a wrong pick is never spoken); never in list mode
   chosen_highlight_s: 0.6      # how long the picked target stays highlighted

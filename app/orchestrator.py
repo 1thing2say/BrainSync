@@ -1,5 +1,9 @@
-"""Server-side state machine (PLAN.md section 7), scan mode: one target says the shown option,
-the other moves to the next one.
+"""Server-side state machine (PLAN.md section 7).
+
+Page mode (default): 3 reply options, each on its own flickering target, plus NEXT on a fourth
+(a diamond on the user's screen). Looking at an option opens a confirm screen with only two
+targets, "Say it" and "Back"; only "Say it" speaks. List mode (the 2-target fallback): all
+options listed with one highlighted, SAY speaks it and NEXT moves the highlight.
 
 The orchestrator owns all state. It is driven by events (decoder and browser messages, plus
 ``tick()``), reads time from an injectable clock and sends messages through two callbacks, so tests
@@ -37,7 +41,7 @@ from app.schemas import (
     ProtocolError,
     Resume,
     Selection,
-    ShowOption,
+    ShowPage,
     Speak,
     State,
     StimOnset,
@@ -55,17 +59,22 @@ from app.schemas import (
 Send = Callable[[Message], None]
 
 DIDNT_CATCH = "Didn't catch that"
+NOT_CONFIRMED = "Not confirmed: nothing was said"
 HOME_LIST = "home"
 QUESTION_LIST = "yes_no"
-ROLE_LABELS = {"say": "SAY", "next": "NEXT"}
-MORE_LABEL = "MORE"  # NEXT on the last option of a list asks for new options
+MORE_LIST = "more"  # the first "More options" page from home, if intents.yaml has it
+NEXT_PAGE_LABEL = "More options"
+SAY_IT, BACK = "Say it", "Back"
+LIST_LABELS = {"say": "SAY", "next": "NEXT"}
+LIST_MORE_LABEL = "MORE"  # list mode: NEXT on the last option asks for new options
 
 
 class St(str, Enum):
     IDLE = "IDLE"
     BASELINE = "BASELINE"
     MENU_CUE = "MENU_CUE"
-    STIMULATING = "STIMULATING"
+    STIMULATING = "STIMULATING"  # a page or list trial
+    CONFIRMING = "CONFIRMING"  # the confirm trial: Say it / Back
     SELECTED = "SELECTED"
     SPEAKING = "SPEAKING"
     REST = "REST"
@@ -73,11 +82,23 @@ class St(str, Enum):
     PAUSED = "PAUSED"
 
 
+TRIAL_STATES = (St.STIMULATING, St.CONFIRMING)
+
+
 @dataclass
 class OptionList:
     list_id: str
     name: str  # fallback list name, later "llm"
     options: list[Option]
+
+
+@dataclass
+class Screen:
+    """What the user's screen shows for the next trial, and what each active target does."""
+
+    show: ShowPage  # for the partner page's mirror
+    display: Display  # for the bridge's PsychoPy display
+    roles: dict[str, str]  # active slot -> role; only these flicker in the trial
 
 
 class Orchestrator:
@@ -103,20 +124,24 @@ class Orchestrator:
         self.keyboard_mode = keyboard_mode
         self.fake_decoder = fake_decoder
 
+        self.mode = cfg.menus.mode
         self.slots = [s.slot for s in cfg.stim.slots]
         self.roles = dict(cfg.stim.roles)
+        self.option_slots = [slot for slot in self.slots if self.roles[slot] == "option"]
         self.state = St.IDLE
         self.deadline: float | None = None
 
         self.trial_id = 0
         self.active_trial: int | None = None
         self.selected_slot: str | None = None
-        self.shown: ShowOption | None = None  # what the user sees; fixed for the whole trial
+        self.screen: Screen | None = None  # fixed from MENU_CUE until the trial ends
 
         self._list_ids = itertools.count(1)
         self._utterance_ids = itertools.count(1)
-        self.options = self._fallback(HOME_LIST)
-        self.index = 0
+        self.page_no = 0  # counts pages shown; _set_list makes the first one page 1
+        self.index = 0  # list mode: the highlighted option
+        self._set_list(self._fallback(HOME_LIST))
+        self.picked: Option | None = None  # page mode: the option waiting for "Say it"
         self.pending_list: OptionList | None = None
         self.more_in_a_row = 0
 
@@ -132,6 +157,10 @@ class Orchestrator:
         self.bridge_message = ""
         self.baseline_id = 0
         self.expected_baseline: int | None = None  # baseline_id we wait for, if a bridge records it
+
+    @property
+    def shown(self) -> ShowPage | None:
+        return self.screen.show if self.screen is not None else None
 
     # ------------------------------------------------------------------ events: time
 
@@ -151,7 +180,7 @@ class Orchestrator:
                                     f"{self.cfg.baseline.timeout_s:g} s", "baseline_failed")
         elif self.state is St.MENU_CUE:
             self._start_trial()
-        elif self.state is St.STIMULATING:
+        elif self.state in TRIAL_STATES:
             self._not_caught("timeout")
         elif self.state is St.SELECTED:
             self._after_selected()
@@ -219,12 +248,9 @@ class Orchestrator:
             return
         self.acked = True
         self.decoder_error = ""
-        last = self.shown is not None and self.shown.index == self.shown.count - 1
-        self._send_decoder(HelloAck(
-            protocol=PROTOCOL,
-            roles=self.roles,
-            labels={slot: self._label(role, last) for slot, role in self.roles.items()},
-        ))
+        screen = self.screen or self._build_screen()
+        self._send_decoder(HelloAck(protocol=PROTOCOL, roles=self.roles,
+                                    labels=screen.display.labels or {}))
         self._send_status()
         if self.state is St.PAUSED and self.paused_by_decoder and self.display_ok:
             self._enter_baseline()
@@ -300,10 +326,11 @@ class Orchestrator:
             pass  # logged above; read by the log summary
 
     def _on_key(self, key: str) -> None:
+        """Keyboard mode: digit n selects slot n (1 = top, 4 = bottom) if it flickers now."""
         key = key.lower()
         if key.isdigit() and self.keyboard_mode:
             n = int(key)
-            if 1 <= n <= len(self.slots) and self.state is St.STIMULATING:
+            if 1 <= n <= len(self.slots) and self.state in TRIAL_STATES:
                 self._on_selection(self.active_trial, self.slots[n - 1], source="keyboard")
         elif key in ("c", "w") and self.last_spoken_id is not None:
             self._record("judgment", utterance_id=self.last_spoken_id, correct=key == "c")
@@ -313,12 +340,14 @@ class Orchestrator:
         name = QUESTION_LIST if text.rstrip().endswith("?") else HOME_LIST
         self.pending_list = self._fallback(name)
         self.more_in_a_row = 0
-        if self.state is St.STIMULATING:
+        if self.state in TRIAL_STATES:
             self._stop_trial("context_changed")
+            self.picked = None
             self._enter_menu_cue()
         elif self.state is St.MENU_CUE:
-            self._enter_menu_cue()  # not in a trial yet, so the option may still change
-        # In every other state the new list is shown at the next MENU_CUE.
+            self.picked = None
+            self._enter_menu_cue()  # not in a trial yet, so the screen may still change
+        # In every other state the new page is shown at the next MENU_CUE.
 
     # ------------------------------------------------------------------ transitions
 
@@ -343,36 +372,23 @@ class Orchestrator:
         self._send_status()  # resume_ready changes
 
     def _enter_menu_cue(self) -> None:
-        if self.pending_list is not None:
-            self.options, self.pending_list, self.index = self.pending_list, None, 0
-        option = self.options.options[self.index]
-        last = self.index == len(self.options.options) - 1
-        slots = [
-            UISlot(slot=slot, role=self.roles[slot], label=self._label(self.roles[slot], last))
-            for slot in self.slots
-        ]
-        self.shown = ShowOption(
-            list_id=self.options.list_id,
-            index=self.index,
-            count=len(self.options.options),
-            label=option.label,
-            utterance=option.utterance,
-            slots=slots,
-        )
+        """Show the next screen (page, confirm or list), still, for cue_s before its trial."""
+        if self.pending_list is not None and self.picked is None:
+            self._set_list(self.pending_list)
+            self.pending_list = None
+        self.screen = self._build_screen()
         self._enter(St.MENU_CUE, self.cfg.stim.cue_s)
-        self._send_ui(self.shown)
+        self._send_ui(self.screen.show)
         self._send_ui(Trial(trial_id=self.trial_id + 1, phase="cue"))
-        self._send_decoder(Display(text=option.utterance, labels={s.slot: s.label for s in slots},
-                                   highlight=None))
+        self._send_decoder(self.screen.display)
 
     def _start_trial(self) -> None:
         self.trial_id += 1
         self.active_trial = self.trial_id
         self.selected_slot = None
-        self._enter(St.STIMULATING, self.cfg.stim.max_trial_s)
-        self._send_decoder(
-            StimStart(trial_id=self.trial_id, active_slots=list(self.slots))
-        )
+        state = St.CONFIRMING if self.screen.show.mode == "confirm" else St.STIMULATING
+        self._enter(state, self.cfg.stim.max_trial_s)
+        self._send_decoder(StimStart(trial_id=self.trial_id, active_slots=list(self.screen.roles)))
         if not self.acked:
             # No bridge (keyboard mode): nothing will report an onset, so show the trial now.
             self._send_ui(Trial(trial_id=self.trial_id, phase="flicker"))
@@ -387,35 +403,63 @@ class Orchestrator:
         if not self._is_current(trial_id):
             self._record("stale_selection", trial_id=trial_id, slot=slot, source=source)
             return
-        if slot not in self.slots:
-            self._record("unknown_slot", trial_id=trial_id, slot=slot, source=source)
+        if slot not in self.screen.roles:
+            self._record("inactive_slot", trial_id=trial_id, slot=slot, source=source)
             return
         self._stop_trial("selected")
         self.selected_slot = slot
-        self._record("selected", trial_id=trial_id, slot=slot, role=self.roles[slot], source=source)
-        self._enter(St.SELECTED, self.cfg.selection.chosen_highlight_s, self.roles[slot])
+        role = self.screen.roles[slot]
+        self._record("selected", trial_id=trial_id, slot=slot, role=role, source=source,
+                     screen=self.screen.show.mode)
+        self._enter(St.SELECTED, self.cfg.selection.chosen_highlight_s, role)
         self._send_ui(Highlight(slot=slot))
         self._send_decoder(Display(highlight=slot))
 
     def _after_selected(self) -> None:
-        if self.roles[self.selected_slot] == "say":
-            self._speak(self.options.options[self.index].utterance)
-            return
-        self.index += 1
-        if self.index >= len(self.options.options):
-            self._more_options()
-        self._enter_rest()
+        mode = self.screen.show.mode
+        role = self.screen.roles[self.selected_slot]
+        if mode == "confirm":
+            option, self.picked = self.picked, None
+            if role == "say":
+                self._speak(option.utterance)
+            else:
+                self._record("confirm_back", utterance=option.utterance)
+                self._enter_rest()  # back to the same page
+        elif mode == "page":
+            if role == "option":
+                option = self.options.options[self.option_slots.index(self.selected_slot)]
+                if self.cfg.selection.confirm_mode == "never":
+                    self._speak(option.utterance)
+                else:
+                    # low_score needs decoder scores and a threshold; until then it confirms too.
+                    self.picked = option
+                    self._enter_menu_cue()  # the confirm screen
+            else:
+                self._more_options()
+                self._enter_rest()
+        else:  # list mode
+            if role == "say":
+                self._speak(self.options.options[self.index].utterance)
+                return
+            self.index += 1
+            if self.index >= len(self.options.options):
+                self._more_options()
+            self._enter_rest()
 
     def _more_options(self) -> None:
-        """NEXT past the last option: a different list; twice in a row goes back home."""
+        """NEXT for a new page: the "more" page first, then others; twice in a row goes home."""
         self.more_in_a_row += 1
         if self.more_in_a_row >= 2:
             self.more_in_a_row = 0
-            self.options = self._fallback(HOME_LIST)
+            self._set_list(self._fallback(HOME_LIST))
+            return
+        names = list(self.intents.fallback_lists)
+        if MORE_LIST in names and self.options.name != MORE_LIST:
+            name = MORE_LIST
         else:
-            others = [n for n in self.intents.fallback_lists if n != self.options.name]
-            self.options = self._fallback(others[0] if others else HOME_LIST)
-        self.index = 0
+            others = [n for n in names if n != self.options.name]
+            name = others[0] if others else HOME_LIST
+        self._set_list(self._fallback(name))
 
     def _speak(self, text: str) -> None:
         self.speaking_id = f"u{next(self._utterance_ids)}"
@@ -427,13 +471,17 @@ class Orchestrator:
         self.last_spoken_id, self.speaking_id = self.speaking_id, None
         self.more_in_a_row = 0
         if self.pending_list is None:
-            self.pending_list = self._fallback(HOME_LIST)  # V3: the LLM's next list
+            self.pending_list = self._fallback(HOME_LIST)  # V3: the LLM's next page
         self._enter_rest()
 
     def _not_caught(self, why: str) -> None:
+        confirming = self.state is St.CONFIRMING
         self._stop_trial(why)  # "no_selection" or "timeout"
-        self._record("not_caught", trial_id=self.trial_id, why=why)
-        self._enter(St.NOT_CAUGHT, self.cfg.selection.chosen_highlight_s, DIDNT_CATCH)
+        self._record("not_caught", trial_id=self.trial_id, why=why, confirming=confirming)
+        if confirming:
+            self.picked = None  # a confirm timeout counts as Back: nothing is spoken by default
+        self._enter(St.NOT_CAUGHT, self.cfg.selection.chosen_highlight_s,
+                    NOT_CONFIRMED if confirming else DIDNT_CATCH)
 
     def _enter_rest(self) -> None:
         self._enter(St.REST, self.cfg.stim.rest_s)
@@ -441,6 +489,7 @@ class Orchestrator:
 
     def _pause(self, detail: str) -> None:
         self._stop_trial("paused")
+        self.picked = None
         self.expected_baseline = None
         self._enter(St.PAUSED, None, detail)
         self._send_status()  # resume_ready changes
@@ -450,18 +499,63 @@ class Orchestrator:
         self._pause(detail)
         self._send_decoder(Pause(reason=reason))
 
+    # ------------------------------------------------------------------- screens
+
+    def _build_screen(self) -> Screen:
+        if self.picked is not None:
+            return self._confirm_screen(self.picked)
+        if self.mode == "page":
+            return self._page_screen()
+        return self._list_screen()
+
+    def _page_screen(self) -> Screen:
+        """An option beside each option slot (in rank order) and NEXT on the next slot."""
+        next_slot = self.cfg.stim.slot_for("next")
+        slots = [UISlot(slot=slot, role="option", label=opt.label, utterance=opt.utterance)
+                 for slot, opt in zip(self.option_slots, self.options.options)]
+        slots.append(UISlot(slot=next_slot, role="next", label=NEXT_PAGE_LABEL))
+        show = ShowPage(list_id=self.options.list_id, page=self.page_no, mode="page", slots=slots)
+        labels = {s.slot: s.utterance or s.label for s in slots}
+        return Screen(show, Display(text="", labels=labels, highlight=None),
+                      {s.slot: s.role for s in slots})
+
+    def _confirm_screen(self, option: Option) -> Screen:
+        """The picked sentence, with only "Say it" and "Back" flickering."""
+        say, back = self.cfg.stim.confirm.say, self.cfg.stim.confirm.back
+        slots = [UISlot(slot=say, role="say", label=SAY_IT), UISlot(slot=back, role="back", label=BACK)]
+        show = ShowPage(list_id=self.options.list_id, page=self.page_no, mode="confirm",
+                        slots=slots, text=option.utterance)
+        # Clear the labels of the targets that stay still.
+        labels = {slot: "" for slot in self.slots} | {say: SAY_IT, back: BACK}
+        return Screen(show, Display(text=option.utterance, labels=labels, highlight=None),
+                      {say: "say", back: "back"})
+
+    def _list_screen(self) -> Screen:
+        """All options with one highlighted; SAY speaks it, NEXT moves the highlight."""
+        last = self.index == len(self.options.options) - 1
+        slots = [UISlot(slot=slot, role=role,
+                        label=LIST_MORE_LABEL if role == "next" and last else LIST_LABELS[role])
+                 for slot, role in self.roles.items()]
+        option = self.options.options[self.index]
+        show = ShowPage(list_id=self.options.list_id, page=self.page_no, mode="list", slots=slots,
+                        text=option.utterance, options=self.options.options,
+                        highlight_index=self.index)
+        return Screen(show, Display(text=option.utterance, labels={s.slot: s.label for s in slots},
+                                    highlight=None),
+                      {s.slot: s.role for s in slots})
+
     # ---------------------------------------------------------------------- helpers
 
     def _is_current(self, trial_id: int | None) -> bool:
-        return self.state is St.STIMULATING and trial_id is not None and trial_id == self.active_trial
+        return self.state in TRIAL_STATES and trial_id is not None and trial_id == self.active_trial
 
     def _fallback(self, name: str) -> OptionList:
         options = [Option(**o.model_dump()) for o in self.intents.fallback_lists[name]]
         return OptionList(list_id=f"m{next(self._list_ids)}", name=name, options=options)
 
-    @staticmethod
-    def _label(role: str, last_option: bool) -> str:
-        return MORE_LABEL if role == "next" and last_option else ROLE_LABELS[role]
+    def _set_list(self, options: OptionList) -> None:
+        self.options, self.index = options, 0
+        self.page_no += 1
 
     def status(self) -> UIStatus:
         return UIStatus(
@@ -484,9 +578,9 @@ class Orchestrator:
         self._send_ui(State(name=self.state.value, detail=detail))
 
     def _send_ui(self, msg: Message) -> None:
-        # PLAN rule 3: the shown option never changes during a trial.
-        if isinstance(msg, ShowOption) and self.state is St.STIMULATING:
-            assert msg == self.shown, "show_option changed during a trial"
+        # PLAN rule 3: the shown options never change during a trial.
+        if isinstance(msg, ShowPage) and self.state in TRIAL_STATES:
+            assert msg == self.shown, "show_page changed during a trial"
         self._record("to_ui", message=msg)
         self._send_ui_cb(msg)
 
@@ -495,6 +589,9 @@ class Orchestrator:
         if not self.acked and not isinstance(msg, (HelloAck, ProtocolError)):
             self._record("not_sent_before_ack", message=msg)
             return
+        # Draft rule 5: the display never changes during a trial (a highlight comes after stim_stop).
+        if isinstance(msg, Display) and self.active_trial is not None:
+            raise AssertionError("display sent during a trial")
         self._record("to_decoder", message=msg)
         self._send_decoder_cb(msg)
 

@@ -1,5 +1,5 @@
 # Allowed intents for LLM options, plus fallback option lists used when the LLM is slow,
-# down or returns something invalid. Each fallback list has exactly menus.option_count options,
+# down or returns something invalid. Each fallback list has exactly menus.option_count options (one page),
 # ranked most likely first, written in the first person as the user.
 
 # "yes" and "no" are quoted: unquoted, YAML reads them as booleans.
@@ -19,16 +19,20 @@ intents:
   - {id: repeat, description: "Ask the partner to repeat or explain"}
 
 fallback_lists:
-  # Default list when there is no question to answer.
+  # Default page when there is no question to answer.
   home:
     - {label: "I'm good", utterance: "I'm doing well, thanks for asking.", intent_id: feeling}
     - {label: "Need help", utterance: "Could you help me with something, please?", intent_id: need}
     - {label: "Drink", utterance: "Could I have something to drink, please?", intent_id: food_drink}
-    - {label: "Thank you", utterance: "Thank you, I really appreciate it.", intent_id: thanks}
 
   # Used when the partner's last line ends with "?".
   yes_no:
     - {label: "Yes", utterance: "Yes, please.", intent_id: "yes"}
     - {label: "No", utterance: "No, thank you.", intent_id: "no"}
     - {label: "Maybe", utterance: "Maybe, let me think about it.", intent_id: maybe}
+
+  # The first "More options" page from home (NEXT twice in a row goes back home).
+  more:
+    - {label: "Thank you", utterance: "Thank you, I really appreciate it.", intent_id: thanks}
     - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
+    - {label: "One moment", utterance: "Please give me a moment.", intent_id: later}
