@@ -259,6 +259,7 @@ next_status() {  # the first line of status.seq, consumed unless it is the last
 shift
 if grep -q 'is running' "$src"; then echo false
 elif grep -q 'to quit' "$src"; then echo quit >> "$STUB_DIR/calls"
+elif grep -q 'SrPt' "$src" && grep -q 'update configuration' "$src"; then echo "serial-off $*" >> "$STUB_DIR/calls"; echo ok
 elif grep -q 'update configuration' "$src"; then echo "eject $*" >> "$STUB_DIR/calls"; echo 1
 elif grep -q 'make new virtual machine' "$src"; then
     # create: record argv and whether the staged installer exists right now.
@@ -393,6 +394,15 @@ EOF
     stub eject-iso --name "$vm" || die "eject: $out"
     grep -qx 'eject ID-1 DRIVE-ISO' "$d/calls" || die "eject argv: $(cat "$d/calls")"
     echo "eject-iso: drops DRIVE-ISO (brainsyncos-installer.iso), keeps the disk"
+    # serial-off: only on a stopped VM.
+    printf 'started\n' > "$d/status.seq"
+    : > "$d/calls"
+    if stub serial-off --name "$vm"; then die "serial-off accepted a running VM"; fi
+    [ ! -s "$d/calls" ] || die "serial-off changed a running VM: $(cat "$d/calls")"
+    printf 'stopped\n' > "$d/status.seq"
+    stub serial-off --name "$vm" || die "serial-off: $out"
+    grep -qx 'serial-off ID-1' "$d/calls" || die "serial-off argv: $(cat "$d/calls")"
+    echo "serial-off: refused while running, removes the port of a stopped VM"
     # start: utmctl exits 0 when UTM refuses; the VM's status says it failed.
     printf 'stopped\n' > "$d/status.seq"
     if STUB_START_FAIL=1 stub start --name "$vm"; then die "start accepted a VM that stayed stopped"; fi

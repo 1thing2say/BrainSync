@@ -207,7 +207,7 @@ scripts/utm-vm.sh check                 # UTM found, Apple Events allowed (first
 scripts/utm-vm.sh create                # VM "BrainSyncOS": Apple Virtualization, 4 GiB, 4 CPUs, 32 GiB, installer drive
 scripts/utm-vm.sh install               # boot -> pick "Install BrainSyncOS ..." -> waits -> ejects installer -> boots -> prints ssh
 ssh brainsync@<ip>                      # or: scripts/utm-vm.sh ssh-info
-scripts/utm-vm.sh stop | start | status | ip | eject-iso | list
+scripts/utm-vm.sh stop | start | status | ip | eject-iso | serial-off | list
 scripts/utm-vm.sh delete                # asks you to type the VM name
 scripts/utm-vm.sh create --backend qemu --name BrainSyncOS-usb   # for USB passthrough
 ```
@@ -244,6 +244,15 @@ scripts/utm-vm.sh create --backend qemu --name BrainSyncOS-usb   # for USB passt
   boot menu): the ISO stays. Only when the console cannot be captured at all does
   it fall back to "ran at least 5 minutes". `install --hide` is refused while the
   boot menu waits for a key (`VM_GRUB_TIMEOUT=-1`).
+- **Serial port (apple backend):** UTM's serial port there is a PTY that something
+  on the Mac must keep reading. Once its buffer (about 16 KB) is full, every console
+  write in the VM blocks, and a boot nobody reads hangs at *EFI stub: Booting Linux
+  Kernel...*. `install` reads it while it waits and removes the port after a
+  successful install, so the installed system never depends on it. For a VM
+  installed before that change, shut it down and run `scripts/utm-vm.sh
+  serial-off`; until then, `cat` of its PTY (`address of serial port 1` in UTM's
+  scripting) unblocks a hung boot. The qemu backend's TCP console drops output
+  nobody reads, and keeps its port.
 - **Keyboard and mouse:** UTM creates an Apple-backend VM made by script with
   keyboard and pointer *Disabled*, and its scripting cannot change them. `create`
   therefore quits UTM (only when no VM is running), sets `Keyboard=Generic` and

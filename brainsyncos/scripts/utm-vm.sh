@@ -17,6 +17,8 @@
 #                         least 5 min); a failure marker ends the wait at once
 #   start [--hide] | stop [--force] | status | ip | ssh-info
 #   eject-iso [--dry-run] remove the installer drive (VM must be stopped)
+#   serial-off            remove the serial port (VM must be stopped); install
+#                         does this itself on the apple backend (see below)
 #   delete [--yes] [--dry-run]
 #                         delete the VM and its disk (asks you to type the name;
 #                         BSOS_CONFIRM_VM=NAME answers non-interactively)
@@ -43,6 +45,13 @@
 # the host's ARP cache.
 # Driving UTM uses Apple Events: the first run asks "... wants access to
 # control UTM"; answer OK (System Settings > Privacy & Security > Automation).
+# On the apple backend the serial port is a PTY that something on the Mac
+# must keep reading: once its buffer (about 16 KB) is full, every console
+# write in the guest blocks and it hangs early in boot ("EFI stub: Booting
+# Linux Kernel..." on the display). install reads it while it waits, then
+# removes the port after a successful install; the installed system needs
+# no serial console (SSH and the display). The qemu backend's TCP console
+# drops output when nobody is connected and is kept.
 # Logs: build/vm/NAME-*.log (serial console capture during install).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -247,6 +256,22 @@ on run argv
     tell application "UTM"
         set p to serial port 1 of virtual machine id (item 1 of argv)
         return (interface of p as text) & tab & (address of p) & tab & ((port of p) as text)
+    end tell
+end run
+EOF
+}
+
+as_serial_off() { cat <<'EOF'
+on run argv
+    tell application "UTM"
+        set vm to virtual machine id (item 1 of argv)
+        if status of vm is not stopped then error "the VM is not stopped" number 1001
+        set cfg to configuration of vm
+        -- «class SrPt»: the "serial ports" property (see as_create_apple).
+        -- UTM 4.7 does not report existing serial ports, so nothing is counted.
+        set «class SrPt» of cfg to {}
+        update configuration of vm with cfg
+        return "ok"
     end tell
 end run
 EOF
@@ -494,7 +519,7 @@ c_check_scripts() {
     local fn src n=0
     [ -d "$UTM_APP" ] || die "UTM not found at $UTM_APP"
     src="$(mktemp)"
-    for fn in as_running as_quit as_lookup as_list as_create_apple as_create_qemu as_drives as_eject as_serial as_delete; do
+    for fn in as_running as_quit as_lookup as_list as_create_apple as_create_qemu as_drives as_eject as_serial as_serial_off as_delete; do
         "$fn" > "$src"
         osacompile -o "$src.scpt" "$src" 2> "$src.err" || { cat "$src.err" >&2; rm -rf "$src" "$src.scpt" "$src.err"; die "AppleScript ${fn#as_} does not compile"; }
         rm -rf "$src.scpt" "$src.err"
@@ -630,6 +655,13 @@ c_eject() {
     log "ejected the installer from $name"
 }
 
+c_serial_off() {
+    lookup
+    [ "$VM_STATUS" = stopped ] || die "$name is $VM_STATUS; shut it down first (in the VM, or scripts/utm-vm.sh stop)"
+    osa as_serial_off "$VM_ID" > /dev/null
+    log "removed the serial port of $name"
+}
+
 c_delete() {
     local answer
     lookup
@@ -709,8 +741,14 @@ c_install() {
     esac
     eject_installer
     log "ejected the installer drive"
+    if [ "$VM_BACKEND_NOW" = apple ]; then
+        # Unread, the PTY would hang the installed system in a later boot (header).
+        osa as_serial_off "$VM_ID" > /dev/null
+        log "removed the serial port (apple backend: an unread serial port blocks the VM)"
+        SERIAL_PID=""
+    fi
     start_vm
-    capture_serial firstboot
+    [ "$VM_BACKEND_NOW" = apple ] || capture_serial firstboot
     until=$(( $(date +%s) + 600 ))
     while [ "$(date +%s)" -lt "$until" ]; do
         lookup
@@ -721,7 +759,7 @@ c_install() {
         fi
         sleep 10
     done
-    die "$name started but SSH did not answer within 10 min (last address: ${ip:-none}); see build/vm/$name-firstboot.log"
+    die "$name started but SSH did not answer within 10 min (last address: ${ip:-none}); look at its window$([ "$VM_BACKEND_NOW" = apple ] || echo ", and build/vm/$name-firstboot.log")"
 }
 
 case "$cmd" in
@@ -736,6 +774,7 @@ case "$cmd" in
     ip) c_ip ;;
     ssh-info) c_ssh_info ;;
     eject-iso) c_eject ;;
+    serial-off) c_serial_off ;;
     delete) c_delete ;;
     *) die "unknown command: $cmd (try --help)" ;;
 esac
