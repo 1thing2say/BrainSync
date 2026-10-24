@@ -47,6 +47,11 @@ if __package__ in (None, ""):
 
 from app.log import DEFAULT_LOG_DIR, read_events  # noqa: E402
 
+
+def is_fake_name(name: str) -> bool:
+    """The orchestrator's rule (Orchestrator.decoder_fake): a bridge named "fake..." is a fake."""
+    return name.lower().startswith("fake")
+
 TRIAL_STATES = ("STIMULATING", "CONFIRMING")
 LLM_LIST = "llm"  # app/orchestrator.py: the name of a page Claude wrote
 SECRET = re.compile(r"sk-ant-[A-Za-z0-9_-]+|sk_car_[A-Za-z0-9_-]+")
@@ -660,7 +665,7 @@ def warnings(summary: dict[str, Any]) -> list[str]:
     if judged >= MIN_COUNT and marks["wrong"] / judged >= WRONG_SHARE:
         out.append(f"{marks['wrong']} of {judged} spoken replies were marked wrong")
     real_decoder = trials["by_source"].get("decoder") and not sess["fake_decoder"] and not any(
-        "fake" in name for name in sess["decoder_names"])
+        is_fake_name(name) for name in sess["decoder_names"])
     if real_decoder and replies["spoken"] and not judged:
         out.append("no C/W marks: press C or W after each spoken reply so accuracy is measured (V5)")
 
@@ -737,7 +742,7 @@ def mode_text(sess: dict[str, Any]) -> str:
     if sess["keyboard_mode"]:
         parts.append("keyboard mode")
     names = sorted(sess["decoder_names"])
-    if sess["fake_decoder"] or any("fake" in n for n in names):
+    if sess["fake_decoder"] or any(is_fake_name(n) for n in names):
         parts.append("fake decoder")
     elif names:
         parts.append(f"decoder {', '.join(names)}")

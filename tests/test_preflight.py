@@ -27,7 +27,8 @@ def health(**over) -> dict:
     """A healthy /api/health answer; ``over`` replaces whole sections or top-level keys."""
     h = {"state": "IDLE", "resume_ready": True,
          "decoder": {"connected": True, "ok": True, "display_ok": True, "board_ok": True,
-                     "message": "", "keyboard_mode": False, "fake_decoder": False},
+                     "message": "", "keyboard_mode": False, "fake_decoder": False,
+                     "name": "ssvep-fbcca", "fake_flag": False},
          "partner_page": {"connected": True, "mic": "listening", "mic_muted": False,
                           "stt_mode": "always"},
          "llm": {"enabled": True, "why_disabled": "", "dynamic": True, "ok": False,
@@ -241,13 +242,21 @@ def test_a_healthy_live_server_passes_everything():
      "keyboard mode"),
     ({"decoder": {"keyboard_mode": True, "connected": False, "ok": False}}, "display", WARN,
      "keyboard mode"),
-    ({"decoder": {"fake_decoder": True}}, "decoder", WARN, "fake decoder"),
-    ({"decoder": {"fake_decoder": True}}, "display", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True}}, "decoder", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True}}, "display", WARN, "fake decoder"),
+    # tools/fake_decoder.py started by hand: the server knows it only by its hello's name.
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder"}}, "decoder", WARN,
+     "selections are random, not EEG (fake-decoder, started by hand)"),
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder"}}, "display", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder", "ok": False,
+                  "message": "low signal"}}, "decoder", FAIL, "fake decoder (fake-decoder)"),
+    ({}, "decoder", PASS, "bridge ssvep-fbcca connected and ok"),
     ({"decoder": {"connected": False, "ok": False}}, "decoder", FAIL, "no bridge"),
     ({"decoder": {"connected": False, "ok": False}}, "display", FAIL, "no display"),
-    ({"decoder": {"fake_decoder": True, "connected": False, "ok": False}}, "decoder", FAIL,
-     "fake decoder not connected"),
-    ({"decoder": {"fake_decoder": True, "ok": False, "message": "Rejected: slots"}}, "decoder", FAIL,
+    ({"decoder": {"fake_decoder": True, "fake_flag": True, "connected": False, "ok": False,
+                  "name": ""}}, "decoder", FAIL, "fake decoder not connected"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True, "ok": False, "name": "",
+                  "message": "Rejected: slots"}}, "decoder", FAIL,
      "Rejected: slots"),
     ({"decoder": {"ok": False, "message": "Rejected: refresh 120 Hz"}}, "decoder", FAIL, "120 Hz"),
     ({"decoder": {"display_ok": False}}, "display", FAIL, "display down"),
@@ -284,6 +293,23 @@ def test_health_problems(over, name, want, text):
 def test_a_bridge_that_is_not_ok_gets_the_matching_fix(message, fix):
     result = check_health(health(decoder={"ok": False, "message": message}), {})[0]
     assert result.level == FAIL and fix in result.fix
+
+
+@pytest.mark.parametrize("decoder, fix", [
+    ({"fake_decoder": True, "name": "fake-decoder"}, "stop tools/fake_decoder.py"),
+    ({"fake_decoder": True, "fake_flag": True}, "restart without --fake-decoder"),
+])
+def test_a_fake_decoder_gets_the_fix_for_how_it_was_started(decoder, fix):
+    result = check_health(health(decoder=decoder), {})[0]
+    assert result.level == WARN and fix in result.fix and "start the bridge" in result.fix
+
+
+def test_a_server_without_decoder_names_still_counts_its_flag():
+    h = health()
+    h["decoder"] = {k: v for k, v in h["decoder"].items() if k not in ("name", "fake_flag")}
+    h["decoder"]["fake_decoder"] = True
+    result = check_health(h, {})[0]
+    assert result.level == WARN and "--fake-decoder" in result.fix
 
 
 # -- fixed-list clips on disk ----------------------------------------------------------------
