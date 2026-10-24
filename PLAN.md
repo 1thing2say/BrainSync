@@ -72,6 +72,14 @@ pull requests.
   every `llm.keepalive_s` while idle, and right after a failed page), so a page does not pay
   DNS + TCP + TLS inside the 4 s; `llm_failed` logs `ms`. On 2026-10-24 every page timed out on
   congested venue Wi-Fi (1-4 s ping, TLS setup 3-9 s): no code change fixes that, see V6 preflight.
+- **Active listening (2026-10-24, branch `feat/partner-listening`):** `stt_mode: always` (default):
+  the mic listens the whole session, hands-free, and is off only while a reply plays (plus a
+  0.5 s tail), paused, idle or muted. The server owns the mic state (it follows the orchestrator's
+  state, a server-held Mute, re-sent to a reconnected page); `ui/listen_core.js` keeps Chrome's
+  recognition running (restart loop with backoff and a watchdog, node-tested) and reports its
+  state (MIC badge). Fixed on the way: STOP during a clip left the mic off for good, the echo
+  filter dropped the partner's "yes", a decoder-reconnect resume never reopened the mic, a spoken
+  remark on the confirm screen dropped the pick. The turn mode below remains as `stt_mode: turn`.
 - **V4 partner listening (2026-10-24, branch `feat/partner-listening`):** hands-free, no keys. The
   server sends `listen` when it is the partner's turn (the session starts, a reply was spoken) and
   closes the mic while a reply plays; Chrome's recognition joins the partner's sentences into one
@@ -320,8 +328,11 @@ BrainSync/
 | `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
 | `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
-| `speech.stt_mode` | `turn` | Hands-free: the mic opens by itself on the partner's turn (session start, after each spoken reply) and is off while a reply plays; `push_to_talk` = only the Listen button |
-| `speech.listen_window_s` / `speech.stt_tail_s` | 10.0 / 0.5 | How long it listens on the partner's turn; the wait after a reply ends before listening |
+| `speech.stt_mode` | `always` | Hands-free: the mic listens the whole session except while a reply plays, paused, idle or muted. `turn` = only at the start and after each reply (`listen_window_s`); `push_to_talk` = only the button |
+| `speech.listen_window_s` / `speech.stt_tail_s` | 10.0 / 0.5 | Turn mode and the Listen button while paused; the wait after a reply ends before the mic reopens (≈0.8 for a Bluetooth speaker) |
+| `speech.stt_interrupts` / `speech.stt_interrupt_cooldown_s` | `question` / 20.0 | A spoken question may stop a page trial, at most once per 20 s and never a pick in progress; `never` = spoken lines always wait for the next cue. Typed text always interrupts |
+| `speech.stt_gap_s` / `speech.stt_max_line_s` / `speech.stt_echo_s` | 1.2 / 15.0 / 4.0 | Silence that ends a partner line; a monologue is sent after this long; lines this soon after the mic reopens are checked for the reply's echo |
+| `speech.start_muted` | false | The partner's Mute (held by the server) at session start |
 | `speech.max_speak_s` | 15.0 | Move on if the page never reports `tts_done` |
 | `selection.confirm_mode` | `always` | `never` / `always` / `low_score` (needs decoder scores). `always` in page mode, so a wrong pick is never spoken; `never` in list mode |
 | `selection.chosen_highlight_s` | 0.6 | Show which target was picked |
@@ -347,10 +358,13 @@ Internal browser ↔ server messages (`/ws/ui`, JSON with a `type` field):
   slots[{slot, role: option|next|say|back, label, utterance}]} (one entry per target; in list mode
   the options ride along as `options[{label, utterance}]`), `trial` {trial_id, phase:
   cue|flicker|rest|baseline}, `highlight` {slot},
-  `speak` {text, utterance_id, audio_url?}, `state` {name, detail}, `transcript` {who, text},
+  `speak` {text, utterance_id, audio_url?}, `listen` {seconds, delay_s, until_stopped, muted,
+  reason} (what the partner's mic does; the server owns it), `state` {name, detail},
+  `transcript` {who, text},
   `status` {decoder_connected, decoder_ok, display_ok, llm_ok, fake_decoder, keyboard_mode}.
 - Browser → server: `tts_done` {utterance_id}, `partner_text` {text, source: stt|typed},
-  `key` {key}, `stop` {}, `resume` {}, `judgment` {utterance_id, correct}.
+  `key` {key}, `stop` {}, `resume` {}, `judgment` {utterance_id, correct}, `mic_set` {muted},
+  `mic_report` {state, restarts} (no transcript text).
 
 Times are Unix seconds. Flicker onsets come from his display (the flip of the first flickering
 frame, `--markers unix`), relayed by the bridge. His live decoder does not epoch on onsets (it
@@ -380,6 +394,10 @@ any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)
   `--selection(next)-->` moves the highlight, past the last option loads a new page. No
   `CONFIRMING` (`confirm_mode: never`).
 - Each trial has a new `trial_id`. Selections with an old `trial_id` are logged and ignored.
+- **Spoken partner lines never throw away the user's work:** during a pick in progress (the Say it
+  / Back screen) they only change the screen after the pick; a remark during a page trial waits for
+  the next cue; a question interrupts at most once per `stt_interrupt_cooldown_s`. Typed text
+  always interrupts.
 - Implement as a class driven by events plus an injectable clock, so tests run without timers.
 
 ## 8. Phases (voice/UI track)

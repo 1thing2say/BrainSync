@@ -130,9 +130,17 @@ class SpeechConfig(Strict):
     tts_timeout_s: float = Field(gt=0)
     max_concurrent: int = Field(ge=1)
     tts_rate: float = Field(gt=0)
-    stt_mode: Literal["turn", "push_to_talk"]  # turn: listen on the partner's turn, hands-free
-    listen_window_s: float = Field(gt=0)  # how long the mic stays open on the partner's turn
+    # always: the whole session except while a reply plays (hands-free); turn: listen_window_s on
+    # the partner's turn; push_to_talk: only the Listen button
+    stt_mode: Literal["always", "turn", "push_to_talk"]
+    listen_window_s: float = Field(gt=0)  # turn mode, and the Listen button while paused
     stt_tail_s: float = Field(ge=0)  # wait after a reply ends before listening (no echo)
+    stt_interrupts: Literal["question", "never"] = "question"  # may a spoken question stop a trial
+    stt_interrupt_cooldown_s: float = Field(default=20.0, ge=0)  # at most one spoken interrupt per
+    stt_gap_s: float = Field(default=1.2, gt=0)  # silence that ends a partner line
+    stt_max_line_s: float = Field(default=15.0, gt=0)  # a long monologue is sent after this long
+    stt_echo_s: float = Field(default=4.0, ge=0)  # check lines this soon after reopening for echo
+    start_muted: bool = False
     max_speak_s: float = Field(gt=0)
 
 
@@ -188,6 +196,8 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     elif cfg.selection.confirm_mode != "never":
         problems.append("selection.confirm_mode: list mode has no confirm step; use never")
 
+    if cfg.speech.stt_max_line_s <= cfg.speech.stt_gap_s:
+        problems.append("speech.stt_max_line_s must be longer than speech.stt_gap_s")
     if cfg.speech.model.endswith("-latest"):
         problems.append(f"speech.model: pin a model version, not {cfg.speech.model}")
 

@@ -176,7 +176,9 @@ def create_app(
     def page_config() -> dict:
         """The few settings the partner page needs."""
         return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
-                "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s}
+                "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
+                "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
+                "stt_echo_s": cfg.speech.stt_echo_s}
 
     # -- the user's profile (ui/profile.html) ---------------------------------------------
 

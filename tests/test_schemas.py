@@ -379,3 +379,25 @@ def test_validate_option_uses_given_limits() -> None:
 def test_option_has_no_baked_in_limits() -> None:
     long = s.Option(label="x" * 200, utterance=" ".join(["w"] * 100), intent_id="i")
     assert len(long.label) == 200
+
+
+@pytest.mark.parametrize("raw", [
+    {"type": "mic_set", "muted": True},
+    {"type": "mic_report", "state": "offline", "restarts": 2},
+])
+def test_mic_messages_round_trip(raw):
+    msg = s.parse_ui_to_server(raw)
+    assert s.parse_ui_to_server(s.to_json(msg)) == msg
+
+
+@pytest.mark.parametrize("parse, raw", [
+    (s.parse_server_to_ui, {"type": "listen", "seconds": 5, "until_stopped": True, "reason": "start"}),
+    (s.parse_ui_to_server, {"type": "mic_report", "state": "dancing"}),
+    (s.parse_ui_to_server, {"type": "mic_report", "state": "listening", "text": "secret words"}),
+], ids=["until_stopped with seconds", "unknown mic state", "mic report never carries text"])
+def test_invalid_mic_messages(parse, raw):
+    if "text" in raw:  # extra fields are ignored by design; the model simply has no text field
+        assert not hasattr(parse(raw), "text")
+        return
+    with pytest.raises(ValidationError):
+        parse(raw)

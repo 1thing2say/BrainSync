@@ -66,11 +66,20 @@ speech:
                                # took 1-3 s per request (2026-10-24), so 2 s timed every clip out.
   max_concurrent: 2            # Cartesia plan limit (HTTP 429 concurrency_limited above it)
   tts_rate: 1.0                # speechSynthesis fallback only
-  stt_mode: turn               # turn: the mic opens by itself on the partner's turn (start of the
-                               # session, after each spoken reply), off while a reply plays;
-                               # push_to_talk: only when the partner taps Listen
-  listen_window_s: 10.0        # how long it listens on the partner's turn
-  stt_tail_s: 0.5              # wait after a reply ends before listening, so it never hears itself
+  stt_mode: always             # always: the mic listens the whole session, hands-free, except while
+                               # a reply plays, paused, idle or muted; turn: listen_window_s at the
+                               # start and after each reply; push_to_talk: only the Listen button
+  listen_window_s: 10.0        # turn mode, and the Listen button while paused
+  stt_tail_s: 0.5              # wait after a reply ends before listening (raise to ~0.8 for a
+                               # Bluetooth speaker), so it never hears itself
+  stt_interrupts: question     # question: a spoken question may stop a page trial (never a pick in
+                               # progress); never: every spoken line waits for the next cue.
+                               # Typed text always interrupts
+  stt_interrupt_cooldown_s: 20.0  # at most one spoken interrupt in this time; 0 = no limit
+  stt_gap_s: 1.2               # silence that ends a partner line
+  stt_max_line_s: 15.0         # a line is sent after this long even if the partner keeps talking
+  stt_echo_s: 4.0              # lines heard this soon after the mic reopens are checked for echo
+  start_muted: false           # true = the session starts with the mic muted
   max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
 
 selection:

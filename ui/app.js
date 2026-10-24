@@ -29,6 +29,7 @@ function connect() {
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = (ev) => {
     setConnected(false);
+    Listener.stop("disconnected");  // the server re-sends the mic state when we are back
     if (ev.code === REPLACED) {
       // Another tab or phone has the session; reconnecting here would just steal it back.
       $("state").textContent = "Open on another page";
@@ -134,7 +135,10 @@ function renderState(msg) {
   const speaking = $("speaking");
   speaking.hidden = msg.name !== "SPEAKING";
   if (msg.name === "SPEAKING") speaking.textContent = `“${msg.detail}”`;
-  if (msg.name === "PAUSED" || msg.name === "IDLE") Speech.cancel();
+  if (msg.name === "PAUSED" || msg.name === "IDLE") {
+    Speech.cancel();
+    speaking = false;  // a cancelled clip never reports its end: without this the mic stayed off
+  }
 }
 
 function speakOut(msg) {
@@ -149,37 +153,67 @@ function speakOut(msg) {
   }, msg.audio_url);
 }
 
-// --- listening to the partner (hands-free: the server says when it is their turn) -----------
+// --- listening to the partner (hands-free; the server owns the mic state) ------------------
 
 let speaking = false;  // a reply is playing: the mic stays off
 let listenWindow = 10;  // seconds, from /api/config
+let sttMode = "always";  // from /api/config
+let mic = { muted: false, until_stopped: false, reason: "idle" };  // the server's last listen
+let reported = "";  // the last mic state sent to the server
 
 function listenFor(msg) {
-  if (msg.seconds > 0 && accepted && !speaking) Listener.start(msg.seconds, msg.delay_s);
-  else if (msg.seconds === 0) Listener.stop(msg.reason);
+  mic = msg;
+  renderMute();
+  if (msg.until_stopped) {
+    if (!speaking) Listener.want(true, msg.delay_s);
+  } else if (msg.seconds > 0) {
+    if (!speaking) Listener.windowFor(msg.seconds, msg.delay_s);
+  } else {
+    Listener.stop(msg.muted ? "muted" : msg.reason);
+  }
 }
 
 const LISTEN_TEXT = {
   listening: "Listening…",
   sent: "Heard:",
-  timeout: "Not listening. Tap Listen to speak.",
-  stopped: "Not listening. Tap Listen to speak.",
+  stopped: "Not listening.",
+  idle: "Mic on once the session starts.",
+  reconnect: "Not listening.",
   speaking: "Mic off while the reply plays.",
-  paused: "Mic off (paused).",
-  denied: "Microphone blocked: allow it in Chrome's address bar, or type below.",
-  nomic: "No microphone found: plug one in, or type below.",
-  offline: "Speech recognition needs internet: type below instead.",
-  unsupported: "No speech recognition in this browser (use Chrome): type below.",
-  error: "Speech recognition failed: tap Listen to try again, or type below.",
+  paused: "Mic off (paused). Tap Listen to speak once.",
+  muted: "Muted: nothing is heard or sent. Tap Unmute to listen.",
+  disconnected: "Mic off: the server is not connected.",
+  needs_tap: "Tap anywhere to turn the mic on.",
+  hidden: "Keep this tab visible: listening may pause.",
+  denied: "Microphone blocked: allow it in Chrome's address bar, then tap Restart mic. Typing works.",
+  nomic: "No microphone found: plug the lapel mic in. Typing works.",
+  offline: "Speech recognition offline: retrying. Typing works.",
+  unsupported: "No speech recognition in this browser (use Chrome). Typing works.",
+  error: "Speech recognition failed: tap Restart mic, or type below.",
 };
+const REPORTABLE = new Set(["listening", "needs_tap", "denied", "nomic", "offline", "unsupported",
+                            "error", "stopped", "hidden", "muted", "speaking", "paused"]);
+
+function micReport(state) {
+  if (!REPORTABLE.has(state) || state === reported) return;
+  if (send({ type: "mic_report", state, restarts: Listener.restarts })) reported = state;
+}
 
 Listener.onLine((text) => send({ type: "partner_text", text, source: "stt" }));
-Listener.onUpdate((state, text) => {
+Listener.onState((state, text) => {
   const line = $("listen-status");
   line.textContent = `${LISTEN_TEXT[state] || ""}${text ? ` “${text}”` : ""}`;
-  line.classList.toggle("on", state === "listening");
-  $("ptt").textContent = state === "listening" ? "Listening…" : "Listen";
+  line.classList.toggle("on", state === "listening" || state === "sent");
+  line.classList.toggle("warn", ["denied", "nomic", "offline", "unsupported", "error", "needs_tap", "hidden"].includes(state));
+  micReport(state === "sent" ? "listening" : state);
 });
+
+function renderMute() {
+  const b = $("mute");
+  b.textContent = mic.muted ? "Unmute" : "Mute";
+  b.setAttribute("aria-pressed", String(Boolean(mic.muted)));
+  b.classList.toggle("muted", Boolean(mic.muted));
+}
 
 function addLine(who, text) {
   const li = document.createElement("li");
@@ -201,6 +235,11 @@ function renderStatus(s) {
     [s.board_ok ? "ok" : "bad", s.board_ok ? "BOARD OK" : "BOARD ?"],
     [s.llm_ok ? "ok" : "", s.llm_ok ? "LLM OK" : "LLM OFF"],
   ];
+  if (s.mic_muted) badges.push(["flag", "MIC MUTED"]);
+  else if (s.mic === "listening") badges.push(["ok", "MIC ON"]);
+  else if (["denied", "nomic", "offline", "unsupported", "error", "needs_tap"].includes(s.mic)) {
+    badges.push(["bad", `MIC: ${s.mic.toUpperCase()}`]);
+  }
   if (s.fake_decoder) badges.push(["flag", "FAKE DECODER"]);
   if (s.keyboard_mode) badges.push(["flag", "KEYBOARD"]);
   $("badges").replaceChildren(...badges.map(([cls, text]) => {
@@ -243,9 +282,28 @@ $("stop").addEventListener("click", () => {
 $("resume").addEventListener("click", () => { if (accepted) send({ type: "resume" }); });
 $("take-over").addEventListener("click", connect);
 $("ptt").addEventListener("click", () => {
-  if (Listener.listening) Listener.stop("stopped");
-  else if (!speaking) Listener.start(listenWindow);
+  if (speaking) return;
+  // Always mode: restart the mic now; otherwise (paused, turn or push-to-talk) one window.
+  if (!(sttMode === "always" && Listener.untilStopped && Listener.kick())) {
+    if (mic.muted) return;
+    if (Listener.wanted && !Listener.untilStopped) Listener.stop("stopped");
+    else Listener.windowFor(listenWindow);
+  }
 });
+$("mute").addEventListener("click", () => send({ type: "mic_set", muted: !mic.muted }));
+// Chrome may want a click before the mic starts after a reload; any tap does it.
+document.addEventListener("pointerdown", () => { if (Listener.state === "needs_tap") Listener.kick(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    $("listen-status").textContent = LISTEN_TEXT.hidden;
+    micReport("hidden");
+  } else if (Listener.wanted) {
+    Listener.kick();
+  }
+});
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => Listener.kick());  // lapel plugged in
+}
 $("correct").addEventListener("click", () => judge("c"));
 $("wrong").addEventListener("click", () => judge("w"));
 
@@ -270,6 +328,10 @@ fetch("/api/config")
   .then((c) => {
     Speech.setRate(c.tts_rate);
     if (c.listen_window_s) listenWindow = c.listen_window_s;
+    if (c.stt_mode) sttMode = c.stt_mode;
+    $("ptt").textContent = sttMode === "always" ? "Restart mic" : "Listen";
+    Listener.configure({ gapMs: (c.stt_gap_s || 1.2) * 1000, maxLineMs: (c.stt_max_line_s || 15) * 1000,
+                         echoMs: (c.stt_echo_s || 4) * 1000 });
   })
   .catch(() => {});
 setJudgment("");

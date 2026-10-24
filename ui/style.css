@@ -92,9 +92,13 @@ button.target:disabled { cursor: default; opacity: 1; }
 .say-form { display: flex; gap: 0.5rem; }
 .say-form input { flex: 1; font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.7rem; }
-.ptt { width: 100%; min-height: 3.2rem; font-size: 1.1rem; }
+.mic-controls { display: flex; gap: 0.5rem; }
+.mic-controls button { flex: 1; min-height: 4rem; font-size: 1.15rem; }
+.mute { font-weight: 700; }
+.mute.muted { background: var(--warn); border-color: var(--warn); color: #1a1205; }
 .listen-status { min-height: 1.2em; }
 .listen-status.on { color: var(--say); font-weight: 600; }
+.listen-status.warn { color: var(--warn); font-weight: 600; }
 .hint { font-size: 0.8rem; color: var(--muted); margin: 0; }
 
 /* Warning */

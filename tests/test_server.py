@@ -68,7 +68,15 @@ def test_partner_page_is_served(client):
     assert client.get("/app.js").status_code == 200
     assert client.get("/api/config").json() == {
         "tts_rate": BASE.speech.tts_rate, "keyboard_mode": False,
-        "stt_mode": "turn", "listen_window_s": BASE.speech.listen_window_s}
+        "stt_mode": "always", "listen_window_s": BASE.speech.listen_window_s,
+        "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
+        "stt_echo_s": BASE.speech.stt_echo_s}
+
+
+def test_a_connecting_page_gets_the_mic_state(kb_client):
+    with kb_client.websocket_connect("/ws/ui") as ui:
+        listen = recv_until(ui, "listen")
+    assert listen["reason"] == "reconnect" and listen["until_stopped"] is False  # idle: mic off
 
 
 def test_decoder_hello_exchange(client):
