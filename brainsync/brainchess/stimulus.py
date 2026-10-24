@@ -32,12 +32,13 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, NoReturn, TextIO
 
 import numpy as np
 
@@ -560,5 +561,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def hard_exit(code: int) -> NoReturn:
+    """Flush and leave at once, skipping interpreter shutdown.
+
+    The command reader is a daemon thread blocked in stdin's readline, holding the
+    buffered reader's lock. When the run ends while stdin is still open (Escape, a
+    refused refresh, a crash) rather than at EOF, interpreter shutdown tries to take
+    that lock and aborts with "Fatal Python error: _enter_buffered_busy" (SIGABRT, exit
+    code -6), which the game reads as a stimulus crash.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    hard_exit(main())

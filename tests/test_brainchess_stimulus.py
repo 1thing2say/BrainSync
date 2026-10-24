@@ -255,6 +255,35 @@ def test_import_does_not_load_psychopy():
     assert res.stdout.split() == ["False", "False"]
 
 
+
+def _exit_with_stdin_open(exit_call: str) -> tuple[int, str, str]:
+    """Run a reader on an open stdin pipe, then exit with ``exit_call``; (code, out, err)."""
+    code = ("import sys, time\n"
+            "from brainsync.brainchess import stimulus as bs\n"
+            "bs.CommandReader(bs.command_stream(sys.stdin), bs.BoardState()).start()\n"
+            "time.sleep(0.3)\n"
+            "print('bye')\n"
+            f"{exit_call}\n")
+    proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        rc = proc.wait(timeout=30)   # stdin stays open, as the game keeps it on Escape
+        return rc, proc.stdout.read(), proc.stderr.read()
+    finally:
+        proc.kill()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_exit_with_stdin_open_keeps_its_code():
+    # Escape ends the run while the reader thread is blocked in readline on the open
+    # pipe; a plain sys.exit then aborted at interpreter shutdown with code -6
+    rc, out, err = _exit_with_stdin_open("bs.hard_exit(1)")
+    assert rc == 1, err
+    assert "Fatal Python error" not in err
+    assert out == "bye\n"   # buffered output is flushed before leaving
+
 class _FakeBoard:
     """Stands in for BoardRenderer so main() runs without a display."""
 
