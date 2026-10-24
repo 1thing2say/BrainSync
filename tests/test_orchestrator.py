@@ -297,6 +297,41 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
     assert r.o.state is St.BASELINE
 
 
+@pytest.mark.parametrize("name, flag, fake", [
+    ("fake-decoder", False, True),  # tools/fake_decoder.py started by hand
+    ("Fake-random", False, True),
+    ("ssvep-fbcca", False, False),  # the teammate's bridge
+    ("ssvep-fbcca", True, True),  # --fake-decoder
+])
+def test_the_acked_hello_name_says_whether_the_decoder_is_fake(name, flag, fake):
+    r = Rig(fake_decoder=flag, bridge=False)
+    r.connect(name=name)
+    status = r.last(r.ui, UIStatus)
+    assert (status.fake_decoder, status.decoder_name) == (fake, name)
+
+
+def test_only_an_acked_hello_names_the_decoder_and_a_disconnect_clears_it():
+    r = Rig(bridge=False)
+    r.connect(name="fake-decoder")
+    r.o.on_decoder_message(bridge_hello(name="fake-decoder", refresh_hz=120.0))  # rejected
+    assert (r.o.decoder_name, r.last(r.ui, UIStatus).fake_decoder) == ("", False)
+    r.connect(name="fake-decoder")
+    r.o.on_decoder_disconnected()
+    status = r.last(r.ui, UIStatus)
+    assert (status.decoder_name, status.fake_decoder) == ("", False)
+
+
+def test_the_log_says_which_decoder_was_acked_and_whether_it_is_fake(tmp_path):
+    from app.log import EventLog, read_events
+
+    log = EventLog(tmp_path)
+    r = Rig(bridge=False, log=log)
+    r.connect(name="fake-decoder")
+    r.connect(name="ssvep-fbcca")
+    acked = [(e["name"], e["fake"]) for e in read_events(log.path) if e["event"] == "decoder_acked"]
+    assert acked == [("fake-decoder", True), ("ssvep-fbcca", False)]
+
+
 def test_reconnect_sends_baseline_only_after_hello_ack():
     r = Rig()
     r.to_trial()
@@ -932,6 +967,21 @@ def test_llm_ok_follows_the_last_page():
     n = len(statuses(r))
     r.answer(LLM_OPTIONS, req)  # nobody waits for it any more: ignored, the badge stays off
     assert len(statuses(r)) == n and not r.o.llm_ok
+
+
+def test_llm_status_tells_not_asked_yet_from_failed():
+    # Before Claude's first page the partner page must not warn "fixed replies only".
+    assert Rig().o.status().llm == "off"  # no Claude at all
+    r = LLMRig()
+    r.to_trial()
+    assert r.o.status().llm == "waiting" and not r.o.status().llm_ok
+    r.partner("Again?")
+    r.answer(None)
+    assert r.o.status().llm == "failed"
+    r.to_trial()
+    r.partner(QUESTION)
+    r.answer(LLM_OPTIONS)
+    assert r.o.status().llm == "ok" and r.o.status().llm_ok
 
 
 def test_partner_line_during_the_confirm_step_waits_for_the_new_page():

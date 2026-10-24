@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import random
 import sys
 import threading
@@ -69,6 +70,8 @@ from app.schemas import (
 )
 
 log = logging.getLogger("fake_decoder")
+REPLACED = 4000  # close code from app/server.py: a newer decoder connection replaced this one
+PARENT_CHECK_S = 1.0  # how often --parent-pid is checked
 
 FALLBACK_SLOTS = "s1=15,s2=17,s3=20,s4=12"  # only if config/default.yaml cannot be loaded
 
@@ -190,6 +193,9 @@ def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
                         help="retry if the connection drops (default on)")
     parser.add_argument("--reconnect-s", type=float, default=1.0,
                         help="seconds between reconnect attempts (default 1.0)")
+    parser.add_argument("--parent-pid", type=int, default=None, metavar="PID",
+                        help="exit once process PID is gone (python -m app.server --fake-decoder "
+                             "passes its own, so a stopped server never leaves this running)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser
 
@@ -232,6 +238,8 @@ class FakeDecoder:
         self.baseline_task: asyncio.Task[None] | None = None
         self.answered = 0
         self.finished = False
+        self.replaced = False  # the server closed with code 4000: a newer decoder took over
+        self.ws: ClientConnection | None = None
 
     # -- connection -------------------------------------------------------
 
@@ -239,18 +247,38 @@ class FakeDecoder:
         """Connect, serve trials, and reconnect on drops until finished (or reconnect is off)."""
         if self.args.mode == "keyboard" and self.stdin is not None:
             self._start_stdin_reader(self.stdin)
-        while not self.finished:
-            try:
-                async with connect(self.args.url) as ws:
-                    log.info("connected to %s", self.args.url)
-                    await self._session(ws)
-            except (OSError, ConnectionClosed, InvalidHandshake, TimeoutError) as exc:
-                log.warning("connection problem: %s", exc)
-            self._cancel_pending()
-            if self.finished or not self.args.reconnect:
-                break
-            log.info("reconnecting in %.1f s", self.args.reconnect_s)
-            await asyncio.sleep(self.args.reconnect_s)
+        watcher = (asyncio.create_task(self._watch_parent(self.args.parent_pid))
+                   if self.args.parent_pid else None)
+        try:
+            while not self.finished:
+                try:
+                    async with connect(self.args.url) as ws:
+                        log.info("connected to %s", self.args.url)
+                        await self._session(ws)
+                except (OSError, ConnectionClosed, InvalidHandshake, TimeoutError) as exc:
+                    log.warning("connection problem: %s", exc)
+                self._cancel_pending()
+                if self.replaced:
+                    # Draft question 17: reconnecting would knock the newer decoder off in turn,
+                    # and the two would restart each other's baseline forever.
+                    log.warning("replaced by a newer decoder (close code %d): stopping", REPLACED)
+                    break
+                if self.finished or not self.args.reconnect:
+                    break
+                log.info("reconnecting in %.1f s", self.args.reconnect_s)
+                await asyncio.sleep(self.args.reconnect_s)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+
+    async def _watch_parent(self, pid: int) -> None:
+        """Stop once the process that started this one is gone (its children are re-parented)."""
+        while os.getppid() == pid:
+            await asyncio.sleep(PARENT_CHECK_S)
+        log.info("parent process %d is gone: stopping", pid)
+        self.finished = True
+        if self.ws is not None:
+            await self.ws.close()
 
     def hello(self) -> DecoderHello:
         return DecoderHello(protocol=PROTOCOL, name=self.args.name, refresh_hz=self.args.refresh_hz,
@@ -259,12 +287,15 @@ class FakeDecoder:
 
     async def _session(self, ws: ClientConnection) -> None:
         self.acked = False  # draft rule 3: nothing flickers until this connection is acked
+        self.ws = ws
         await ws.send(to_json(self.hello()))
         status_task = asyncio.create_task(self._send_status(ws))
         try:
             async for raw in ws:
                 await self._handle(ws, raw)
         finally:
+            self.ws = None
+            self.replaced = ws.close_code == REPLACED
             status_task.cancel()
             self._cancel_pending()
             self._cancel_baseline()

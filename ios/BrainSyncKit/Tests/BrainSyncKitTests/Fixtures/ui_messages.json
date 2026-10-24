@@ -1,0 +1,385 @@
+{
+  "server_to_ui": [
+    {
+      "type": "show_page",
+      "list_id": "home-1",
+      "page": 1,
+      "mode": "page",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "option",
+          "label": "Go outside",
+          "utterance": "Yes, let's go outside."
+        },
+        {
+          "slot": "s2",
+          "role": "option",
+          "label": "Not now",
+          "utterance": "Not right now."
+        },
+        {
+          "slot": "s3",
+          "role": "option",
+          "label": "After lunch",
+          "utterance": "Maybe after lunch."
+        },
+        {
+          "slot": "s4",
+          "role": "next",
+          "label": "More options",
+          "utterance": ""
+        }
+      ],
+      "text": "",
+      "options": [],
+      "highlight_index": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "home-1",
+      "page": 1,
+      "mode": "confirm",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "say",
+          "label": "Say it",
+          "utterance": ""
+        },
+        {
+          "slot": "s4",
+          "role": "back",
+          "label": "Back",
+          "utterance": ""
+        }
+      ],
+      "text": "Yes, let's go outside.",
+      "options": [],
+      "highlight_index": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "yes_no",
+      "page": 2,
+      "mode": "list",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "say",
+          "label": "SAY",
+          "utterance": ""
+        },
+        {
+          "slot": "s2",
+          "role": "next",
+          "label": "NEXT",
+          "utterance": ""
+        }
+      ],
+      "text": "",
+      "options": [
+        {
+          "label": "Yes",
+          "utterance": "Yes, please.",
+          "intent_id": "yes"
+        },
+        {
+          "label": "No",
+          "utterance": "No, thank you.",
+          "intent_id": "no"
+        },
+        {
+          "label": "Maybe",
+          "utterance": "Maybe later.",
+          "intent_id": "maybe"
+        }
+      ],
+      "highlight_index": 1
+    },
+    {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "cue"
+    },
+    {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "flicker"
+    },
+    {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "rest"
+    },
+    {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "baseline"
+    },
+    {
+      "type": "highlight",
+      "slot": "s1"
+    },
+    {
+      "type": "speak",
+      "text": "Yes, let's go outside.",
+      "utterance_id": "u-7",
+      "audio_url": "/audio/3f2a9c"
+    },
+    {
+      "type": "speak",
+      "text": "Not right now.",
+      "utterance_id": "u-8",
+      "audio_url": null
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.5,
+      "until_stopped": true,
+      "muted": false,
+      "reason": "start"
+    },
+    {
+      "type": "listen",
+      "seconds": 10.0,
+      "delay_s": 0.5,
+      "until_stopped": false,
+      "muted": false,
+      "reason": "turn"
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.0,
+      "until_stopped": false,
+      "muted": false,
+      "reason": "speaking"
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.0,
+      "until_stopped": false,
+      "muted": true,
+      "reason": "muted"
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.0,
+      "until_stopped": false,
+      "muted": false,
+      "reason": "paused"
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.0,
+      "until_stopped": false,
+      "muted": false,
+      "reason": "idle"
+    },
+    {
+      "type": "listen",
+      "seconds": 0.0,
+      "delay_s": 0.0,
+      "until_stopped": true,
+      "muted": false,
+      "reason": "reconnect"
+    },
+    {
+      "type": "state",
+      "name": "STIMULATING",
+      "detail": ""
+    },
+    {
+      "type": "state",
+      "name": "PAUSED",
+      "detail": "Decoder disconnected"
+    },
+    {
+      "type": "transcript",
+      "who": "partner",
+      "text": "Do you want to go outside?"
+    },
+    {
+      "type": "transcript",
+      "who": "user",
+      "text": "Yes, let's go outside."
+    },
+    {
+      "type": "status",
+      "decoder_connected": true,
+      "decoder_ok": true,
+      "display_ok": true,
+      "llm_ok": true,
+      "fake_decoder": false,
+      "keyboard_mode": false,
+      "board_ok": true,
+      "decoder_message": "posterior RMS 12-20 uV",
+      "decoder_name": "ssvep-fbcca",
+      "llm": "ok",
+      "mic_muted": false,
+      "mic": "listening",
+      "resume_ready": true
+    },
+    {
+      "type": "status",
+      "decoder_connected": false,
+      "decoder_ok": false,
+      "display_ok": false,
+      "llm_ok": false,
+      "fake_decoder": true,
+      "keyboard_mode": true,
+      "board_ok": false,
+      "decoder_message": "hello rejected: refresh 120 Hz",
+      "decoder_name": "fake-random",
+      "llm": "failed",
+      "mic_muted": true,
+      "mic": "muted",
+      "resume_ready": false
+    },
+    {
+      "type": "status",
+      "decoder_connected": true,
+      "decoder_ok": false,
+      "display_ok": true,
+      "llm_ok": false,
+      "fake_decoder": false,
+      "keyboard_mode": false,
+      "board_ok": false,
+      "decoder_message": "",
+      "decoder_name": "",
+      "llm": "waiting",
+      "mic_muted": false,
+      "mic": "denied",
+      "resume_ready": false
+    },
+    {
+      "type": "status",
+      "decoder_connected": false,
+      "decoder_ok": false,
+      "display_ok": false,
+      "llm_ok": false,
+      "fake_decoder": false,
+      "keyboard_mode": false,
+      "board_ok": false,
+      "decoder_message": "",
+      "decoder_name": "",
+      "llm": "off",
+      "mic_muted": false,
+      "mic": "",
+      "resume_ready": false
+    }
+  ],
+  "ui_to_server": [
+    {
+      "type": "tts_done",
+      "utterance_id": "u-7"
+    },
+    {
+      "type": "partner_text",
+      "text": "Do you want to go outside?",
+      "source": "stt"
+    },
+    {
+      "type": "partner_text",
+      "text": "How was your weekend?",
+      "source": "typed"
+    },
+    {
+      "type": "key",
+      "key": "1"
+    },
+    {
+      "type": "key",
+      "key": "C"
+    },
+    {
+      "type": "stop"
+    },
+    {
+      "type": "resume"
+    },
+    {
+      "type": "judgment",
+      "utterance_id": "u-7",
+      "correct": true
+    },
+    {
+      "type": "judgment",
+      "utterance_id": "u-8",
+      "correct": false
+    },
+    {
+      "type": "mic_set",
+      "muted": true
+    },
+    {
+      "type": "mic_set",
+      "muted": false
+    },
+    {
+      "type": "mic_report",
+      "state": "listening",
+      "restarts": 0
+    },
+    {
+      "type": "mic_report",
+      "state": "needs_tap",
+      "restarts": 1
+    },
+    {
+      "type": "mic_report",
+      "state": "denied",
+      "restarts": 2
+    },
+    {
+      "type": "mic_report",
+      "state": "nomic",
+      "restarts": 3
+    },
+    {
+      "type": "mic_report",
+      "state": "offline",
+      "restarts": 4
+    },
+    {
+      "type": "mic_report",
+      "state": "unsupported",
+      "restarts": 5
+    },
+    {
+      "type": "mic_report",
+      "state": "error",
+      "restarts": 6
+    },
+    {
+      "type": "mic_report",
+      "state": "stopped",
+      "restarts": 7
+    },
+    {
+      "type": "mic_report",
+      "state": "hidden",
+      "restarts": 8
+    },
+    {
+      "type": "mic_report",
+      "state": "muted",
+      "restarts": 9
+    },
+    {
+      "type": "mic_report",
+      "state": "speaking",
+      "restarts": 10
+    },
+    {
+      "type": "mic_report",
+      "state": "paused",
+      "restarts": 11
+    }
+  ]
+}

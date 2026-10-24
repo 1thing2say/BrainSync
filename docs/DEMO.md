@@ -19,11 +19,9 @@ slower.
       Refresh rate: 60 Hz). With ProMotion on there is no SSVEP at all, and our server rejects any
       `hello` more than 1 Hz from 60 Hz.
 - [ ] **Partner page on its own screen:** an external monitor for Chrome with PsychoPy on the
-      built-in panel, or the partner's phone (set `server.host: 0.0.0.0` in
-      `config/default.yaml`, open `http://<mac-ip>:8000`). Chrome allows the microphone only on
-      https or localhost, so on the phone expect speech recognition to be blocked: test it first,
-      and plan to type the partner's lines there. The flicker is always full screen, so it cannot
-      share a screen with Chrome.
+      built-in panel, or **the partner's phone**: the iPhone app (section 2, "iPhone app") or
+      the web page (section 2, "On a phone"). The flicker is always
+      full screen, so it cannot share a screen with Chrome.
 - [ ] **Lapel mic on the partner**, set as the macOS default input (System Settings > Sound >
       Input). Chrome uses the default input; plug it in before opening the page.
 - [ ] **Speaker** set as the default output, loud enough for the room. A Bluetooth speaker lags:
@@ -36,6 +34,9 @@ slower.
 - [ ] **Fixed-list clips on disk:** `python tools/prerender_tts.py` while the network is good.
       Then the fixed pages (shown whenever Claude is slow) speak in the Cartesia voice even with
       the Wi-Fi down. Run it again after changing the voice, model or `config/intents.yaml`.
+- [ ] **iPhone app installed** (if the partner uses it): built from `ios/BrainSyncPartner.xcodeproj`
+      on the demo Mac (`ios/README.md`). A free Apple ID install expires after 7 days: run it from
+      Xcode again on the day. Microphone and Speech Recognition allowed for BCI Partner.
 - [ ] Repo on the demo branch, `pip install -e ".[dev]"` done in our venv; the teammate's venv
       for `../ssvep`.
 
@@ -72,6 +73,60 @@ Both show a FAKE DECODER or KEYBOARD badge on the partner page. Say so out loud 
 The fake decoder is for rehearsing only: its picks (and confirms) are random, so never present
 them as the user's choices.
 
+### On a phone (iPhone Safari or Android Chrome)
+
+```
+python -m app.server --tunnel           # add --fake-decoder / --keyboard as above
+```
+
+`--tunnel` starts a Cloudflare quick tunnel (`cloudflared`, no account: `brew install cloudflared`)
+and prints a **phone link**, `https://….trycloudflare.com/?key=…`. The laptop's partner page shows
+it too: **Copy phone link** in the footer. Send it to the phone (AirDrop, Messages) and open it in
+Safari. Then:
+
+- The phone link is new every start and carries a secret key: share it only with the partner's
+  phone. Without the key the address answers 403; the decoder socket never works through it.
+- The phone takes over the session from the laptop's page (only one partner page at a time):
+  the laptop shows "Open on another page". The phone speaks the replies now: turn its volume up,
+  and keep it off silent mode (the ring/silent switch mutes web audio on an iPhone).
+- Tap **I understand, start** on the phone: that tap lets Safari play the replies, and asks for
+  the microphone. Allow it. The screen stays on while the page is open.
+- iPhone speech recognition stops more often than Chrome's: if the mic card says "Tap to start
+  the mic", tap anywhere. Typing always works.
+- "Add to Home Screen" from Safari's share menu opens it full screen next time (same link).
+- It needs internet on both ends; on a slow network the tunnel adds a little delay to each
+  message, not to the decoding (the bridge stays local).
+
+### iPhone app
+
+The native app (`ios/`) replaces the Safari page: on-device speech recognition, echo cancellation,
+Cartesia clips with the iPhone's own voice as fallback, no tab to keep in front. Install it once
+from Xcode (`ios/README.md`). Start the server in one of two ways:
+
+```
+python -m app.server --tunnel           # https through Cloudflare, any network
+python -m app.server                    # with server.host: 0.0.0.0, plain http on the same Wi-Fi
+```
+
+The server prints an **iPhone app link**, `brainsync://pair?url=…&key=…`, and the laptop's
+partner page shows **Copy iPhone app link** next to the phone link. Then:
+
+- AirDrop or message the app link to the iPhone and tap it: the app opens and connects. Pasting
+  the app link or the web phone link into the app's pair screen works too.
+- The key changes every server start: after a restart the app says the link expired; send the new
+  one. On the LAN address, allow **Local Network** the first time iOS asks.
+- Tap **I understand, start** in the app and allow the microphone and speech recognition. Turn the
+  media volume up (the silent switch does not matter here).
+- **The app is the partner page while it is connected.** The laptop's page shows "Open on another
+  page"; preflight's `partner page` line says "connected (iPhone app)". Keep the laptop page open
+  anyway for links, preflight and the profile page; do not press "Use this page instead" there
+  unless you mean to move the session back.
+- **Stop** is pinned at the bottom of the app. `Esc` on the display still stops the flicker
+  locally, and is the one to use if the app shows it is not connected.
+- If the app fails (does not install, cannot connect, mic blocked): open the phone link in Safari
+  (section above), or press **Use this page instead** on the laptop page and run the demo from
+  Chrome. Typing works in all three.
+
 ## 3. Preflight
 
 With the server (and the bridge) running, in a second terminal:
@@ -95,7 +150,7 @@ exits 0 only if nothing failed. `--json` prints one JSON object instead. What to
 | `CARTESIA_API_KEY`, `cartesia`, `voice (server)` | WARN: the browser voice speaks every reply. Add the key to `.env` and restart, or accept it. Clips already on disk still play. |
 | `clips` | WARN: some fixed-list sentences have no clip on disk yet. Run `python tools/prerender_tts.py` (the server also fetches them at start, slowly on a busy network). |
 | `net api.anthropic.com`, `net api.cartesia.ai` | FAIL unreachable / WARN congested: switch to a phone hotspot or a wired network. Without internet Chrome's speech recognition also stops: type the partner's lines. To accept the browser voice instead, set `speech.provider: browser` and restart (preflight then skips Cartesia). |
-| `partner page` | FAIL: open the server's address in Chrome. Leave the flicker warning up: **I understand, start** starts the baseline and then the flicker. |
+| `partner page` | FAIL: open the server's address in Chrome (or connect the iPhone app; PASS then says "connected (iPhone app)"). Leave the flicker warning up: **I understand, start** starts the baseline and then the flicker. |
 | `mic` | WARN before the session starts is normal (no report yet). Otherwise follow its `fix:` line (allow the mic, unmute, bring the page to the front); after **I understand, start**, check for the MIC ON badge. Check the macOS default input and output too. |
 
 Go only on GO (no FAIL). A WARN is a fallback you have accepted: say which one in the pitch.
@@ -200,6 +255,7 @@ gel pads either way): otherwise say what was used. If the run used `--keyboard` 
 | Bridge drops out | The session pauses ("Decoder disconnected"). When the bridge reconnects and its `hello` passes, the session resumes by itself with a new baseline, so the flicker comes back without a Resume. **Stop** pressed while it is paused does not cancel this: if the user needs a break, press `Esc` on the display once it is back. |
 | Decoder or bridge cannot be fixed | Restart the server with `python -m app.server --keyboard`: keys 1-4 select (confirm: 1 = Say it, 4 = Back), C / W mark replies. Say it is keyboard mode. |
 | Speech recognition fails (red MIC badge, offline, no mic) | Type the partner's line in the box and press Enter. **Restart mic** retries. |
+| iPhone app drops out or misbehaves | It reconnects by itself every second. If it stays down: the Safari phone link, or **Use this page instead** on the laptop page. A restarted server needs a new app link. |
 | Cartesia fails or is slow | Nothing to do: the browser voice speaks that reply. Before the demo, `speech.provider: browser` in `config/default.yaml` (then restart the server) makes it browser-only. |
 | Claude fails or is slow (LLM OFF, or options lag) | Nothing to do: after `llm.timeout_s` (4 s) the fixed list appears (yes / no / maybe after a question, otherwise home). `menus.dynamic: false` (then restart the server) makes it fixed lists only. |
 | Flicker must stop now | `Esc` on the display (local, immediate), or **Stop** / `Esc` on the partner page. After Stop or `Esc` the server never restarts the flicker by itself: **Resume** runs a new baseline first. |

@@ -47,7 +47,8 @@ def test_default_config_loads() -> None:
     assert cfg.stim.slot_for("next") == "s4"
     assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s4")
     assert cfg.stim.waveform == "sine"
-    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3
+    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3 and cfg.menus.spare_options == 1
+    assert cfg.llm.timeout_s == 4.0 and cfg.llm.hedge_after_s == 2.5
     assert cfg.selection.confirm_mode == "always"
     assert cfg.speech.provider == "cartesia" and cfg.speech.model == "sonic-3.5"
 
@@ -174,6 +175,11 @@ INVALID_CONFIGS = [
     ("zero max trial", _set("stim", "max_trial_s", 0), "max_trial_s"),
     ("zero baseline", _set("baseline", "seconds", 0), "baseline.seconds"),
     ("zero llm timeout", _set("llm", "timeout_s", 0), "timeout_s"),
+    ("hedge not before the timeout", _set("llm", "hedge_after_s", 4.0),
+     "llm.hedge_after_s (4) must be shorter than llm.timeout_s (4)"),
+    ("negative hedge", _set("llm", "hedge_after_s", -1), "hedge_after_s"),
+    ("negative spares", _set("menus", "spare_options", -1), "spare_options"),
+    ("too many spares", _set("menus", "spare_options", 4), "spare_options"),
     ("zero option count", _set("menus", "option_count", 0), "option_count"),
     ("negative history", _set("context", "history_turns", -1), "history_turns"),
     ("bad confirm mode", _set("selection", "confirm_mode", "sometimes"), "confirm_mode"),
@@ -201,6 +207,15 @@ def test_invalid_config_raises(
     with pytest.raises(ConfigError) as exc:
         load_config(_write(tmp_path, raw))
     assert expected in str(exc.value)
+
+
+def test_hedge_and_spares_can_be_turned_off(tmp_path: Path) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["hedge_after_s"] = 0
+    raw["llm"]["timeout_s"] = 1.0
+    raw["menus"]["spare_options"] = 0
+    cfg = load_config(_write(tmp_path, raw))
+    assert cfg.llm.hedge_after_s == 0 and cfg.menus.spare_options == 0
 
 
 def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:

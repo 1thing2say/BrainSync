@@ -388,6 +388,9 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
     """Go/no-go from the server's own view: decoder, display, page, mic, Claude, voice."""
     d, p, llm, tts = h["decoder"], h["partner_page"], h["llm"], h["tts"]
     keyboard, fake = d["keyboard_mode"] or page_cfg.get("keyboard_mode", False), d["fake_decoder"]
+    # fake_decoder is also true for a tools/fake_decoder.py started by hand (its hello's name);
+    # a server without fake_flag only knew the --fake-decoder flag.
+    fake_flag, name = d.get("fake_flag", fake), d.get("name", "")
     msg = f" ({d['message']})" if d["message"] else ""
     results = []
 
@@ -396,8 +399,13 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               + (", a bridge is connected" if d["connected"] else ""),
                               "restart without --keyboard for a live EEG run"))
     elif fake and d["connected"] and d["ok"]:
-        results.append(Result("decoder", WARN, "fake decoder: selections are random, not EEG",
-                              "restart without --fake-decoder and start the bridge"))
+        results.append(Result("decoder", WARN, "fake decoder: selections are random, not EEG"
+                              + ("" if fake_flag else f" ({name or 'fake'}, started by hand)"),
+                              "restart without --fake-decoder and start the bridge" if fake_flag
+                              else "stop tools/fake_decoder.py and start the bridge"))
+    elif fake and not fake_flag:  # a hand-started fake whose status says ok false
+        results.append(Result("decoder", FAIL, f"fake decoder ({name or 'fake'}) connected but "
+                              "not ok" + msg, "stop tools/fake_decoder.py and start the bridge"))
     elif fake:  # nothing selects: the session would wait forever
         results.append(Result("decoder", FAIL, "fake decoder "
                               + ("connected but not ok" + msg if d["connected"] else "not connected"),
@@ -413,7 +421,9 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               "check the bridge's terminal"))
     else:
         board = "" if d["board_ok"] else "; board_ok is false (check the headset and USB)"
-        results.append(Result("decoder", WARN if board else PASS, "bridge connected and ok" + msg + board,
+        bridge = f"bridge {name}" if name else "bridge"
+        results.append(Result("decoder", WARN if board else PASS,
+                              f"{bridge} connected and ok" + msg + board,
                               "reseat the headset or replug the board" if board else ""))
 
     if fake and not keyboard:
@@ -431,7 +441,10 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               "start the bridge (it launches the display)"))
 
     if p["connected"]:
-        results.append(Result("partner page", PASS, "connected"))
+        # Which partner client: the iPhone app (/ws/ui?client=ios) or a browser; older servers
+        # report nothing. Information only, never a failure.
+        client = {"ios": "iPhone app", "browser": "browser"}.get(h.get("ui_client", ""), "")
+        results.append(Result("partner page", PASS, f"connected ({client})" if client else "connected"))
     else:
         results.append(Result("partner page", FAIL, "not open",
                               "open the server's address in Chrome"))
