@@ -710,10 +710,10 @@ BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data .venv/bin/python -m pytest
 node --test extension/test/*.test.mjs
 ```
 
-Without data: 523 passed, 9 skipped (the real-data tests skip themselves), 60 to 85 s.
-With the data: 532 passed. No test opens a window or touches the board.
-Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19 (a real server on a
-free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
+The suite collects 997 tests. Without data the 9 real-data tests skip themselves, and the
+BrainFlow board test skips where the Cerelog fork is not installed. No test opens a window
+or touches the board. Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19
+(a real server on a free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
 and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11 and
 `test_extension.py` 12. Without the `reels` extra the 10 browser tests in
 `test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
@@ -724,12 +724,9 @@ protocol state machine, the scroller, and the service worker against a fake `chr
 and WebSocket). Node 24 reads `--test` arguments as globs, so
 pass the files, not the folder. The node tests are skipped when node is not installed.
 
-Without data: 602 passed, 10 skipped (the 9 real-data tests skip themselves). With the
-data: 611 passed, 1 skipped. The one skip in both runs is the BrainFlow board test: the
-venv these counts come from (2026-10-24) has no Cerelog fork installed. Where the fork is
-installed, that test runs too. Each run took 55 to 80 s on a busy machine (load average
-about 18). No test opens a window or touches the board. The BrainSwipe tests run the
-whole swipe loop on the fake board. They check that stale windows never vote, that the
+BrainSwipe adds 220: `test_swipe.py` 53, `test_swipe_cli.py` 29, `test_swipe_web.py` 37,
+`test_profiles.py` 30, `test_stimulus_cards.py` 57 and `test_demo_session.py` 14. They
+run the whole swipe loop on the fake board. They check that stale windows never vote, that the
 voice line names the profile on screen, and that a card or flash command never changes a
 square's luminance.
 
