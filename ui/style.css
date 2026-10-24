@@ -64,6 +64,11 @@ kbd { border: 1px solid var(--muted); border-radius: 4px; padding: 0 0.3rem; }
 .decoder-message:empty { display: none; }
 .controls { display: flex; gap: 0.5rem; }
 .controls button { flex: 1; }
+button.danger.offline { background: transparent; color: var(--danger); font-weight: 600; }
+button.target { font: inherit; cursor: pointer; }
+button.target:disabled { cursor: default; opacity: 1; }
+.judgment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); }
+.judged { color: var(--say); }
 
 .conversation { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; display: flex;
   flex-direction: column; gap: 0.5rem; min-height: 8rem; }

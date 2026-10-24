@@ -28,6 +28,7 @@ from app.schemas import (
     SlotSpec,
     Speak,
     State,
+    StimOnset,
     StimStart,
     StimStop,
     Stop,
@@ -107,7 +108,8 @@ class Rig:
                 self.finish_baseline()
             else:
                 self.run_out()
-        return self.last(self.decoder, StimStart)
+        # None without a bridge: nothing is sent to the decoder then.
+        return next((m for m in reversed(self.decoder) if isinstance(m, StimStart)), None)
 
     def select(self, slot: str) -> None:
         start = self.last(self.decoder, StimStart)
@@ -272,6 +274,21 @@ def test_start_goes_through_baseline_and_cue():
     assert r.o.state is St.STIMULATING
     start = r.last(r.decoder, StimStart)
     assert start.trial_id == 1 and start.active_slots == ["s1", "s2"]
+    assert r.last(r.ui, Trial).phase == "cue"  # the mirror waits for the display's onset
+    r.o.on_decoder_message(StimOnset(trial_id=1, t_unix=r.clock.t))
+    assert r.last(r.ui, Trial).phase == "flicker"
+
+
+def test_stale_onset_does_not_change_the_mirror():
+    r = Rig()
+    start = r.to_trial()
+    r.o.on_decoder_message(StimOnset(trial_id=start.trial_id - 1, t_unix=0))
+    assert r.last(r.ui, Trial).phase == "cue"
+
+
+def test_without_a_bridge_the_mirror_flickers_at_stim_start():
+    r = Rig(bridge=False, keyboard_mode=True)
+    r.to_trial()
     assert r.last(r.ui, Trial).phase == "flicker"
 
 

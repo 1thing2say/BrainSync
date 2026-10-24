@@ -201,7 +201,9 @@ class Orchestrator:
             else:
                 self._record("stale_no_selection", trial_id=msg.trial_id)
         elif isinstance(msg, StimOnset):
-            pass  # logged above; onsets are for his offline analysis
+            # Logged above (his offline analysis uses it); the mirror shows the flicker from here.
+            if self._is_current(msg.trial_id):
+                self._send_ui(Trial(trial_id=msg.trial_id, phase="flicker"))
 
     def _on_hello(self, hello: DecoderHello) -> None:
         """Check the bridge's hello against config: hello_ack, or error and stay paused."""
@@ -371,7 +373,9 @@ class Orchestrator:
         self._send_decoder(
             StimStart(trial_id=self.trial_id, active_slots=list(self.slots))
         )
-        self._send_ui(Trial(trial_id=self.trial_id, phase="flicker"))
+        if not self.acked:
+            # No bridge (keyboard mode): nothing will report an onset, so show the trial now.
+            self._send_ui(Trial(trial_id=self.trial_id, phase="flicker"))
 
     def _stop_trial(self, reason: str) -> None:
         if self.active_trial is None:

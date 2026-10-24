@@ -20,6 +20,16 @@
     </div>
   </div>
 
+  <!-- Shown when another tab or phone opened the partner page (only one can be connected). -->
+  <div id="replaced" class="overlay" role="dialog" aria-modal="true" aria-labelledby="replaced-title" hidden>
+    <div class="card">
+      <h1 id="replaced-title">Open on another page</h1>
+      <p>The partner page was opened in another tab or on another device, which now runs the
+        session. Only one partner page can be connected at a time.</p>
+      <button id="take-over" class="primary">Use this page instead</button>
+    </div>
+  </div>
+
   <main class="layout">
     <section class="mirror" aria-label="User's screen (mirror, no flicker)">
       <header class="mirror-head">
@@ -52,6 +62,13 @@
         <button type="submit">Send</button>
       </form>
       <button id="ptt" class="ptt" disabled title="Push-to-talk arrives in V4">Hold to talk</button>
+
+      <div class="judgment" aria-label="Mark the last spoken reply">
+        <span>Last reply:</span>
+        <button id="correct">Correct</button>
+        <button id="wrong">Wrong</button>
+        <span id="judged" class="judged" aria-live="polite"></span>
+      </div>
 
       <p class="hint" id="hint"></p>
     </aside>
