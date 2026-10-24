@@ -969,6 +969,21 @@ def test_llm_ok_follows_the_last_page():
     assert len(statuses(r)) == n and not r.o.llm_ok
 
 
+def test_llm_status_tells_not_asked_yet_from_failed():
+    # Before Claude's first page the partner page must not warn "fixed replies only".
+    assert Rig().o.status().llm == "off"  # no Claude at all
+    r = LLMRig()
+    r.to_trial()
+    assert r.o.status().llm == "waiting" and not r.o.status().llm_ok
+    r.partner("Again?")
+    r.answer(None)
+    assert r.o.status().llm == "failed"
+    r.to_trial()
+    r.partner(QUESTION)
+    r.answer(LLM_OPTIONS)
+    assert r.o.status().llm == "ok" and r.o.status().llm_ok
+
+
 def test_partner_line_during_the_confirm_step_waits_for_the_new_page():
     r = LLMRig()
     r.to_trial()

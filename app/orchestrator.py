@@ -160,8 +160,9 @@ class Orchestrator:
         self.mic_tail_until = 0.0  # the mic reopens after this, once a reply has ended
         self.mic_report = ""  # what the page says its recognition is doing
         self.last_stt_interrupt = float("-inf")
-        # The last LLM page arrived in time and valid; False until one has (no badge before proof).
-        self.llm_ok = False
+        # The last LLM page arrived in time and valid; None until one was asked for and answered
+        # (no OK badge before proof, and no warning either).
+        self.llm_ok: bool | None = None
 
         self.mode = cfg.menus.mode
         self.slots = [s.slot for s in cfg.stim.slots]
@@ -771,7 +772,9 @@ class Orchestrator:
             decoder_message=(f"Rejected: {self.decoder_error}" if self.decoder_error
                              else self.bridge_message),
             resume_ready=self.state in (St.IDLE, St.PAUSED) and not self.resume_problem(),
-            llm_ok=self.request_page is not None and self.llm_ok,
+            llm_ok=self.request_page is not None and self.llm_ok is True,
+            llm=("off" if self.request_page is None else "waiting" if self.llm_ok is None
+                 else "ok" if self.llm_ok else "failed"),
             fake_decoder=self.decoder_fake,
             decoder_name=self.decoder_name,
             keyboard_mode=self.keyboard_mode,

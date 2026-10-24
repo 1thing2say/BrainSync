@@ -344,6 +344,28 @@ async def test_no_reconnect_exits_on_drop(server: StubServer, start_decoder) -> 
     await asyncio.wait_for(task, WAIT)
 
 
+async def test_replaced_by_a_newer_decoder_stops_instead_of_reconnecting(
+        server: StubServer, start_decoder) -> None:
+    # Two decoders that reconnect after 4000 knock each other off forever, and every new hello
+    # restarts the session's baseline (draft question 17).
+    decoder, task = await start_decoder()
+    await server.conn.close(code=4000, reason="replaced")
+    await asyncio.wait_for(task, WAIT)
+    assert decoder.replaced
+    assert server.hellos.empty()  # no second hello
+
+
+async def test_stops_once_its_parent_process_is_gone(server: StubServer, start_decoder, monkeypatch) -> None:
+    import tools.fake_decoder as fd
+
+    monkeypatch.setattr(fd, "PARENT_CHECK_S", 0.01)
+    parents = iter([4242, 4242])  # the server, twice; then re-parented after it died
+    monkeypatch.setattr(fd.os, "getppid", lambda: next(parents, 1))
+    decoder, task = await start_decoder("--parent-pid", "4242")
+    await asyncio.wait_for(task, WAIT)
+    assert decoder.finished and server.hellos.empty()
+
+
 # ---------------------------------------------------------------------------
 # Protocol 2 behaviour (INTERFACE-v2-draft.md)
 # ---------------------------------------------------------------------------

@@ -377,7 +377,9 @@ def main(argv: list[str] | None = None) -> None:
         # It retries every second until the server is up, so starting it first is fine.
         # Its hello uses this server's config, so it passes the handshake check.
         slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+        # --parent-pid: it exits once this server is gone, however the server was stopped.
         fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
+                                 "--parent-pid", str(os.getpid()),
                                  "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
                                  "--slots", slots, "--waveform", cfg.stim.waveform,
                                  "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],

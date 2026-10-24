@@ -74,7 +74,10 @@ const ViewCore = (() => {
       if (s.decoder_connected && !s.board_ok) warnings.push("Board?");
     }
     if (MIC_PROBLEMS.has(s.mic) && s.mic !== "hidden") problems.push(`Mic: ${MIC[s.mic][0].toLowerCase()}`);
-    if (!s.llm_ok) warnings.push("Fixed replies only (no Claude)");
+    // Before Claude's first page there is nothing to warn about; an older server sends no "llm".
+    const llm = s.llm || (s.llm_ok ? "ok" : "off");
+    if (llm === "off") warnings.push("Fixed replies only (no Claude)");
+    else if (llm === "failed") warnings.push("Claude's last page failed: fixed list shown");
     if (s.mic_muted) warnings.push("Mic muted");
     const flags = [];
     if (s.fake_decoder) flags.push("FAKE DECODER");

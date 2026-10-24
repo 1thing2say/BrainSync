@@ -28,9 +28,16 @@ test("problems come first and name what is wrong", () => {
 });
 
 test("a fallback that still works is a warning, not a problem", () => {
-  const h = VC.health({ ...READY, llm_ok: false, mic_muted: true });
+  const h = VC.health({ ...READY, llm: "off", llm_ok: false, mic_muted: true });
   assert.equal(h.level, "warn");
   assert.equal(h.text, "Ready · Fixed replies only (no Claude) · Mic muted");
+  assert.equal(VC.health({ ...READY, llm: "failed", llm_ok: false }).text,
+    "Ready · Claude's last page failed: fixed list shown");
+});
+
+test("Claude not asked yet is no warning", () => {
+  assert.equal(VC.health({ ...READY, llm: "waiting", llm_ok: false }).level, "ok");
+  assert.equal(VC.health({ ...READY, llm_ok: false }).level, "warn");  // an older server: no "llm"
 });
 
 test("keyboard mode needs no decoder; fake and keyboard are always flagged", () => {

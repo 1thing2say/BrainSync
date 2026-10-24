@@ -31,7 +31,7 @@ DEFAULT_OUT = REPO_ROOT / "cache" / "ui_shots"
 WAIT_MS = 3200  # virtual time before the shot: the selection timer reads 3 s
 
 READY = {"type": "status", "decoder_connected": True, "decoder_ok": True, "display_ok": True,
-         "board_ok": True, "llm_ok": True, "fake_decoder": False, "keyboard_mode": False,
+         "board_ok": True, "llm_ok": True, "llm": "ok", "fake_decoder": False, "keyboard_mode": False,
          "mic": "listening", "mic_muted": False, "resume_ready": False,
          "decoder_name": "ssvep-fbcca", "decoder_message": ""}
 TALK = [{"type": "transcript", "who": "partner", "text": "Hi Sam, how are you feeling today?"},
@@ -76,7 +76,7 @@ STATES: dict[str, tuple[int, int, list[dict], tuple[str, str], bool]] = {
     "speaking": (1440, 900, [READY, *TALK, CONFIRM, state("SPEAKING", "Yes, let's go outside."),
                              trial("rest")], ("speaking", ""), False),
     "problems": (1440, 900, [{**READY, "decoder_connected": False, "decoder_ok": False,
-                              "display_ok": False, "board_ok": False, "llm_ok": False,
+                              "display_ok": False, "board_ok": False, "llm_ok": False, "llm": "failed",
                               "decoder_name": "", "mic": "denied", "resume_ready": True},
                              *TALK, PAGE, state("PAUSED", "Decoder disconnected")],
                  ("denied", ""), True),
