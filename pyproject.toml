@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 display = ["psychopy>=2026.2"]
+reels = ["websockets>=12"]
 dev = ["pytest>=8", "pytest-cov>=5"]
 chess = ["chess>=1.10"]
 

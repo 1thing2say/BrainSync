@@ -3,11 +3,13 @@
 A config names the flicker targets, where they sit, how they flicker and the session
 timing. Positions and sizes are in screen heights from the screen centre (PsychoPy
 ``height`` units), so a fullscreen window spans y in [-0.5, 0.5] and x in
-[-aspect/2, aspect/2].
+[-aspect/2, aspect/2]. ``x_offset`` (default 0) shifts the whole grid sideways, for a
+layout that must leave the middle of the screen free (the Reels pair sits in the right
+margin beside the video).
 
     name = "two_targets"
     [targets]   freqs = [15.0, 17.0]; phases_pi = [0.0, 0.0]; labels = ["15", "17"]
-    [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0
+    [layout]    rows = 1; cols = 2; size = 0.4; spacing = 1.0; x_offset = 0.0
     [stimulus]  waveform = "sine"; hold_cue = true
     [display]   refresh_hz = 60.0; refresh_tolerance_hz = 1.0; screen = 0; background = 0.0
                 aspect = 1.5
@@ -34,7 +36,7 @@ _PHASE_TOL = 1e-9
 
 _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels"}),
-    "layout": frozenset({"rows", "cols", "size", "spacing"}),
+    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset"}),
     "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
@@ -88,6 +90,7 @@ class StimulusConfig:
     rows: int = 1
     cols: int = 1
     spacing: float = 0.0
+    x_offset: float = 0.0   # screen heights the grid is shifted right (negative: left)
     path: Path | None = None
 
     @property
@@ -259,12 +262,15 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     cols = lay.integer("cols", n)
     size = lay.number("size", 0.4)
     spacing = lay.number("spacing", 1.0 if n > 1 else 0.0)
+    x_offset = lay.number("x_offset", 0.0)
+    if not math.isfinite(x_offset):
+        raise ValueError(f"[layout] x_offset must be finite, got {x_offset}")
 
     color = stim.numbers("cue_color", [1.0, -1.0, -1.0])
     if len(color) != 3 or not all(-1.0 <= v <= 1.0 for v in color):
         raise ValueError(f"[stimulus] cue_color must be three values in [-1, 1], got {color}")
 
-    positions = grid_positions(n, rows, cols, spacing)
+    positions = [(x + x_offset + 0.0, y) for x, y in grid_positions(n, rows, cols, spacing)]
     cfg = StimulusConfig(
         name=name,
         targets=tuple(Target(index=k, freq=freqs[k], phase=phases_pi[k] * math.pi,
@@ -288,6 +294,7 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         rows=rows,
         cols=cols,
         spacing=spacing,
+        x_offset=x_offset,
         path=path,
     )
     validate(cfg)

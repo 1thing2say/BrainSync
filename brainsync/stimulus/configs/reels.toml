@@ -1,0 +1,41 @@
+# Instagram Reels pair: look at the top square for the previous reel, the bottom one for
+# the next. The Chrome extension under extension/ draws these squares over
+# instagram.com/reels and brainsync.reels sends it this layout over a WebSocket.
+# Same 15 and 17 Hz as two_targets, because that pair separated on the user's own EEG
+# (Cerelog X8, 60 Hz display, 2026-10-22). Sine flicker, because 17 Hz does not divide 60.
+# The squares are stacked vertically in the right margin beside the 9:16 video, so the
+# video stays in the middle of the screen. They sit 0.65 screen heights apart, closer
+# than two_targets' 1.0: untested on EEG, so record a cued session in this layout
+# (brainsync.record -c reels) and score it with brainsync.score_cued before trusting it.
+name = "reels"
+
+[targets]
+freqs = [15.0, 17.0]    # Hz
+phases_pi = [0.0, 0.0]  # multiples of pi
+labels = ["up", "down"] # scroll directions: target 0 = previous reel, target 1 = next
+
+[layout]
+rows = 2
+cols = 1
+size = 0.3       # side length, screen heights
+spacing = 0.65   # centre to centre: targets at y = +0.325 (up) and -0.325 (down)
+x_offset = 0.55  # right of the video; a 9:16 video one screen high spans x = +/-0.28
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+cue_scale = 1.1  # 1.2 would put the cue box 0.505 from the centre, past the top edge
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 10
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true
