@@ -9,8 +9,10 @@ selection (rule 1), and an option is spoken exactly as shown (rule 2).
 
 The call forces one strict tool call, ``propose_replies``, whose input has one field per rank
 (``option_1`` .. ``option_3``), so the output is schema-valid JSON with the ranking explicit.
-Lengths, intents and duplicates are checked here (strict schemas cannot express them). An invalid
-answer or a transient error is retried once, within ``llm.timeout_s`` in all.
+Lengths, intents and duplicates are checked here (strict schemas cannot express them). A label
+that is too long is shortened rather than rejected: it is only the short tag beside a square, and
+the utterance (what is spoken) is never changed. An invalid answer is retried once with the
+problems named, and a transient error once, within ``llm.timeout_s`` in all.
 
 The API key comes from the environment (``ANTHROPIC_API_KEY``, loaded from ``.env`` by the
 server's ``main``) and is never logged.
@@ -107,13 +109,14 @@ class MenuMaker:
                   partner_last=req.partner_last)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.llm.timeout_s
+        feedback: list[str] = []  # what was wrong with the last answer, for the retry
         for attempt in range(1, ATTEMPTS + 1):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             started = time.monotonic()
             try:
-                msg = await asyncio.wait_for(self._create(**self.params(req)), remaining)
+                msg = await asyncio.wait_for(self._create(**self.params(req, feedback)), remaining)
             except TimeoutError:
                 self._log("llm_failed", request_id=req.request_id, reason="timeout", attempt=attempt)
                 return None  # no time left for a retry
@@ -126,20 +129,26 @@ class MenuMaker:
                     return None
                 continue  # connection errors, 429, 5xx: retry if time allows
             ms = round((time.monotonic() - started) * 1000)
-            options, problems = self.parse(msg, req)
+            options, problems, shortened = self.parse(msg, req)
             usage = getattr(msg, "usage", None)
             tokens = {"input_tokens": getattr(usage, "input_tokens", None),
                       "output_tokens": getattr(usage, "output_tokens", None)}
             if options is not None:
                 self._log("llm_ok", request_id=req.request_id, attempt=attempt, ms=ms,
-                          options=[o.utterance for o in options], **tokens)
+                          options=[o.utterance for o in options], labels_shortened=shortened,
+                          **tokens)
                 return options
             self._log("llm_invalid", request_id=req.request_id, attempt=attempt, ms=ms,
                       problems=problems, **tokens)
+            feedback = problems
         return None
 
-    def params(self, req: PageRequest) -> dict[str, Any]:
-        """The Messages API request for one page."""
+    def params(self, req: PageRequest, feedback: list[str] | None = None) -> dict[str, Any]:
+        """The Messages API request for one page; ``feedback`` names what a rejected answer broke."""
+        content = user_message(req, self.profile.name)
+        if feedback:
+            content += ("\n\nYour previous answer could not be used: " + "; ".join(feedback)
+                        + f". Call {TOOL_NAME} again with every rule met.")
         return {
             "model": self.llm.model,
             "max_tokens": MAX_TOKENS,
@@ -147,21 +156,22 @@ class MenuMaker:
             "tools": [self.tool],
             "tool_choice": {"type": "tool", "name": TOOL_NAME},
             "output_config": {"effort": "low"},
-            "messages": [{"role": "user", "content": user_message(req, self.profile.name)}],
+            "messages": [{"role": "user", "content": content}],
         }
 
     # -- validation ---------------------------------------------------------
 
-    def parse(self, msg: Any, req: PageRequest) -> tuple[list[Option] | None, list[str]]:
-        """Options from the response, or None and the problems found."""
+    def parse(self, msg: Any, req: PageRequest) -> tuple[list[Option] | None, list[str], list[str]]:
+        """Options from the response (or None), the problems found, and the labels shortened."""
         if getattr(msg, "stop_reason", None) == "refusal":
-            return None, ["refused"]
+            return None, ["refused"], []
         block = next((b for b in getattr(msg, "content", []) or []
                       if getattr(b, "type", None) == "tool_use" and getattr(b, "name", None) == TOOL_NAME),
                      None)
         if block is None or not isinstance(block.input, dict):
-            return None, [f"no {TOOL_NAME} call (stop_reason {getattr(msg, 'stop_reason', None)})"]
+            return None, [f"no {TOOL_NAME} call (stop_reason {getattr(msg, 'stop_reason', None)})"], []
         problems: list[str] = []
+        shortened: list[str] = []
         options: list[Option] = []
         known = set(self.intents.intent_ids)
         for key in rank_keys(self.menus.option_count):
@@ -170,7 +180,10 @@ class MenuMaker:
             except ValidationError as exc:
                 problems.append(f"{key}: {exc.errors()[0].get('msg')}")
                 continue
-            option = Option(label=option.label.strip(), utterance=option.utterance.strip(),
+            label = shorten_label(option.label, self.menus.label_max_words, self.menus.label_max_chars)
+            if label != option.label.strip():
+                shortened.append(f"{option.label.strip()!r} -> {label!r}")
+            option = Option(label=label, utterance=option.utterance.strip(),
                             intent_id=option.intent_id.strip())
             problems += [f"{key}: {p}" for p in validate_option(
                 option, self.menus.label_max_chars, self.menus.utterance_max_words,
@@ -187,8 +200,8 @@ class MenuMaker:
         if repeats:
             problems.append(f"repeats options already shown: {repeats}")
         if problems:
-            return None, problems
-        return options, []
+            return None, problems, shortened
+        return options, [], shortened
 
     def _log(self, event: str, **fields: object) -> None:
         if self.log is not None:
@@ -198,6 +211,29 @@ class MenuMaker:
 # ---------------------------------------------------------------------------
 # Prompt and tool
 # ---------------------------------------------------------------------------
+
+
+# Words a shortened label should not end on ("Walk to the" -> "Walk").
+DANGLING = {"a", "an", "the", "to", "by", "of", "for", "at", "in", "on", "with", "and", "or", "but",
+            "too", "my", "your", "our", "is", "are", "be", "so", "if"}
+
+
+def shorten_label(label: str, max_words: int, max_chars: int) -> str:
+    """The first ``max_words`` words of ``label``, cut at a word boundary to ``max_chars``, without
+    a dangling last word. A label that already fits is returned unchanged.
+
+    Only the label is shortened: it is the tag beside a square, never what is spoken.
+    """
+    label = label.strip()
+    words = label.split()
+    if len(words) <= max_words and len(label) <= max_chars:
+        return label
+    words = words[:max_words]
+    while len(words) > 1 and len(" ".join(words)) > max_chars:
+        words.pop()
+    while len(words) > 1 and words[-1].strip(",.;:-!?").lower() in DANGLING:
+        words.pop()
+    return " ".join(words)[:max_chars].rstrip(" ,.;:-")
 
 
 def rank_keys(count: int) -> list[str]:
@@ -258,7 +294,9 @@ not rewordings of one reply.
 - Use only facts from the profile below or from the conversation. Never invent names, plans, \
 places or events.
 - Never give medical advice or make medical claims.
-- Each label is a few words that let {profile.name} recognise the sentence at a glance.
+- Each label is a short tag beside its square, at most {menus.label_max_words} words and \
+{menus.label_max_chars} characters, so {profile.name} recognises the sentence at a glance: for example \
+"Let's go", "Not now", "After lunch", "Coffee first". The full sentence goes in the utterance.
 
 About {profile.name} (a fictional demo persona): {profile.about}
 Likes: {", ".join(profile.likes)}.

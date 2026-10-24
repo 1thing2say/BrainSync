@@ -11,7 +11,7 @@ import pytest
 from app.config import load_config, load_intents, load_profile
 from app.context import Conversation, PageRequest, Turn, time_of_day
 from app.log import EventLog, read_events
-from app.menus import TOOL_NAME, MenuMaker, rank_keys, reply_tool, user_message
+from app.menus import TOOL_NAME, MenuMaker, rank_keys, reply_tool, shorten_label, user_message
 
 CFG = load_config()
 INTENTS = load_intents()
@@ -139,18 +139,48 @@ def _with(rank: str, **fields) -> dict:
 
 
 @pytest.mark.parametrize("bad, problem", [
-    (_with("option_2", label="A label that is far too long"), "label over"),
     (_with("option_3", utterance="word " * 15), "utterance over"),
     (_with("option_1", intent_id="teleport"), "unknown intent"),
     (_with("option_3", utterance=GOOD["option_1"]["utterance"]), "duplicate"),
     ({k: v for k, v in GOOD.items() if k != "option_3"}, "option_3"),
-], ids=["long label", "long utterance", "unknown intent", "duplicate", "missing option"])
+], ids=["long utterance", "unknown intent", "duplicate", "missing option"])
 async def test_an_invalid_answer_is_retried_once(event_log, bad, problem):
     fake = FakeClaude(reply(bad), reply(GOOD))
     options = await maker(fake, event_log).make_page(request())
     assert options is not None and len(fake.calls) == 2
     invalid = [e for e in llm_events(event_log) if e["event"] == "llm_invalid"]
     assert len(invalid) == 1 and any(problem in p for p in invalid[0]["problems"])
+
+
+async def test_the_retry_names_what_was_wrong():
+    fake = FakeClaude(reply(_with("option_3", utterance="word " * 15)), reply(GOOD))
+    await maker(fake).make_page(request())
+    first, retry = (c["messages"][0]["content"] for c in fake.calls)
+    assert "could not be used" not in first
+    assert "could not be used" in retry and "option_3: utterance over 14 words" in retry
+
+
+@pytest.mark.parametrize("label, short", [
+    ("Not sure about dinner", "Not sure about"),  # 4 words: the first 3
+    ("Something comfortable tonight", "Something"),  # 3 words but 29 chars: cut at a word
+    ("Unbelievablyfantastic", "Unbelievablyfantas"),  # one long word: cut to 18 chars
+    ("Let's go", "Let's go"),
+    ("Walk to the lake", "Walk"),  # no dangling "to the"
+    ("A walk by the lake", "A walk"),
+    ("Not yet, too early", "Not yet"),
+    ("Up to you", "Up to you"),  # fits already: never changed
+])
+def test_shorten_label(label, short):
+    assert shorten_label(label, 3, 18) == short
+
+
+async def test_a_long_label_is_shortened_and_the_page_kept(event_log):
+    fake = FakeClaude(reply(_with("option_2", label="Not sure about dinner")))
+    options = await maker(fake, event_log).make_page(request())
+    assert len(fake.calls) == 1 and options[1].label == "Not sure about"
+    assert options[1].utterance == GOOD["option_2"]["utterance"]  # what is spoken never changes
+    ok = llm_events(event_log)[-1]
+    assert ok["event"] == "llm_ok" and ok["labels_shortened"] == ["'Not sure about dinner' -> 'Not sure about'"]
 
 
 async def test_two_invalid_answers_give_none(event_log):
