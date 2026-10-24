@@ -77,6 +77,49 @@ instead, so synthetic files never mix with real ones.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
 
+## Flicker depth and the Flicker Lab
+
+Every config flickers with a sine wave. `[stimulus] depth` (or `--depth` on
+`brainsync.stimulus` and `brainsync.record`) sets how far it swings around mid-grey:
+1.0, the default, is full black to white, and 0.5 is a gentler 25-75% grey flicker with
+the same mean. A lower depth gives a weaker SSVEP, so no config lowers it yet.
+
+`web/flicker-lab/index.html` compares the waveforms by eye. Open it in a browser, no
+server needed. It draws with `extension/flicker.js`, the same luminance as the Reels
+overlay, and has three views:
+- **Side by side:** two squares, each with its own waveform, depth and frequency, and a
+  trace of the grey level on every frame.
+- **Blind comfort test:** a shuffled set of conditions, each rated 1-5 after it plays,
+  with a per-condition table and a CSV.
+- **Headset test:** the record and score commands for an accuracy A/B across depths.
+
+### Live A/B with the headset
+
+`python -m brainsync.ab` runs the real PsychoPy stimulus with the Cerelog X8 and compares
+flicker conditions in one cued session. By default these are square 1, sine 1 and sine 0.5,
+with 4 blocks × 2 targets × 3 conditions, so 24 trials in about 3.6 minutes.
+- **Trial order:** each block shows every condition at every target once, shuffled, so
+  fatigue and electrode drift affect all conditions equally.
+- **Still screen:** it is the same mid-grey whatever comes next.
+- **Scoring:** each trial is scored once its still window has been recorded. A
+  per-condition table goes to the terminal and appears under the squares between
+  flickers. It shows whether the decoder picked the cued square, the SNR at the cued
+  frequency, the CCA r and, with `--rate`, the 1-5 comfort rating.
+- **Blind ratings:** with `--rate`, nothing reveals a trial's condition until you have rated it.
+- **End screen:** it holds the final table until you press space.
+- **Saved file:** the session is saved as a `_cued.npz`.
+
+```
+python -m brainsync.ab --rate                       # headset + display
+python -m brainsync.ab --conditions sine:1,sine:0.6,sine:0.4
+python -m brainsync.ab --fake                       # synthetic, no board or display
+python -m brainsync.ab --score <file>_cued.npz      # the same table from a saved session
+```
+
+The still-screen line should sit near 0 dB. With 8 trials per condition, differences
+smaller than about twice the ± values are noise. At 60 Hz, 17 Hz cannot be an even square
+wave (3.53 frames per cycle), so square at 17 Hz is irregular, and the tool warns about it.
+
 ## Phase 0: frequency selection
 
 Which flicker frequencies does this user's EEG follow? Each single-target session

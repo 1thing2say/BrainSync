@@ -36,8 +36,9 @@ def test_fixture_on_disk_matches_brainsync_flicker():
     on_disk = json.loads((TEST_DIR / "flicker_fixture.json").read_text())
     assert on_disk == built, "stale fixture: run .venv/bin/python extension/test/make_fixture.py"
     assert (TEST_DIR / "flicker_fixture.json").read_text() == make_fixture.dumps(built)
-    assert {(c["waveform"], c["freq"]) for c in built["cases"]} == {
-        (w, f) for w in ("sine", "square") for f in (12.0, 15.0, 17.0)}
+    assert {(c["waveform"], c["freq"], c["depth"]) for c in built["cases"]} == {
+        (w, f, d) for w in ("sine", "square") for f in (12.0, 15.0, 17.0) for d in (1.0, 0.5)}
+    assert len(built["cases"]) == 24
     assert all(len(c["values"]) == 241 for c in built["cases"])
 
 

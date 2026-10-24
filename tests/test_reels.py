@@ -82,7 +82,7 @@ def test_longer_cooldown_means_fewer_scrolls(capsys):
 def test_calibrate_on_still(capsys):
     assert reels.main([*HEADLESS, "--seconds", "5", "--calibrate-on", "still"]) == 0
     err = capsys.readouterr().err
-    assert "squares still" in err and "[say] Keep still and look at the middle" in err
+    assert "squares still" in err and "[speak] Keep still and look at the middle" in err
 
 
 def test_log_writes_json_lines(tmp_path, capsys):
