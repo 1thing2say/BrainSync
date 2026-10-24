@@ -302,6 +302,32 @@ class Speak(Message):
     audio_url: str | None = None
 
 
+class Listen(Message):
+    """What the partner page's mic should do. Three forms:
+
+    - ``until_stopped``: listen from ``delay_s`` on until the next listen message (``always`` mode:
+      the whole session except while a reply plays, paused, idle or muted);
+    - ``seconds`` > 0: listen for that long, after ``delay_s`` (``turn`` mode: the partner's turn);
+    - neither: stop now.
+
+    ``muted`` carries the partner's Mute, which the server holds. Sent so nobody has to press
+    anything and the app never hears itself.
+    """
+
+    type: Literal["listen"] = "listen"
+    seconds: float = Field(ge=0)
+    delay_s: float = Field(default=0.0, ge=0)
+    until_stopped: bool = False
+    muted: bool = False
+    reason: Literal["start", "turn", "speaking", "paused", "muted", "idle", "reconnect"]
+
+    @model_validator(mode="after")
+    def _one_form(self) -> Listen:
+        if self.until_stopped and self.seconds > 0:
+            raise ValueError("until_stopped listens until told otherwise: seconds must be 0")
+        return self
+
+
 class State(Message):
     """Orchestrator state name for display."""
 
@@ -335,6 +361,8 @@ class UIStatus(Message):
     keyboard_mode: bool
     board_ok: bool = False
     decoder_message: str = ""
+    mic_muted: bool = False  # the partner's Mute
+    mic: str = ""  # the page's last mic_report state ("listening", "offline", "denied", ...)
     resume_ready: bool = False
 
 
@@ -375,6 +403,22 @@ class Resume(Message):
     """Resume after STOP."""
 
     type: Literal["resume"] = "resume"
+
+
+class MicSet(Message):
+    """The partner pressed Mute or Unmute (the server holds the setting)."""
+
+    type: Literal["mic_set"] = "mic_set"
+    muted: bool
+
+
+class MicReport(Message):
+    """What the page's speech recognition is doing, sent when it changes (no transcript text)."""
+
+    type: Literal["mic_report"] = "mic_report"
+    state: Literal["listening", "needs_tap", "denied", "nomic", "offline", "unsupported", "error",
+                   "stopped", "hidden", "muted", "speaking", "paused"]
+    restarts: int = Field(default=0, ge=0)
 
 
 class Judgment(Message):
@@ -442,11 +486,11 @@ ServerToDecoder = Annotated[
 ShowPage.model_rebuild()
 
 ServerToUI = Annotated[
-    Union[ShowPage, Trial, Highlight, Speak, State, Transcript, UIStatus],
+    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus],
     Field(discriminator="type"),
 ]
 UIToServer = Annotated[
-    Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment],
+    Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment, MicSet, MicReport],
     Field(discriminator="type"),
 ]
 
@@ -525,6 +569,7 @@ __all__ = [
     "Trial",
     "Highlight",
     "Speak",
+    "Listen",
     "State",
     "Transcript",
     "UIStatus",
@@ -534,6 +579,8 @@ __all__ = [
     "Stop",
     "Resume",
     "Judgment",
+    "MicSet",
+    "MicReport",
     "Option",
     "validate_option",
     "DecoderToServer",

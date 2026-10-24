@@ -193,6 +193,71 @@ def test_decisions_scored_before_a_rearm_are_dropped(monkeypatch, tmp_path, caps
     assert "ended: time up" in capsys.readouterr().out
 
 
+class HiddenSpellBoard(FakeBoard):
+    """FakeBoard whose viewer has the squares out of view from 45 to 60 s of board time
+    (calibration ends near 30 s); see test_decisions_out_of_view_never_scroll."""
+
+    current: FakeBoard | None = None
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        type(self).current = self
+
+    @classmethod
+    def in_view(cls) -> bool:
+        return not 45.0 <= cls.current.elapsed < 60.0
+
+
+def test_decisions_out_of_view_never_scroll(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(reels, "FakeBoard", HiddenSpellBoard)
+    monkeypatch.setattr(reels.Link, "showing", property(lambda self: HiddenSpellBoard.in_view()))
+    log = tmp_path / "run.jsonl"
+    assert reels.main([*HEADLESS, "--seconds", "60", "--switch", "1000", "--log", str(log)]) == 0
+    rows = [json.loads(ln) for ln in log.read_text().splitlines()]
+    pause = next(r["t"] for r in rows if r["kind"] == "pause")
+    resume = next(r["t"] for r in rows if r["kind"] == "resume")
+    assert resume - pause == pytest.approx(15.0, abs=0.5)
+    hidden = [r for r in rows if r["kind"] == "decision" and r["hidden"]]
+    assert len(hidden) == pytest.approx(15.0 / 0.25, abs=2)
+    scrolls = [r["t"] for r in rows if r["kind"] == "scroll"]
+    assert scrolls and not [t for t in scrolls if pause <= t <= resume]
+    assert any(t > resume for t in scrolls)       # dwelling on one square: scrolls go on
+    # after the squares come back a scroll needs `votes` (4) decisions with fresh votes
+    fresh, first = None, None
+    for r in rows:
+        if r["kind"] == "resume":
+            fresh = 0
+        elif r["kind"] == "decision" and fresh is not None and not r["stale"]:
+            fresh += 1
+        elif r["kind"] == "scroll" and fresh is not None:
+            first = fresh
+            break
+    assert first is not None and first >= 4
+    cap = capsys.readouterr()
+    assert re.search(r"squares out of view 1[45]\.\d s in 1 spell: decisions then were ignored",
+                     cap.out), cap.out
+    assert "squares out of view: decisions ignored" in cap.err and "back in view after" in cap.err
+
+
+def test_link_tracks_spells_out_of_view(capsys):
+    bridge = FakeBridge([])
+    bridge.showing = True
+    link = reels.Link(bridge, reels.JsonLog(None))
+    assert link.track_view(1.0) is None
+    bridge.showing = False
+    assert link.track_view(2.0) == "hidden" and link.track_view(3.0) is None
+    bridge.showing = True
+    assert link.track_view(5.5) == "back" and link.track_view(6.0) is None
+    bridge.showing = False
+    assert link.track_view(10.0) == "hidden"
+    link.end_view(11.0)
+    link.end_view(12.0)                            # nothing left open
+    assert (link.hidden_s, link.hidden_spells, link.hidden_at) == (4.5, 2, None)
+    lines = reels._summary(reels.Tally(), link, ("up", "down"), "time up")
+    assert "  squares out of view 4.5 s in 2 spells: decisions then were ignored" in lines
+    assert reels.Link(None, reels.JsonLog(None)).showing       # --no-browser: always
+
+
 @pytest.mark.parametrize("argv", [
     ["--fast", "--no-browser"],
     [*HEADLESS, "--seconds", "0"],
@@ -348,9 +413,11 @@ def start_main(argv: list[str]) -> tuple[threading.Thread, dict]:
 
 
 async def extension(port: int, refresh_hz: float = 59.97, bye_after: int | None = 2,
-                    ack: bool = True, timeout: float = 60.0) -> list[dict]:
-    """Connect, say hello, ack every scroll and say bye after ``bye_after`` scrolls; the
-    messages received until the stop phase (or the server closing)."""
+                    ack: bool = True, timeout: float = 60.0,
+                    showing: bool | None = None) -> list[dict]:
+    """Connect, say hello (with ``showing`` unless None), ack every scroll and say bye after
+    ``bye_after`` scrolls; the messages received until the stop phase (or the server
+    closing)."""
     from websockets.asyncio.client import connect
     from websockets.exceptions import ConnectionClosed
 
@@ -366,9 +433,11 @@ async def extension(port: int, refresh_hz: float = 59.97, bye_after: int | None 
     got: list[dict] = []
     scrolls = 0
     async with ws:
-        await ws.send(json.dumps({"type": "hello", "agent": "extension",
-                                  "url": "https://www.instagram.com/reels/",
-                                  "refresh_hz": refresh_hz, "dropped": 0, "accepted": True}))
+        hello = {"type": "hello", "agent": "extension", "url": "https://www.instagram.com/reels/",
+                 "refresh_hz": refresh_hz, "dropped": 0, "accepted": True}
+        if showing is not None:
+            hello["showing"] = showing
+        await ws.send(json.dumps(hello))
         try:
             while True:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout))
@@ -428,6 +497,21 @@ def test_browser_run_config_phases_scrolls_and_bye(capsys, tmp_path):
     assert "browser connected: extension" in cap.err and "refresh 59.97 Hz" in cap.err
     kinds = [json.loads(ln)["kind"] for ln in log.read_text().splitlines()]
     assert {"hello", "ack", "frames", "bye"} <= set(kinds)
+
+
+@needs_ws
+def test_a_tab_out_of_view_gets_no_scrolls(capsys):
+    port = free_port()
+    th, result = start_main(["--fake", "--fast", "--no-voice", "--seconds", "30",
+                             "--ws-port", str(port), "--wait-browser", "20"])
+    got = asyncio.run(extension(port, showing=False))
+    th.join(60)
+    assert not th.is_alive() and result.get("code") == 0, result
+    assert not [m for m in got if m["type"] == "scroll"]
+    assert [m["target"] for m in got if m["type"] == "cue"] == [-1]   # cleared, never drawn
+    out = capsys.readouterr().out
+    assert "ended: time up" in out and "0 scrolls" in out
+    assert re.search(r"squares out of view 2\d\.\d s in 1 spell", out), out
 
 
 @needs_ws

@@ -51,8 +51,10 @@ def event_log(tmp_path):
     log.close()
 
 
-async def make_tts(fake: FakeCartesia, event_log=None, key: str | None = KEY, **speech) -> CartesiaTTS:
-    tts = CartesiaTTS(SPEECH.model_copy(update=speech), key, log=event_log, transport=fake.transport)
+async def make_tts(fake: FakeCartesia, event_log=None, key: str | None = KEY, cache_dir=None,
+                   **speech) -> CartesiaTTS:
+    tts = CartesiaTTS(SPEECH.model_copy(update=speech), key, log=event_log, transport=fake.transport,
+                      cache_dir=cache_dir)
     await tts.start()
     return tts
 
@@ -63,7 +65,7 @@ async def test_success_caches_the_clip_and_sends_the_documented_request(event_lo
     text = "Yes, let's go outside."
     assert tts.url_for(text) is None
     await tts.prefetch([text])
-    clip_id = audio_id(SPEECH.voice_id, text)
+    clip_id = tts.id_for(text)
     assert tts.url_for(text) == f"/audio/{clip_id}"
     assert tts.get(clip_id) == (CLIP, MP3)
 
@@ -263,6 +265,75 @@ def test_cache_key_depends_on_voice_and_text():
     assert audio_id("v1", "Hi.") == audio_id("v1", "Hi.")
     assert audio_id("v1", "Hi.") != audio_id("v2", "Hi.")
     assert audio_id("v1", "Hi.") != audio_id("v1", "Hi!")
+    assert audio_id("v1", "Hi.", "sonic-3.5|mp3") != audio_id("v1", "Hi.", "sonic-3.5|wav")
+
+
+# -- the disk cache --------------------------------------------------------------------------
+
+
+async def test_a_clip_on_disk_survives_a_restart(tmp_path):
+    fake = FakeCartesia()
+    tts = await make_tts(fake, cache_dir=tmp_path)
+    await tts.prefetch(["Kept."])
+    await tts.stop()
+    clip_id = tts.id_for("Kept.")
+    assert (tmp_path / f"{clip_id}.mp3").read_bytes() == CLIP
+    assert not list(tmp_path.glob("*.tmp"))
+
+    again = await make_tts(fake, cache_dir=tmp_path)  # a new process: empty memory
+    assert again.url_for("Kept.") == f"/audio/{clip_id}"
+    await again.prefetch(["Kept."])
+    assert len(fake.requests) == 1  # never fetched twice
+    assert again.get(clip_id) == (CLIP, MP3)
+    assert again.cached_count(["Kept.", "Kept.", "New."]) == (1, 2)
+    await again.stop()
+
+
+async def test_a_disk_clip_plays_without_a_key_or_network(tmp_path):
+    await (await make_tts(FakeCartesia(), cache_dir=tmp_path)).prefetch(["Offline."])
+    fake = FakeCartesia(_offline)
+    tts = await make_tts(fake, key=None, cache_dir=tmp_path)
+    assert tts.url_for("Offline.") and tts.get(tts.id_for("Offline."))[0] == CLIP
+    assert fake.requests == []
+    await tts.stop()
+
+
+@pytest.mark.parametrize("change", [{"voice_id": "another-voice"}, {"model": "sonic-3"},
+                                    {"format": "wav"}, {"bit_rate": 128000},
+                                    {"provider": "browser"}],
+                         ids=["voice", "model", "format", "bit rate", "browser provider"])
+async def test_a_changed_voice_or_format_never_replays_an_old_clip(tmp_path, change):
+    await (await make_tts(FakeCartesia(), cache_dir=tmp_path)).prefetch(["Hello."])
+    tts = await make_tts(FakeCartesia(), key=None, cache_dir=tmp_path, **change)
+    assert tts.url_for("Hello.") is None
+    await tts.stop()
+
+
+@pytest.mark.parametrize("clip_id", ["../../etc/passwd", "a" * 31, "A" * 32, ""])
+async def test_only_clip_ids_reach_the_disk(tmp_path, clip_id):
+    tts = await make_tts(FakeCartesia(), cache_dir=tmp_path)
+    assert tts.get(clip_id) is None
+    await tts.stop()
+
+
+async def test_a_disk_that_cannot_be_written_still_keeps_the_clip_in_memory(tmp_path, event_log):
+    blocked = tmp_path / "file"
+    blocked.write_text("not a directory")
+    tts = await make_tts(FakeCartesia(), event_log, cache_dir=blocked / "tts")
+    await tts.prefetch(["Memory."])
+    assert tts.url_for("Memory.")
+    assert any(e["event"] == "tts_cache_write_failed" for e in read_events(event_log.path))
+    await tts.stop()
+
+
+async def test_prerender_fetches_only_missing_clips(tmp_path):
+    from tools.prerender_tts import prerender
+
+    fake = FakeCartesia()
+    await (await make_tts(fake, cache_dir=tmp_path)).prefetch(["One."])
+    tts = CartesiaTTS(SPEECH, KEY, transport=fake.transport, cache_dir=tmp_path)
+    assert await prerender(tts, ["One.", "Two.", "Three."]) == (3, 3)
+    assert len(fake.requests) == 3  # "One." once, then the two missing ones
 
 
 def test_load_env_sets_missing_names_only(tmp_path, monkeypatch):

@@ -6,11 +6,6 @@ that flicker, an 8-channel Cerelog X8 EEG board picks it up, and a training-free
 (CCA or filter-bank CCA) works out which square you are looking at. The cue box then moves
 onto it and the label is spoken.
 
-This repository is a from-scratch rebuild of an earlier demo. It reproduces each phase of
-the original work from the data already recorded. Every number below was measured with
-this code on 2026-10-23 (the phase 3 numbers on 2026-10-24, after the decoder gained its
-rest threshold).
-
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
 > trigger a seizure in people with photosensitive epilepsy. Both demo targets (15 and
 > 17 Hz) lie inside it. Ask about epilepsy before every session. Stop at once if anyone
@@ -48,16 +43,9 @@ The check prints `250` (plus a `pkg_resources` deprecation warning, which is har
 The fork's native libraries are macOS arm64 only.
 
 ## Data
-
-The tools read data in place from one root folder, `$BRAINSYNC_DATA_DIR`. It defaults
-to `<repo>/data` in this checkout (`~/brainsync_data` for a non-editable install). The
-existing data lives elsewhere:
-
 ```bash
 export BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data
 ```
-
-The commands below assume this export. Under the root:
 
 - `spectrum_checks/*_trials.npz`: single-target sessions (one flicker frequency each).
 - `spectrum_checks/*_cued.npz`: two-target cued sessions (15 and 17 Hz).
@@ -88,6 +76,49 @@ instead, so synthetic files never mix with real ones.
   EEG.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
+
+## Flicker depth and the Flicker Lab
+
+Every config flickers with a sine wave. `[stimulus] depth` (or `--depth` on
+`brainsync.stimulus` and `brainsync.record`) sets how far it swings around mid-grey:
+1.0, the default, is full black to white, and 0.5 is a gentler 25-75% grey flicker with
+the same mean. A lower depth gives a weaker SSVEP, so no config lowers it yet.
+
+`web/flicker-lab/index.html` compares the waveforms by eye. Open it in a browser, no
+server needed. It draws with `extension/flicker.js`, the same luminance as the Reels
+overlay, and has three views:
+- **Side by side:** two squares, each with its own waveform, depth and frequency, and a
+  trace of the grey level on every frame.
+- **Blind comfort test:** a shuffled set of conditions, each rated 1-5 after it plays,
+  with a per-condition table and a CSV.
+- **Headset test:** the record and score commands for an accuracy A/B across depths.
+
+### Live A/B with the headset
+
+`python -m brainsync.ab` runs the real PsychoPy stimulus with the Cerelog X8 and compares
+flicker conditions in one cued session. By default these are square 1, sine 1 and sine 0.5,
+with 4 blocks × 2 targets × 3 conditions, so 24 trials in about 3.6 minutes.
+- **Trial order:** each block shows every condition at every target once, shuffled, so
+  fatigue and electrode drift affect all conditions equally.
+- **Still screen:** it is the same mid-grey whatever comes next.
+- **Scoring:** each trial is scored once its still window has been recorded. A
+  per-condition table goes to the terminal and appears under the squares between
+  flickers. It shows whether the decoder picked the cued square, the SNR at the cued
+  frequency, the CCA r and, with `--rate`, the 1-5 comfort rating.
+- **Blind ratings:** with `--rate`, nothing reveals a trial's condition until you have rated it.
+- **End screen:** it holds the final table until you press space.
+- **Saved file:** the session is saved as a `_cued.npz`.
+
+```
+python -m brainsync.ab --rate                       # headset + display
+python -m brainsync.ab --conditions sine:1,sine:0.6,sine:0.4
+python -m brainsync.ab --fake                       # synthetic, no board or display
+python -m brainsync.ab --score <file>_cued.npz      # the same table from a saved session
+```
+
+The still-screen line should sit near 0 dB. With 8 trials per condition, differences
+smaller than about twice the ± values are noise. At 60 Hz, 17 Hz cannot be an even square
+wave (3.53 frames per cycle), so square at 17 Hz is irregular, and the tool warns about it.
 
 ## Phase 0: frequency selection
 
@@ -295,6 +326,18 @@ on Reels where Start was pressed moves the feed; the others ack `ok: false`, and
 counts one ack per scroll id. Escape in any tab ends the run, also before calibration
 (exit 0, "viewer quit").
 
+Decisions count only while some tab shows the squares. Each tab says whether its squares
+are in view in its hello and again in a `view` message each time that changes: they are
+out of view in a background tab, on another Space, in a covered window or after leaving
+Reels. While no tab shows them, decisions are still scored and logged (`"hidden": true`),
+but none scrolls and the cue box is cleared. When the squares come back the votes are
+reset, so a scroll needs fresh windows. The summary says how long they were out of view.
+On the first headset run the viewer kept switching to the terminal. The decoder committed
+15 times while Chrome was hidden, 12 of them "down", with nothing on screen to look at.
+Only the 2 scrolls with the squares in view reached Instagram, and both moved the reel.
+Keep Chrome and the terminal side by side, both visible: a tab only has to be visible,
+not focused.
+
 Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
 
 - A new commit fires one scroll in that target's direction. Abstentions never fire, and
@@ -311,9 +354,9 @@ Decoder commits become scrolls in `brainsync/scroll.py` (`ScrollGate`):
 The rest baseline is calibrated while the viewer watches the reel with the squares
 flickering in the periphery (`--calibrate-on watch`, the default). Here "not choosing"
 means watching the video, not a still screen. `--calibrate-on still` holds the squares
-still instead, as phase 3 does. This choice, the closer spacing below and the whole
-Reels setup are untested on real EEG. Only the fake board and the mock page have run
-it.
+still instead, as phase 3 does. This choice and the closer spacing below are not
+validated on real EEG yet: one headset run so far (above), with too few scrolls in view
+to judge accuracy.
 
 Setup: install the `reels` extra (websockets). Load `extension/` unpacked at
 `chrome://extensions` (Developer mode, Chrome 116 or newer). Put Chrome in full screen
@@ -671,6 +714,112 @@ Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`
 `one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
 quits.
 
+## Live brain map
+
+A live scalp map of your own EEG in the browser. Every 0.25 s the last 2 s from the 8
+electrodes become one frame: band power per electrode (delta, theta, alpha, beta) as a z-score
+against your own rest baseline, 15/17 Hz SSVEP SNR and contact quality. A stdlib HTTP server
+streams the frames as Server-Sent Events to `extension/brainmap/`, which interpolates them over
+a drawing of the head. It needs only numpy, scipy and the standard library, so the same code
+runs on the Jetson.
+
+```bash
+.venv/bin/python -m brainsync.brainmap --open                     # fake board, http://127.0.0.1:8140/
+.venv/bin/python -m brainsync.brainmap --board cerelog --open     # the headset (port auto-detected)
+.venv/bin/python -m brainsync.brainmap --board replay --recording run_cued.npz --speed 4
+.venv/bin/python -m brainsync.brainmap --host 0.0.0.0             # headless Jetson, viewed over the LAN
+```
+
+Sit still with the eyes open for the first `--baseline-s` seconds (30 by default). Until then
+the band views show dB relative to the mean across electrodes, not z-scores. Keys 1-6 pick
+delta, theta, alpha, beta, SSVEP 15 and SSVEP 17 Hz. An electrode that is flat, noisy, clipped
+or offset is greyed out and left out of the interpolation. Only one process can hold the board,
+so close any other BrainSync tool first.
+
+Measured on the M4 on 2026-10-24. The fake board (`--seconds 60`, default 30 s baseline) gave
+232 frames at 4.00 Hz with no gaps, and the baseline was ready 32 s in (30 s of windows after
+the first 2 s window). The fake board stays quiet through the baseline, then puts 10, 15 and
+17 Hz tones on P7/P8/O1/O2 for 10 s each. In the 10 Hz phase the median posterior alpha z was
++3.4 to +4.3 per channel (never below +2.2) while the front four channels stayed near 0
+(-0.3). The SSVEP SNR on those channels, averaged over the last 4 s, was +14.6 dB at 15 Hz
+against -0.3 dB at 17 Hz in the 15 Hz phase, and +14.7 dB at 17 Hz against -0.9 dB at 15 Hz
+in the 17 Hz phase. A synthetic 40 s recording (20 s noise, then 20 s of 10 Hz alpha on
+O1/O2) replayed at `--speed 4 --baseline-s 15` gave all 153 frames. During the alpha phase O1
+and O2 alpha z averaged +5.8 and +6.1, while the other six channels averaged -0.2. The run
+ended with the "ended" status reaching the client, and exit 0. One frame costs about 0.44 ms
+and 730 bytes of JSON.
+
+The rest baseline leaves out blinks and movements (over 150 µV peak to peak after filtering,
+plus the second after), and it uses the median and the median absolute deviation, so a few
+artifacts barely move it. An electrode that was off or bad during the rest needs a full
+`--baseline-s` of clean signal of its own before it gets z-scores; until then the page says
+"no baseline yet" for it.
+
+It is a scalp map from 8 electrodes, not a brain scan, and the page says so. The colours
+between the dots are interpolated, not measured. They show which part of the head carries
+which rhythm, not where in the cortex it comes from, which would need dozens of electrodes and
+a head model. Blinks dominate Fp1/Fp2, and jaw or neck muscle shows up as beta on P7/P8. Noise
+alone moves a z-score too: in the two runs above, channels carrying only noise were beyond
+±1.7 to ±2.5 z (by band) in 5% of frames, and single frames reached ±5.6, mostly on the blue
+side, so read one red or blue patch as a hint until it holds for a few seconds. Still to check on the headset: the table of actions in
+[extension/brainmap/README.md](extension/brainmap/README.md) (eyes closed, blinks, jaw, the
+15 Hz square), and decoder accuracy with the map on screen versus off.
+
+## Predicted-brain heatmap (optional, Reels demo)
+
+This is the offline, simulated alternative to the [live brain map](#live-brain-map): it shows
+a model's prediction for an average brain, not your EEG.
+
+A side panel for the Reels demo that shows what Meta's TRIBE v2 predicts an average brain's
+fMRI response to the reel on screen would be. It is decoration: computed offline for our own
+clips, never fed to the decoder, and labelled "Not your EEG" in the panel and on every frame.
+TRIBE v2 is CC BY-NC 4.0 (non-commercial use only, credit Meta). Only use clips you own.
+
+TRIBE needs its own venv: torch < 2.7 and Python 3.11+, on the arm64 Homebrew Python (the
+Rosetta `/usr/local/bin/python3*` cannot install that torch). About 1.5 GB for the venv and
+7 GB of models (TRIBE 0.7, V-JEPA2 ViT-g 4.1, w2v-BERT 2.3), all deletable:
+
+```bash
+/opt/homebrew/bin/python3.11 -m venv .venv-tribe
+.venv-tribe/bin/pip install --no-cache-dir \
+    "tribev2 @ git+https://github.com/facebookresearch/tribev2@af58661791a351a448a489042a28f6c37e1c14b7" \
+    nilearn pytest
+.venv-tribe/bin/pip install --no-cache-dir --no-deps -e .
+# predict defaults HF_HOME to .tribe-cache/hf (git-ignored) and caps MPS memory so it fails
+# instead of swapping; set either variable yourself to override
+.venv-tribe/bin/python -m brainsync.heatmap predict beach.mp4 --clip-id beach   # auto: cuda, mps, cpu
+.venv-tribe/bin/python -m brainsync.heatmap render beach --video beach.mp4
+python3 -m http.server -d extension 8000    # http://127.0.0.1:8000/heatmap/demo.html
+```
+
+Only video and audio are used: the text path needs the gated Llama-3.2-3B and WhisperX, and
+TRIBE drops it by itself when there are no words (it was trained with modality dropout). No
+Hugging Face token is needed.
+
+Measured on the M4 (24 GB) on 2026-10-24, 5 s test clip:
+
+| Device | Predict time | Per second of video | Matches CPU fp32 |
+|---|---|---|---|
+| CPU, fp32 | 1030 s | ~206 s | reference |
+| MPS, fp16, chunked attention | 316 s | ~63 s | r = 1.000 every second, 0.1% relative error |
+
+Two fixes in `predict.py` make MPS work. torch 2.6's MPS attention builds the whole
+8192 x 8192 score matrix for V-JEPA2 (a 6 GB allocation that pushed the Mac into swap), so
+attention runs in exact 1024-query chunks. And neuralset's per-pass stack of 41 hidden
+layers stayed on the GPU (5.9 to 13.8 GB in three passes, then the process died), so each
+pass moves to the CPU and the GPU cache is emptied. Both apply on CUDA too.
+
+Jetson Orin Nano 8 GB (not yet tried): one fp16 V-JEPA2 pass needed 5.2 GB of GPU memory on
+the Mac. That is tight next to the OS on 8 GB of shared memory, so run predict there with
+nothing else open, or keep predicting on the Mac and copy `extension/heatmap/clips/` over.
+The panel itself is static files and runs anywhere Chrome does.
+
+The panel (`extension/heatmap/`, see its README) sits in the left margin, mirroring the
+squares, refuses any layout within 0.05 screen heights of a square, the reel column or the
+HUD, does no per-frame work, and keeps its backdrop up for reels without a prediction so the
+scene does not change after calibration. Still to measure on the headset: decoder
+accuracy and dropped frames with the panel on versus off.
+
 ## Module map
 
 | Module | Role |
@@ -701,6 +850,9 @@ quits.
 | `brainsync/swipe.py` | BrainSwipe: fresh-window swipe voting, the endless feed, CLI |
 | `brainsync/swipe_web.py` | BrainSwipe browser mock: localhost server with Server-Sent Events, the real swipe logic on a real-time fake board |
 | `brainsync/web/` | The mock's page: HTML, CSS, `app.js` (DOM, network, speech) and `logic.js` (pure helpers, tested with node) |
+| `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
+| `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
+| `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
 
 ## Tests
 
@@ -712,13 +864,13 @@ node --test extension/test/*.test.mjs
 
 The suite collects 997 tests. Without data the 9 real-data tests skip themselves, and the
 BrainFlow board test skips where the Cerelog fork is not installed. No test opens a window
-or touches the board. Phase 4 adds 103 of them: `test_scroll.py` 22, `test_bridge.py` 19
-(a real server on a free port), `test_reels.py` 39 (fake board, a WebSocket client in place of the browser,
+or touches the board. Phase 4 adds 117 of them: `test_scroll.py` 22, `test_bridge.py` 23
+(a real server on a free port), `test_reels.py` 49 (fake board, a WebSocket client in place of the browser,
 and SIGTERM/SIGHUP sent to a real `--manual` process), `test_config_reels.py` 11 and
-`test_extension.py` 12. Without the `reels` extra the 10 browser tests in
+`test_extension.py` 12. Without the `reels` extra the 14 browser tests in
 `test_reels.py` and all of `test_bridge.py` skip. `test_extension.py`
 checks the flicker fixture against `brainsync.stimulus.flicker`, the manifest and the
-mock page, runs `node --check` on every script and runs the 65 node tests (the flicker
+mock page, runs `node --check` on every script and runs the 84 node tests (the flicker
 port within 1e-9 of the Python luminance, the overlay's geometry, refresh meter and
 protocol state machine, the scroller, and the service worker against a fake `chrome`
 and WebSocket). Node 24 reads `--test` arguments as globs, so

@@ -6,6 +6,7 @@
     python -m brainsync.stimulus --free --feedback stdin        # live demo: cue box from a decoder
     python -m brainsync.stimulus --free --feedback stdin --hold-still   # still until the first line
     python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
+    python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
 Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
 flushed right after the flip that shows the event. Once the window is up and its measured
@@ -16,6 +17,14 @@ line. Space starts, Escape quits.
 With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card between
 the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
 lights target k's box (see brainsync.stimulus.feedback).
+
+--conditions mixes flicker conditions in one cued session (see brainsync.ab, which runs
+it with the headset): each block cues every (condition, target) pair once, the still
+screen is mid-grey for all of them, each trial's first marker is "cond:<j>" (j indexes the
+list, printed as "conditions: ..." before the first trial), and --rate asks for a 1-5
+comfort rating after each rest ("rate:<n>"). --status stdin shows the latest
+{"text": "..."} line under the targets between flickers, and holds the end screen until
+space, Escape or EOF.
 """
 from __future__ import annotations
 
@@ -27,11 +36,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
-from .config import (CARD_ASPECT, DEFAULT_CONFIG, Card, StimulusConfig, config_warnings,
-                     load_config, override, session_trials)
+from .config import (CARD_ASPECT, DEFAULT_CONFIG, Card, StimulusConfig, Trial,
+                     config_warnings, load_config, override, parse_conditions, session_trials)
 from .display import (MARKER_CLOCKS, Aborted, MarkerWriter, card_paths, cued_frames,
-                      free_frames, play, refresh_mismatch)
-from .flicker import frame_luminances, frames_per_cycle, phase_pi
+                      free_frames, play, refresh_mismatch, still_luminances)
+from .flicker import frames_per_cycle, phase_pi
 
 
 def _refresh_arg(text: str) -> str | float:
@@ -76,6 +85,19 @@ def build_parser() -> argparse.ArgumentParser:
     session.add_argument("--hold-cue", action=argparse.BooleanOptionalAction, default=None,
                          help="leave the cue box up while the cued target flickers "
                               "(default: as the config says)")
+    p.add_argument("--depth", type=float,
+                   help="flicker modulation depth in (0, 1]: luminance swings 0.5 +/- depth/2, "
+                        "1 is full black-white (default: as the config says)")
+    p.add_argument("--conditions", metavar="SPECS",
+                   help="cued session: mix flicker conditions per trial, comma-separated "
+                        "<waveform>:<depth>, e.g. square:1,sine:1,sine:0.5")
+    p.add_argument("--rate", action="store_true",
+                   help="cued session: ask for a 1-5 comfort rating (keys 1-5) after each "
+                        "trial's rest, marked rate:<n>")
+    p.add_argument("--status", default="none", choices=("none", "stdin"),
+                   help="cued session: 'stdin' shows the latest {\"text\": ...} JSON line "
+                        "under the targets between flickers, and waits at the end until "
+                        "space, Escape or EOF")
     p.add_argument("--seed", type=int, help="seed for the shuffled order (random if omitted)")
     p.add_argument("--no-wait", action="store_true", help="skip the press-space start screen")
     p.add_argument("--refresh", type=_refresh_arg,
@@ -89,11 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
 def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
                 cards: Sequence[Path] = ()) -> list[str]:
     hz = cfg.refresh
+    flicker = (f"conditions {', '.join(c.spec for c in cfg.conditions)} mixed per trial"
+               if cfg.conditions else f"{cfg.waveform} flicker")
     lines = [
         f"config {cfg.name}" + (f" ({cfg.path})" if cfg.path else ""),
-        f"  {cfg.n_targets} target(s), {cfg.waveform} flicker, refresh {hz:g} Hz, "
+        f"  {cfg.n_targets} target(s), {flicker}, refresh {hz:g} Hz, "
         f"side {cfg.size:g} screen heights, cue held through flicker: "
-        f"{'yes' if cfg.hold_cue else 'no'}",
+        f"{'yes' if cfg.hold_cue else 'no'}"
+        + ("" if cfg.conditions else f", flicker depth {cfg.depth:g}"),
     ]
     for t in cfg.targets:
         x, y = t.pos
@@ -112,15 +137,23 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
         return lines
     s = cfg.session
     trials = session_trials(cfg, seed)
+    per_block = cfg.n_targets * max(1, len(cfg.conditions))
     total = round(len(trials) * (s.cue_s + s.stim_s + s.rest_s))
-    lines.append(f"session: {s.blocks} block(s) x {cfg.n_targets} = {len(trials)} trial(s) of "
+    pairs = f"{cfg.n_targets} x {len(cfg.conditions)} condition(s)" if cfg.conditions \
+        else f"{cfg.n_targets}"
+    lines.append(f"session: {s.blocks} block(s) x {pairs} = {len(trials)} trial(s) of "
                  f"cue {s.cue_s:g} + stim {s.stim_s:g} + rest {s.rest_s:g} s, "
                  f"{total // 60} min {total % 60:02d} s, seed {seed}")
     width = len(str(s.blocks))
-    for start in range(0, len(trials), cfg.n_targets):
-        chunk = trials[start:start + cfg.n_targets]
+
+    def name(t: Trial) -> str:
+        return f"{t.target}/{cfg.conditions[t.condition].spec}" if cfg.conditions \
+            else str(t.target)
+
+    for start in range(0, len(trials), per_block):
+        chunk = trials[start:start + per_block]
         lines.append(f"  block {chunk[0].block + 1:>{width}}/{s.blocks}: "
-                     + " ".join(map(str, (t.target for t in chunk))))
+                     + " ".join(map(name, chunk)))
     return lines
 
 
@@ -134,8 +167,10 @@ def print_plan(cfg: StimulusConfig, seed: int, free: bool, out: TextIO | None = 
 def _configure(args: argparse.Namespace) -> StimulusConfig:
     cfg = load_config(args.config)
     hz = args.refresh if isinstance(args.refresh, float) else None
+    conditions = parse_conditions(args.conditions) if args.conditions is not None else None
     return override(cfg, blocks=args.blocks, cue_s=args.cue_s, stim_s=args.stim_s,
-                    rest_s=args.rest_s, hold_cue=args.hold_cue, refresh_hz=hz)
+                    rest_s=args.rest_s, hold_cue=args.hold_cue, depth=args.depth,
+                    conditions=conditions, refresh_hz=hz)
 
 
 def _check_refresh(cfg: StimulusConfig, args: argparse.Namespace,
@@ -158,7 +193,7 @@ def _check_refresh(cfg: StimulusConfig, args: argparse.Namespace,
 def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                  cards: Sequence[Path] = ()) -> int:
     from .display import PsychoPyRenderer
-    from .feedback import FeedbackReader
+    from .feedback import FeedbackReader, StatusReader
 
     renderer = PsychoPyRenderer(cfg, cards=cards) if cards else PsychoPyRenderer(cfg)
     try:
@@ -175,8 +210,7 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
         markers = MarkerWriter(args.markers)
         if not args.no_wait:
             try:
-                renderer.wait_for_start(frame_luminances(cfg.freqs, cfg.phases, 0,
-                                                         cfg.refresh, cfg.waveform))
+                renderer.wait_for_start(still_luminances(cfg))
             except Aborted:
                 print("aborted before start", file=sys.stderr)
                 return 1
@@ -198,7 +232,17 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
             return 0
         trials = session_trials(cfg, seed)
         print(f"cued session: {len(trials)} trials, seed {seed}", file=sys.stderr)
-        timing = play(cued_frames(cfg, trials), renderer, markers, cfg.refresh,
+        if cfg.conditions:
+            print("conditions: " + " ".join(c.spec for c in cfg.conditions), file=sys.stderr,
+                  flush=True)
+        status = StatusReader(sys.stdin).start() if args.status == "stdin" else None
+        frames = cued_frames(
+            cfg, trials,
+            status=None if status is None else (lambda: status.text),
+            rate=renderer.rating if args.rate else None,
+            finish=None if status is None
+            else (lambda: status.done or renderer.close_pressed()))
+        timing = play(frames, renderer, markers, cfg.refresh,
                       trial_targets={t.index: t.target for t in trials},
                       measured_refresh=measured)
         print(timing.summary(), flush=True)
@@ -218,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--cards needs --free")
     if args.seconds is not None and args.seconds <= 0:
         p.error(f"--seconds must be positive, got {args.seconds}")
+    if args.free and (args.conditions is not None or args.rate or args.status != "none"):
+        p.error("--conditions, --rate and --status are for a cued session, not --free")
     try:
         cfg = _configure(args)
         cards = card_paths(args.cards) if args.cards is not None else []

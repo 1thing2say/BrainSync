@@ -23,11 +23,20 @@ is refused with 403. Without that check any web page open in the browser could c
 say bye and end the run, or send a hello at 60 Hz before the real overlay did. Clients
 that send no Origin (not a browser: the tests, websocat) are let in.
 
+The run decodes only while some tab shows the squares: every client says whether its
+squares are in view (accepted, on Reels, not stopped, and the tab visible: not a background
+tab, another Space or a covered window) in its hello and again in a "view" message each
+time that changes. ``showing`` is True while any connected client's latest word is "in
+view"; a hello without the field (an older extension) counts as in view. A client that
+disconnects stops counting.
+
 Server -> client:
-    config  {"type": "config", "name", "waveform", "refresh_hz", "refresh_tolerance_hz",
-             "targets": [{"label", "freq", "phase", "x", "y", "size"}]}  on connect; x, y
-            are the square's centre and size its side, in screen heights from the
-            viewport centre with y up (PsychoPy height units); phase in radians
+    config  {"type": "config", "name", "waveform", "depth", "refresh_hz",
+             "refresh_tolerance_hz", "targets": [{"label", "freq", "phase", "x", "y",
+             "size"}]}  on connect; x, y are the square's centre and size its side, in
+            screen heights from the viewport centre with y up (PsychoPy height units);
+            phase in radians; depth in (0, 1] is the modulation depth (luminance
+            0.5 +/- depth/2), absent means 1
     phase   {"type": "phase", "phase": wait|calibrate|run|stop, "flicker": bool,
              "seconds": number|null, "text"}  flicker false: squares still at 0.5;
             stop: hide the squares and show the text
@@ -38,8 +47,10 @@ Server -> client:
              error|unused, "text"}  the EEG board, for the HUD's EEG line
     ping    {"type": "ping"}  every 20 s, ignored by clients
 Client -> server:
-    hello    {"type": "hello", "agent", "url", "refresh_hz", "dropped", "accepted": true}
-             once the viewer accepted the photosensitivity warning and refresh was measured
+    hello    {"type": "hello", "agent", "url", "refresh_hz", "dropped", "accepted": true,
+              "showing": bool}  once the viewer accepted the photosensitivity warning and
+             refresh was measured
+    view     {"type": "view", "showing": bool}  the squares came into or went out of view
     frames   {"type": "frames", "refresh_hz", "dropped"}  every 5 s while flickering
     scrolled {"type": "scrolled", "id", "ok": bool, "method"}  one per scroll
     bye      {"type": "bye"}  the viewer pressed Escape
@@ -64,7 +75,7 @@ if TYPE_CHECKING:
 HOST = "127.0.0.1"
 PORT = 8765
 PING_S = 20.0
-EVENT_TYPES = frozenset({"bye", "scrolled", "frames"})
+EVENT_TYPES = frozenset({"bye", "scrolled", "frames", "view"})
 PHASES = ("wait", "calibrate", "run", "stop")
 EEG_STATES = ("unknown", "absent", "connecting", "connected", "streaming", "no-data", "error",
               "unused")
@@ -76,7 +87,7 @@ ORIGINS = re.compile(r"chrome-extension://[a-p]{32}|https?://(127\.0\.0\.1|local
 
 def config_message(cfg: StimulusConfig) -> dict[str, Any]:
     """The "config" message: targets with centre (x, y) and side in screen heights, y up."""
-    return {"type": "config", "name": cfg.name, "waveform": cfg.waveform,
+    return {"type": "config", "name": cfg.name, "waveform": cfg.waveform, "depth": cfg.depth,
             "refresh_hz": cfg.display.refresh_hz,
             "refresh_tolerance_hz": cfg.display.refresh_tolerance_hz,
             "targets": [{"label": t.label, "freq": t.freq, "phase": t.phase,
@@ -164,6 +175,7 @@ class Bridge:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._hello: dict[str, Any] | None = None
         self._hello_seen = threading.Event()
+        self._views: dict[object, bool] = {}   # client -> its squares are in view
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -310,13 +322,15 @@ class Bridge:
         self._clients.add(conn)
         try:
             async for text in conn:
-                self._receive(text)
+                self._receive(text, conn)
         except ConnectionClosed:
             pass
         finally:
             self._clients.discard(conn)
+            with self._lock:
+                self._views.pop(conn, None)
 
-    def _receive(self, text: str | bytes) -> None:
+    def _receive(self, text: str | bytes, client: object = None) -> None:
         msg = parse_client_message(text)
         if msg is None:
             self.ignored += 1
@@ -325,9 +339,16 @@ class Bridge:
         if kind == "hello":
             with self._lock:
                 self._hello = msg
+                self._views[client] = msg.get("showing") is not False
             self._events.put(msg)       # queued first: a waiter woken by the event finds it
             self._hello_seen.set()
+        elif kind == "view" and not isinstance(msg.get("showing"), bool):
+            self.ignored += 1
+            _note(f"ignored a view message without a true/false \"showing\": {text[:80]!r}")
         elif kind in EVENT_TYPES:
+            if kind == "view":
+                with self._lock:
+                    self._views[client] = msg["showing"]
             self._events.put(msg)
         else:
             self.ignored += 1
@@ -336,6 +357,12 @@ class Bridge:
     @property
     def n_clients(self) -> int:
         return len(self._clients)
+
+    @property
+    def showing(self) -> bool:
+        """True while some connected client has its squares in view."""
+        with self._lock:
+            return any(self._views.values())
 
     @property
     def latest_hello(self) -> dict[str, Any] | None:
@@ -348,7 +375,7 @@ class Bridge:
         return self.latest_hello
 
     def events(self) -> list[dict[str, Any]]:
-        """Client messages received since the last call (hello, bye, scrolled, frames)."""
+        """Client messages received since the last call (hello, bye, scrolled, frames, view)."""
         out = []
         while True:
             try:

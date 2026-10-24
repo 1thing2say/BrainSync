@@ -22,3 +22,14 @@ routines:
   - "Coffee and the news in the morning"
   - "A walk outside after lunch when the weather is nice"
   - "Calls Maya on Sunday evenings"
+avoid_topics: []
+# How Sam talks: shapes the tone and length of every option, never its facts.
+personality:
+  formality: casual            # casual, neutral or formal
+  length: brief                # brief (3-6 words), medium (5-10) or chatty (up to the limit)
+  humour: light                # none, light or playful
+  warmth: warm                 # reserved or warm
+  directness: gentle           # gentle ("Not right now, thanks") or direct ("No.")
+  phrases: ["Sounds good"]
+  avoid_phrases: []
+  notes: ""
