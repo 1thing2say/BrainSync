@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flicker Lab</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Flicker Lab: compare square, full sine and reduced-depth sine flicker by eye, then rate
+   them blind. The page is a dark stimulus room in both colour schemes: the squares are
+   drawn on black like the Reels overlay, so a light page would change the contrast. */
+:root {
+  --bg: #0E1011;
+  --surface: #171A1C;
+  --surface-2: #1F2326;
+  --rule: #2E3438;
+  --ink: #E7EAE6;
+  --ink-2: #9AA4A8;
+  --a: #E59A4B;        /* panel A trace */
+  --b: #6FA8E8;        /* panel B trace */
+  --warn: #F0C05A;
+  --danger: #E0645A;
+  --focus: #F4F6F2;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --sans: "Atkinson Hyperlegible", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 var(--sans);
+  min-height: 100vh;
+}
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 20px 16px 48px; }
+
+header.top {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+  gap: 8px 24px; padding-bottom: 14px; border-bottom: 1px solid var(--rule);
+}
+h1 { font-size: 22px; margin: 0; letter-spacing: 0.01em; }
+h1 small { font-weight: 400; color: var(--ink-2); font-size: 15px; margin-left: 8px; }
+.status { font: 13px/1.4 var(--mono); color: var(--ink-2); display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.status b { color: var(--ink); font-weight: 500; }
+.status b.bad { color: var(--warn); }
+
+nav.tabs { display: flex; gap: 4px; margin: 16px 0 18px; flex-wrap: wrap; }
+nav.tabs button {
+  background: none; border: 1px solid var(--rule); border-radius: 999px;
+  padding: 6px 14px; cursor: pointer; color: var(--ink-2);
+}
+nav.tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+.lede { color: var(--ink-2); max-width: 70ch; margin: 0 0 16px; }
+.lede strong { color: var(--ink); font-weight: 700; }
+
+.btn {
+  background: var(--surface-2); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 8px 14px; cursor: pointer;
+}
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 700; }
+.btn.stop { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 700; padding: 4px 10px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+kbd { font: 12px var(--mono); border: 1px solid var(--rule); border-radius: 4px; padding: 0 4px; color: var(--ink-2); }
+
+/* -- side by side ------------------------------------------------------------------------ */
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .panels { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
+  padding: 14px; display: grid; gap: 12px; min-width: 0;
+}
+.panel header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.panel h2 { margin: 0; font-size: 17px; }
+.panel h2 .tag { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
+.panel[data-k="0"] h2 .tag { background: var(--a); }
+.panel[data-k="1"] h2 .tag { background: var(--b); }
+.badge { font: 12px var(--mono); color: var(--warn); }
+canvas.stim { width: 100%; aspect-ratio: 1 / 1; max-height: 380px; display: block; background: #000; border-radius: 6px; }
+canvas.scope { width: 100%; height: 110px; display: block; background: var(--bg); border-radius: 6px; }
+.stats { font: 12.5px/1.5 var(--mono); color: var(--ink-2); margin: 0; }
+.stats .warn { color: var(--warn); }
+
+.controls { display: grid; gap: 10px; }
+.row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 10px; }
+.row > span { color: var(--ink-2); font-size: 14px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.seg label { padding: 5px 12px; cursor: pointer; font-size: 14px; position: relative; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label:has(input:checked) { background: var(--ink); color: var(--bg); }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
+.depth { display: flex; align-items: center; gap: 10px; }
+.depth input[type=range] { flex: 1; min-width: 0; accent-color: var(--ink); }
+.depth output { font: 13px var(--mono); width: 3.2em; text-align: right; }
+select { background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button {
+  background: none; border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px;
+  font-size: 13px; cursor: pointer; color: var(--ink-2);
+}
+.chips button:hover { color: var(--ink); border-color: var(--ink-2); }
+.check { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; color: var(--ink-2); cursor: pointer; }
+
+/* -- blind test --------------------------------------------------------------------------- */
+.setup { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 16px; display: grid; gap: 14px; }
+.setup fieldset { border: 0; padding: 0; margin: 0; }
+.setup legend { color: var(--ink-2); font-size: 14px; margin-bottom: 6px; padding: 0; }
+.conds { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.setup .opts { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
+.setup label.num { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 14px; }
+.setup input[type=number] { width: 4.5em; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 6px; }
+
+.stage { position: relative; background: #000; border-radius: 12px; overflow: hidden; }
+.stage canvas { width: 100%; height: min(72vh, 640px); display: block; }
+.stage .say {
+  position: absolute; left: 0; right: 0; top: 14px; text-align: center;
+  font: 14px var(--mono); color: #8E989C; pointer-events: none;
+}
+.rate {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 16px; text-align: center;
+  background: rgba(14, 16, 17, 0.94); padding: 16px;
+}
+.rate h3 { margin: 0; font-size: 20px; }
+.rate .scale { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.rate .scale button {
+  width: 92px; padding: 10px 6px; border-radius: 10px; border: 1px solid var(--rule);
+  background: var(--surface-2); cursor: pointer; display: grid; gap: 2px;
+}
+.rate .scale button b { font: 600 22px var(--mono); }
+.rate .scale button small { font-size: 12px; color: var(--ink-2); line-height: 1.2; }
+.rate .scale button:hover { border-color: var(--ink); }
+
+.results { margin-top: 18px; display: grid; gap: 12px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+th { color: var(--ink-2); font-weight: 400; font-size: 13px; }
+td.num { font: 14px var(--mono); white-space: nowrap; }
+.meter { height: 10px; background: var(--surface-2); border-radius: 5px; min-width: 80px; }
+.meter i { display: block; height: 100%; border-radius: 5px; background: var(--ink); }
+.note { color: var(--ink-2); font-size: 14px; margin: 0; }
+.note.warn { color: var(--warn); }
+
+/* -- headset ------------------------------------------------------------------------------ */
+.steps { display: grid; gap: 14px; max-width: 80ch; padding-left: 20px; margin: 0; }
+pre {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; font: 13px/1.55 var(--mono); margin: 6px 0 0;
+}
+code { font-family: var(--mono); font-size: 0.92em; }
+
+/* -- warning ------------------------------------------------------------------------------ */
+dialog {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); border-radius: 14px;
+  max-width: 520px; width: calc(100% - 32px); padding: 22px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
+dialog h2 { margin: 0 0 8px; font-size: 19px; color: var(--warn); }
+dialog p { margin: 0 0 12px; color: var(--ink-2); }
+dialog .actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Flicker Lab <small>square vs sine vs gentle sine</small></h1>
+    <div class="status" aria-live="polite">
+      <span>refresh <b id="hz">measuring…</b></span>
+      <span>dropped <b id="drops">0</b></span>
+      <button class="btn stop" id="stop-all" hidden>Stop flicker <kbd>Esc</kbd></button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-compare" aria-controls="view-compare" aria-selected="true">Side by side</button>
+    <button role="tab" id="tab-blind" aria-controls="view-blind" aria-selected="false">Blind comfort test</button>
+    <button role="tab" id="tab-headset" aria-controls="view-headset" aria-selected="false">Headset test</button>
+  </nav>
+
+  <!-- side by side -->
+  <section id="view-compare" role="tabpanel" aria-labelledby="tab-compare">
+    <p class="lede">A starts as the classic on/off <strong>square</strong> wave, B as a
+      <strong>sine</strong> at half depth. BrainSync already flickers with a sine at full depth
+      (black to white); the new <code>depth</code> setting is what makes it gentler, swinging
+      around mid-grey instead. Look at one square at a time, and hold the other still for a
+      clean comparison.</p>
+    <div class="bar">
+      <button class="btn primary" id="cmp-run">Start flicker</button>
+      <span class="note"><kbd>Space</kbd> start / stop · <kbd>Esc</kbd> stop</span>
+    </div>
+    <div class="panels" id="panels"></div>
+  </section>
+
+  <!-- blind test -->
+  <section id="view-blind" role="tabpanel" aria-labelledby="tab-blind" hidden>
+    <p class="lede">Each trial flickers one square for a few seconds, in a shuffled order the
+      viewer can't see, then asks how comfortable it was. Look straight at the square. Run it
+      with a few people: the table averages comfort per condition, and the CSV keeps every trial.</p>
+    <form class="setup" id="blind-setup">
+      <fieldset>
+        <legend>Conditions</legend>
+        <div class="conds" id="conds"></div>
+      </fieldset>
+      <div class="opts">
+        <label class="num">Frequency <select id="b-freq"></select></label>
+        <label class="num">Seconds per trial <input type="number" id="b-secs" min="2" max="30" step="1" value="6"></label>
+        <label class="num">Repeats <input type="number" id="b-reps" min="1" max="5" step="1" value="2"></label>
+        <span class="note" id="b-count"></span>
+      </div>
+      <div><button class="btn primary" type="submit" id="b-start">Start test</button></div>
+    </form>
+    <div class="stage" id="stage" hidden>
+      <canvas id="stage-canvas"></canvas>
+      <div class="say" id="stage-say"></div>
+      <div class="rate" id="rate" hidden>
+        <h3>How comfortable was that to look at?</h3>
+        <div class="scale" id="scale"></div>
+        <p class="note">or press <kbd>1</kbd>–<kbd>5</kbd></p>
+      </div>
+    </div>
+    <div class="results" id="results" hidden></div>
+  </section>
+
+  <!-- headset -->
+  <section id="view-headset" role="tabpanel" aria-labelledby="tab-headset" hidden>
+    <p class="lede">Comfort is half the question; the other half is whether the decoder still
+      sees the SSVEP. A lower depth gives a weaker response, so measure accuracy at each depth
+      with the headset before lowering any config's default.</p>
+    <ol class="steps">
+      <li>Record one cued session per depth, same config and same sitting. Change the order
+        between people so fatigue doesn't always land on the same depth.
+        <pre>OUT=~/brainsync-depth-ab
+.venv/bin/python -m brainsync.record -c two_targets --depth 1.0 --save-dir "$OUT/d1.0"
+.venv/bin/python -m brainsync.record -c two_targets --depth 0.6 --save-dir "$OUT/d0.6"
+.venv/bin/python -m brainsync.record -c two_targets --depth 0.4 --save-dir "$OUT/d0.4"</pre></li>
+      <li>Score each depth's sessions and compare the accuracies.
+        <pre>for d in 1.0 0.6 0.4; do
+  echo "depth $d"; .venv/bin/python -m brainsync.score_cued "$OUT/d$d"/*_cued.npz
+done</pre></li>
+      <li>To include the square wave, copy <code>brainsync/stimulus/configs/two_targets.toml</code>,
+        set <code>waveform = "square"</code> under <code>[stimulus]</code>, and pass the copy with
+        <code>-c path/to/copy.toml</code>. At 60 Hz, 17 Hz is 3.53 frames per cycle, so its square
+        duty cycle is uneven; the config check warns about it.</li>
+      <li>Ask for a comfort rating (1–5) after each session, the same scale as the blind
+        test, so comfort and accuracy line up per depth.</li>
+      <li>For BrainChess, repeat with <code>-c chess_probe</code>: its board-square targets are
+        small and give the weakest response, so a lower depth costs the most there.</li>
+    </ol>
+  </section>
+</div>
+
+<dialog id="gate" aria-labelledby="gate-title">
+  <h2 id="gate-title">Flickering light</h2>
+  <p>This page flickers squares between dark and light. Flicker at 15–25 Hz is the band
+    most likely to trigger a seizure in people with photosensitive epilepsy. Don't continue
+    if you or anyone watching has epilepsy or has had a seizure.</p>
+  <p>Press <kbd>Esc</kbd> at any time to stop the flicker.</p>
+  <div class="actions">
+    <button class="btn" id="gate-no">Cancel</button>
+    <button class="btn primary" id="gate-yes">I understand, enable flicker</button>
+  </div>
+</dialog>
+
+<template id="panel-tpl">
+  <article class="panel">
+    <header><h2><span class="tag"></span><span class="name"></span></h2><span class="badge"></span></header>
+    <canvas class="stim"></canvas>
+    <canvas class="scope" role="img"></canvas>
+    <p class="stats"></p>
+    <div class="controls">
+      <div class="row"><span>Waveform</span>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" value="square">Square</label>
+          <label><input type="radio" value="sine">Sine</label>
+        </div></div>
+      <div class="row"><span>Depth</span>
+        <div class="depth"><input type="range" min="0.1" max="1" step="0.05"><output></output></div></div>
+      <div class="row"><span>Frequency</span><div><select class="freq"></select></div></div>
+      <div class="row"><span>Presets</span><div class="chips"></div></div>
+      <div class="row"><span></span><label class="check"><input type="checkbox" class="hold"> Hold still (mid-grey)</label></div>
+    </div>
+  </article>
+</template>
+
+<!-- the same luminance function the Reels overlay draws with, ported from flicker.py -->
+<script src="../../extension/flicker.js"></script>
+<script>
+(function () {
+  "use strict";
+  const F = window.BrainScrollFlicker;
+  const $ = (id) => document.getElementById(id);
+
+  const STILL_LUM = 0.5;           // still squares sit at the flicker's mean
+  const WARMUP_FRAMES = 30;        // rAF intervals ignored before measuring the refresh
+  const REFRESH_FRAMES = 120;      // intervals in each refresh estimate
+  const SCOPE_FRAMES = 60;         // frames shown on each luminance trace
+  const READY_MS = 1500;           // still grey before each blind trial
+  const FREQS = [8, 10, 12, 15, 17, 20, 24];
+  const GREYS = [];
+  for (let i = 0; i < 256; i++) GREYS.push("rgb(" + i + "," + i + "," + i + ")");
+
+  const PRESETS = [
+    { label: "Square · full", waveform: "square", depth: 1 },
+    { label: "Sine · full (BrainSync now)", waveform: "sine", depth: 1 },
+    { label: "Sine · 0.5", waveform: "sine", depth: 0.5 },
+    { label: "Sine · 0.3", waveform: "sine", depth: 0.3 },
+  ];
+  const CONDITIONS = [
+    { id: "square-1.0", label: "Square · full", waveform: "square", depth: 1, on: true },
+    { id: "sine-1.0", label: "Sine · full", waveform: "sine", depth: 1, on: true },
+    { id: "sine-0.7", label: "Sine · 0.7", waveform: "sine", depth: 0.7, on: false },
+    { id: "sine-0.5", label: "Sine · 0.5", waveform: "sine", depth: 0.5, on: true },
+    { id: "sine-0.3", label: "Sine · 0.3", waveform: "sine", depth: 0.3, on: false },
+  ];
+  const COMFORT = ["Very uncomfortable", "Uncomfortable", "Neutral", "Comfortable", "Very comfortable"];
+
+  // -- refresh: 1000 / the mean of the intervals within 0.5..1.5 times the median, the
+  //    same estimate as the Reels overlay's RefreshMeter -------------------------------------
+  const meter = { seen: 0, since: 0, buf: [], hz: null };
+  function pushInterval(dt) {
+    if (!(dt > 0) || !Number.isFinite(dt)) return;
+    if (meter.seen++ < WARMUP_FRAMES) return;
+    meter.buf.push(dt);
+    if (meter.buf.length > REFRESH_FRAMES) meter.buf.shift();
+    if (meter.buf.length === REFRESH_FRAMES && ++meter.since >= REFRESH_FRAMES) {
+      meter.since = 0;
+      const sorted = meter.buf.slice().sort((a, b) => a - b);
+      const med = sorted[sorted.length >> 1];
+      let sum = 0, n = 0;
+      for (const v of meter.buf) if (v > 0.5 * med && v < 1.5 * med) { sum += v; n++; }
+      const first = meter.hz === null;
+      meter.hz = 1000 / (sum / n);
+      if (first) refreshReady();
+    }
+  }
+
+  // -- flicker run --------------------------------------------------------------------------
+  // One run at a time. Its refresh is fixed when it starts, so the phase cannot jump when
+  // the estimate moves, and frame n is the number of measured refresh periods since its
+  // first frame (a dropped frame skips a luminance instead of delaying the rest). The
+  // luminance itself uses the nominal refresh, the measured one rounded, as the PsychoPy
+  // stimulus adopts round(measured): 15 Hz at 60 Hz is exactly 4 frames per cycle.
+  const run = { active: false, hz: null, period: null, t0: null, dropped: 0 };
+  let totalDropped = 0;
+  const nominal = (hz) => Math.round(hz);
+
+  function startRun(hz) {
+    run.active = true;
+    run.hz = nominal(hz);
+    run.period = 1000 / hz;
+    run.t0 = null;
+    run.dropped = 0;
+    $("stop-all").hidden = false;
+  }
+  function stopRun() {
+    run.active = false;
+    $("stop-all").hidden = true;
+  }
+  /** Frame index on rAF time t; the first call after startRun is frame 0. */
+  function frameAt(t) {
+    if (run.t0 === null) run.t0 = t;
+    return Math.round((t - run.t0) / run.period);
+  }
+
+  // -- photosensitivity warning: asked once per page load, before the first flicker ----------
+  let acknowledged = false;
+  let pendingStart = null;
+  function withAck(fn) {
+    if (acknowledged) { fn(); return; }
+    pendingStart = fn;
+    $("gate").showModal();
+  }
+  $("gate-yes").addEventListener("click", () => {
+    acknowledged = true;
+    $("gate").close();
+    const fn = pendingStart;
+    pendingStart = null;
+    if (fn) fn();
+  });
+  $("gate-no").addEventListener("click", () => { pendingStart = null; $("gate").close(); });
+  $("gate").addEventListener("cancel", () => { pendingStart = null; });
+
+  // -- canvases ----------------------------------------------------------------------------
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    return { w, h, dpr };
+  }
+
+  /** Black backing with a centred grey square, its side `frac` of the shorter edge, and a
+   *  dim outline that never changes, so a black frame of the flicker still shows the target. */
+  function drawSquare(canvas, lum, frac) {
+    const { w, h, dpr } = fit(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    const side = Math.round(Math.min(w, h) * frac);
+    const x = Math.round((w - side) / 2), y = Math.round((h - side) / 2);
+    ctx.fillStyle = GREYS[Math.round(lum * 255)];
+    ctx.fillRect(x, y, side, side);
+    const gap = 6 * dpr;
+    ctx.strokeStyle = "#3A3F42";
+    ctx.lineWidth = dpr;
+    ctx.strokeRect(x - gap, y - gap, side + 2 * gap, side + 2 * gap);
+  }
+
+  const css = getComputedStyle(document.documentElement);
+  const token = (name) => css.getPropertyValue(name).trim();
+
+  /** Luminance per frame as a stepped trace: each frame holds its value for one period. */
+  function drawScope(canvas, values, count, color) {
+    const { w, h, dpr } = fit(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, w, h);
+    const padL = 34 * dpr, padR = 6 * dpr, padY = 10 * dpr;
+    const y = (v) => padY + (1 - v) * (h - 2 * padY);
+    ctx.font = 11 * dpr + "px " + token("--mono");
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = dpr;
+    for (const v of [0, 0.5, 1]) {
+      ctx.strokeStyle = token("--rule");
+      ctx.beginPath(); ctx.moveTo(padL, y(v)); ctx.lineTo(w - padR, y(v)); ctx.stroke();
+      ctx.fillStyle = token("--ink-2");
+      ctx.fillText(v === 0.5 ? ".5" : String(v), 6 * dpr, y(v));
+    }
+    if (!count) return;
+    const step = (w - padL - padR) / SCOPE_FRAMES;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) {
+      const x = padL + i * step, yy = y(values[i]);
+      if (i === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+      ctx.lineTo(x + step, yy);
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (let i = 0; i < count; i++) {
+      ctx.beginPath();
+      ctx.arc(padL + (i + 0.5) * step, y(values[i]), 2 * dpr, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  function freqOptions(select, value) {
+    select.textContent = "";
+    const hz = nominal(meter.hz || 60);
+    for (const f of FREQS) {
+      if (f >= hz / 2) continue;   // at or above half the refresh the flicker aliases
+      const o = document.createElement("option");
+      o.value = String(f);
+      o.textContent = f + " Hz" + (F.photosensitive(f) ? " ⚠" : "");
+      select.appendChild(o);
+    }
+    select.value = String(value);
+    if (select.selectedIndex < 0) select.selectedIndex = 0;
+  }
+
+  // -- side by side ------------------------------------------------------------------------
+  const panels = [
+    { name: "A", waveform: "square", depth: 1, freq: 15, hold: false, color: "--a" },
+    { name: "B", waveform: "sine", depth: 0.5, freq: 15, hold: false, color: "--b" },
+  ];
+
+  function buildPanels() {
+    const tpl = $("panel-tpl");
+    panels.forEach((p, k) => {
+      const el = tpl.content.firstElementChild.cloneNode(true);
+      el.dataset.k = String(k);
+      el.querySelector(".name").textContent = p.name;
+      const radios = el.querySelectorAll(".seg input");
+      radios.forEach((r) => { r.name = "wave-" + k; });
+      el.querySelector(".seg").setAttribute("aria-label", "Waveform " + p.name);
+      const range = el.querySelector("input[type=range]");
+      range.setAttribute("aria-label", "Depth " + p.name);
+      const out = el.querySelector("output");
+      const freq = el.querySelector("select.freq");
+      freq.setAttribute("aria-label", "Frequency " + p.name);
+      const scope = el.querySelector("canvas.scope");
+      for (const pre of PRESETS) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = pre.label;
+        b.addEventListener("click", () => { p.waveform = pre.waveform; p.depth = pre.depth; sync(); });
+        el.querySelector(".chips").appendChild(b);
+      }
+      radios.forEach((r) => r.addEventListener("change", () => { p.waveform = r.value; sync(); }));
+      range.addEventListener("input", () => { p.depth = Number(range.value); sync(); });
+      freq.addEventListener("change", () => { p.freq = Number(freq.value); sync(); });
+      el.querySelector(".hold").addEventListener("change", (e) => { p.hold = e.target.checked; });
+
+      function sync() {
+        radios.forEach((r) => { r.checked = r.value === p.waveform; });
+        range.value = String(p.depth);
+        out.value = p.depth.toFixed(2);
+        el.querySelector(".badge").textContent = F.photosensitive(p.freq) ? "⚠ 15–25 Hz band" : "";
+        el.querySelector(".stats").innerHTML = statsLine(p);
+        scope.setAttribute("aria-label", "Luminance trace of " + p.name + ": " + p.waveform +
+                           ", depth " + p.depth.toFixed(2) + ", " + p.freq + " Hz");
+        p.preview = null;
+      }
+      Object.assign(p, {
+        stim: el.querySelector("canvas.stim"), scope, freqSelect: freq, sync,
+        trace: new Float64Array(SCOPE_FRAMES), traceCount: 0, preview: null,
+      });
+      freqOptions(freq, p.freq);
+      p.freq = Number(freq.value);
+      sync();
+      $("panels").appendChild(el);
+    });
+  }
+
+  /** Frames per cycle, distinct 8-bit greys over one second, and the luminance range. */
+  function statsLine(p) {
+    const hz = nominal(meter.hz || 60);
+    const levels = new Set();
+    let lo = 1, hi = 0;
+    for (let i = 0; i < Math.round(hz); i++) {
+      const v = F.luminance(p.freq, 0, i, hz, p.waveform, p.depth);
+      levels.add(Math.round(v * 255));
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+    const fpc = hz / p.freq;
+    let s = fpc.toFixed(2) + " frames/cycle · " + levels.size + " grey levels · " +
+            Math.round(lo * 100) + "–" + Math.round(hi * 100) + "% of white";
+    const k = Math.round(fpc);
+    if (p.waveform === "square" && !(Math.abs(fpc - k) < 1e-6 && k % 2 === 0)) {
+      s += ' · <span class="warn">uneven duty cycle</span>';
+    }
+    if (!meter.hz) s += " (assuming 60 Hz)";
+    return s;
+  }
+
+  /** The first SCOPE_FRAMES frames of a panel's flicker, traced while it is still. */
+  function preview(p) {
+    if (!p.preview) {
+      const hz = nominal(meter.hz || 60);
+      p.preview = new Float64Array(SCOPE_FRAMES);
+      for (let i = 0; i < SCOPE_FRAMES; i++) {
+        p.preview[i] = F.luminance(p.freq, 0, i, hz, p.waveform, p.depth);
+      }
+    }
+    return p.preview;
+  }
+
+  function drawCompare(t) {
+    const n = run.active ? frameAt(t) : 0;
+    for (const p of panels) {
+      const lum = run.active && !p.hold
+        ? F.luminance(p.freq, 0, n, run.hz, p.waveform, p.depth) : STILL_LUM;
+      drawSquare(p.stim, lum, 0.62);
+      if (run.active) {
+        if (p.traceCount < SCOPE_FRAMES) p.trace[p.traceCount++] = lum;
+        else { p.trace.copyWithin(0, 1); p.trace[SCOPE_FRAMES - 1] = lum; }
+        drawScope(p.scope, p.trace, p.traceCount, token(p.color));
+      } else {
+        drawScope(p.scope, preview(p), SCOPE_FRAMES, token(p.color));
+      }
+    }
+  }
+
+  function setCompareRunning(on) {
+    if (on) {
+      if (!meter.hz) return;
+      withAck(() => {
+        for (const p of panels) p.traceCount = 0;
+        startRun(meter.hz);
+        $("cmp-run").textContent = "Stop flicker";
+      });
+    } else {
+      stopRun();
+      $("cmp-run").textContent = "Start flicker";
+    }
+  }
+  $("cmp-run").addEventListener("click", () => setCompareRunning(!run.active));
+
+  // -- blind comfort test ------------------------------------------------------------------
+  // Stages: ready (still grey, READY_MS) -> flicker (secs) -> rate (wait for 1-5) -> ready ...
+  const blind = { trials: [], i: 0, stage: "idle", stageT0: null, results: [], freq: 15, secs: 6, hz: 60 };
+
+  function buildBlindSetup() {
+    for (const c of CONDITIONS) {
+      const l = document.createElement("label");
+      l.className = "check";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = c.on;
+      box.dataset.id = c.id;
+      box.addEventListener("change", countTrials);
+      l.append(box, " " + c.label);
+      $("conds").appendChild(l);
+    }
+    freqOptions($("b-freq"), 15);
+    $("b-reps").addEventListener("input", countTrials);
+    $("b-secs").addEventListener("input", countTrials);
+    COMFORT.forEach((label, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = "<b>" + (i + 1) + "</b><small>" + label + "</small>";
+      b.addEventListener("click", () => rate(i + 1));
+      $("scale").appendChild(b);
+    });
+    countTrials();
+  }
+
+  function chosenConditions() {
+    const ids = new Set([...document.querySelectorAll("#conds input:checked")].map((b) => b.dataset.id));
+    return CONDITIONS.filter((c) => ids.has(c.id));
+  }
+
+  function clampInt(v, lo, hi) {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : lo;
+  }
+
+  function countTrials() {
+    const n = chosenConditions().length * clampInt($("b-reps").value, 1, 5);
+    const secs = clampInt($("b-secs").value, 2, 30);
+    const minutes = Math.max(1, Math.round(n * (secs + READY_MS / 1000 + 3) / 60));
+    $("b-count").textContent = n + " trials · about " + minutes + " min";
+    $("b-start").disabled = !meter.hz || chosenConditions().length < 2;
+  }
+
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  $("blind-setup").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const conds = chosenConditions();
+    if (!meter.hz || conds.length < 2) return;
+    withAck(() => {
+      const reps = clampInt($("b-reps").value, 1, 5);
+      blind.trials = [];
+      for (let r = 0; r < reps; r++) blind.trials.push(...shuffle(conds.slice()));
+      Object.assign(blind, {
+        i: 0, results: [], freq: Number($("b-freq").value),
+        secs: clampInt($("b-secs").value, 2, 30), hz: meter.hz,
+      });
+      $("blind-setup").hidden = true;
+      $("results").hidden = true;
+      $("stage").hidden = false;
+      enterStage("ready");
+    });
+  });
+
+  function enterStage(stage) {
+    blind.stage = stage;
+    blind.stageT0 = null;   // set from the next rAF timestamp
+    $("rate").hidden = stage !== "rate";
+    const of = "trial " + (blind.i + 1) + " of " + blind.trials.length;
+    $("stage-say").textContent = stage === "ready" ? of + " · look at the centre"
+      : stage === "flicker" ? of : "";
+    if (stage === "rate") $("scale").firstChild.focus();
+  }
+
+  /** Advance the blind test on rAF time t; returns this frame's luminance. */
+  function stepBlind(t) {
+    if (blind.stageT0 === null) blind.stageT0 = t;
+    if (blind.stage === "ready" && t - blind.stageT0 >= READY_MS) {
+      startRun(blind.hz);
+      enterStage("flicker");
+    }
+    if (blind.stage !== "flicker") return STILL_LUM;
+    const n = frameAt(t);
+    if (n >= Math.round(blind.secs * run.hz)) {
+      blind.trialDropped = run.dropped;
+      stopRun();
+      enterStage("rate");
+      return STILL_LUM;
+    }
+    const c = blind.trials[blind.i];
+    return F.luminance(blind.freq, 0, n, run.hz, c.waveform, c.depth);
+  }
+
+  function rate(score) {
+    if (blind.stage !== "rate") return;
+    const c = blind.trials[blind.i];
+    blind.results.push({
+      trial: blind.i + 1, condition: c.id, waveform: c.waveform, depth: c.depth,
+      freq_hz: blind.freq, refresh_hz: blind.hz.toFixed(2), seconds: blind.secs,
+      comfort: score, dropped_frames: blind.trialDropped || 0,
+    });
+    blind.i++;
+    if (blind.i < blind.trials.length) enterStage("ready");
+    else finishBlind(false);
+  }
+
+  function finishBlind(aborted) {
+    stopRun();
+    blind.stage = "idle";
+    $("stage").hidden = true;
+    $("rate").hidden = true;
+    $("blind-setup").hidden = false;
+    showResults(aborted);
+  }
+
+  function showResults(aborted) {
+    const host = $("results");
+    host.textContent = "";
+    host.hidden = false;
+    if (aborted) {
+      const p = document.createElement("p");
+      p.className = "note warn";
+      p.textContent = "Test stopped after " + blind.results.length + " of " + blind.trials.length + " trials.";
+      host.appendChild(p);
+    }
+    if (!blind.results.length) return;
+    const by = new Map();
+    for (const r of blind.results) {
+      if (!by.has(r.condition)) by.set(r.condition, []);
+      by.get(r.condition).push(r.comfort);
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    const table = document.createElement("table");
+    table.innerHTML = "<thead><tr><th>Condition</th><th>Mean comfort</th><th></th><th>Ratings</th></tr></thead>";
+    const body = document.createElement("tbody");
+    for (const c of CONDITIONS) {
+      const rs = by.get(c.id);
+      if (!rs) continue;
+      const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td></td><td class=num></td><td><div class=meter><i></i></div></td><td class=num></td>";
+      tr.children[0].textContent = c.label;
+      tr.children[1].textContent = mean.toFixed(2) + " / 5";
+      tr.querySelector(".meter i").style.width = (mean / 5 * 100).toFixed(1) + "%";
+      tr.children[3].textContent = rs.join(", ");
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    host.appendChild(wrap);
+    const dropped = blind.results.reduce((a, r) => a + r.dropped_frames, 0);
+    const note = document.createElement("p");
+    note.className = dropped ? "note warn" : "note";
+    note.textContent = blind.freq + " Hz at " + blind.hz.toFixed(2) + " Hz refresh · " +
+      (dropped ? dropped + " dropped frames during the flicker; close other tabs and rerun if that's many"
+               : "no dropped frames");
+    host.appendChild(note);
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const dl = document.createElement("button");
+    dl.className = "btn";
+    dl.textContent = "Download CSV";
+    dl.addEventListener("click", downloadCsv);
+    bar.appendChild(dl);
+    host.appendChild(bar);
+  }
+
+  function downloadCsv() {
+    const cols = ["trial", "condition", "waveform", "depth", "freq_hz", "refresh_hz", "seconds",
+                  "comfort", "dropped_frames"];
+    const lines = [cols.join(",")].concat(blind.results.map((r) => cols.map((c) => r[c]).join(",")));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }));
+    a.download = "flicker-comfort.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  // -- views, keys -------------------------------------------------------------------------
+  let mode = "compare";
+  const VIEWS = ["compare", "blind", "headset"];
+  function show(view) {
+    stopAll();
+    mode = view;
+    for (const v of VIEWS) {
+      $("tab-" + v).setAttribute("aria-selected", String(v === view));
+      $("view-" + v).hidden = v !== view;
+    }
+  }
+  for (const v of VIEWS) $("tab-" + v).addEventListener("click", () => show(v));
+
+  function stopAll() {
+    if (blind.stage !== "idle") finishBlind(true);
+    setCompareRunning(false);
+  }
+  $("stop-all").addEventListener("click", stopAll);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { stopAll(); return; }
+    if ($("gate").open) return;
+    if (mode === "compare" && e.key === " " && !/^(INPUT|SELECT|BUTTON|TEXTAREA)$/.test(e.target.tagName)) {
+      e.preventDefault();
+      setCompareRunning(!run.active);
+    } else if (mode === "blind" && blind.stage === "rate" && /^[1-5]$/.test(e.key)) {
+      rate(Number(e.key));
+    }
+  });
+
+  /** First refresh estimate: enable the flicker and drop frequencies the display can't show. */
+  function refreshReady() {
+    $("cmp-run").disabled = false;
+    for (const p of panels) {
+      freqOptions(p.freqSelect, p.freq);
+      p.freq = Number(p.freqSelect.value);
+      p.sync();
+    }
+    freqOptions($("b-freq"), Number($("b-freq").value) || 15);
+    countTrials();
+  }
+
+  // -- the frame loop ----------------------------------------------------------------------
+  let last = null;
+  function tick(t) {
+    if (last !== null) {
+      const dt = t - last;
+      pushInterval(dt);
+      if (run.active && run.t0 !== null && dt > F.DROP_FACTOR * run.period) {
+        run.dropped++;
+        totalDropped++;
+      }
+    }
+    last = t;
+    if (mode === "compare") drawCompare(t);
+    else if (mode === "blind" && blind.stage !== "idle") drawSquare($("stage-canvas"), stepBlind(t), 0.5);
+    $("hz").textContent = meter.hz ? meter.hz.toFixed(2) + " Hz" : "measuring…";
+    $("drops").textContent = String(totalDropped);
+    $("drops").classList.toggle("bad", totalDropped > 0);
+    requestAnimationFrame(tick);
+  }
+
+  $("cmp-run").disabled = true;
+  buildPanels();
+  buildBlindSetup();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

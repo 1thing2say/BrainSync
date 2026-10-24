@@ -77,6 +77,22 @@ instead, so synthetic files never mix with real ones.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
 
+## Flicker depth and the Flicker Lab
+
+Every config flickers with a sine wave. `[stimulus] depth` (or `--depth` on
+`brainsync.stimulus` and `brainsync.record`) sets how far it swings around mid-grey:
+1.0, the default, is full black to white, and 0.5 is a gentler 25-75% grey flicker with
+the same mean. A lower depth gives a weaker SSVEP, so no config lowers it yet.
+
+`web/flicker-lab/index.html` compares the waveforms by eye. Open it in a browser, no
+server needed. It draws with `extension/flicker.js`, the same luminance as the Reels
+overlay, and has three views:
+- **Side by side:** two squares, each with its own waveform, depth and frequency, and a
+  trace of the grey level on every frame.
+- **Blind comfort test:** a shuffled set of conditions, each rated 1-5 after it plays,
+  with a per-condition table and a CSV.
+- **Headset test:** the record and score commands for an accuracy A/B across depths.
+
 ## Phase 0: frequency selection
 
 Which flicker frequencies does this user's EEG follow? Each single-target session
