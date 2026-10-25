@@ -9,24 +9,11 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://www.instagram.com/*"
-      ],
-      "js": [
-        "flicker.js",
-        "cvep.js",
-        "scroller.js",
-        "overlay.js",
-        "content.js"
-      ],
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["flicker.js", "cvep.js", "scroller.js", "overlay.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
-  "permissions": [
-    "debugger",
-    "storage"
-  ],
-  "host_permissions": [
-    "https://www.instagram.com/*"
-  ]
+  "permissions": ["debugger", "storage"],
+  "host_permissions": ["https://www.instagram.com/*"]
 }
