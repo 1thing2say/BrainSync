@@ -943,8 +943,9 @@ class CodeEngine:
 
     def _since_start(self, X: np.ndarray, t: np.ndarray,
                      events: list[tuple]) -> tuple[np.ndarray, np.ndarray, list[tuple]]:
-        """Samples and cycle markers from this command on (an earlier flicker's are dropped)."""
-        keep = t >= self._t_start - ONSET_SLACK_S
+        """Samples from ``pad_s`` before this command on (the filter's lead-in before the first
+        cycle) and cycle markers from it on (an earlier flicker's are dropped)."""
+        keep = t >= self._t_start - float(getattr(self.decoder, "pad_s", ONSET_SLACK_S))
         if not keep.all():
             X, t = X[:, keep], t[keep]
         return X, t, [e for e in events if e[1] == "cycle" and e[0] >= self._t_start - ONSET_SLACK_S]
