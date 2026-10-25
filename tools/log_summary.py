@@ -8,9 +8,11 @@ total when there is more than one:
 - the partner's C/W marks (judgment events) and the share marked correct;
 - spoken replies: seconds per reply (from the partner's line or the previous reply), selections
   per reply, how often the reply was option 1 (``spoken.rank``), and which list it came from;
-- Claude pages: requests and how each ended (shown, timed out, ignored, failed), median and p95
-  of ``llm_ok`` ms and of the wall-clock time from the request to the page on screen (or given
-  up), the fallback rate and tokens;
+- Claude pages (any LLM backend: a local llama-server, then Claude): requests and how each ended
+  (shown, timed out, ignored, failed), median and p95 of ``llm_ok`` ms (overall and per backend)
+  and of the wall-clock time from the request to the page on screen (or given up), which backend
+  answered, the fallback rate and tokens. A backend that hands over to the next one (``next`` on
+  its failure) does not end the request: only the last backend's failure does;
 - Cartesia: clips ok / failed, median ms, replies spoken with a clip vs the browser voice;
 - partner input: typed vs spoken lines, queued vs interrupting, mic states seen;
 - warnings worth acting on.
@@ -132,6 +134,9 @@ class Stats:
     replies: list = field(default_factory=list)  # one dict per spoken reply
     llm_requests: list = field(default_factory=list)  # one dict per Claude page request
     llm_ok_ms: list = field(default_factory=list)
+    llm_ok_by: list = field(default_factory=list)  # [backend, ms] per llm_ok that names one
+    llm_answered: Counter = field(default_factory=Counter)  # pages written, per backend
+    llm_handovers: Counter = field(default_factory=Counter)  # "local -> claude"
     llm_attempt_failures: Counter = field(default_factory=Counter)  # reason (status) per attempt
     llm_invalid: int = 0
     tokens_in: int = 0
@@ -444,8 +449,13 @@ class _Session:
     def _on_llm_ok(self, t: float | None, e: dict) -> None:
         req = self._request(e)
         req["ok_t"] = t
+        backend = e.get("backend")
         if isinstance(e.get("ms"), (int, float)):
             self.s.llm_ok_ms.append(float(e["ms"]))
+            if isinstance(backend, str):
+                self.s.llm_ok_by.append([backend, float(e["ms"])])
+        if isinstance(backend, str):
+            self.s.llm_answered[backend] += 1
         self._tokens(e)
         options = [o for o in e.get("options") or [] if isinstance(o, str)]
         self.llm_sentences.update(options)
@@ -456,12 +466,19 @@ class _Session:
         self._request(e)["invalid"] += 1
         self.s.llm_invalid += 1
         self._tokens(e)
+        if e.get("next"):
+            self.s.llm_handovers[f"{e.get('backend')} -> {e['next']}"] += 1
 
     def _on_llm_failed(self, t: float | None, e: dict) -> None:
         req = self._request(e)
         reason = str(e.get("reason") or "?")
         status = e.get("status")
-        self.s.llm_attempt_failures[f"{reason} ({status})" if status else reason] += 1
+        key = f"{reason} ({status})" if status else reason
+        backend = e.get("backend")
+        self.s.llm_attempt_failures[f"{backend}: {key}" if isinstance(backend, str) else key] += 1
+        if e.get("next"):  # this backend handed over: the request goes on with the next one
+            self.s.llm_handovers[f"{backend} -> {e['next']}"] += 1
+            return
         req["failed_t"], req["failed_reason"] = t, reason
         if reason == "timeout" and req["timeout_t"] is None:
             req["timeout_t"] = t
@@ -590,6 +607,10 @@ def summarize(s: Stats) -> dict[str, Any]:
             "requests": len(reqs), "by_reason": dict(Counter(r["reason"] for r in reqs)),
             "outcomes": dict(outcomes),
             "ok_ms": spread(s.llm_ok_ms),
+            # Per backend: a local model and Claude have very different latencies.
+            "ok_ms_by_backend": {b: spread([ms for name, ms in s.llm_ok_by if name == b])
+                                 for b in sorted({name for name, _ in s.llm_ok_by})},
+            "answered_by": dict(s.llm_answered), "handovers": dict(s.llm_handovers),
             "answer_s": spread([r["answer_s"] for r in reqs if r["answer_s"] is not None]),
             "screen_s": spread([r["screen_s"] for r in reqs if r["screen_s"] is not None]),
             # Of the requests that decided a screen: how often the fixed list stood in.
@@ -638,8 +659,10 @@ def warnings(summary: dict[str, Any]) -> list[str]:
                    "requests: see the Claude line for why")
     refused = [k for k in llm["attempt_failures"] if re.search(r"\((401|403|404)\)", k)]
     if refused:
-        out.append(f"Claude rejected the request ({', '.join(refused)}): check ANTHROPIC_API_KEY "
-                   "and llm.model")
+        names = {k.split(": ", 1)[0] for k in refused if ": " in k} or {"claude"}
+        who = "Claude" if names == {"claude"} else ", ".join(sorted(names))
+        out.append(f"{who} rejected the request ({', '.join(refused)}): check the key "
+                   "(api_key_env) and model of that backend in llm.backends")
     if llm["warm_failed"]:
         out.append(f"the Claude keep-alive failed {llm['warm_failed']} time(s): the connection "
                    "was dropping")
@@ -801,6 +824,12 @@ def format_report(title: str, summary: dict[str, Any]) -> str:
             + (f"; failed attempts {_counts(llm['attempt_failures'])}" if llm["attempt_failures"] else "")
             + (f"; invalid {llm['invalid']}" if llm["invalid"] else ""),
         ]
+        if llm["answered_by"] or llm["handovers"]:
+            lines.append(
+                f"          answered by {_counts(llm['answered_by']) or 'none'}"
+                + "".join(f"; {name} llm_ok {_spread_text(sp, ' ms', 0)}"
+                          for name, sp in llm["ok_ms_by_backend"].items())
+                + (f"; handed over {_counts(llm['handovers'])}" if llm["handovers"] else ""))
     else:
         lines.append("Claude    no requests")
     failed = sum(tts["failed"].values())

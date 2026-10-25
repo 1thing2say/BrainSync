@@ -5,15 +5,19 @@ it passed, a fix. Exits 0 only if nothing FAILed; a WARN is a fallback the demo 
 browser voice, keyboard mode) or something to look at.
 
 1. config/default.yaml is valid.
-2. ANTHROPIC_API_KEY and CARTESIA_API_KEY are set (environment or .env; names only, never values).
+2. Each LLM backend's key (``llm.backends``: BRAINSYNC_LLAMA_API_KEY for the local llama-server,
+   ANTHROPIC_API_KEY for Claude) and CARTESIA_API_KEY are set (environment or .env; names only,
+   never values). Without the llama-server key the local backend is simply off (SKIP).
 3. Network: DNS, TCP connect (about one ping), TLS and HTTP round trips to api.anthropic.com and
    api.cartesia.ai. A congested link (1-4 s ping on 2026-10-24) timed out every Claude page.
-4. One free Claude call (GET /v1/models/{llm.model}, no tokens): the key and the model work.
+4. Each LLM backend with a key: Claude with one free call (GET /v1/models/{model}, no tokens), a
+   local llama-server with GET /health and /v1/models (on this computer, so also run with
+   --skip-network). A backend that fails is a WARN while another one can still write the pages.
 5. One short Cartesia synthesis in the configured voice and format; WARN if it fails, since the
    browser voice then speaks every reply. Then how many fixed-list clips are already on disk
    (speech.cache_dir); WARN if some are missing (python tools/prerender_tts.py fetches them).
 6. The running server (GET /api/health and /api/config at --url): decoder, display, partner page,
-   mic, Claude keep-alive, Cartesia.
+   mic, each LLM backend (key, keep-alive, which one wrote the last page), Cartesia.
 Then the headset checklist is printed as a reminder (manual, not checked).
 
     python tools/preflight.py                        # server at http://127.0.0.1:8000
@@ -46,6 +50,7 @@ from app.config import (  # noqa: E402
     STATE_DIR,
     AppConfig,
     ConfigError,
+    LLMBackend,
     load_config,
     load_env,
     load_intents,
@@ -57,7 +62,7 @@ ANTHROPIC_HOST = "api.anthropic.com"
 CARTESIA_HOST = httpx.URL(TTS_URL).host
 ANTHROPIC_VERSION = "2023-06-01"  # the Messages API version header
 TEST_SENTENCE = "Preflight check."  # two words: a small clip, a real synthesis
-KEYS = ("ANTHROPIC_API_KEY", "CARTESIA_API_KEY")
+KEYS = ("ANTHROPIC_API_KEY", "BRAINSYNC_LLAMA_API_KEY", "CARTESIA_API_KEY")  # redacted always
 SECRET = re.compile(r"sk-ant-[A-Za-z0-9_\-]+|sk_car_[A-Za-z0-9_\-]+")
 
 HEADSET_CHECKLIST = [
@@ -107,24 +112,46 @@ def check_config(path: str | Path | None = None) -> tuple[Result, AppConfig | No
     return Result("config", PASS, f"{cfg.menus.mode} mode, {slots}, {cfg.stim.waveform}"), cfg
 
 
+def missing_key_level(backend: LLMBackend, backends: list[LLMBackend], any_on: bool) -> str:
+    """How bad a backend without its key is. With another backend on: a local llama-server is
+    optional (SKIP: a laptop has none), Claude is the rescue (WARN). With none on, every page is
+    a fixed list: FAIL on Claude (or on every backend when none is Claude)."""
+    if any_on:
+        return SKIP if backend.kind == "llama" else WARN
+    claude = any(b.kind == "anthropic" for b in backends)
+    return FAIL if backend.kind == "anthropic" or not claude else SKIP
+
+
 def check_keys(cfg: AppConfig, env: Mapping[str, str]) -> list[Result]:
     """Whether each key is set. Only names are reported, never values."""
-    needed = {
-        "ANTHROPIC_API_KEY": (cfg.menus.dynamic, FAIL, "pages are fixed lists, not Claude's",
-                              "menus.dynamic is false"),
-        "CARTESIA_API_KEY": (cfg.speech.provider == "cartesia", WARN,
-                             "the browser voice speaks every reply",
-                             f"speech.provider is {cfg.speech.provider}"),
-    }
+    backends = cfg.llm.backends
+    on = [b for b in backends if env.get(b.api_key_env)]
     results = []
-    for name, (used, level, without, unused) in needed.items():
-        if env.get(name):
+    for b in backends:
+        name = b.api_key_env
+        if any(r.name == name for r in results):
+            continue  # two backends sharing a key
+        if not cfg.menus.dynamic:
+            results.append(Result(name, SKIP, "not needed: menus.dynamic is false"))
+        elif env.get(name):
             results.append(Result(name, PASS, "set"))
-        elif not used:
-            results.append(Result(name, SKIP, f"not needed: {unused}"))
         else:
-            results.append(Result(name, level, f"not set: {without}",
-                                  f"add {name}=... to .env at the repo root"))
+            level = missing_key_level(b, backends, bool(on))
+            if on:
+                without = f"backend {b.name} off; {', then '.join(x.name for x in on)} writes the pages"
+            else:
+                without = "pages are fixed lists, no LLM writes them"
+            fix = ("" if level == SKIP else f"add {name}=... to .env at the repo root" + (
+                "" if b.kind == "anthropic" else " (the key in llama-server's --api-key-file)"))
+            results.append(Result(name, level, f"not set: {without}", fix))
+    if env.get("CARTESIA_API_KEY"):
+        results.append(Result("CARTESIA_API_KEY", PASS, "set"))
+    elif cfg.speech.provider != "cartesia":
+        results.append(Result("CARTESIA_API_KEY", SKIP,
+                              f"not needed: speech.provider is {cfg.speech.provider}"))
+    else:
+        results.append(Result("CARTESIA_API_KEY", WARN, "not set: the browser voice speaks every reply",
+                              "add CARTESIA_API_KEY=... to .env at the repo root"))
     return results
 
 
@@ -238,33 +265,88 @@ def _error_detail(response: httpx.Response, secrets: list[str]) -> str:
     return redact(text[:160], secrets)
 
 
+def _first_claude(cfg: AppConfig) -> LLMBackend | None:
+    return next((b for b in cfg.llm.backends if b.kind == "anthropic"), None)
+
+
 def check_claude(cfg: AppConfig, api_key: str | None, *, timeout: float = 10.0,
                  transport: httpx.BaseTransport | None = None,
-                 clock: Callable[[], float] = time.perf_counter) -> Result:
-    """GET /v1/models/{model}: free (no tokens), proves the key and the model name."""
-    model = cfg.llm.model
+                 clock: Callable[[], float] = time.perf_counter,
+                 backend: LLMBackend | None = None, others_on: bool = False) -> Result:
+    """GET /v1/models/{model}: free (no tokens), proves the key and the model name. ``backend``:
+    the Claude backend to check (the first one by default). ``others_on``: another backend can
+    write the pages, so a failure here is a WARN."""
+    backend = backend or _first_claude(cfg)
+    name = backend.name if backend else "claude"
     if not cfg.menus.dynamic:
-        return Result("claude", SKIP, "menus.dynamic is false: fixed lists only")
+        return Result(name, SKIP, "menus.dynamic is false: fixed lists only")
+    if backend is None:
+        return Result(name, SKIP, "no Claude backend in llm.backends")
     if not api_key:
-        return Result("claude", SKIP, "no ANTHROPIC_API_KEY (see above)")
+        return Result(name, SKIP, f"no {backend.api_key_env} (see above)")
+    model, bad = backend.model, WARN if others_on else FAIL
+    without = "the other backends write the pages" if others_on else "pages would be fixed lists"
+    base = (backend.base_url or f"https://{ANTHROPIC_HOST}").rstrip("/")
     started = clock()
     try:
         with httpx.Client(transport=transport, timeout=timeout) as client:
-            r = client.get(f"https://{ANTHROPIC_HOST}/v1/models/{model}",
+            r = client.get(f"{base}/v1/models/{model}",
                            headers={"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION})
     except httpx.HTTPError as exc:
-        return Result("claude", FAIL, f"no answer ({type(exc).__name__}): pages would be fixed lists",
+        return Result(name, bad, f"no answer ({type(exc).__name__}): {without}",
                       "check the network (above)")
     ms = (clock() - started) * 1000
-    data = {"ms": round(ms), "status": r.status_code, "model": model}
+    data = {"ms": round(ms), "status": r.status_code, "model": model, "backend": name}
     if r.status_code == 200:
-        return Result("claude", PASS, f"key and model {model} work ({ms:.0f} ms, cold connection)",
+        return Result(name, PASS, f"key and model {model} work ({ms:.0f} ms, cold connection)",
                       data=data)
-    fix = {401: "ANTHROPIC_API_KEY is wrong or revoked: replace it in .env",
+    fix = {401: f"{backend.api_key_env} is wrong or revoked: replace it in .env",
            403: "the key has no access to this model or API",
-           404: f"no model named {model}: check llm.model in config/default.yaml"}.get(
-               r.status_code, "try again in a minute; pages fall back to fixed lists meanwhile")
-    return Result("claude", FAIL, f"HTTP {r.status_code}: {_error_detail(r, [api_key])}", fix, data)
+           404: f"no model named {model}: check llm.backends ({name}) in config/default.yaml"}.get(
+               r.status_code, "try again in a minute; pages fall back meanwhile")
+    return Result(name, bad, f"HTTP {r.status_code}: {_error_detail(r, [api_key])}", fix, data)
+
+
+def check_local(backend: LLMBackend, api_key: str | None, *, others_on: bool = False,
+                timeout: float = 5.0, transport: httpx.BaseTransport | None = None,
+                clock: Callable[[], float] = time.perf_counter) -> Result:
+    """A local llama-server: GET /health (no key; 503 while the model loads), then /v1/models with
+    the key. On this computer, so it runs with --skip-network too."""
+    name, bad = backend.name, WARN if others_on else FAIL
+    if not api_key:
+        return Result(name, SKIP, f"no {backend.api_key_env}: backend off")
+    without = "the next backend writes the pages" if others_on else "pages would be fixed lists"
+    base = backend.base_url.rstrip("/")
+    started = clock()
+    try:
+        with httpx.Client(transport=transport, timeout=timeout) as client:
+            health = client.get(f"{base}/health")
+            models = (client.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+                      if health.status_code == 200 else None)
+    except httpx.HTTPError as exc:
+        return Result(name, bad, f"llama-server not reachable at {base} ({type(exc).__name__}): "
+                      + without, "start it (BrainSyncOS: sudo systemctl status brainsyncos-llama)")
+    ms = (clock() - started) * 1000
+    data = {"ms": round(ms), "status": health.status_code, "backend": name}
+    if models is None:
+        loading = health.status_code == 503
+        return Result(name, WARN if loading or others_on else FAIL,
+                      f"llama-server at {base}: " + ("still loading its model" if loading else
+                                                     f"/health HTTP {health.status_code}"),
+                      "wait for the model to load and rerun" if loading else
+                      "check the server's log (journalctl -u brainsyncos-llama)", data)
+    if models.status_code == 401:
+        return Result(name, bad, f"llama-server at {base} rejects {backend.api_key_env}: {without}",
+                      "use the key in llama-server's --api-key-file", data)
+    if models.status_code != 200:
+        return Result(name, bad, f"llama-server at {base}: /v1/models HTTP {models.status_code}",
+                      "check the server's log (journalctl -u brainsyncos-llama)", data)
+    try:
+        served = ", ".join(m.get("id", "?") for m in models.json().get("data", [])) or "?"
+    except (ValueError, AttributeError):
+        served = "?"
+    return Result(name, PASS, f"llama-server at {base} up, key accepted, serving {served} "
+                  f"({ms:.0f} ms)", data=data)
 
 
 def check_cartesia(cfg: AppConfig, api_key: str | None, *, transport: httpx.BaseTransport | None = None,
@@ -462,7 +544,9 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
         results.append(Result("mic", WARN, f"{mic or 'no report yet'} ({mode} mode)",
                               MIC_FIX.get(mic, MIC_FIX["error"])))
 
-    if not llm.get("dynamic", True):
+    if llm.get("backends") is not None:
+        results += check_llm_health(llm)
+    elif not llm.get("dynamic", True):
         results.append(Result("claude (server)", SKIP, "menus.dynamic is false: fixed lists only"))
     elif not llm["enabled"]:
         results.append(Result("claude (server)", FAIL, f"off: {llm['why_disabled']}",
@@ -492,6 +576,50 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
     return results
 
 
+def check_llm_health(llm: dict) -> list[Result]:
+    """One line per LLM backend from the server's view: on or off (its key), the keep-alive for
+    Claude, and which backend wrote the last page or why it failed."""
+    backends = llm["backends"]
+    if not llm.get("dynamic", True):
+        return [Result(f"{b['name']} (server)", SKIP, "menus.dynamic is false: fixed lists only")
+                for b in backends]
+    any_on = any(b["enabled"] for b in backends)
+    claude = any(b["kind"] == "anthropic" for b in backends)
+    last, error = llm.get("last_backend", ""), llm.get("last_error", "")
+    results = []
+    for b in backends:
+        name = f"{b['name']} (server)"
+        if not b["enabled"]:
+            if any_on:
+                level = SKIP if b["kind"] == "llama" else WARN
+            else:
+                level = FAIL if b["kind"] == "anthropic" or not claude else SKIP
+            results.append(Result(name, level, f"off: {b['why_disabled']}",
+                                  "" if level == SKIP else
+                                  f"add the key to .env and restart the server"))
+            continue
+        page = ""
+        if llm.get("ok") and last == b["name"]:
+            page = "; wrote the last page in time"
+        elif error and f"{b['name']}:" in error:
+            page = "; last page: " + error.split(f"{b['name']}:", 1)[1].split(";")[0].strip()
+        what = f"{b['model']}" + (f" at {b['base_url']}" if b["base_url"] else "")
+        if b["kind"] != "anthropic":
+            results.append(Result(name, PASS, what + page))
+            continue
+        warm = b["warm_ok"]
+        if b["keepalive_s"] <= 0:
+            results.append(Result(name, WARN, f"{what}, keep-alive off" + page,
+                                  "set keepalive_s (20) so pages skip the connection setup"))
+        elif warm:
+            results.append(Result(name, PASS, f"{what}, connection kept open" + page))
+        else:
+            why = "keep-alive failing" if warm is False else "keep-alive not answered yet"
+            results.append(Result(name, WARN, f"{what}, {why}" + page,
+                                  "check the network; rerun in 20 s"))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
@@ -509,15 +637,31 @@ def run_checks(url: str, *, skip_network: bool = False, env: Mapping[str, str] |
     if cfg is None:
         return results
     results += check_keys(cfg, env)
-    anthropic_key, cartesia_key = env.get("ANTHROPIC_API_KEY"), env.get("CARTESIA_API_KEY")
+    cartesia_key = env.get("CARTESIA_API_KEY")
+    backends = cfg.llm.backends
+    on = [b for b in backends if env.get(b.api_key_env)]
+
+    def others_on(b: LLMBackend) -> bool:
+        return any(x is not b for x in on)
+
+    if cfg.menus.dynamic:  # a llama-server on this computer is checked even without the network
+        for b in backends:
+            if b.kind == "llama" and env.get(b.api_key_env):  # no key: its key line says "off"
+                results.append(check_local(b, env.get(b.api_key_env), others_on=others_on(b),
+                                           timeout=timeout, transport=transport))
     if skip_network:
         results.append(Result("network", SKIP, "--skip-network: no network, Claude or Cartesia check"))
     else:
-        hosts = ([ANTHROPIC_HOST] if cfg.menus.dynamic else []) + (
+        claude_default = any(b.kind == "anthropic" and not b.base_url for b in backends)
+        hosts = ([ANTHROPIC_HOST] if cfg.menus.dynamic and claude_default else []) + (
             [CARTESIA_HOST] if cfg.speech.provider == "cartesia" else [])
         probe = probe or (lambda host: probe_host(host, timeout=timeout, transport=transport))
         results += check_network(hosts, probe, slow_ms)
-        results.append(check_claude(cfg, anthropic_key, timeout=timeout, transport=transport))
+        claudes = [b for b in backends if b.kind == "anthropic"] or [None]
+        for b in claudes:
+            key = env.get(b.api_key_env) if b else None
+            results.append(check_claude(cfg, key, timeout=timeout, transport=transport, backend=b,
+                                        others_on=others_on(b) if b else False))
         results.append(check_cartesia(cfg, cartesia_key, transport=transport))
     results.append(check_clips(cfg, clips_dir))
     health, page_cfg, result = fetch_server(url, transport=transport)
@@ -556,7 +700,12 @@ def main(argv: list[str] | None = None) -> None:
                    help="median HTTP round trip above this is a congested link (WARN)")
     args = p.parse_args(argv)
     load_env()  # names only; the values stay in this process
-    secrets = [os.environ.get(k, "") for k in KEYS]
+    names = set(KEYS)
+    try:
+        names |= {b.api_key_env for b in load_config(args.config).llm.backends}
+    except ConfigError:
+        pass  # the config check reports it
+    secrets = [os.environ.get(k, "") for k in sorted(names)]
     results = run_checks(args.url, skip_network=args.skip_network, config_path=args.config,
                          timeout=args.timeout, slow_ms=args.slow_ms)
     ok = not any(r.level == FAIL for r in results)

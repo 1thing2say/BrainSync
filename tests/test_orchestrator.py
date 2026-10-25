@@ -766,11 +766,16 @@ LLM_OPTIONS = [
 QUESTION = "Do you want to go outside?"
 
 
+LLM_WAIT = CFG.llm.backend("claude").timeout_s
+
+
 class LLMRig(Rig):
     """A Rig whose pages come from a fake LLM: ``requests`` collects what it was asked."""
 
     def __init__(self, cfg=CFG, **kwargs) -> None:
         self.requests: list[PageRequest] = []
+        # As on a laptop: only Claude has a key, so the server passes Claude's turn as the wait.
+        kwargs.setdefault("llm_wait_s", LLM_WAIT)
         super().__init__(cfg, request_page=self.requests.append, **kwargs)
 
     def partner(self, text: str = QUESTION) -> PageRequest:
@@ -803,7 +808,7 @@ def test_llm_timeout_shows_the_fallback_and_ignores_the_late_page():
     r = LLMRig()
     r.to_trial()
     req = r.partner()
-    r.advance(CFG.llm.timeout_s)
+    r.advance(LLM_WAIT)
     assert r.o.state is St.MENU_CUE
     assert r.page_utterances() == [o.utterance for o in YES_NO]  # the question fallback
     assert not r.last(r.ui, UIStatus).llm_ok
@@ -959,7 +964,7 @@ def test_llm_ok_follows_the_last_page():
         req = r.partner(text)
         n = len(statuses(r))
         if answer == "timeout":
-            r.advance(CFG.llm.timeout_s)
+            r.advance(LLM_WAIT)
         else:
             r.answer(answer)
         assert len(statuses(r)) == n + change and statuses(r)[-1].llm_ok is ok
@@ -982,6 +987,35 @@ def test_llm_status_tells_not_asked_yet_from_failed():
     r.partner(QUESTION)
     r.answer(LLM_OPTIONS)
     assert r.o.status().llm == "ok" and r.o.status().llm_ok
+
+
+def test_llm_status_names_the_backend_that_wrote_the_page_or_why_each_failed():
+    r = LLMRig()
+    r.to_trial()
+    r.partner()
+    r.o.on_page_ready(r.requests[-1].request_id, LLM_OPTIONS, backend="local")
+    status = r.last(r.ui, UIStatus)
+    assert status.llm == "ok" and status.llm_backend == "local" and status.llm_error == ""
+    r.to_trial()
+    r.partner("Again?")
+    r.o.on_page_ready(r.requests[-1].request_id, LLM_OPTIONS, backend="claude")
+    assert r.last(r.ui, UIStatus).llm_backend == "claude"  # a new status: another backend
+    r.to_trial()
+    r.partner("And now?")
+    r.o.on_page_ready(r.requests[-1].request_id, None,
+                      error="local: timeout; claude: APIConnectionError")
+    status = r.last(r.ui, UIStatus)
+    assert status.llm == "failed" and status.llm_backend == ""
+    assert status.llm_error == "local: timeout; claude: APIConnectionError"
+    r.to_trial()
+    r.partner("Hello?")
+    r.advance(r.o.llm_wait_s)  # nothing came: the orchestrator gave up
+    assert r.last(r.ui, UIStatus).llm_error == "timed out"
+
+
+def test_the_wait_for_a_page_is_every_backend_s_turn_unless_given():
+    assert Rig().o.llm_wait_s == CFG.llm.page_timeout_s == sum(b.timeout_s for b in CFG.llm.backends)
+    assert LLMRig(llm_wait_s=4.0).o.llm_wait_s == 4.0  # the server passes the active backends' sum
 
 
 def test_partner_line_during_the_confirm_step_waits_for_the_new_page():
@@ -1010,7 +1044,7 @@ def test_page_arriving_during_the_confirm_trial_is_held_until_the_next_cue(late)
     assert r.o.state is St.MENU_CUE and r.last(r.ui, ShowPage).mode == "confirm"
     r.to_trial()
     if late:
-        r.advance(CFG.llm.timeout_s)  # still in the confirm trial, past llm.timeout_s
+        r.advance(LLM_WAIT)  # still in the confirm trial, past the wait
     assert r.o.state is St.CONFIRMING
     n_ui, n_decoder = len(r.ui), len(r.decoder)
     new = fresh("Out")
@@ -1087,7 +1121,7 @@ def run_unattended_llm(cfg, trials: int = 30, seed: int = 5):
     """
     rng = random.Random(seed)
     r = LLMRig(cfg)
-    timeout = cfg.llm.timeout_s
+    timeout = r.o.llm_wait_s
     due: list[tuple[float, int, list[Option] | None]] = []  # (when, request_id, options)
     reason_of: dict[str, str] = {}
     late: set[str] = set()

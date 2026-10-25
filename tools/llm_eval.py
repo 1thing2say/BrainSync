@@ -5,10 +5,13 @@ Runs a fixed set of partner lines through the real app/menus.py and flags option
 happened, a sentence over the personality's length target, or a question whose options are not
 different answers. Prints a table; exits 1 if anything was flagged or no valid page came back.
 
-Needs ANTHROPIC_API_KEY (environment or .env); makes one Claude call per case, never logs the key.
+Needs each backend's key (ANTHROPIC_API_KEY, BRAINSYNC_LLAMA_API_KEY; environment or .env);
+uses the backends of llm.backends in order, as the server does, one page per case, and never logs
+a key. ``--backend local`` checks one backend alone (a local llama-server's model, say).
 
     python tools/llm_eval.py                         # the demo persona (config/profile.yaml)
     python tools/llm_eval.py --profile profiles/user.yaml
+    python tools/llm_eval.py --backend local         # only the local llama-server
 """
 
 from __future__ import annotations
@@ -95,14 +98,23 @@ def check_page(partner: str, options: list[Option], profile: Profile, max_words:
     return flags
 
 
-async def run(profile: Profile, cases: list[str]) -> int:
+async def run(profile: Profile, cases: list[str], backend: str | None = None) -> int:
     from app.menus import MenuMaker  # imports the SDK (slow from a /mnt/c venv)
 
     cfg, intents = load_config(), load_intents()
-    maker = MenuMaker(cfg.menus, cfg.llm, intents, profile, os.environ.get("ANTHROPIC_API_KEY"))
+    llm = cfg.llm
+    if backend:
+        chosen = [b for b in llm.backends if b.name == backend]
+        if not chosen:
+            print(f"no backend {backend!r} in llm.backends "
+                  f"({', '.join(b.name for b in llm.backends)})", file=sys.stderr)
+            return 2
+        llm = llm.model_copy(update={"backends": chosen})
+    maker = MenuMaker(cfg.menus, llm, intents, profile, keys=os.environ)
     if not maker.enabled:
-        print(f"Claude is off: {maker.why_disabled}", file=sys.stderr)
+        print(f"the LLM is off: {maker.why_disabled}", file=sys.stderr)
         return 2
+    print("backends: " + ", then ".join(f"{b.name} ({b.cfg.model})" for b in maker.active))
     bad = 0
     print(f"profile: {profile.name} (length {profile.personality.length}, "
           f"formality {profile.personality.formality})\n")
@@ -110,15 +122,16 @@ async def run(profile: Profile, cases: list[str]) -> int:
         conv = Conversation(cfg.context.history_turns)
         conv.partner_said(partner)
         started = time.monotonic()
-        options = await maker.make_page(conv.page_request(n, "partner", time.time()))
+        result = await maker.page(conv.page_request(n, "partner", time.time()))
+        options = result.options
         took = time.monotonic() - started
         if options is None:
             bad += 1
-            print(f"FAIL  {partner}  ({took:.1f} s): no valid page\n")
+            print(f"FAIL  {partner}  ({took:.1f} s): no valid page ({result.error})\n")
             continue
         flags = check_page(partner, options, profile, cfg.menus.utterance_max_words)
         bad += bool(flags)
-        print(f"{'FLAG' if flags else 'ok  '}  {partner}  ({took:.1f} s)")
+        print(f"{'FLAG' if flags else 'ok  '}  {partner}  ({took:.1f} s, {result.backend})")
         for i, o in enumerate(options, 1):
             print(f"      {i}. {o.utterance}  [{o.label}]")
         for f in flags:
@@ -132,13 +145,14 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="llm_eval", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--profile", type=Path, help="a profile YAML (default: the demo persona)")
+    p.add_argument("--backend", help="only this backend of llm.backends (default: all, in order)")
     args = p.parse_args(argv)
     load_env()
     if args.profile:
         profile = Profile.model_validate(yaml.safe_load(args.profile.read_text(encoding="utf-8")))
     else:
         profile = load_profile()
-    sys.exit(asyncio.run(run(profile, CASES)))
+    sys.exit(asyncio.run(run(profile, CASES, args.backend)))
 
 
 if __name__ == "__main__":

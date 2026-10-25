@@ -253,7 +253,9 @@ function renderStatus(s) {
       s.decoder_connected ? (s.decoder_ok ? "DECODER OK" : "DECODER NOT OK") : "NO DECODER"],
     [s.display_ok ? "ok" : "bad", s.display_ok ? "DISPLAY OK" : "DISPLAY OFF"],
     [s.board_ok ? "ok" : "bad", s.board_ok ? "BOARD OK" : "BOARD ?"],
-    { ok: ["ok", "LLM OK"], waiting: ["", "LLM READY"], failed: ["bad", "LLM FAILED"] }[s.llm]
+    // Which backend wrote the last page (local llama-server or Claude), when the server says.
+    { ok: ["ok", s.llm_backend ? `LLM OK: ${s.llm_backend.toUpperCase()}` : "LLM OK"],
+      waiting: ["", "LLM READY"], failed: ["bad", "LLM FAILED"] }[s.llm]
       || ["", "LLM OFF"],
   ];
   if (s.mic_muted) badges.push(["flag", "MIC MUTED"]);
