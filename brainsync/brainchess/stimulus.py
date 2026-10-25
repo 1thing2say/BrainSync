@@ -3,6 +3,8 @@
     python -m brainsync.brainchess.stimulus --plan      # geometry and frequencies, no window
     python -m brainsync.brainchess.stimulus             # full screen, commands on stdin
     python -m brainsync.brainchess.stimulus --flip      # Black at the bottom
+    python -m brainsync.brainchess.stimulus -c chess_cvep --markers unix   # c-VEP (default
+                                                        # of python -m brainsync.brainchess)
 
 The game process decides what flickers; this process only draws, frame-locked. It reads
 one command per line on stdin (a daemon thread parses them into a BoardState, and every
@@ -13,16 +15,22 @@ frame draws the latest state, so a slow or chatty game never stalls the flicker)
     pieces <path>          RGBA PNG of the pieces layer, board sized (see render.py)
     arrow <from> <to>      arrow between two square indices; 'arrow none' clears it
     panels <l0>|<l1>       PLAY / BACK panels flickering as targets 0 (left) and 1 (right)
-                           under these labels; 'panels none' leaves them idle
+                           under these labels; 'panels none' leaves them idle. A c-VEP
+                           config has three: '<l0>|<l1>|<l2>', an empty label leaves that
+                           panel idle (the board's groups are targets 0 and 1, BACK is 2)
     text <message>         the prompt in the side column; 'text' alone clears it
     stage <name>           the step lit in the stage row: piece, dest, promo, confirm or none
-    votes <t> <n> <of>     vote meter: n of ``of`` fresh windows agree on target t (0, 1 or
-                           '-' for none yet)
+    votes <t> <n> <of>     vote meter: n of ``of`` fresh windows agree on target t (0, 1,
+                           2 or '-' for none yet)
+    confidence <a>|<b>|..  c-VEP: the confidence block in the side column, one line each
+                           (a bar per target and the lead / choice line, or the training
+                           progress); 'confidence' alone clears it
+    cue <k>                c-VEP: the cue box around panel k (training); 'cue none' clears
     lanes <a,b,...>        names of the EEG lanes in the trace strip (1..8; resets it)
     eeg <t> <dt> <v...>    trace samples dt s apart, the last at stream time t, row-major
                            with one value per lane in each row
-    window <t> <r> <f> <p> one decoder window ending at stream time t: named target r (0, 1
-                           or '-'), f 1 when the gate counted it (0: too early or board
+    window <t> <r> <f> <p> one decoder window ending at stream time t: named target r (0, 1,
+                           2 or '-'), f 1 when the gate counted it (0: too early or board
                            still), p 1 when it fired a pick
     hold                   every flicker stands still at its frame-0 luminance
     go                     flicker runs
@@ -36,6 +44,15 @@ The flicker frame counter starts at the first ``go`` and then counts every displ
 frame, held or not, so the flicker phase stays locked to the display from then on.
 Optional markers ("go", "hold", "groups:<64 chars>") go to stderr after the flip that
 shows the change. Nothing here imports psychopy until a window is opened.
+
+A c-VEP config ([code], three targets: chess_cvep) follows the BrainSync standard
+(docs/CVEP-STANDARD.md): frame n of target k is white when bit (n - 21 k) mod 63 of the
+m-sequence is 1 and black when 0 (brainsync.vep.live.frame_bit), a still target is white,
+and n counts the frames since the current layout's first flickering frame: it restarts at
+every ``go`` and at every change of the groups or panels, so each screen starts on a cycle.
+The first flip of every cycle prints the marker "cycle:<n>" (with --markers unix, which
+python -m brainsync.brainchess passes), the board's tags read A / B, the vote meters
+give way to the confidence block, and a third panel, BACK, sits beside the other two.
 
 The look follows the browser mockup (see style.py): the board on the left, a column on
 the right with the title, stage row, prompt, vote meters, the PLAY / BACK panels and the
@@ -66,6 +83,7 @@ from ..stimulus.config import StimulusConfig, config_warnings, load_config, over
 from ..stimulus.display import MARKER_CLOCKS, MarkerWriter, SessionTiming, median_rate
 from ..stimulus.flicker import (dropped_frames, frame_luminances, frames_per_cycle, phase_pi,
                                 to_psychopy_rgb)
+from ..vep.live import BITS, frame_bit
 from .render import BOARD_SIZE, SQUARE_SIZE, grid_cell, square_center
 from .trace import MAX_LANES, TraceBuffer, TraceView, Window, lane_points, window_marks
 
@@ -86,7 +104,10 @@ MAX_MARKS = 8         # pick markers
 FPS_EVERY_S = 0.5     # how often the frame-rate readout is re-laid out (text costs ~1-4 ms)
 FPS_SPAN_S = 1.0      # the readout averages the frames shown over this long
 VERBS = ("groups", "pieces", "arrow", "panels", "text", "stage", "votes", "lanes", "eeg",
-         "window", "hold", "go")
+         "window", "confidence", "cue", "hold", "go")
+MAX_TARGETS = 3       # c-VEP: group A, group B and the Back panel
+MAX_CONFIDENCE = style.CONFIDENCE_LINES   # lines in the confidence block
+CODE_TAGS = ("A", "B")   # c-VEP tags on the group squares (f-VEP: the frequencies)
 
 
 # -- protocol -------------------------------------------------------------------------------
@@ -94,9 +115,10 @@ VERBS = ("groups", "pieces", "arrow", "panels", "text", "stage", "votes", "lanes
 @dataclass(frozen=True)
 class Command:
     """One parsed stdin line. ``value`` by verb: groups -> str (64 chars), pieces -> Path,
-    arrow -> (from, to) or None, panels -> (label0, label1) or None, text/stage -> str,
-    votes -> (target, n, of), lanes -> tuple of names, eeg -> (t, dt, values),
-    window -> trace.Window, hold/go -> None."""
+    arrow -> (from, to) or None, panels -> (label0, label1[, label2]) or None,
+    text/stage -> str, votes -> (target, n, of), lanes -> tuple of names,
+    eeg -> (t, dt, values), window -> trace.Window, confidence -> tuple of lines,
+    cue -> target or None, hold/go -> None."""
 
     verb: str
     value: Any = None
@@ -124,8 +146,8 @@ def _square_arg(text: str) -> int:
 
 
 def _target_arg(text: str) -> int:
-    if text not in ("0", "1", "-"):
-        raise ValueError(f"target must be 0, 1 or '-', got {text!r}")
+    if text not in ("0", "1", "2", "-"):
+        raise ValueError(f"target must be 0, 1, 2 or '-', got {text!r}")
     return ABSTAIN if text == "-" else int(text)
 
 
@@ -182,9 +204,10 @@ def parse_command(line: str) -> Command:
         if rest == "none":
             return Command("panels", None)
         labels = rest.split("|")
-        if len(labels) != 2:
-            raise ValueError(f"panels needs '<label0>|<label1>' or 'none', got {rest!r}")
-        return Command("panels", (labels[0].strip(), labels[1].strip()))
+        if len(labels) not in (2, MAX_TARGETS):
+            raise ValueError(f"panels needs '<label0>|<label1>', '<label0>|<label1>|<label2>' "
+                             f"or 'none', got {rest!r}")
+        return Command("panels", tuple(lab.strip() for lab in labels))
     if verb == "text":
         return Command("text", rest)
     if verb == "stage":
@@ -219,6 +242,18 @@ def parse_command(line: str) -> Command:
             raise ValueError(f"window needs '<t> <target> <fresh> <fired>', got {rest!r}")
         return Command("window", Window(_number(parts[0], "t"), _target_arg(parts[1]),
                                         _flag_arg(parts[2]), _flag_arg(parts[3])))
+    if verb == "confidence":
+        lines = tuple(ln.strip() for ln in rest.split("|")) if rest else ()
+        if len(lines) > MAX_CONFIDENCE:
+            raise ValueError(f"confidence takes at most {MAX_CONFIDENCE} lines, got "
+                             f"{len(lines)}")
+        return Command("confidence", lines)
+    if verb == "cue":
+        if rest == "none":
+            return Command("cue", None)
+        if rest not in ("0", "1", "2"):
+            raise ValueError(f"cue needs a panel 0, 1 or 2, or 'none', got {rest!r}")
+        return Command("cue", int(rest))
     if verb in ("hold", "go"):
         if rest:
             raise ValueError(f"{verb} takes no arguments, got {rest!r}")
@@ -236,12 +271,19 @@ class BoardSnapshot:
     pieces: Path | None = None
     pieces_version: int = 0
     arrow: tuple[int, int] | None = None
-    panels: tuple[str, str] | None = None
+    panels: tuple[str, ...] | None = None
     text: str = ""
     stage: str = "none"
     votes: tuple[int, int, int] = NO_VOTES
     lanes: tuple[str, ...] = ()
     holding: bool = True
+    confidence: tuple[str, ...] = ()
+    cue: int | None = None
+
+    @property
+    def layout(self) -> tuple:
+        """What a c-VEP code restarts on: the flickering squares and panels, and go."""
+        return (self.groups, self.panels, self.holding)
 
 
 class BoardState:
@@ -279,6 +321,10 @@ class BoardState:
                 s = replace(s, stage=cmd.value)
             elif cmd.verb == "votes":
                 s = replace(s, votes=cmd.value)
+            elif cmd.verb == "confidence":
+                s = replace(s, confidence=cmd.value)
+            elif cmd.verb == "cue":
+                s = replace(s, cue=cmd.value)
             elif cmd.verb == "lanes":
                 self.trace.set_lanes(len(cmd.value))
                 s = replace(s, lanes=cmd.value)
@@ -392,19 +438,75 @@ def square_colors(groups: str, lums: np.ndarray) -> np.ndarray:
     return out
 
 
+def _check_targets(cfg: StimulusConfig) -> None:
+    if cfg.paradigm == "code":
+        if cfg.n_targets != MAX_TARGETS:
+            raise ValueError(f"a c-VEP board stimulus needs a three-target config, got "
+                             f"{cfg.n_targets} target(s) in {cfg.name!r}")
+        c = cfg.code
+        if c.length != len(BITS) or c.frames_per_bit != 1:
+            raise ValueError(f"a c-VEP board stimulus shows the standard {len(BITS)}-bit "
+                             f"m-sequence, one bit per frame; {cfg.name!r} has length "
+                             f"{c.length}, {c.frames_per_bit} frame(s) per bit")
+    elif cfg.paradigm != "freq" or cfg.n_targets != 2:
+        raise ValueError(f"the board stimulus needs a two-target frequency config or a "
+                         f"three-target [code] config, got {cfg.n_targets} {cfg.paradigm} "
+                         f"target(s) in {cfg.name!r}")
+
+
+def code_luminances(frame_index: int, cfg: StimulusConfig, holding: bool = False) -> np.ndarray:
+    """c-VEP: every target's luminance on flicker frame ``frame_index`` (frames since the
+    layout's first flickering frame): 1.0 (white) for a 1 bit, 0.0 (black) for a 0, with
+    target k's code ``k * lag_frames`` frames late. Held, every target is white (still)."""
+    if cfg.code is None:
+        raise ValueError(f"config {cfg.name!r} has no [code] table")
+    if holding:
+        return np.ones(cfg.n_targets)
+    return np.array([float(frame_bit(k, int(frame_index), cfg.code.lag_frames))
+                     for k in range(cfg.n_targets)])
+
+
 def frame_values(snap: BoardSnapshot, frame_index: int,
                  cfg: StimulusConfig) -> tuple[np.ndarray, np.ndarray]:
-    """(square luminances (64,), panel luminances (2,)) for one frame.
+    """(square luminances (64,), panel luminances (n targets,)) for one frame.
 
-    While holding every flicker shows its frame-0 luminance; the panel values matter only
-    while panels are shown.
+    While holding every flicker shows its frame-0 luminance (f-VEP) or white (c-VEP); the
+    panel values matter only while panels are shown. The board's groups '0' and '1' are
+    targets 0 and 1; a c-VEP config's third target is the Back panel.
     """
-    if cfg.n_targets != 2:
-        raise ValueError(f"the board stimulus needs a two-target config, got "
-                         f"{cfg.n_targets} target(s) in {cfg.name!r}")
-    i = 0 if snap.holding else frame_index
-    lum = frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform, cfg.depth)
-    return square_luminances(snap.groups, lum[0], lum[1]), lum[:2].copy()
+    _check_targets(cfg)
+    if cfg.paradigm == "code":
+        lum = code_luminances(frame_index, cfg, snap.holding)
+    else:
+        i = 0 if snap.holding else frame_index
+        lum = frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform, cfg.depth)
+    return square_luminances(snap.groups, lum[0], lum[1]), lum.copy()
+
+
+class CodeClock:
+    """c-VEP frame counting for the board: frames since the current layout's first
+    flickering frame, restarted whenever the layout (groups, panels, go) changes, and the
+    "cycle:<n>" marker on each cycle's first frame (none while holding)."""
+
+    def __init__(self, cycle_frames: int) -> None:
+        if int(cycle_frames) != cycle_frames or cycle_frames < 1:
+            raise ValueError(f"cycle_frames must be a positive integer, got {cycle_frames!r}")
+        self.cycle_frames = int(cycle_frames)
+        self.frame = 0
+        self._layout: tuple | None = None
+
+    def step(self, snap: BoardSnapshot) -> tuple[int, list[str]]:
+        """(this frame's flicker frame index, its marker events); call once per frame,
+        before drawing it, then the next frame counts on from there."""
+        if snap.layout != self._layout:
+            self._layout = snap.layout
+            self.frame = 0
+        if snap.holding:
+            return 0, []
+        i = self.frame
+        self.frame += 1
+        events = [f"cycle:{i // self.cycle_frames}"] if i % self.cycle_frames == 0 else []
+        return i, events
 
 
 def arrow_vertices(frm: int, to: int, flip: bool = False, shaft: float = 0.022,
@@ -432,11 +534,10 @@ def tag_position(sq: int, flip: bool = False) -> tuple[float, float]:
 
 
 def check_layout(cfg: StimulusConfig) -> None:
-    """ValueError unless the config has two panels in the side column, clear of the board,
-    the vote meters above and the trace strip below, on a screen the layout fits."""
-    if cfg.n_targets != 2:
-        raise ValueError(f"the board stimulus needs a two-target config, got "
-                         f"{cfg.n_targets} target(s) in {cfg.name!r}")
+    """ValueError unless the config has two panels (three for c-VEP) in the side column,
+    clear of the board, the vote meters (c-VEP: the confidence block) above and the trace
+    strip below, on a screen the layout fits."""
+    _check_targets(cfg)
     board_right = style.BOARD_X + BOARD_SIZE / 2
     inner = min(t.pos[0] for t in cfg.targets) - cfg.size / 2
     if inner <= board_right:
@@ -449,12 +550,17 @@ def check_layout(cfg: StimulusConfig) -> None:
                          f"the side column's edge {style.COLUMN_RIGHT:+.3f}")
     top = max(t.pos[1] for t in cfg.targets) + cfg.size / 2
     bottom = min(t.pos[1] for t in cfg.targets) - cfg.size / 2
-    ceiling = style.VOTES_Y - 0.06       # room for the active panels' labels above them
+    # room for the active panels' labels above them, under the meters or confidence block
+    ceiling = (style.CONFIDENCE_BOTTOM if cfg.paradigm == "code" else style.VOTES_Y) - 0.06
     floor = style.TRACE_TOP + 0.03       # room for the Hz pills below them
     if top > ceiling or bottom < floor:
         raise ValueError(f"config {cfg.name!r} puts the panels between y = {bottom:+.3f} and "
                          f"{top:+.3f}; they must stay within {floor:+.3f}..{ceiling:+.3f}, "
-                         "between the vote meters and the trace strip")
+                         "between the vote meters (or confidence block) and the trace strip")
+    xs = sorted(t.pos[0] for t in cfg.targets)
+    if any(b - a < 2 * cfg.reach - 1e-9 for a, b in zip(xs, xs[1:])):
+        raise ValueError(f"config {cfg.name!r} puts the panels closer than their cue boxes "
+                         f"({2 * cfg.reach:.3f} apart); widen [layout] spacing")
     if cfg.display.aspect < style.LAYOUT_ASPECT - 1e-9:
         raise ValueError(f"config {cfg.name!r} allows a {cfg.display.aspect:g}:1 screen; the "
                          f"board and side column need {style.LAYOUT_ASPECT:.3f}:1")
@@ -481,14 +587,27 @@ def plan_lines(cfg: StimulusConfig, flip: bool) -> list[str]:
         f"({style.BOARD_X:+.3f}, {style.BOARD_Y:+.3f}), "
         + ("black at the bottom (h8 bottom left)" if flip
            else "white at the bottom (a1 bottom left)"),
-        f"  {cfg.waveform} flicker, depth {cfg.depth:g}, refresh {hz:g} Hz; squares and panels "
-        "share the target frequencies; flickering squares stay grey with a 15 / 17 tag",
     ]
+    if cfg.paradigm == "code":
+        c = cfg.code
+        lines.append(f"  c-VEP: one {c.length}-bit m-sequence, white / black, a cycle of "
+                     f"{c.cycle_frames} frames ({c.cycle_frames / hz:.2f} s at {hz:g} Hz) "
+                     "restarted with every screen; group A squares show target 0's code, "
+                     "group B target 1's, the BACK panel target 2's")
+    else:
+        lines.append(f"  {cfg.waveform} flicker, depth {cfg.depth:g}, refresh {hz:g} Hz; squares "
+                     "and panels share the target frequencies; flickering squares stay grey "
+                     "with a 15 / 17 tag")
     for t in cfg.targets:
         x, y = t.pos
-        lines.append(f"  target {t.index}  panel {t.label!r}  {t.freq:.3f} Hz  phase "
-                     f"{phase_pi(t.phase):.2f} pi  {frames_per_cycle(t.freq, hz):.3f} "
-                     f"frames/cycle  panel centre ({x:+.3f}, {y:+.3f})  side {cfg.size:g}")
+        if cfg.paradigm == "code":
+            lag = t.index * cfg.code.lag_frames
+            what = f"code lag {lag} frames ({1000 * lag / hz:.0f} ms)"
+        else:
+            what = (f"{t.freq:.3f} Hz  phase {phase_pi(t.phase):.2f} pi  "
+                    f"{frames_per_cycle(t.freq, hz):.3f} frames/cycle")
+        lines.append(f"  target {t.index}  panel {t.label!r}  {what}  panel centre "
+                     f"({x:+.3f}, {y:+.3f})  side {cfg.size:g}")
     lines.append(f"  panels clear the board edge by {inner - board_right:.3f}; side column "
                  f"x = {style.COLUMN_LEFT:+.3f}..{style.COLUMN_RIGHT:+.3f} with the prompt, "
                  f"votes and a {style.TRACE_SPAN_S:g} s EEG and decoder-window strip")
@@ -514,8 +633,9 @@ def _rgb255(rgb: tuple[float, float, float]) -> tuple[int, int, int]:
     return (r, g, b)
 
 
-def tag_image(target: int, px_height: int = 96):
-    """PIL RGBA image of the "15" (square corners) or "17" (pill) tag."""
+def tag_image(target: int, px_height: int = 96, text: str | None = None):
+    """PIL RGBA image of the "15" (square corners) or "17" (pill) tag; ``text`` replaces
+    the frequency (c-VEP: "A" / "B")."""
     from PIL import Image, ImageDraw, ImageFont
 
     w = int(round(px_height * style.TAG_SIZE[0] / style.TAG_SIZE[1]))
@@ -526,8 +646,9 @@ def tag_image(target: int, px_height: int = 96):
     draw.rounded_rectangle((0, 0, w - 1, px_height - 1), radius=radius, fill=fill)
     font = ImageFont.truetype(str(style.FONT_PATHS[style.MONO_BOLD_FONT]),
                               int(px_height * 0.72))
-    draw.text((w / 2, px_height / 2), "15" if target == 0 else "17", font=font,
-              fill=(255, 255, 255, 255), anchor="mm")
+    if text is None:
+        text = "15" if target == 0 else "17"
+    draw.text((w / 2, px_height / 2), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
     return img
 
 
@@ -540,7 +661,9 @@ class BoardRenderer:
                  note: Callable[[str], None] = _stderr_note) -> None:
         from psychopy import event, visual  # lazy: never imported by tests
 
+        _check_targets(cfg)
         self.cfg = cfg
+        self.code = cfg.paradigm == "code"
         self.flip_board = flip
         self._visual = visual
         self._keys = event.getKeys
@@ -557,8 +680,10 @@ class BoardRenderer:
             self.win, units="height", nElements=N_SQUARES, sizes=SQUARE_SIZE, xys=xys,
             colors=square_colors(PLAIN_GROUPS, square_luminances(PLAIN_GROUPS, 0.5, 0.5)),
             colorSpace="rgb", elementTex=None, elementMask=None, interpolate=False)
-        self.tags = [visual.ImageStim(self.win, image=tag_image(k), units="height",
-                                      size=style.TAG_SIZE, interpolate=True) for k in (0, 1)]
+        self.tags = [visual.ImageStim(self.win,
+                                      image=tag_image(k, text=CODE_TAGS[k] if self.code else None),
+                                      units="height", size=style.TAG_SIZE, interpolate=True)
+                     for k in (0, 1)]
         self._tag_pos = [tag_position(sq, flip) for sq in range(N_SQUARES)]
         self.pieces = None
         self._pieces_version = 0
@@ -570,6 +695,7 @@ class BoardRenderer:
         self._arrow: tuple[int, int] | None = None
         self._make_panels()
         self._make_header()
+        self._make_confidence()
         self._make_trace()
         self._make_fps()
 
@@ -598,6 +724,9 @@ class BoardRenderer:
         h = style.TITLE_HEIGHT
         parts = [("BRAINCHESS ", style.INK), ("15", style.TRACE15), ("/", style.INK_2),
                  ("17", style.TRACE17)]
+        if self.code:
+            parts = [("BRAINCHESS ", style.INK), ("C", style.TRACE15), ("-", style.INK_2),
+                     ("VEP", style.TRACE17)]
         width = style.text_width("".join(p for p, _ in parts), style.DISPLAY_FONT, h)
         h *= min(1.0, style.COLUMN_WIDTH / width)
         out, x = [], style.COLUMN_LEFT
@@ -666,17 +795,22 @@ class BoardRenderer:
         out.append(self._text(t.label, (x, y + side * 0.2), style.PANEL_LABEL_HEIGHT,
                               style.DISPLAY_FONT, style.INK_2, anchor="center"))
         out += self._hz_pill(k, (x, y + side * 0.02))
-        out.append(self._text("used to confirm or promote", (x, y - side * 0.24),
+        note = "undo the last pick" if k == 2 else "used to confirm or promote"
+        out.append(self._text(note, (x, y - side * 0.24),
                               style.PANEL_NOTE_HEIGHT, color=style.INK_2, anchor="center",
                               wrap=side * 0.8))
         return out
 
     def _hz_pill(self, k: int, pos) -> list:
         h = style.PANEL_NOTE_HEIGHT * 1.15
-        text = f"{self.cfg.targets[k].freq:g} Hz"
+        if self.code:
+            lag = k * self.cfg.code.lag_frames
+            text = f"+{1000 * lag / self.cfg.refresh:.0f} ms"
+        else:
+            text = f"{self.cfg.targets[k].freq:g} Hz"
         w = style.text_width(text, style.MONO_BOLD_FONT, h) + 0.016
         color = style.TARGET_COLORS[k]
-        if k == 0:
+        if k != 1:
             shape = self._rect(pos, (w, h * 1.7), None, color, 1.5)
         else:
             shape = self._visual.ShapeStim(self.win, units="height", pos=pos,
@@ -697,8 +831,10 @@ class BoardRenderer:
         # legend, laid right to left from the strip's right edge
         x = style.COLUMN_RIGHT - 0.012
         sw = h * 0.8
-        for label, kind in (("too early", "stale"), ("no answer", "none"), ("17 Hz", 1),
-                            ("15 Hz", 0)):
+        legend = ((("too early", "stale"), ("no answer", "none"), ("BACK", 2), ("B", 1),
+                   ("A", 0)) if self.code else
+                  (("too early", "stale"), ("no answer", "none"), ("17 Hz", 1), ("15 Hz", 0)))
+        for label, kind in legend:
             x -= style.text_width(label, style.MONO_FONT, h)
             out.append(self._text(label, (x, style.TRACE_HEADER_Y), h, color=style.INK_2))
             x -= sw / 2 + 0.006
@@ -707,6 +843,8 @@ class BoardRenderer:
                 out.append(self._rect(pos, (sw, sw), style.TRACE15))
             elif kind == 1:
                 out.append(self._circle(pos, sw / 2, style.TRACE17))
+            elif kind == 2:
+                out.append(self._rect(pos, (sw, sw * 0.6), style.TRACE_BACK))
             elif kind == "none":
                 out.append(self._rect(pos, (sw, 0.0025), style.INK_2))
             else:
@@ -722,7 +860,7 @@ class BoardRenderer:
         stims = self._title()
         stims.append(self._rect(((style.COLUMN_LEFT + style.COLUMN_RIGHT) / 2, style.RULE_Y),
                                 (style.COLUMN_WIDTH, 0.002), style.RULE))
-        stims += self._stepper() + self._vote_row() + self._coordinates()
+        stims += self._stepper() + ([] if self.code else self._vote_row()) + self._coordinates()
         stims.append(self._rect(style.BOARD_ORIGIN, (BOARD_SIZE + 0.006,) * 2, style.INK))
         for k, t in enumerate(self.cfg.targets):
             stims += self._idle_panel(k, t)
@@ -750,6 +888,17 @@ class BoardRenderer:
                                           style.INK, anchor="center", wrap=side + 0.06,
                                           valign="bottom"))
         self._labels = tuple(self.cfg.labels)
+        cue = side * self.cfg.cue_scale
+        self.cue_box = self._rect(self.cfg.targets[0].pos, (cue, cue), None, style.MARKER, 4.0)
+        self._cue: int | None = None
+
+    def _make_confidence(self) -> None:
+        """c-VEP: the lines under the prompt, one TextStim each, re-laid out on change."""
+        self.confidence = [self._text("", (style.COLUMN_LEFT,
+                                           style.CONFIDENCE_Y - j * style.CONFIDENCE_STEP),
+                                      style.CONFIDENCE_HEIGHT, style.MONO_FONT, style.INK)
+                           for j in range(MAX_CONFIDENCE)]
+        self._confidence: tuple[str, ...] = ()
 
     def _make_header(self) -> None:
         self.caption = self._text("", (style.COLUMN_LEFT, style.PROMPT_TOP), style.PROMPT_HEIGHT,
@@ -857,6 +1006,8 @@ class BoardRenderer:
             self._caption = snap.text
         if snap.text:
             self.caption.draw()
+        if self.code:
+            return
         target, n, of = snap.votes
         if snap.votes != self._votes:
             for k, meter in enumerate(self._meters):
@@ -875,6 +1026,11 @@ class BoardRenderer:
         self._counts[(n, of)].draw()
 
     def _draw_panels(self, snap: BoardSnapshot, panel_lums: np.ndarray) -> None:
+        if snap.cue is not None and snap.cue < len(self.panels):
+            if snap.cue != self._cue:
+                self.cue_box.pos = self.cfg.targets[snap.cue].pos
+                self._cue = snap.cue
+            self.cue_box.draw()
         if snap.panels is None:
             return
         if snap.panels != self._labels:
@@ -882,10 +1038,24 @@ class BoardRenderer:
                 label.text = text
             self._labels = snap.panels
         for k, panel in enumerate(self.panels):
+            # a panel the command left out, or (c-VEP) gave no label, stays idle
+            if k >= len(snap.panels) or (self.code and not snap.panels[k]):
+                continue
             self.panel_frames[k].draw()
             panel.fillColor = to_psychopy_rgb(panel_lums[k])
             panel.draw()
             self.labels[k].draw()
+
+    def _draw_confidence(self, snap: BoardSnapshot) -> None:
+        if not self.code:
+            return
+        if snap.confidence != self._confidence:
+            for j, stim in enumerate(self.confidence):
+                stim.text = snap.confidence[j] if j < len(snap.confidence) else ""
+            self._confidence = snap.confidence
+        for j in range(min(len(snap.confidence), len(self.confidence))):
+            if snap.confidence[j]:
+                self.confidence[j].draw()
 
     def _set_lanes(self, names: tuple[str, ...]) -> None:
         lane = (style.LANES_TOP - style.LANES_BOTTOM) / max(len(names), 1)
@@ -933,6 +1103,9 @@ class BoardRenderer:
             elif w.raw == 1:                       # a little shorter: not by colour alone
                 h = top - bottom - 0.005
                 xys[j], sizes[j], colors[j] = (x, bottom + h / 2), (width, h), style.TRACE17
+            elif w.raw == 2:                       # c-VEP Back: shorter still
+                h = top - bottom - 0.01
+                xys[j], sizes[j], colors[j] = (x, bottom + h / 2), (width, h), style.TRACE_BACK
             else:
                 xys[j], sizes[j] = (x, (top + bottom) / 2), (width, 0.0025)
             alpha[j] = 1.0 if w.fresh else 0.3
@@ -979,6 +1152,7 @@ class BoardRenderer:
             self.arrow.draw()
         self._draw_panels(snap, panel_lums)
         self._draw_header(snap)
+        self._draw_confidence(snap)
         self._draw_trace(snap, trace)
         self.fps_text.draw()
         self._frame += 1
@@ -1043,6 +1217,7 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace) -> int:
         timing = SessionTiming(refresh=cfg.refresh, measured_refresh=measured)
         frame = 0              # flicker frames since the first go
         started = False
+        code = CodeClock(cfg.code.cycle_frames) if cfg.paradigm == "code" else None
         prev: BoardSnapshot | None = None
         last: float | None = None
         while not reader.done:
@@ -1051,9 +1226,14 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace) -> int:
                 break
             snap = state.snapshot()
             started = started or not snap.holding
-            renderer.draw(snap, *frame_values(snap, frame, cfg), state.trace)
+            cycles: list[str] = []
+            if code is not None:   # c-VEP: frames since this layout's first flickering frame
+                index, cycles = code.step(snap)
+            else:
+                index = frame
+            renderer.draw(snap, *frame_values(snap, index, cfg), state.trace)
             t = renderer.flip()
-            markers.emit(_events(prev, snap))
+            markers.emit(_events(prev, snap) + cycles)
             timing.n_frames += 1
             if last is not None:
                 timing.dropped += dropped_frames((last, t), cfg.refresh)

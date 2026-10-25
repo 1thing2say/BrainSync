@@ -51,7 +51,8 @@ SQ_LIGHT = hex_rgb("#DDE2DA")
 SQ_DARK = hex_rgb("#A7B2AB")
 SELECTED = hex_rgb("#E2BE4E")      # the chosen piece's square: amber, neither group colour
 WHITE = hex_rgb("#FFFFFF")
-TARGET_COLORS = (TRACE15, TRACE17)
+TRACE_BACK = hex_rgb("#3F7A3A")    # c-VEP: the Back panel (target 2)
+TARGET_COLORS = (TRACE15, TRACE17, TRACE_BACK)
 
 # -- board ----------------------------------------------------------------------------------
 BOARD_X = -0.26                  # board centre; its edges at -0.71 and +0.19
@@ -81,6 +82,13 @@ VOTE_BOX = 0.016
 PANEL_LABEL_HEIGHT = 0.026       # PLAY / BACK in the display face
 PANEL_NOTE_HEIGHT = 0.0135
 PANEL_INSET = 0.008              # flicker area inside the panel frame
+# c-VEP: the confidence block (a bar per target and the lead / choice line) replaces the
+# vote meters, under the prompt
+CONFIDENCE_Y = 0.255             # first line's centre
+CONFIDENCE_STEP = 0.024
+CONFIDENCE_HEIGHT = 0.016
+CONFIDENCE_LINES = 4             # three targets and the status line
+CONFIDENCE_BOTTOM = CONFIDENCE_Y - (CONFIDENCE_LINES - 1) * CONFIDENCE_STEP
 
 # -- trace strip ----------------------------------------------------------------------------
 TRACE_TOP = -0.168

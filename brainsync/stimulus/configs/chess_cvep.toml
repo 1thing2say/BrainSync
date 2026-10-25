@@ -1,0 +1,47 @@
+# BrainChess board stimulus in the BrainSync c-VEP standard (docs/CVEP-STANDARD.md; python
+# -m brainsync.brainchess, the default). Three targets show one 63-bit m-sequence, white
+# and black, 21 frames (350 ms) apart: target 0 is group A of the board's candidate squares
+# (and the left panel, for the promotion and PLAY steps), target 1 group B (the middle
+# panel: the other promotion pieces, or RESTART), target 2 the BACK panel on the right,
+# which undoes the last pick at every step. Training cues the A panel. The board stimulus
+# restarts the code with every screen and prints cycle:<n> markers (--markers unix).
+# The three panels sit in the side column of the board window (brainchess/style.py): 0.13
+# high, centres at x +0.305, +0.475 and +0.645 (x_offset 0.475, spacing 0.17), so their
+# cue boxes (1.2x, 0.156) neither touch each other nor pass the column's right edge
+# (+0.735), and their left edge (+0.24) stays clear of the board (+0.19).
+name = "chess_cvep"
+
+[targets]
+labels = ["A", "B", "BACK"]
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+rows = 1
+cols = 3
+size = 0.13      # panel side, screen heights
+spacing = 0.17   # centre to centre
+x_offset = 0.475 # the row's centre: the middle of the side column
+
+[stimulus]
+hold_cue = false
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0    # unused by the board stimulus, which paints the mockup's paper colour
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+# unused by the board stimulus (the game drives it over stdin); kept valid so the stock
+# stimulus can still run a cued c-VEP session on the panels with -c chess_cvep
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

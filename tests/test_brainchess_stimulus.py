@@ -5,6 +5,7 @@ import io
 import subprocess
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -72,7 +73,7 @@ def test_parse_every_verb():
     ("arrow e2 e4", "integer"),
     ("arrow 7 7", "different"),
     ("panels PLAY", "label0"),
-    ("panels a|b|c", "label0"),
+    ("panels a|b|c|d", "label0"),
     ("hold now", "no arguments"),
     ("go 1", "no arguments"),
     ("flash 3", "unknown command"),
@@ -80,7 +81,7 @@ def test_parse_every_verb():
     ("stage", "stage must be"),
     ("stage castle", "stage must be"),
     ("votes 0 1", "votes needs"),
-    ("votes 2 1 4", "target must be"),
+    ("votes 3 1 4", "target must be"),
     ("votes 0 5 4", "n <= of"),
     ("votes 0 0 0", "n <= of"),
     ("votes 0 -1 4", ">= 0"),
@@ -93,7 +94,10 @@ def test_parse_every_verb():
     ("eeg x 0.02 5", "t must be a number"),
     ("eeg 1 0.02 5 nan", "finite"),
     ("window 1 0 1", "window needs"),
-    ("window 1 2 1 0", "target must be"),
+    ("window 1 3 1 0", "target must be"),
+    ("cue 3", "cue needs"),
+    ("cue", "cue needs"),
+    ("confidence a|b|c|d|e", "at most 4"),
     ("window 1 0 yes 0", "flag must be"),
     ("window inf 0 1 0", "finite"),
 ])
@@ -701,3 +705,175 @@ def _raise_on_image(self, name, value):
     if name == "image":
         raise OSError("broken")
     object.__setattr__(self, name, value)
+
+
+# -- c-VEP (chess_cvep): three targets, code frames, cycle markers -------------------------
+
+from brainsync.brainchess.stimulus import CodeClock, code_luminances  # noqa: E402
+from brainsync.vep.live import BITS, LAG_FRAMES, frame_bit  # noqa: E402
+
+CODE_GROUPS = "0" * 20 + "." * 4 + "1" * 20 + "." * 19 + "s"
+
+
+def test_parse_the_code_verbs():
+    assert parse_command("panels ||BACK").value == ("", "", "BACK")
+    assert parse_command("panels PLAY|RESTART|BACK").value == ("PLAY", "RESTART", "BACK")
+    assert parse_command("panels Q|N").value == ("Q", "N")
+    line = "confidence A    ███░░░░░ +0.42 <|lead 0.31   choice: A *"
+    assert parse_command(line).value == ("A    ███░░░░░ +0.42 <", "lead 0.31   choice: A *")
+    assert parse_command("confidence").value == ()
+    assert parse_command("cue 2").value == 2 and parse_command("cue none").value is None
+    assert parse_command("window 3.0 2 1 1").value == Window(3.0, 2, True, True)
+    assert parse_command("votes 2 1 2").value == (2, 1, 2)
+
+
+def test_board_state_keeps_confidence_and_cue():
+    state = BoardState()
+    for line in ("confidence a|b", "cue 0", f"groups {CODE_GROUPS}", "panels ||BACK"):
+        state.apply(parse_command(line))
+    snap = state.snapshot()
+    assert snap.confidence == ("a", "b") and snap.cue == 0
+    assert snap.layout == (CODE_GROUPS, ("", "", "BACK"), True)
+    state.apply(parse_command("cue none"))
+    assert state.snapshot().cue is None
+
+
+def test_code_luminances_follow_the_standard_frame_rule():
+    cfg = load_config("chess_cvep")
+    for n in (0, 1, 20, 21, 42, 62, 63, 100, 1000):
+        want = [float(frame_bit(k, n)) for k in range(3)]
+        np.testing.assert_array_equal(code_luminances(n, cfg), want)
+        # target k is target 0 delayed by k * 21 frames
+        assert code_luminances(n + 21, cfg)[1] == code_luminances(n, cfg)[0]
+    np.testing.assert_array_equal(code_luminances(5, cfg, holding=True), [1.0, 1.0, 1.0])
+    # one cycle shows the m-sequence itself: half white (32 of 63), half black
+    assert sum(code_luminances(n, cfg)[0] for n in range(63)) == sum(BITS) == 32
+
+
+def test_frame_values_draw_each_group_with_its_code_white_and_black():
+    cfg = load_config("chess_cvep")
+    snap = BoardSnapshot(groups=CODE_GROUPS, panels=("", "", "BACK"), holding=False)
+    g = np.array(list(CODE_GROUPS))
+    for n in range(0, 130, 7):
+        sq, panels = frame_values(snap, n, cfg)
+        assert panels.shape == (3,)
+        np.testing.assert_array_equal(sq[g == "0"], frame_bit(0, n))
+        np.testing.assert_array_equal(sq[g == "1"], frame_bit(1, n))
+        assert panels[2] == frame_bit(2, n)
+        rgb = square_colors(CODE_GROUPS, sq)
+        # full contrast: a 1 bit is pure white, a 0 bit pure black
+        np.testing.assert_array_equal(rgb[g == "0"], 1.0 if frame_bit(0, n) else -1.0)
+        assert tuple(rgb[63]) == style.SELECTED
+    held, _ = frame_values(BoardSnapshot(groups=CODE_GROUPS), 9, cfg)
+    np.testing.assert_array_equal(held[g == "0"], 1.0)      # still squares are white
+
+
+def test_code_clock_restarts_with_each_layout_and_marks_cycles():
+    clock = CodeClock(63)
+    held = BoardSnapshot(groups=CODE_GROUPS)
+    assert clock.step(held) == (0, [])
+    go = replace(held, holding=False)
+    seen = [clock.step(go) for _ in range(130)]
+    assert [i for i, _ in seen[:3]] == [0, 1, 2]
+    marks = [(i, ev) for i, ev in seen if ev]
+    assert marks == [(0, ["cycle:0"]), (63, ["cycle:1"]), (126, ["cycle:2"])]
+    # text or confidence changes do not restart the code; groups and panels do
+    assert clock.step(replace(go, text="hi", confidence=("x",))) == (130, [])
+    assert clock.step(replace(go, panels=("", "", "BACK"))) == (0, ["cycle:0"])
+    assert clock.step(replace(go, panels=("", "", "BACK"))) == (1, [])
+    assert clock.step(replace(go, panels=("", "", "BACK"), holding=True)) == (0, [])
+    with pytest.raises(ValueError, match="positive"):
+        CodeClock(0)
+
+
+def test_chess_cvep_config_fits_the_side_column():
+    cfg = load_config("chess_cvep")
+    check_layout(cfg)
+    assert cfg.paradigm == "code" and cfg.labels == ("A", "B", "BACK")
+    assert cfg.code.length == 63 and cfg.code.lag_frames == LAG_FRAMES
+    assert [round(t.pos[0], 3) for t in cfg.targets] == [0.305, 0.475, 0.645]
+    lines = bs.plan_lines(cfg, False)
+    assert any("63-bit m-sequence" in ln for ln in lines)
+    assert any("code lag 42 frames (700 ms)" in ln for ln in lines)
+
+
+@pytest.mark.parametrize("name, match", [
+    ("cvep_3", "panel's left edge"),          # the standard's own layout: not a side column
+    ("cvep_4", "three-target config"),
+])
+def test_check_layout_rejects_other_code_configs(name, match):
+    with pytest.raises(ValueError, match=match):
+        check_layout(load_config(name))
+
+
+def test_check_layout_rejects_overlapping_cue_boxes(tmp_path):
+    text = (Path(load_config("chess_cvep").path).read_text()
+            .replace("spacing = 0.17", "spacing = 0.15"))
+    path = tmp_path / "tight.toml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="closer than their cue boxes"):
+        check_layout(load_config(str(path)))
+
+
+def test_main_code_mode_prints_cycle_markers(fake_board, monkeypatch, capsys):
+    import threading
+    release = threading.Event()
+
+    class Stdin(io.StringIO):
+        lines = [f"groups {CODE_GROUPS}\n", "panels ||BACK\n", "go\n"]
+
+        def readline(self, *args):
+            if not self.lines:
+                release.wait(5)
+                return ""
+            return self.lines.pop(0)
+
+    monkeypatch.setattr(sys, "stdin", Stdin())
+
+    def draw(self, snap, sq, pn, trace=None):
+        self.frames.append((snap, sq, pn))
+        if sum(not f[0].holding for f in self.frames) >= 140:
+            release.set()
+
+    monkeypatch.setattr(_FakeBoard, "draw", draw)
+    assert bs.main(["-c", "chess_cvep", "--markers", "unix"]) == 0
+    err = capsys.readouterr().err
+    cycles = [ln for ln in err.splitlines() if "] cycle:" in ln]
+    assert [ln.split()[-1] for ln in cycles[:3]] == ["cycle:0", "cycle:1", "cycle:2"]
+    frames = fake_board.instances[0].frames
+    flick = [f for f in frames if not f[0].holding and f[0].panels == ("", "", "BACK")]
+    assert len(flick) >= 130
+    for n, (_, sq, pn) in enumerate(flick[:130]):
+        assert pn.tolist() == [float(frame_bit(k, n)) for k in range(3)]
+
+
+def test_board_renderer_code_mode_against_fake_psychopy(monkeypatch):
+    visual = _fake_visual()
+    fake = types.ModuleType("psychopy")
+    fake.visual, fake.event = visual, types.SimpleNamespace(getKeys=lambda keyList: [])
+    monkeypatch.setitem(sys.modules, "psychopy", fake)
+    cfg = load_config("chess_cvep")
+    r = bs.BoardRenderer(cfg)
+    assert r.code and len(r.panels) == 3 and len(r.confidence) == style.CONFIDENCE_LINES
+    texts = [s.kw.get("text") for s in r.static[0].kw["stim"] if "text" in s.kw]
+    for want in ("BRAINCHESS ", "VEP", "A", "B", "BACK", "undo the last pick", "+350 ms"):
+        assert want in texts
+    assert "VOTES" not in texts and "15 Hz" not in texts
+    snap = BoardSnapshot(groups=CODE_GROUPS, panels=("", "", "BACK"), holding=False,
+                         confidence=("A ███ +0.42 <", "B", "BACK", "lead 0.31   choice: A"),
+                         cue=None)
+    sql, pnl = frame_values(snap, 0, cfg)
+    r.draw(snap, sql, pnl)
+    # only the BACK panel is active; the board's groups carry A / B tags
+    assert [p.drawn for p in r.panels] == [0, 0, 1]
+    assert r.tags[0].drawn == 20 and r.tags[1].drawn == 20
+    assert [c.text for c in r.confidence] == list(snap.confidence)
+    assert all(c.drawn == 1 for c in r.confidence)
+    assert r.cue_box.drawn == 0
+    train = BoardSnapshot(panels=("A", "B", "BACK"), holding=False, cue=0,
+                          confidence=("training: keep looking at A   cycle 3/30",))
+    r.draw(train, *frame_values(train, 5, cfg))
+    assert [p.drawn for p in r.panels] == [1, 1, 2] and r.cue_box.drawn == 1
+    assert r.cue_box.pos == cfg.targets[0].pos
+    assert r.confidence[0].drawn == 2 and r.confidence[1].drawn == 1   # cleared lines skipped
+    assert r.panels[2].fillColor == bs.to_psychopy_rgb(frame_bit(2, 5))
