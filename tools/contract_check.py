@@ -28,7 +28,15 @@ for the active slots and raw / committed among them, and a selection must follow
 decision. The config follows the hello: a code hello is checked against config/default.yaml, a
 freq hello against config/fvep_page.yaml (``--config`` picks one for both).
 
+``--page-cycles`` (code mode): play the session page that draws the code (``display.flicker:
+browser``, section 9.7) as well. During each training and each trial (from its stim_onset) it
+sends the bridge ``cycle`` {train_id or trial_id, n, t_unix} once per cycle (1.05 s), with
+``t_unix`` this computer's clock, as our server relays the page's flips. A headless bridge on
+the headset needs them to train and decode; one with its own display (or a fake board) must
+ignore them, and the check fails if anything it sends breaks the rules above.
+
     python tools/contract_check.py --config config/fvep_list.yaml   # a 2-target list-mode bridge
+    python tools/contract_check.py --page-cycles                    # bridge --no-stimulus
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ from app.config import DEFAULT_CONFIG_PATH, FVEP_PAGE_CONFIG_PATH, AppConfig, lo
 from app.schemas import (
     PROTOCOL,
     Baseline,
+    Cycle,
     Decision,
     DecoderHello,
     DecoderStatus,
@@ -260,6 +269,8 @@ class ContractCheck:
             self.labels = {slot: ROLE_LABELS[role] for slot, role in self.roles.items()}
         self.scores_seen = False
         self.inbox: Inbox | None = None
+        self.cycler: asyncio.Task | None = None  # --page-cycles: the page's cycles, if running
+        self.cycles_sent = 0
         given = getattr(self.args, "config", None)
         self.config_name = (str(given) if given else "config/default.yaml" if self.code
                             else "config/fvep_page.yaml")
@@ -273,6 +284,7 @@ class ContractCheck:
                 await self._session(ws, inbox)
                 self._final_checks(inbox)
         finally:
+            self._stop_cycles()
             reader.cancel()
             with contextlib.suppress(Exception):
                 await ws.close()
@@ -280,6 +292,30 @@ class ContractCheck:
     async def _send(self, ws: ServerConnection, msg: Message) -> None:
         with contextlib.suppress(ConnectionClosed):
             await ws.send(to_json(msg))
+
+    def _start_cycles(self, ws: ServerConnection, **owner: int) -> None:
+        """--page-cycles in code mode: a cycle message per cycle for ``train_id`` or
+        ``trial_id``, as the server relays the page's flips, until ``_stop_cycles``."""
+        self._stop_cycles()
+        if not (self.code and getattr(self.args, "page_cycles", False)):
+            return
+        code = self.cfg.stim.code
+        cycle_s = (code.cycle_frames if code is not None else 63) / self.cfg.display.expected_refresh_hz
+
+        async def run() -> None:
+            n = 0
+            while True:
+                await self._send(ws, Cycle(n=n, t_unix=time.time(), **owner))
+                self.cycles_sent += 1
+                n += 1
+                await asyncio.sleep(cycle_s)
+
+        self.cycler = asyncio.create_task(run())
+
+    def _stop_cycles(self) -> None:
+        if self.cycler is not None:
+            self.cycler.cancel()
+            self.cycler = None
 
     async def _handshake(self, ws: ServerConnection, inbox: Inbox) -> bool:
         hello = await inbox.expect({"hello"}, self.args.hello_timeout)
@@ -334,6 +370,13 @@ class ContractCheck:
         slot = self.slots[0]
         await self._send(ws, Train(train_id=train_id, slot=slot, label="left", cycles=cycles,
                                    retrain=retrain))
+        self._start_cycles(ws, train_id=train_id)
+        try:
+            return await self._trained(inbox, train_id, retrain, cycles)
+        finally:
+            self._stop_cycles()
+
+    async def _trained(self, inbox: Inbox, train_id: int, retrain: bool, cycles: int) -> bool:
         last, progress, started = -1, 0, time.monotonic()
         while True:
             msg = await inbox.expect({"train_progress", "trained"}, self.args.train_timeout)
@@ -406,6 +449,7 @@ class ContractCheck:
 
     async def _stop(self, ws: ServerConnection, inbox: Inbox, trial_id: int, reason: str) -> list[Message]:
         """End the trial; returns answers that arrived during it but were never waited for."""
+        self._stop_cycles()
         inbox.active = None
         inbox.stopped = (trial_id, time.monotonic())
         await self._send(ws, StimStop(trial_id=trial_id, reason=reason))
@@ -428,6 +472,7 @@ class ContractCheck:
             self.report.fail(f"trial {trial_id}: stim_onset first", f"{first.type} came before any stim_onset")
             await self._stop(ws, inbox, trial_id, "selected" if isinstance(first, Selection) else "no_selection")
             return
+        self._start_cycles(ws, trial_id=trial_id)  # the page flickers from the onset on
         delay = first.t_unix - started
         self.report.check(delay < self.args.onset_timeout,
                           f"trial {trial_id}: stim_onset first, within {self.args.onset_timeout:g} s",
@@ -464,6 +509,10 @@ class ContractCheck:
         await self._start(ws, inbox, trial_id, *self._screen(trial_id, confirm=False))
         onset = await inbox.expect({"stim_onset"}, self.args.onset_timeout)
         self.report.check(onset is not None, f"trial {trial_id}: stim_onset before the pause")
+        if onset is not None:
+            self._start_cycles(ws, trial_id=trial_id)
+            if self.cycler is not None:
+                await asyncio.sleep(0.1)  # its first cycle goes out before the pause
         early = await self._stop(ws, inbox, trial_id, "paused")
         if any(isinstance(m, (Selection, NoSelection)) for m in early):
             self.report.info(f"trial {trial_id}: answered before the pause (allowed)")
@@ -477,6 +526,8 @@ class ContractCheck:
         return self.inbox.decisions.get(trial_id, 0) if self.inbox is not None else 0
 
     def _final_checks(self, inbox: Inbox) -> None:
+        if self.code and getattr(self.args, "page_cycles", False):
+            self.report.info("page cycles sent", f"{self.cycles_sent} cycle messages")
         if self.scores_seen:
             self.report.check(inbox.hello is not None and inbox.hello.score_kind is not None,
                               "score_kind in hello when selections carry scores")
@@ -509,6 +560,9 @@ def build_parser(cfg: AppConfig) -> argparse.ArgumentParser:
                    help=f"code mode: cycles asked for in train (default {cycles})")
     p.add_argument("--train-timeout", type=float, default=cfg.train.timeout_s,
                    help=f"code mode: wait for trained (default {cfg.train.timeout_s:g})")
+    p.add_argument("--page-cycles", action="store_true",
+                   help="code mode: also send the cycle messages our server relays from the "
+                        "session page (a bridge run with --no-stimulus needs them)")
     p.add_argument("--host", default=cfg.server.host)
     p.add_argument("--port", type=int, default=cfg.server.port)
     p.add_argument("--trials", type=int, default=3, help="normal trials before the paused one")

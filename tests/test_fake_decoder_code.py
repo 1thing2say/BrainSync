@@ -15,6 +15,7 @@ from app.config import load_config
 from app.schemas import (
     PROTOCOL,
     CodeParams,
+    Cycle,
     Decision,
     DecoderHello,
     DecoderStatus,
@@ -258,3 +259,48 @@ async def test_a_selection_without_decisions_and_a_stray_decision_fail():
     assert "FAIL  trial 1: decision after stim_onset: it came first" in out
     assert "FAIL  trial 1: decision scores the active slots" in out
     assert "FAIL  trial 2: a decision before the selection (code mode)" in out
+
+
+# ---------------------------------------------------------------------------
+# The session page's cycles (display.flicker: browser; draft section 9.7)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_fake_decoder_counts_relayed_cycles(server: StubServer, start_decoder):  # noqa: F811
+    decoder, _ = await start_decoder("--train-s", "5")
+    await server.send(Train(train_id=2, slot="s1", cycles=30, retrain=True))
+    for n in range(3):
+        await server.send(Cycle(train_id=2, n=n, t_unix=1792809201.5 + 1.05 * n))
+    await server.send(Cycle(trial_id=7, n=0, t_unix=1792809210.0))
+    for _ in range(100):
+        if sum(decoder.cycles.values()) == 4:
+            break
+        await asyncio.sleep(0.01)
+    assert decoder.cycles == {("train", 2): 3, ("trial", 7): 1}
+
+
+def recording_fake(made: list):
+    async def run(url: str) -> None:
+        args = parse_args(["--url", url, "--latency", "1.2", "--seed", "1", "--no-reconnect",
+                           "--status-interval", "0.2", "--train-s", "0.2"])
+        made.append(FakeDecoder(args, stdin=None))
+        await made[0].run()
+
+    return run
+
+
+async def test_the_contract_check_plays_the_page_with_page_cycles():
+    made: list[FakeDecoder] = []
+    report, out = await run_code_check(recording_fake(made), "--page-cycles")
+    assert report.ok, out
+    assert "INFO  page cycles sent" in out
+    counts = made[0].cycles
+    for key in (("train", 1), ("train", 2), ("trial", 1), ("trial", 2)):
+        assert counts.get(key, 0) >= 1, counts
+
+
+async def test_without_page_cycles_the_check_sends_none():
+    made: list[FakeDecoder] = []
+    report, out = await run_code_check(recording_fake(made))
+    assert report.ok, out
+    assert made[0].cycles == {} and "page cycles" not in out

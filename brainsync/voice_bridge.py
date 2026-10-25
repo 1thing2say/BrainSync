@@ -29,9 +29,12 @@ frequency-coded protocol 2 as first written (four_diamond, FBCCA, baseline). Cod
               is the selection, its scores the correlations (score_kind "correlation")
   baseline    answered with ok false, "code mode: send train"
 
-The cycle times come from the display's ``cycle:<n>`` markers (with --fake, from the fake
-board, which then shows the code of a random active target during a trial and the training
-target while training).
+The cycle times come from the display's ``cycle:<n>`` markers; with --no-stimulus (the session
+page in Chrome draws the code, ``display.flicker: browser``) from the server's ``cycle``
+{train_id or trial_id, n, t_unix} messages, the page's flip times on the board's clock
+(INTERFACE-v2-draft.md section 9.7); with --fake from the fake board, which then shows the code
+of a random active target during a trial and the training target while training. A bridge with
+its own display ignores ``cycle`` messages.
 
 Startup: connect the board once (about 16 s for the Cerelog X8), start the display
 (``python -m brainsync.stimulus -c <config> --free --feedback stdin --hold-still --markers
@@ -70,7 +73,8 @@ its stdin, then terminate and kill if it lingers) and never relaunched.
 --fake uses FakeBoard (freq) or a SequenceFakeBoard over the stimulus config (code); during a
 trial it carries the response to a random active target, so trials end in a selection. --fast runs it in virtual time, FAST_SPEED times faster than real time.
 --no-stimulus replaces the display with a headless stand-in: no window, the onset is the time
-the flicker would start, the refresh comes from the config.
+the flicker would start, the refresh comes from the config; in code mode on the headset the
+cycles then come from the server (above).
 
 The board is read on its own thread, which also runs the decoder; the asyncio loop only
 handles messages. Exit code 0 when stopped (Ctrl-C, SIGTERM, close code 4000, the server that
@@ -1047,6 +1051,7 @@ class Bridge:
         self.slots = slot_ids(cfg.n_targets)
         self.code = getattr(engine, "paradigm", "freq") == "code"
         self.training: TrainRun | None = None
+        self.cycles_heard = 0   # server cycle messages handed to the engine (--no-stimulus)
         self.scores_on_display = not getattr(args, "no_scores", False)
         self.name = bridge_name(args)
         self.labels = [""] * cfg.n_targets
@@ -1531,10 +1536,46 @@ class Bridge:
             self._interrupt_baseline()
             self._interrupt_training("interrupted")
             self.ready = False
+        elif kind == "cycle":
+            self._on_cycle_msg(msg)
         else:
             log.warning("ignored unknown message type %r", kind)
 
     # -- code mode: training and decisions -------------------------------------------------
+
+    @property
+    def server_cycles(self) -> bool:
+        """Code mode without a display of its own (--no-stimulus): the session page draws the
+        code, and its cycle times come from the server's ``cycle`` messages."""
+        return self.code and bool(getattr(self.args, "no_stimulus", False))
+
+    def _on_cycle_msg(self, msg: dict[str, Any]) -> None:
+        """``cycle`` {train_id or trial_id, n, t_unix} (INTERFACE-v2-draft.md section 9.7): the
+        first flip of cycle n of the page's flicker, on the board's clock, for the training or
+        trial in progress; it goes to the decoder like a display's ``cycle:<n>`` marker. A
+        bridge with its own display stamps its own cycles and ignores these."""
+        if not self.server_cycles:
+            log.debug("ignored cycle: %s", "freq mode" if not self.code
+                      else "this bridge's display stamps its own cycles")
+            return
+        n, t_unix = msg.get("n"), msg.get("t_unix")
+        train_id, trial_id = msg.get("train_id"), msg.get("trial_id")
+        if (not isinstance(n, int) or isinstance(n, bool) or n < 0
+                or not isinstance(t_unix, (int, float)) or isinstance(t_unix, bool)
+                or not math.isfinite(t_unix) or (train_id is None) == (trial_id is None)):
+            log.warning("ignored invalid cycle: %.200s", msg)
+            return
+        if train_id is not None:
+            current = self.training is not None and self.training.train_id == train_id
+        else:
+            current = self.trial is not None and self.trial.trial_id == trial_id
+        if not current:
+            log.debug("ignored cycle %d of %s %s: not in progress", n,
+                      "train" if train_id is not None else "trial",
+                      train_id if train_id is not None else trial_id)
+            return
+        self.cycles_heard += 1
+        self.engine.add_event(float(t_unix), "cycle", n)
 
     def _on_train_msg(self, msg: dict[str, Any]) -> None:
         tid, slot, cycles = msg.get("train_id"), msg.get("slot"), msg.get("cycles", 30)
@@ -1583,7 +1624,9 @@ class Bridge:
         """The flicker of a training that never ends goes off here (photosensitive safety)."""
         if self.training is not None and self.training.train_id == train_id:
             log.warning("train %d: no template after its time limit: flicker off", train_id)
-            self._interrupt_training("no template in time (are the cycle markers arriving?)")
+            source = ("the page's cycle messages" if self.server_cycles and not self.args.fake
+                      else "the cycle markers")
+            self._interrupt_training(f"no template in time (are {source} arriving?)")
 
     def _finish_training(self) -> TrainRun | None:
         run, self.training = self.training, None
@@ -1752,7 +1795,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="with --fake: noise and target seed")
     disp = p.add_argument_group("display")
     disp.add_argument("--no-stimulus", action="store_true",
-                      help="no PsychoPy window: a headless stand-in (onset = time.time())")
+                      help="no PsychoPy window: a headless stand-in (onset = time.time()); in "
+                           "code mode the cycle times come from the server's cycle messages "
+                           "(the session page draws the code, display.flicker: browser), or "
+                           "from the fake board with --fake")
     disp.add_argument("--no-wait", action="store_true",
                       help="skip the display's start screen (pass --no-wait to it)")
     disp.add_argument("--ignore-refresh", action="store_true",
@@ -1783,9 +1829,6 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
     if args.fast and not args.fake:
         p.error("--fast needs --fake")
     resolve(args)
-    if args.paradigm == "code" and args.no_stimulus and not args.fake:
-        p.error("--paradigm code with --no-stimulus needs --fake: the cycle markers come from "
-                "the display")
     if args.cycles < 1 or args.train_cycles < 2 or args.code_votes < 1 or args.code_margin < 0:
         p.error(f"--cycles and --code-votes must be >= 1, --train-cycles >= 2 and --code-margin "
                 f">= 0, got {args.cycles}, {args.code_votes}, {args.train_cycles}, "

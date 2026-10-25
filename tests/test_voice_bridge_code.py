@@ -87,12 +87,22 @@ def test_code_is_the_default_paradigm_and_follows_the_config():
     assert vb.stimulus_args(p.parse_args([]))[:2] == ["-c", "voice_cvep3"]
 
 
-@pytest.mark.parametrize("argv", [["--no-stimulus"], ["--cycles", "0"], ["--train-cycles", "1"],
+@pytest.mark.parametrize("argv", [["--cycles", "0"], ["--train-cycles", "1"],
                                   ["--code-votes", "0"], ["--code-margin", "-1"]])
 def test_bad_code_arguments_exit_2(argv):
     with pytest.raises(SystemExit) as exc:
         vb.main(argv)
     assert exc.value.code == 2
+
+
+def test_a_headless_code_bridge_on_the_headset_is_allowed():
+    # The session page draws the code (display.flicker: browser) and the server relays its
+    # cycles, so --no-stimulus no longer needs --fake. Only the arguments are checked here:
+    # nothing opens the board.
+    p = vb.build_parser()
+    args = p.parse_args(["--no-stimulus"])
+    vb.check_arguments(p, args)
+    assert args.paradigm == "code" and not args.fake
 
 
 def test_a_freq_config_with_paradigm_code_exits_2(capsys):
@@ -439,3 +449,133 @@ async def test_cycle_markers_go_to_the_engine():
 
     await with_server(script, factory)
     assert [c for c in engine.calls if c[0] == "event"] == [("event", 1792809201.5, "cycle", 12)]
+
+
+# ---------------------------------------------------------------------------
+# The session page draws the code: cycles come from the server (draft section 9.7)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_headless_bridge_takes_the_servers_cycles_for_the_training_and_trial_in_progress():
+    engine = StubCodeEngine(commit_to=None, hold_train=True)
+
+    async def script(peer: Peer) -> None:
+        await code_handshake(peer, train=False)
+        await peer.send(type="train", train_id=4, slot="s1", label="left", cycles=30, retrain=True)
+        await peer.recv("train_progress")
+        await peer.send(type="cycle", train_id=4, n=0, t_unix=1792809201.5)
+        await peer.send(type="cycle", train_id=3, n=1, t_unix=1792809202.55)   # an old training
+        await peer.send(type="cycle", trial_id=4, n=1, t_unix=1792809202.55)   # no such trial
+        await peer.send(type="cycle", train_id=4, n=-1, t_unix=1792809202.55)  # invalid
+        await peer.send(type="cycle", train_id=4, trial_id=4, n=2, t_unix=1.0)  # both ids
+        await peer.send(type="cycle", train_id=4, n=1, t_unix=1792809202.55)
+        await asyncio.sleep(0.05)
+        engine.finish_train(4, 30)
+        await next_of(peer, "trained")
+        await peer.send(type="cycle", train_id=4, n=2, t_unix=1792809203.6)    # after it ended
+        await peer.send(type="stim_start", trial_id=9, active_slots=["s1", "s3"])
+        await peer.recv("stim_onset")
+        await peer.send(type="cycle", trial_id=9, n=0, t_unix=1792809210.0)
+        await peer.send(type="cycle", trial_id=8, n=0, t_unix=1792809210.0)    # a stale trial
+        await peer.send(type="stim_stop", trial_id=9, reason="timeout")
+        await peer.send(type="cycle", trial_id=9, n=1, t_unix=1792809211.05)   # after the stop
+        await asyncio.sleep(0.1)
+        await peer.ws.close(4000, "done")
+
+    made: list[vb.Bridge] = []
+
+    def factory(url: str) -> vb.Bridge:
+        made.append(make_code_bridge(url, engine))
+        return made[0]
+
+    await with_server(script, factory)
+    assert made[0].server_cycles
+    assert [c for c in engine.calls if c[0] == "event"] == [
+        ("event", 1792809201.5, "cycle", 0), ("event", 1792809202.55, "cycle", 1),
+        ("event", 1792809210.0, "cycle", 0)]
+    assert made[0].cycles_heard == 3
+
+
+async def test_a_bridge_with_its_own_display_ignores_the_servers_cycles():
+    engine = StubCodeEngine(hold_train=True)
+
+    def factory(url: str) -> vb.Bridge:
+        args = vb.build_parser().parse_args(["--url", url, "--fake", "--reconnect-s", "0.1",
+                                             "--status-interval", "0.2"])
+        cfg = load_stimulus(vb.DEFAULT_CODE_CONFIG)
+        # A PsychoPy display stands in as a headless one, but the bridge was not started with
+        # --no-stimulus: its display stamps the cycles itself.
+        return vb.Bridge(args, cfg, engine, vb.HeadlessDisplay(cfg.refresh))
+
+    async def script(peer: Peer) -> None:
+        await code_handshake(peer, train=False)
+        await peer.send(type="train", train_id=1, slot="s1", label="left", cycles=30, retrain=True)
+        await peer.recv("train_progress")
+        await peer.send(type="cycle", train_id=1, n=0, t_unix=1792809201.5)
+        await asyncio.sleep(0.05)
+        await peer.ws.close(4000, "done")
+
+    await with_server(script, factory)
+    assert not [c for c in engine.calls if c[0] == "event"]
+
+
+class RelayBoard:
+    """The fake board's EEG, but its cycle times reach the engine only through ``add_event``,
+    as the session page's do through the server: CodeEngine runs as on the headset (fake
+    False). ``look(target)`` moves the fake gaze and restarts the code on the board's thread at
+    its next read, as a page starting a new flicker would."""
+
+    def __init__(self, board) -> None:
+        self.board = board
+        self.fs = board.fs
+        self.engine = None
+        self.relayed = 0
+        self._look: int | None = None
+
+    def look(self, target: int) -> None:
+        self._look = target
+
+    def advance(self, seconds: float) -> None:
+        self.board.advance(seconds)
+
+    def read(self):
+        if self._look is not None:
+            self.board.set_target(self._look)
+            self.board.start_flicker()
+            self._look = None
+        X, t = self.board.read()
+        for ev in self.board.read_events():
+            if ev[1] == "cycle":
+                self.engine.add_event(ev[0], "cycle", ev[2])
+                self.relayed += 1
+        return X, t
+
+
+async def test_code_engine_trains_and_decodes_from_relayed_cycles():
+    args = vb.resolve(vb.build_parser().parse_args(["--fake", "--fast", "--seed", "4"]))
+    cfg, board, decoder = vb.build_code(args)
+    relay = RelayBoard(board)
+    engine = vb.CodeEngine(relay, decoder, fake=False, fast=True, refresh=cfg.refresh)
+    relay.engine = engine
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue = asyncio.Queue()
+    engine.attach(loop, lambda *a: events.put_nowait(("commit", *a)))
+    engine.attach_code(lambda *a: events.put_nowait(("progress", *a)),
+                       lambda *a: events.put_nowait(("trained", *a)),
+                       lambda *a: events.put_nowait(("decision", *a)))
+    relay.look(0)
+    engine.start_train(1, 0, 10, True, board.now)
+    engine.start()
+    try:
+        while (ev := await asyncio.wait_for(events.get(), 30))[0] != "trained":
+            assert ev[0] == "progress"
+        assert ev[1:3] == (1, True) and ev[3] >= 0.5
+        for trial_id, looked, active in ((2, 2, [0, 1, 2]), (3, 0, [0, 2])):
+            relay.look(looked)
+            engine.start_trial(trial_id, active, board.now)
+            while (ev := await asyncio.wait_for(events.get(), 30))[0] != "commit":
+                assert ev[0] == "decision" and ev[1] == trial_id
+            assert ev[1:3] == (trial_id, looked)
+        assert relay.relayed > 10
+    finally:
+        engine.close()

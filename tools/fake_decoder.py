@@ -12,7 +12,9 @@ carries ``paradigm: "code"``, each slot's ``lag_frames`` (``--slots s1=0,s2=21,s
 code; ``train`` is answered with one ``train_progress`` per cycle over ``--train-s`` seconds
 (default: the cycles at 1.05 s each) and then ``trained`` (a fake accuracy); a later ``train``
 without ``retrain`` is answered at once. During a trial a ``decision`` goes out about every cycle,
-the chosen slot's correlation rising, the last one committing it right before the selection. A ``stim_stop``, ``pause`` or newer
+the chosen slot's correlation rising, the last one committing it right before the selection.
+The session page's ``cycle`` messages (relayed by the server when the page draws the code,
+section 9.7) are accepted and counted; the fake answers do not need them. A ``stim_stop``, ``pause`` or newer
 ``stim_start`` cancels the pending answer, so a stopped or stale trial is never answered. Before
 ``hello_ack`` (or after ``error``) it refuses ``stim_start``, as the real bridge keeps its flicker
 off then (draft rule 3).
@@ -59,6 +61,7 @@ from app.schemas import (
     Baseline,
     BaselineDone,
     CodeParams,
+    Cycle,
     Decision,
     DecoderHello,
     DecoderStatus,
@@ -287,6 +290,8 @@ class FakeDecoder:
         self.baseline_task: asyncio.Task[None] | None = None
         self.train_task: asyncio.Task[None] | None = None
         self.trained_accuracy: float | None = None  # code mode: the "template" it has
+        # code mode: page cycle messages received, per ("train", train_id) / ("trial", trial_id)
+        self.cycles: dict[tuple[str, int | None], int] = {}
         self.answered = 0
         self.finished = False
         self.replaced = False  # the server closed with code 4000: a newer decoder took over
@@ -393,6 +398,12 @@ class FakeDecoder:
             self._on_train(ws, msg)
         elif isinstance(msg, Display):
             log.info("display: %s", to_json(msg))  # what the PsychoPy display would draw
+        elif isinstance(msg, Cycle):
+            # The session page's cycle flips (display.flicker: browser): counted, not needed,
+            # since the fake answers come from timers.
+            key = ("train", msg.train_id) if msg.train_id is not None else ("trial", msg.trial_id)
+            self.cycles[key] = self.cycles.get(key, 0) + 1
+            log.debug("cycle %d of %s %s at %.3f", msg.n, *key, msg.t_unix)
         elif isinstance(msg, StimStart):
             self._on_stim_start(ws, msg)
         elif isinstance(msg, StimStop):
