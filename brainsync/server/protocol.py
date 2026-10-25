@@ -56,7 +56,7 @@ ERROR_CODES = frozenset({"bad_token", "busy", "bad_hello", "refresh", "too_many_
                          "protocol", "not_allowed", "detect_unavailable", "scan_failed",
                          "internal"})
 CLIENT_TYPES = frozenset({"hello", "onset", "frames", "ping", "pause", "resume", "bye", "gaze",
-                          "scan", "clicked"})
+                          "scan", "clicked", "rescan"})
 VIEWER_TYPES = frozenset({"ping", "bye"})
 
 LATENCY_S = 0.14
@@ -70,6 +70,11 @@ REFRESH_RATES = (60.0, 90.0, 120.0, 144.0)
 REFRESH_TOLERANCE_HZ = 1.0
 
 MAX_HINTS = 200
+# scan.source (v3.1): "screenshot" (an image, the default) or "ax" (a desktop client's
+# accessibility tree, image optional).
+SCAN_SOURCES = ("screenshot", "ax")
+MAX_HINT_ACTIONS = 8         # an ax hint's AX action names, each cut to HINT_ACTION_CHARS
+HINT_ACTION_CHARS = 40
 # hello.client fields kept (strings, cut to 64 characters). "instance" is a random id the client
 # keeps for its lifetime, so the server can tell the same client reconnecting from another one.
 CLIENT_FIELDS = ("name", "kind", "version", "instance")
@@ -332,8 +337,23 @@ def _image(value: Any) -> dict[str, Any]:
     return {"media_type": media_type, "data": data, "w": w, "h": h}
 
 
-def _hints(value: Any) -> list[dict[str, Any]]:
-    """Up to MAX_HINTS checked hints in viewport CSS px; later ones are dropped."""
+def _hint_actions(value: Any, where: str, code: str) -> list[str]:
+    """An ax hint's AX action names: the first MAX_HINT_ACTIONS, each cut to 40 characters."""
+    if not isinstance(value, list):
+        raise ProtocolError(code, f"{where}.actions must be a list of AX action names such as "
+                                  f"[\"AXPress\"], got {_show(value)}")
+    out = []
+    for i, name in enumerate(value[:MAX_HINT_ACTIONS]):
+        if not isinstance(name, str):
+            raise ProtocolError(code, f"{where}.actions[{i}] must be a string, got "
+                                      f"{_show(name)}")
+        out.append(name[:HINT_ACTION_CHARS])
+    return out
+
+
+def _hints(value: Any, ax: bool = False) -> list[dict[str, Any]]:
+    """Up to MAX_HINTS checked hints in viewport CSS px (window points for an ax scan); later
+    ones are dropped. Only ax hints keep ``actions`` and ``enabled``."""
     code = "protocol"
     if value is None:
         return []
@@ -360,6 +380,11 @@ def _hints(value: Any) -> list[dict[str, Any]]:
             "tag": _str(h.get("tag"), f"{where}.tag", code, clip=40)})
         if h.get("submit") is True:        # optional: the hint is a form's submit control
             hints[-1]["submit"] = True
+        if ax:
+            if h.get("actions") is not None:
+                hints[-1]["actions"] = _hint_actions(h["actions"], where, code)
+            if h.get("enabled") is not None:
+                hints[-1]["enabled"] = _bool(h["enabled"], f"{where}.enabled", code)
     return hints
 
 
@@ -390,14 +415,38 @@ def _check_gaze(m: Mapping[str, Any], code: str) -> dict[str, Any]:
             "slot": None if slot is None else _slot_name(slot, "gaze.slot", code)}
 
 
+def _scan_app(value: Any, code: str) -> dict[str, Any]:
+    """An ax scan's front app: {bundle_id, name, pid}; the strings may be empty."""
+    app = _dict(value, "scan.app", code)
+    return {"bundle_id": _str(_need(app, "bundle_id", "scan.app", code), "scan.app.bundle_id",
+                              code, clip=255),
+            "name": _str(_need(app, "name", "scan.app", code), "scan.app.name", code, clip=200),
+            "pid": _int(_need(app, "pid", "scan.app", code), "scan.app.pid", code, minimum=0)}
+
+
 def _check_scan(m: Mapping[str, Any], code: str) -> dict[str, Any]:
-    return {"type": "scan",
-            "scan_id": _int(_need(m, "scan_id", "scan", code), "scan.scan_id", code, minimum=0),
-            "image": _image(_need(m, "image", "scan", code)),
-            "viewport": _viewport(_need(m, "viewport", "scan", code), "scan.viewport", code),
-            "url": _str(m.get("url"), "scan.url", code, clip=2048),
-            "title": _str(m.get("title"), "scan.title", code, clip=200),
-            "hints": _hints(m.get("hints"))}
+    source = m.get("source", "screenshot")
+    if source not in SCAN_SOURCES:
+        raise ProtocolError(code, f"scan.source must be \"screenshot\" or \"ax\", got "
+                                  f"{_show(source)}")
+    ax = source == "ax"
+    msg: dict[str, Any] = {"type": "scan"}
+    msg["scan_id"] = _int(_need(m, "scan_id", "scan", code), "scan.scan_id", code, minimum=0)
+    if ax:
+        msg["source"] = "ax"
+        msg["image"] = None if m.get("image") is None else _image(m["image"])
+    else:
+        msg["image"] = _image(_need(m, "image", "scan", code))
+    msg["viewport"] = _viewport(_need(m, "viewport", "scan", code), "scan.viewport", code)
+    msg["url"] = _str(m.get("url"), "scan.url", code, clip=2048)
+    msg["title"] = _str(m.get("title"), "scan.title", code, clip=200)
+    msg["hints"] = _hints(m.get("hints"), ax=ax)
+    if ax:
+        msg["app"] = _scan_app(_need(m, "app", "scan (source \"ax\")", code), code)
+        window = _dict(_need(m, "window", "scan (source \"ax\")", code), "scan.window", code)
+        msg["window"] = {"title": _str(_need(window, "title", "scan.window", code),
+                                       "scan.window.title", code, clip=200)}
+    return msg
 
 
 def _check_clicked(m: Mapping[str, Any], code: str) -> dict[str, Any]:
@@ -415,14 +464,18 @@ def _check_bare(m: Mapping[str, Any], code: str) -> dict[str, Any]:
 
 _CHECKS = {"onset": _check_onset, "frames": _check_frames, "ping": _check_ping,
            "pause": _check_bare, "resume": _check_bare, "bye": _check_bare,
-           "gaze": _check_gaze, "scan": _check_scan, "clicked": _check_clicked}
+           "gaze": _check_gaze, "scan": _check_scan, "clicked": _check_clicked,
+           "rescan": _check_bare}
 
 
 def validate_client(msg: Mapping[str, Any]) -> dict[str, Any]:
     """A checked, cleaned copy of a client message other than hello (PROTOCOL-v3 section 2).
 
     Only the documented fields are kept. Scan hints beyond 200 are dropped and their text is
-    cut to 120 characters. ProtocolError("protocol") for an unknown type or a bad field.
+    cut to 120 characters. A scan with ``source`` "ax" (v3.1) comes back with "source": "ax",
+    its ``app`` and ``window`` and an ``image`` that may be None, and its hints keep
+    ``actions`` and ``enabled``; a screenshot scan comes back exactly as in v3.
+    ProtocolError("protocol") for an unknown type or a bad field.
     """
     code = "protocol"
     if not isinstance(msg, Mapping) or not isinstance(msg.get("type"), str):
@@ -677,13 +730,17 @@ def scan_request(scan_id: int, settle_ms: int = SETTLE_MS) -> dict[str, Any]:
 
 
 def scan_result(scan_id: int, ok: bool, ms: float, elements: Sequence[Mapping[str, Any]],
-                n_candidates: int, summary: str = "") -> dict[str, Any]:
-    """What a detection found, for the HUD and logs; ``n_elements`` is len(elements)."""
+                n_candidates: int, summary: str = "", *, cached: bool = False) -> dict[str, Any]:
+    """What a detection found, for the HUD and logs; ``n_elements`` is len(elements).
+
+    ``cached`` (v3.1) is true when the ranking came from the server's rank cache instead of
+    a model call.
+    """
     elements = [dict(e) for e in elements]
     return {"type": "scan_result", "scan_id": _builder_int(scan_id, "scan_id"), "ok": bool(ok),
             "ms": int(round(_builder_float(ms, "ms"))), "n_elements": len(elements),
             "n_candidates": _builder_int(n_candidates, "n_candidates"),
-            "summary": str(summary), "elements": elements}
+            "summary": str(summary), "elements": elements, "cached": bool(cached)}
 
 
 def click(click_id: int, x: float, y: float, element: Mapping[str, Any]) -> dict[str, Any]:

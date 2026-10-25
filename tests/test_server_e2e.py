@@ -66,7 +66,11 @@ class StubCreate:
     def __call__(self, **params):
         with self.lock:
             self.calls.append(params)
-        text = json.dumps({"summary": "Login page", "elements": ELEMENTS})
+        # a rank (text-only, ax) request gets the compact v3.1 answer; vision gets ELEMENTS
+        if '"type": "image"' not in json.dumps(params.get("messages", [])):
+            text = json.dumps({"summary": "Login page", "order": [0], "risky": [], "labels": []})
+        else:
+            text = json.dumps({"summary": "Login page", "elements": ELEMENTS})
         return SimpleNamespace(stop_reason="end_turn", model="stub-haiku",
                                content=[SimpleNamespace(type="text", text=text)],
                                usage=SimpleNamespace(input_tokens=1500, output_tokens=200))
@@ -133,10 +137,10 @@ def scan(scan_id: int) -> dict:
             "title": "Example login", "hints": HINTS}
 
 
-def http_get(port: int, path: str) -> tuple[int, dict, bytes]:
+def http_get(port: int, path: str, headers=()) -> tuple[int, dict, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        conn.request("GET", path)
+        conn.request("GET", path, headers=dict(headers))
         resp = conn.getresponse()
         return resp.status, {k.lower(): v for k, v in resp.getheaders()}, resp.read()
     finally:
@@ -258,6 +262,86 @@ def test_point_mode_scans_shows_top_k_and_clicks(server):
     assert {"connect", "layout", "selection", "click", "scan_result", "point.scan",
             "point.click"} <= kinds
     assert server.token not in log
+
+
+def ax_scan(scan_id: int) -> dict:
+    """A desktop client's scan (v3.1): six AX hints in window points, no image."""
+    hints = [{"id": i, "x": 100 + 130 * i, "y": 100, "w": 120, "h": 40, "role": "AXButton",
+              "text": "Sign in" if i == 0 else f"Tool {i}", "tag": "", "actions": ["AXPress"],
+              "enabled": True} for i in range(6)]
+    return {"type": "scan", "scan_id": scan_id, "source": "ax", "viewport": dict(VIEWPORT),
+            "app": {"bundle_id": "com.example.app", "name": "Example", "pid": 4242},
+            "window": {"title": "Login"}, "hints": hints}
+
+
+@pytest.mark.slow
+def test_point_mode_ranks_an_ax_scan_text_only_and_caches_it(server):
+    c = controller(server, mode="point", slots=None)
+    try:
+        req = c.until("scan_request", timeout=RUN_TIMEOUT)
+        n_calls = len(server.stub.calls)
+        c.send(ax_scan(req["scan_id"]))
+        res = c.until("scan_result", timeout=10)
+        # ELEMENTS name hint 0 and hint -1: only the element with a valid hint_id is kept
+        assert res["ok"] is True and res["cached"] is False and res["n_elements"] == 1
+        assert res["elements"][0]["hint_id"] == 0 and res["elements"][0]["role"] == "button"
+        assert res["elements"][0]["x"] == pytest.approx(0.1)
+        assert len(server.stub.calls) == n_calls + 1
+        call = server.stub.calls[-1]
+        assert [b["type"] for b in call["messages"][0]["content"]] == ["text"]
+        assert "accessibility tree" in call["system"][0]["text"]
+        pick = c.until("layout", timeout=5, pred=lambda m: m["stage"] == "pick")
+        assert [t["slot"] for t in pick["targets"]] == ["b1", "more"]
+        wait_run(c)
+        c.gaze("more")                              # the last page's "more" rescans
+        req2 = c.until("scan_request", timeout=SELECT_TIMEOUT)
+        c.gaze(None)
+        c.send(ax_scan(req2["scan_id"]))
+        res2 = c.until("scan_result", timeout=10)
+        assert res2["cached"] is True and res2["elements"] == res["elements"]
+        assert len(server.stub.calls) == n_calls + 1           # no second model call
+        c.until("layout", timeout=5, pred=lambda m: m["stage"] == "pick")
+        c.send({"type": "rescan"})                  # the focused window changed
+        req3 = c.until("scan_request", timeout=5)
+        assert req3["settle_ms"] == 300 and req3["scan_id"] > req2["scan_id"]
+        c.until("layout", timeout=5, pred=lambda m: m["stage"] == "idle")
+    finally:
+        c.close()
+
+
+def test_api_speech_is_served_on_the_server_port(server):
+    auth = [("Authorization", f"Bearer {server.token}")]
+    assert http_get(server.port, "/api/speech?text=Headset%20streaming")[0] == 401   # no token
+    status, headers, body = http_get(server.port, "/api/speech?text=Headset%20streaming", auth)
+    assert status == 503 and "no voice" in json.loads(body)["error"]    # BRAINSYNC_TTS=off
+    assert http_get(server.port, "/api/speech?text=", auth)[0] == 400
+    assert http_get(server.port, "/api/speech?text=" + "a" * 301, auth)[0] == 400
+
+
+def test_speech_clip_uses_the_shared_cartesia_voice(monkeypatch, tmp_path):
+    from brainsync import voice
+
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFF....WAVE")
+    asked = []
+
+    class Speaker:
+        def clip(self, text, timeout=None):
+            asked.append((text, timeout))
+            return wav if text == "hi" else None
+
+    monkeypatch.setattr(voice, "default_speaker", lambda: Speaker())
+    assert app.speech_clip("hi") == b"RIFF....WAVE"
+    assert app.speech_clip("fails") is None
+    assert asked == [("hi", app.SPEECH_TIMEOUT_S), ("fails", app.SPEECH_TIMEOUT_S)]
+    monkeypatch.setattr(voice, "default_speaker", lambda: None)
+    assert app.speech_clip("hi") is None
+
+
+def test_scan_archive_skips_an_ax_scan_without_an_image(tmp_path):
+    archive = app.ScanArchive(tmp_path / "scans")
+    assert archive.save({**ax_scan(1), "image": None}) is None
+    assert archive.saved == 0 and list((tmp_path / "scans").iterdir()) == []
 
 
 def test_point_mode_without_a_detector_is_refused_but_slots_work(tmp_path):

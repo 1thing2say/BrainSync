@@ -606,3 +606,174 @@ def test_scores_the_real_detector_on_a_stub_create(dataset):
     assert row["hint_id_accuracy"] == 1.0 and row["hint_label_accuracy"] == 1.0
     assert (row["input_tokens"], row["output_tokens"]) == (1500, 300)
     assert row["cost_usd"] == pytest.approx(se.cost_usd(1500, 300))
+
+
+# -- --ax: accessibility dumps (v3.1) -----------------------------------------------------------
+
+WINDOW = {"title": "All iCloud", "frame": {"x": 100, "y": 50, "w": 900, "h": 600}}
+ITEMS = [
+    {"id": 0, "role": "AXButton", "subrole": "", "label": "New Note",
+     "frame": {"x": 120, "y": 70, "w": 40, "h": 20}, "enabled": True, "actions": ["AXPress"]},
+    {"id": 1, "role": "AXButton", "subrole": "", "label": "Delete",
+     "frame": {"x": 200, "y": 70, "w": 40, "h": 20}, "enabled": False, "actions": ["AXPress"]},
+    {"id": 2, "role": "AXTextField", "subrole": "AXSearchField", "label": "Search",
+     "frame": {"x": 600, "y": 70, "w": 200, "h": 22}, "enabled": True, "actions": []},
+]
+
+
+def write_dump(folder: Path, name: str, **over) -> Path:
+    data = {"app": {"bundle_id": name, "name": name.split(".")[-1], "pid": 412},
+            "window": WINDOW, "items": ITEMS, "walk_ms": 42.5, "truncated": False}
+    data.update(over)
+    path = folder / f"{name}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class RankStub(StubDetector):
+    def __init__(self, answers=None, **kw):
+        super().__init__(answers, **kw)
+        self.ranks: list[tuple] = []
+
+    def rank(self, hints, viewport_w, viewport_h, *, app, window_title, history=(), url=""):
+        self.ranks.append((hints, viewport_w, viewport_h, app, window_title, history, url))
+        answer = self.answers.pop(0) if self.answers else det(
+            [el("New note", hint_id=0), el("Delete", hint_id=1), el("Search", hint_id=2)],
+            ms=800, input_tokens=3000, output_tokens=150)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+@pytest.fixture
+def axdir(tmp_path):
+    for name in ("com.apple.Notes", "com.apple.finder"):
+        write_dump(tmp_path, name)
+    return tmp_path
+
+
+def test_load_ax_dump_makes_window_relative_hints(axdir):
+    dump = se.load_ax_dump(axdir / "com.apple.Notes.json")
+    assert dump.app == {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 412}
+    assert dump.window_title == "All iCloud"
+    assert (dump.viewport_w, dump.viewport_h) == (900, 600)
+    assert dump.hints[0] == {"id": 0, "x": 20, "y": 20, "w": 40, "h": 20, "role": "AXButton",
+                             "text": "New Note", "tag": "", "actions": ["AXPress"],
+                             "enabled": True}
+    assert dump.hints[2]["tag"] == "AXSearchField" and dump.hints[1]["enabled"] is False
+    assert dump.n_items == 3 and dump.walk_ms == 42.5 and dump.truncated is False
+
+
+def test_load_ax_dump_caps_hints_at_200(tmp_path):
+    items = [{**ITEMS[0], "id": i} for i in range(250)]
+    dump = se.load_ax_dump(write_dump(tmp_path, "big", items=items))
+    assert len(dump.hints) == 200 and dump.n_items == 250
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"app": None}, "top level"), ({"window": None}, "window must be"),
+    ({"window": {"title": "x"}}, "window.frame"),
+    ({"window": {"title": "x", "frame": {"x": 0, "y": 0, "w": 0, "h": 5}}}, "no area"),
+    ({"items": None}, "items must be a list"),
+    ({"items": [{"frame": ITEMS[0]["frame"]}]}, "integer id"),
+    ({"items": [{"id": 0, "frame": {"x": 1}}]}, "item 0 frame"),
+    ({"items": [ITEMS[0], ITEMS[0]]}, "share an id")])
+def test_load_ax_dump_rejects_broken_dumps(tmp_path, over, needle):
+    with pytest.raises(ValueError, match=needle):
+        se.load_ax_dump(write_dump(tmp_path, "bad", **over))
+
+
+def test_load_ax_dataset_sorts_skips_and_errors(axdir, tmp_path, capsys):
+    (axdir / "broken.json").write_text("{", encoding="utf-8")
+    dumps, skipped = se.load_ax_dataset(axdir)
+    assert [d.name for d in dumps] == ["com.apple.Notes", "com.apple.finder"]
+    assert [s["name"] for s in skipped] == ["broken"]
+    assert len(se.load_ax_dataset(axdir, limit=1)[0]) == 1
+    with pytest.raises(ValueError, match="not a folder"):
+        se.load_ax_dataset(tmp_path / "missing")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="no usable dump"):
+        se.load_ax_dataset(empty)
+
+
+def test_evaluate_ax_calls_rank_and_scores_pressable(axdir):
+    dumps, _ = se.load_ax_dataset(axdir, limit=1)
+    stub = RankStub()
+    result = se.evaluate_ax(dumps, stub)
+    (hints, vw, vh, app, title, history, url), = stub.ranks
+    assert hints == list(dumps[0].hints) and (vw, vh) == (900, 600)
+    assert app["bundle_id"] == "com.apple.Notes" and title == "All iCloud"
+    assert history == () and url == "" and stub.calls == []
+    row = result["dumps"][0]
+    # New Note is pressable, Delete is disabled, Search has no press action
+    assert row["n_elements"] == 3 and row["n_pressable"] == 1
+    assert row["pressable"] == pytest.approx(1 / 3)
+    assert row["n_hints"] == 3 and row["n_hints_pressable"] == 1
+    assert row["top3"] == ["New note", "Delete", "Search"]
+    assert row["cost_usd"] == pytest.approx(se.cost_usd(3000, 150))
+    t = result["totals"]
+    assert t["n_ok"] == 1 and t["ms_median"] == 800 and t["n_elements_mean"] == 3
+
+
+def test_evaluate_ax_keeps_going_after_a_failure_and_summarizes(axdir):
+    dumps, _ = se.load_ax_dataset(axdir)
+    stub = RankStub([RuntimeError("boom"), det([el(hint_id=0)], ms=500, input_tokens=100,
+                                               output_tokens=10)])
+    result = se.evaluate_ax(dumps, stub)
+    assert [r["ok"] for r in result["dumps"]] == [False, True]
+    assert "boom" in result["dumps"][0]["error"]
+    t = result["totals"]
+    assert (t["n_dumps"], t["n_ok"], t["n_failed"]) == (2, 1, 1)
+    assert t["pressable"] == 1.0 and t["ms_p90"] == 500
+    assert t["cost_usd_per_dump"] == pytest.approx(se.cost_usd(100, 10))
+    assert se.summarize_ax([])["pressable"] is None
+    assert "FAILED" in se.format_ax_row(result["dumps"][0])
+    text = se.format_ax_totals(t)
+    assert "pressable  100%" in text and "median 500 ms" in text
+
+
+def test_main_ax_writes_json_and_report(axdir, capsys):
+    stub = RankStub()
+    assert run_main(["--ax", str(axdir)], stub) == 0
+    out = capsys.readouterr().out
+    assert "com.apple.Notes" in out and "pressable" in out and "latency" in out
+    data = json.loads((axdir / "results" / "ax-rank.json").read_text())
+    assert data["settings"]["ax"] == str(axdir)
+    assert data["totals"]["n_ok"] == 2 and len(data["dumps"]) == 2
+    assert len(stub.ranks) == 2 and stub.calls == []
+
+
+@pytest.mark.parametrize("argv", [["--ax", "AX", "DIR"], ["--ax", "AX", "--with-hints"],
+                                  ["--ax", "AX", "--limit", "0"]])
+def test_main_ax_bad_arguments_exit_2(axdir, argv):
+    argv = [str(axdir) if a in ("AX", "DIR") else a for a in argv]
+    with pytest.raises(SystemExit) as info:
+        run_main(argv, RankStub())
+    assert info.value.code == 2
+
+
+def test_main_ax_missing_folder_exits_2_and_all_failed_exits_1(axdir, tmp_path, capsys):
+    assert run_main(["--ax", str(tmp_path / "missing")], RankStub()) == 2
+    assert run_main(["--ax", str(axdir)], RankStub([RuntimeError("x"), RuntimeError("y")])) == 1
+    assert "no dump was ranked" in capsys.readouterr().err
+
+
+def test_ax_scores_the_real_detector_on_a_stub_create(axdir):
+    detect = pytest.importorskip("brainsync.screen.detect")
+    answer = {"summary": "Notes", "order": [99, 0], "risky": [], "labels": []}   # 99: a ghost
+    calls = []
+
+    def create(**params):
+        calls.append(params)
+        return SimpleNamespace(stop_reason="end_turn",
+                               content=[SimpleNamespace(type="text", text=json.dumps(answer))],
+                               usage=SimpleNamespace(input_tokens=900, output_tokens=80))
+
+    dumps, _ = se.load_ax_dataset(axdir, limit=1)
+    result = se.evaluate_ax(dumps, detect.Detector(api_key="unused-test-key", create=create))
+    row = result["dumps"][0]
+    assert row["ok"], row.get("error")
+    assert len(calls) == 1 and [b["type"] for b in calls[0]["messages"][0]["content"]] == ["text"]
+    assert row["n_elements"] == 1 and row["pressable"] == 1.0          # the ghost is dropped
+    assert (row["input_tokens"], row["output_tokens"]) == (900, 80) and row["cached"] is False

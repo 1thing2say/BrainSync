@@ -9,7 +9,10 @@ It wires the pieces of PROTOCOL-v3.md together: the board (a real-time FakeBoard
 ``--board fake``, else the Cerelog X8 through the BrainFlow fork) feeds a DecoderBank, the
 Session runs the phases, calibration, onset gating and the client's mode, and the Transport
 serves WebSocket and HTTP on one port. ``GET /`` is the reference page from ``clients/web/``
-(with ``clients/js/`` beside it), ``GET /health`` the board and client state.
+(with ``clients/js/`` beside it), ``GET /health`` the board and client state, and
+``GET /api/speech?text=...`` a WAV of the text in the Cartesia voice of brainsync.voice
+(``speech_clip``; 503 without CARTESIA_API_KEY or with BRAINSYNC_TTS=off), so a desktop
+client can speak status changes without holding the key.
 
 Startup prints, once, the address of the reference page with the token in its fragment
 (``#token=...``), so it can be opened or pasted into the BrainPoint extension's options. The
@@ -67,6 +70,7 @@ JS_DIR = ROOT / "clients" / "js"
 WEB_FILES = ("index.html", "style.css", "app.js")
 JS_FILES = ("flicker.js", "brainsync-client.js")
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png"}
+SPEECH_TIMEOUT_S = 10.0     # one /api/speech synthesis (Cartesia's own limit is 8 s a try)
 
 
 def _note(text: str) -> None:
@@ -246,7 +250,10 @@ class ScanArchive:
         self.saved = 0
 
     def save(self, msg: dict) -> Path | None:
-        """Write one scan message; returns the image path, or None (noted) when it failed."""
+        """Write one scan message; returns the image path, or None (noted) when it failed.
+        An ax scan without an image (v3.1) has nothing to keep and is skipped quietly."""
+        if msg.get("image") is None and msg.get("source") == "ax":
+            return None
         try:
             image = msg["image"]
             ext = IMAGE_EXT[image["media_type"]]
@@ -319,6 +326,19 @@ def make_point_factory(detector: Any, freqs: Sequence[float], *, min_p_button: f
 
     factory().stop()
     return factory
+
+
+def speech_clip(text: str) -> bytes | None:
+    """The WAV of ``text`` in the shared Cartesia voice (brainsync.voice), for
+    ``GET /api/speech``; None when there is no voice (BRAINSYNC_TTS=off, no
+    CARTESIA_API_KEY, or the synthesis failed). Blocking: the transport runs it on a thread."""
+    from .. import voice
+
+    speaker = voice.default_speaker()
+    if speaker is None:
+        return None
+    clip = speaker.clip(text, timeout=SPEECH_TIMEOUT_S)
+    return None if clip is None else clip.read_bytes()
 
 
 def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
@@ -507,7 +527,7 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
                               health=lambda: session.health(),
                               catchup=lambda conn_id, role, hello:
                                   session.catchup(conn_id, role, hello),
-                              max_slots=len(freqs))
+                              speech=speech_clip, max_slots=len(freqs))
         session = Session(transport, board, bank, freqs, fake=args.board == "fake",
                           point_factory=point_factory, calibrate_s=args.calibrate_s,
                           refresh_hz=args.refresh_rates[0], refresh_rates=args.refresh_rates,
