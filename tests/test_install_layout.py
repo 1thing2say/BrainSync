@@ -79,3 +79,33 @@ def test_debian_stockfish_is_a_fallback() -> None:
     pytest.importorskip("chess")
     from brainsync.brainchess import prior
     assert "/usr/games/stockfish" in prior.FALLBACK_PATHS
+
+
+KEYS_PROBE = """
+import json, os
+from app import config
+from app.menus import MenuMaker
+from brainsync import voice
+names = config.load_env()
+cfg = config.load_config()
+maker = MenuMaker(cfg.menus, cfg.llm, config.load_intents(), config.load_profile(), keys=os.environ)
+print(json.dumps({"names": sorted(names), "cartesia": voice.find_api_key() == "sk-car-test",
+                  "backends": {b.name: b.why_disabled for b in maker.backends}}))
+"""
+
+
+def test_every_key_from_the_installed_secrets_file(tmp_path: Path) -> None:
+    # The file as BrainSyncOS's 70-brainsync.sh writes it (comments), with the keys added the
+    # way the owner and 85-llama.sh add them: BCI Voice must see all three.
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("# BrainSync API keys\n#ANTHROPIC_API_KEY=\n\nANTHROPIC_API_KEY=sk-ant-test\n"
+                       "CARTESIA_API_KEY=sk-car-test\nBRAINSYNC_LLAMA_API_KEY=llama-test\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ANTHROPIC_API_KEY", "CARTESIA_API_KEY", "BRAINSYNC_LLAMA_API_KEY")}
+    env.update({paths.ENV_FILE_VAR: str(secrets), "PYTHONPATH": str(REPO)})
+    proc = subprocess.run([sys.executable, "-c", KEYS_PROBE], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout)
+    assert got == {"names": ["ANTHROPIC_API_KEY", "BRAINSYNC_LLAMA_API_KEY", "CARTESIA_API_KEY"],
+                   "cartesia": True, "backends": {"local": "", "claude": ""}}

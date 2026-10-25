@@ -12,10 +12,15 @@ known in advance.
 The key is ``CARTESIA_API_KEY`` from the environment, else from ``BRAINSYNC_ENV_FILE``
 (an installed copy: /etc/brainsync/secrets.env), else from the first ``.env`` found
 in the working directory or above it, or above this package (the repo root's ``.env``
-serves every worktree under it). It is never printed. Without a key, without a player,
-or when a request fails, the prompt is only printed (there is no other voice to fall back
-to). ``BRAINSYNC_TTS=off`` silences everything, which the test suite uses;
-``CARTESIA_VOICE_ID`` and ``BRAINSYNC_TTS_CACHE`` override the voice and the cache folder.
+serves every worktree under it). It is never printed.
+
+Without a key, or when a request fails (offline), the prompt is spoken by espeak-ng, the
+offline voice, if it is installed (BrainSyncOS installs it): it writes the same kind of WAV,
+cached beside the Cartesia clips under its own name, so a Cartesia clip is never shadowed
+by it. A prompt that once fell back keeps that voice until the process ends. Without either
+voice, or without a player, the prompt is only printed. ``BRAINSYNC_TTS=off`` silences
+everything, which the test suite uses; ``CARTESIA_VOICE_ID`` and ``BRAINSYNC_TTS_CACHE``
+override the voice and the cache folder.
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from pathlib import Path
 from . import paths
 
 __all__ = ["CartesiaSpeaker", "TTSError", "speak", "prefetch", "find_api_key",
-           "player_command", "default_speaker", "DEFAULT_VOICE_ID"]
+           "player_command", "espeak_command", "default_speaker", "DEFAULT_VOICE_ID"]
 
 TTS_URL = "https://api.cartesia.ai/tts/bytes"
 DEFAULT_VOICE_ID = "47c38ca4-5f35-497b-b1a3-415245fb35e1"   # config/default.yaml speech.voice_id
@@ -50,6 +55,8 @@ MAX_PENDING = 3                  # prompts waiting to be played; older ones are 
 MAX_AHEAD = 2                    # clips synthesised at once (Cartesia plan limit)
 DRAIN_S = 4.0                    # at exit, how long the prompts still queued may play
 KEY_NAME = "CARTESIA_API_KEY"
+ESPEAK = "espeak-ng"             # the offline voice, found on PATH
+ESPEAK_TIMEOUT_S = 10.0          # one prompt; it takes well under a second
 # players that take a WAV file and block until it has played, in order of preference
 PLAYERS = (("afplay",), ("paplay",), ("aplay", "-q"),
            ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"))
@@ -111,6 +118,12 @@ def player_command(path: Path, which: Callable[[str], str | None] = shutil.which
     return None
 
 
+def espeak_command(path: Path, exe: str) -> list[str]:
+    """The espeak-ng command that writes the text on its stdin as a WAV at ``path`` (the
+    text never goes on the command line, so it cannot be read as an option)."""
+    return [exe, "-v", LANGUAGE, "-w", str(path), "--stdin"]
+
+
 def clip_key(voice_id: str, text: str) -> str:
     """Cache file stem for one utterance in one voice, model and format."""
     blob = f"{MODEL}\n{API_VERSION}\n{voice_id}\n{SAMPLE_RATE}\n{text}"
@@ -153,17 +166,20 @@ class CartesiaSpeaker:
 
     ``post(body, headers)`` sends one request and returns the audio (or raises TTSError);
     ``play(path)`` plays a WAV and returns when it is done. Both default to the real thing
-    and are replaced in tests.
+    and are replaced in tests. ``espeak`` is the offline voice: True finds espeak-ng on
+    PATH, a string is its path, None or False means none.
     """
 
     def __init__(self, api_key: str | None, voice_id: str = DEFAULT_VOICE_ID,
                  cache_dir: Path | None = None, *, post: Post | None = None,
                  play: Play | None = None, note: Callable[[str], None] = _stderr_note,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 espeak: str | bool | None = True) -> None:
         self.voice_id = voice_id
         self.cache_dir = Path(cache_dir) if cache_dir is not None else Path(
             os.environ.get("BRAINSYNC_TTS_CACHE", Path.home() / ".cache" / "brainsync" / "tts"))
         self._key = api_key or ""
+        self._espeak = shutil.which(ESPEAK) if espeak is True else (espeak or None)
         self._post = post if post is not None else _httpx_post
         self._player = play
         self._note = note
@@ -182,11 +198,11 @@ class CartesiaSpeaker:
         self.dropped = 0
         if not self._key:
             self._note_once(f"{KEY_NAME} is not set (environment or .env); prompts are "
-                            "printed only")
+                            + ("spoken by espeak-ng" if self._espeak else "printed only"))
 
     @property
     def enabled(self) -> bool:
-        return bool(self._key) and not self._closed
+        return bool(self._key or self._espeak) and not self._closed
 
     def _note_once(self, msg: str) -> None:
         if msg not in self._noted:
@@ -203,6 +219,8 @@ class CartesiaSpeaker:
         path = self.cache_dir / f"{clip_key(self.voice_id, text)}.wav"
         if path.is_file() and path.stat().st_size > 44:      # more than a WAV header
             return path
+        if not self._key:
+            return self._offline(text)
         for attempt in range(1, ATTEMPTS + 1):
             try:
                 audio = self._post(request_body(self.voice_id, text), self._headers())
@@ -210,8 +228,9 @@ class CartesiaSpeaker:
                 if exc.retry and attempt < ATTEMPTS:
                     self._sleep(attempt * RETRY_S)
                     continue
-                self._note_once(f"Cartesia request failed ({exc}); that prompt is printed only")
-                return None
+                self._note_once(f"Cartesia request failed ({exc}); that prompt is "
+                                + ("spoken by espeak-ng" if self._espeak else "printed only"))
+                return self._offline(text)
             try:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
@@ -222,6 +241,29 @@ class CartesiaSpeaker:
                 return None
             return path
         return None
+
+    def _offline(self, text: str) -> Path | None:
+        """``text`` as a WAV from espeak-ng, or None without it (or when it fails)."""
+        if not self._espeak:
+            return None
+        name = hashlib.sha256(f"{ESPEAK}\n{LANGUAGE}\n{text}".encode("utf-8")).hexdigest()[:32]
+        path = self.cache_dir / f"espeak-{name}.wav"
+        if path.is_file() and path.stat().st_size > 44:
+            return path
+        tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(espeak_command(tmp, self._espeak), input=text.encode("utf-8"),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=ESPEAK_TIMEOUT_S, check=True)
+            if not tmp.is_file() or tmp.stat().st_size <= 44:
+                raise OSError("espeak-ng wrote no audio")
+            os.replace(tmp, path)
+        except (OSError, subprocess.SubprocessError) as exc:
+            tmp.unlink(missing_ok=True)
+            self._note_once(f"espeak-ng failed ({type(exc).__name__}); that prompt is printed only")
+            return None
+        return path
 
     def _future(self, text: str) -> Future:
         with self._lock:
@@ -350,7 +392,8 @@ def default_speaker(voice_id: str | None = None) -> CartesiaSpeaker | None:
 
 
 def speak(text: str, voice_id: str | None = None) -> None:
-    """Say ``text`` with Cartesia after any prompt still playing; returns at once."""
+    """Say ``text`` with Cartesia (offline: espeak-ng) after any prompt still playing;
+    returns at once."""
     speaker = default_speaker(voice_id)
     if speaker is not None:
         speaker.say(text)
