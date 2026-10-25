@@ -13,7 +13,7 @@ test("checkUrl accepts ws:// and wss://, fills in /ws, and says how to fix anyth
   assert.deepEqual(P.checkUrl(undefined), { url: P.DEFAULT_URL });
   assert.deepEqual(P.checkUrl("  ws://127.0.0.1:8765/ws  "), { url: "ws://127.0.0.1:8765/ws" });
   assert.deepEqual(P.checkUrl("ws://127.0.0.1:9000"), { url: "ws://127.0.0.1:9000/ws" });
-  assert.deepEqual(P.checkUrl("wss://box.tail1234.ts.net/ws"), { url: "wss://box.tail1234.ts.net/ws" });
+  assert.deepEqual(P.checkUrl("wss://ripe-banana.trycloudflare.com/ws"), { url: "wss://ripe-banana.trycloudflare.com/ws" });
   assert.match(P.checkUrl("http://127.0.0.1:8765/ws").error, /ws:\/\/ or wss:\/\//);
   assert.match(P.checkUrl("127.0.0.1:8765").error, /ws:\/\/ or wss:\/\/|not an address/);
   assert.match(P.checkUrl("not a url").error, /not an address/);
@@ -48,12 +48,12 @@ test("the form loads the settings and saves a checked address and the token", as
   await settle();
   assert.equal(nodes.serverUrl.value, "ws://10.0.0.2:8765/ws");
   assert.equal(nodes.token.value, "tok");
-  nodes.serverUrl.value = "wss://box.ts.net";
+  nodes.serverUrl.value = "wss://ripe-banana.trycloudflare.com";
   nodes.token.value = "  new-token ";
   nodes.form.fire("submit");
   await settle();
-  assert.deepEqual(store, { serverUrl: "wss://box.ts.net/ws", token: "new-token" });
-  assert.equal(nodes.serverUrl.value, "wss://box.ts.net/ws");
+  assert.deepEqual(store, { serverUrl: "wss://ripe-banana.trycloudflare.com/ws", token: "new-token" });
+  assert.equal(nodes.serverUrl.value, "wss://ripe-banana.trycloudflare.com/ws");
   assert.match(nodes.status.textContent, /^Saved/);
   assert.ok(!nodes.status.textContent.includes("new-token"), "the token is never shown back");
   assert.equal(nodes.status.className, "ok");

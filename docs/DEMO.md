@@ -114,8 +114,12 @@ partner page shows **Copy iPhone app link** next to the phone link. Then:
   the app link or the web phone link into the app's pair screen works too.
 - The key changes every server start: after a restart the app says the link expired; send the new
   one. On the LAN address, allow **Local Network** the first time iOS asks.
-- Tap **I understand, start** in the app and allow the microphone and speech recognition. Turn the
-  media volume up (the silent switch does not matter here).
+- First launch: the app walks through its setup (pair, flicker warning, microphone, a short
+  offline practice). **Start the session** on the last step starts it, like **I understand,
+  start**. Do the setup before the demo; **Stop the flicker** is on every step once paired.
+- Later launches: tap **I understand, start** and allow the microphone and speech recognition if
+  asked. Turn the media volume up (the silent switch does not matter here). Text size, the
+  speaker test and **Pair again** are in Settings (the gear).
 - **The app is the partner page while it is connected.** The laptop's page shows "Open on another
   page"; preflight's `partner page` line says "connected (iPhone app)". Keep the laptop page open
   anyway for links, preflight and the profile page; do not press "Use this page instead" there

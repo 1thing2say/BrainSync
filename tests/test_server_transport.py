@@ -110,10 +110,13 @@ def test_origin_allowed():
 def test_origin_allowed_own_host():
     # the page served by this server over the network: Origin equals Host, host is an IP
     assert origin_allowed("http://100.64.0.5:8765", "100.64.0.5:8765")
-    assert origin_allowed("https://jetson.tail1234.ts.net", "jetson.tail1234.ts.net")
     assert origin_allowed("http://jetson:8765", "jetson:8765", bind_host="jetson")
     # a DNS rebinding page matches Host too, but is a name: refused
     assert not origin_allowed("http://evil.example:8765", "evil.example:8765")
+    # so is any other name, a tunnel's or a *.ts.net one: they need --origin
+    assert not origin_allowed("https://ripe-banana.trycloudflare.com",
+                              "ripe-banana.trycloudflare.com")
+    assert not origin_allowed("https://jetson.tail1234.ts.net", "jetson.tail1234.ts.net")
     # port or host differ from Host: refused
     assert not origin_allowed("http://100.64.0.5:9999", "100.64.0.5:8765")
     assert not origin_allowed("http://100.64.0.6:8765", "100.64.0.5:8765")
@@ -124,6 +127,19 @@ def test_origin_allowed_patterns():
     pats = [re.compile(r"https://app\.example\.com")]
     assert origin_allowed("https://app.example.com", patterns=pats)
     assert not origin_allowed("https://app.example.com.evil", patterns=pats)
+
+
+def test_origin_allowed_tunnel_host_only_with_its_pattern():
+    # brainsync-tunnel.sh passes --origin https://<host> with the dots escaped
+    host = "ripe-banana.trycloudflare.com"
+    pats = [re.compile(r"https://ripe-banana\.trycloudflare\.com")]
+    assert origin_allowed(f"https://{host}", host, patterns=pats)
+    assert origin_allowed(f"https://{host}", patterns=pats)
+    assert not origin_allowed("https://other-name.trycloudflare.com",
+                              "other-name.trycloudflare.com", patterns=pats)
+    # a *.ts.net name is no different now: only a pattern lets it in
+    assert origin_allowed("https://jetson.tail1234.ts.net", "jetson.tail1234.ts.net",
+                          patterns=[re.compile(r"https://jetson\.tail1234\.ts\.net")])
 
 
 # -- arguments --------------------------------------------------------------------------------

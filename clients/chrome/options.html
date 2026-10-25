@@ -31,8 +31,8 @@
   <form id="form" autocomplete="off">
     <label for="serverUrl">Server address</label>
     <input id="serverUrl" type="text" spellcheck="false" placeholder="ws://127.0.0.1:8765/ws">
-    <div class="help">ws://127.0.0.1:8765/ws for a server on this computer; wss://&lt;host&gt;/ws through
-      tailscale serve for one on another machine.</div>
+    <div class="help">ws://127.0.0.1:8765/ws for a server on this computer; wss://&lt;name&gt;.trycloudflare.com/ws
+      through a cloudflared tunnel for one on another machine.</div>
     <label for="token">Token</label>
     <input id="token" type="password" spellcheck="false" autocomplete="off" placeholder="leave empty for --no-auth">
     <div class="help">python -m brainsync.server prints it once at startup. It is kept in this browser only.</div>

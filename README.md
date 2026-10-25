@@ -811,28 +811,34 @@ missing board exits 1, a bad argument 2.
 `clients/chrome/README.md` explains each file and permission. Password fields are blacked
 out in the screenshot and their values never leave the page.
 
-### Over the network: Tailscale
+### Over the network: cloudflared
 
-The server speaks plain `ws://`. Anything beyond this machine goes through `tailscale
-serve`, which adds HTTPS (and so `wss://`) with a certificate for the machine's tailnet
-name:
+The server speaks plain `ws://` on `127.0.0.1`. Anything beyond this machine goes through a
+Cloudflare quick tunnel: `cloudflared` connects outward and gives a random
+`https://<name>.trycloudflare.com` address with HTTPS (and so `wss://`). Quick tunnels need
+no Cloudflare account, and they work on Wi-Fi with client isolation. On the Jetson,
+`brainsync-tunnel.service` does all of this at boot and writes the link to
+`~/brainsync-link.txt` (`deploy/jetson/cloudflare/README.md`). On any other machine:
 
 ```bash
-.venv/bin/python -m brainsync.server --board cerelog          # still on 127.0.0.1:8765
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8765
+cloudflared tunnel --url http://127.0.0.1:8765          # prints https://<name>.trycloudflare.com
+.venv/bin/python -m brainsync.server --board cerelog \
+    --origin 'https://<name>\.trycloudflare\.com'      # still on 127.0.0.1:8765
 ```
 
-The page is then at `https://<machine>.<tailnet>.ts.net/#token=...` and the extension's
-server address is `wss://<machine>.<tailnet>.ts.net/ws`. `tailscale serve` has changed its
-syntax across versions (older ones used `tailscale serve https / http://127.0.0.1:8765`), so
-check `tailscale serve --help` for yours, and `tailscale serve status` shows what is
-served. If the page's own address is refused with HTTP 403, add
-`--origin 'https://<machine>\.<tailnet>\.ts\.net'`. Binding `--host 0.0.0.0` instead serves
-plain `ws://` to the whole LAN; keep the token on if you do.
+The page is then at `https://<name>.trycloudflare.com/#token=<token>`, with the token the
+server printed (the part after `#token=` in its address line; it is also in
+`~/.config/brainsync/token`), and the extension's server address is
+`wss://<name>.trycloudflare.com/ws`. `--origin` lets the page's own address through: without
+it the page gets HTTP 403. Every `cloudflared` start gives a new address, so restart the
+server with the new `--origin`. The address is public and the token is its only gate: never
+run the server with `--no-auth` behind a tunnel, and do not post the link.
 
 ### On the Jetson
 
-`deploy/jetson/` has a systemd unit and the steps. `--board cerelog` needs the Cerelog fork
+`sudo deploy/jetson/install.sh` sets the Jetson up in one command: Python 3.12, the venv,
+the BrainFlow wheel and `brainsync-tunnel.service`, which runs the server behind a Cloudflare
+quick tunnel from boot on (`deploy/jetson/README.md`). `--board cerelog` needs the Cerelog fork
 of BrainFlow built for Linux aarch64: `deploy/jetson/brainflow/` builds the wheel (Docker on
 the Mac, or natively on the Jetson) and `deploy/jetson/brainflow/INSTALL.md` installs and
 checks it. The wheel was verified in an arm64 container, not yet on a real Jetson with the
@@ -989,7 +995,7 @@ accuracy and dropped frames with the panel on versus off.
 | `clients/js/` | Browser SDK: `Connection`, `FlickerState`, refresh meter, and `flicker.js` |
 | `clients/web/` | The reference page (slots mode), served by the server at `/` |
 | `clients/chrome/` | BrainPoint, the point-mode Chrome extension |
-| `deploy/jetson/` | systemd unit and setup steps for the Jetson |
+| `deploy/jetson/` | One-command Jetson setup (`install.sh`), the Cloudflare tunnel service and the steps |
 | `tools/screen_eval.py` | Scores Haiku's detection against DOM ground truth |
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 | `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |

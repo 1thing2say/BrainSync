@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Smoke test of the Jetson setup (deploy/jetson/README.md) in containers, behind a TLS proxy.
+# Smoke test of the Jetson setup (deploy/jetson/README.md) in containers, behind a TLS front end.
 #
 #   deploy/jetson/smoke_test.sh
 #   WHEEL=path/to/brainflow-0.0.1-py3-none-linux_aarch64.whl deploy/jetson/smoke_test.sh
 #
 # It builds an Ubuntu 22.04 arm64 image like a JetPack 6 Jetson: Python 3.12 from deadsnakes,
 # the Cerelog BrainFlow wheel, then this checkout with `pip install -e .`, in the order of
-# README step 2. On a private Docker network it then runs
+# README step 2, with a login user (`jetson`) to run the server. On a private Docker network
+# it then runs
 #
-#   server  python -m brainsync.server --board fake --host 0.0.0.0 --token-file /tmp/token
-#   proxy   caddy:2 serving https://jetson.tailtest.ts.net with `tls internal`, the stand-in
-#           for `tailscale serve`; its port 443 is published on 127.0.0.1 only
+#   server  python -m brainsync.server --board fake --token-file /tmp/token and --origin for
+#           the site, as cloudflare/brainsync-tunnel.sh runs it, but on --host 0.0.0.0 so the
+#           proxy container can reach it (on the Jetson cloudflared runs beside it, on 127.0.0.1)
+#   proxy   caddy:2 serving https://jetson-smoke.trycloudflare.com with `tls internal`, the
+#           stand-in for the Cloudflare edge; its port 443 is published on 127.0.0.1 only
 #   client  the same image, talking https/wss to the proxy and trusting only Caddy's root CA
 #
 # and checks /health, the reference page, a controller that gets a welcome and a selection
@@ -30,7 +33,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 KIT="$HERE/brainflow"
-SITE="jetson.tailtest.ts.net"
+SITE="jetson-smoke.trycloudflare.com"
 IMAGE="brainsync-jetson-smoke"
 KIT_IMAGE="brainflow-cerelog-jetson"
 RUN="brainsync-smoke-$$"
@@ -114,7 +117,8 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends python3.12 python3.12-venv \
  && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin --groups dialout brainsync
+# The login user the server runs as on the Jetson (brainsync-tunnel.service, User=)
+RUN useradd --create-home --groups dialout,tty jetson
 WORKDIR /opt/brainsync
 RUN python3.12 -m venv .venv && .venv/bin/python -m pip install --quiet "setuptools<81"
 COPY wheel/ /tmp/wheel/
@@ -126,7 +130,7 @@ RUN .venv/bin/python -c 'import tomllib; print("\n".join(tomllib.load(open("/tmp
 COPY repo/ /opt/brainsync/
 RUN .venv/bin/python -m pip install --quiet -e . \
  && .venv/bin/python -m pip show brainflow | grep -x 'Version: 0.0.1'
-USER brainsync
+USER jetson
 ENV PYTHONUNBUFFERED=1 PATH=/opt/brainsync/.venv/bin:$PATH
 EOF
 log "building $IMAGE (linux/arm64)"
@@ -137,12 +141,13 @@ else
     fatal "image build (log above)"
 fi
 
-# 3. the server on a private network, as the unit runs it but with the fake board
+# 3. the server on a private network, as brainsync-tunnel.sh runs it, with the fake board:
+# --origin allows exactly the site (the tunnel script escapes the dots the same way)
 log "starting the server and the proxy"
 docker network create "$NET" >/dev/null
 docker run -d --platform linux/arm64 --name "$SERVER" --network "$NET" --network-alias brainsync \
     "$IMAGE" python -m brainsync.server --board fake --host 0.0.0.0 --port 8765 \
-    --token-file /tmp/token --no-detect >/dev/null
+    --token-file /tmp/token --origin "https://${SITE//./\\.}" --no-detect >/dev/null
 server_up() { docker logs "$SERVER" 2>&1 | grep -q '^BrainSync server on '; }
 if wait_for 60 server_up; then
     pass "server: --board fake on 0.0.0.0:8765 inside the network, token in /tmp/token"
@@ -151,7 +156,8 @@ else
     fatal "server did not start within 60 s (log above)"
 fi
 
-# 4. the TLS proxy, the stand-in for `tailscale serve --https=443 http://127.0.0.1:8765`
+# 4. the TLS proxy, the stand-in for the Cloudflare edge in front of `cloudflared tunnel --url
+# http://127.0.0.1:8765`: https in, plain http to the server, the Host passed through
 cat > "$TMP/Caddyfile" <<EOF
 {
 	skip_install_trust
@@ -328,7 +334,7 @@ check(f"client: {URL} with Origin https://evil.example gets HTTP 403", evil_orig
 sys.exit(1 if failed else 0)
 EOF
 log "client checks"
-# Caddy keeps its root certificate at 0600; it is public, and the client runs as brainsync.
+# Caddy keeps its root certificate at 0600; it is public, and the client runs as jetson.
 chmod 0755 "$TMP/smoke"
 chmod 0644 "$TMP/smoke/root.crt" "$TMP/smoke/check.py"
 docker create -i --platform linux/arm64 --name "$CLIENT" --network "$NET" \

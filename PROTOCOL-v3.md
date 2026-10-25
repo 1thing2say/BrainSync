@@ -27,9 +27,11 @@ Two client modes:
   - `GET /health` returns `{"ok": true, "board": "<state>", "controller": bool, "viewers": n}`.
   - `GET /api/speech?text=…` returns the text as WAV (v3.1, section 5).
   - `GET /ws` upgrades to WebSocket.
-- The default bind is `127.0.0.1`. With `--host 0.0.0.0` (or a Tailscale address) the server can
-  be reached over the network. Use `wss://` through `tailscale serve` (or a Cloudflare Tunnel)
-  for anything beyond a trusted LAN; the server itself speaks plain `ws://`.
+- The default bind is `127.0.0.1`. Other machines reach the server through a Cloudflare quick
+  tunnel (`cloudflared tunnel --url http://127.0.0.1:8765`), which gives an
+  `https://<name>.trycloudflare.com` address and so `wss://`; the server itself speaks plain
+  `ws://`, and allows the tunnel's Origin with `--origin`. On the Jetson,
+  `brainsync-tunnel.service` runs both (`deploy/jetson/cloudflare/README.md`).
 - Messages are UTF-8 JSON text frames, one object per frame, each with a string `type`. Unknown
   fields are ignored. Unknown types are answered with `error` (`code: "protocol"`,
   `fatal: false`) and otherwise ignored. Binary frames are ignored. A frame over 4 MB closes the

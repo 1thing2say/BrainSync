@@ -19,6 +19,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -33,6 +34,7 @@ pytest.importorskip("websockets")
 from brainsync.screen.detect import Detector  # noqa: E402
 from brainsync.server import app  # noqa: E402
 from brainsync.server.client import Client, ServerError  # noqa: E402
+from brainsync.server.transport import origin_allowed  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
@@ -670,23 +672,70 @@ def test_refresh_rates_reach_the_welcome(tmp_path):
 
 # -- deployment ---------------------------------------------------------------------------
 
-def test_the_jetson_unit_runs_valid_arguments():
-    import configparser
-    import shlex
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None
+                    or shutil.which("curl") is None, reason="needs bash and curl")
+def test_the_jetson_tunnel_runs_the_server_with_valid_arguments(tmp_path):
+    """brainsync-tunnel.service runs brainsync-tunnel.sh, which starts the server. The unit is
+    rendered as cloudflare/install.sh renders it; the script runs with a fake cloudflared and
+    a stand-in Python that records the server's arguments and exits 2 (a bad argument)."""
+    jetson = ROOT / "deploy" / "jetson"
+    unit = subprocess.run(["bash", str(jetson / "cloudflare" / "install.sh"), "--print-unit",
+                           "--user", "jetson", "--home", "/home/jetson",
+                           "--dir", "/opt/brainsync"],
+                          capture_output=True, text=True, check=True, timeout=30).stdout
+    # Environment= and EnvironmentFile= repeat, so not configparser: KEY -> every value
+    service: dict[str, list[str]] = {}
+    section = ""
+    for line in unit.replace("\\\n", " ").splitlines():
+        if line.startswith("["):
+            section = line.strip("[]")
+        elif section == "Service" and "=" in line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            service.setdefault(key, []).append(value)
+    assert service["User"] == ["jetson"]
+    assert service["ExecStart"] == ["/opt/brainsync/deploy/jetson/cloudflare/brainsync-tunnel.sh"]
+    assert "dialout" in service["SupplementaryGroups"][0].split()
+    assert service["KillSignal"] == ["SIGTERM"] and service["RestartPreventExitStatus"] == ["2"]
 
-    text = (ROOT / "deploy" / "jetson" / "brainsync-server.service").read_text()
-    unit = configparser.ConfigParser(interpolation=None, strict=True)
-    unit.optionxform = str
-    unit.read_string(text.replace("\\\n", " "))
-    service = unit["Service"]
-    argv = shlex.split(service["ExecStart"])
-    assert argv[:3] == ["/opt/brainsync/.venv/bin/python", "-m", "brainsync.server"]
+    home = tmp_path / "home"
+    home.mkdir()
+    argv_file = tmp_path / "server.argv"
+    stub = tmp_path / "python"
+    stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" >"$ARGV_FILE"\nexit 2\n')
+    stub.chmod(0o755)
+    token_file = tmp_path / "token"
+    with socket.socket() as sock:   # a free port, so the script's "already answers" check passes
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
+           "TMPDIR": str(tmp_path), "BRAINSYNC_DIR": str(ROOT), "PYTHON": str(stub),
+           "CLOUDFLARED": str(jetson / "cloudflare" / "test" / "fake-cloudflared"),
+           "PORT": str(port), "BOARD": "fake", "TOKEN_FILE": str(token_file),
+           "SERVER_ARGS": "--no-detect", "SERIAL_DEVICES": "", "URL_TIMEOUT": "10",
+           "STOP_TIMEOUT": "5", "ARGV_FILE": str(argv_file)}
+    r = subprocess.run(["bash", str(jetson / "cloudflare" / "brainsync-tunnel.sh")], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, r.stderr      # what RestartPreventExitStatus=2 keeps stopped
+    assert "refused its arguments" in r.stderr
+
+    argv = argv_file.read_text().splitlines()
+    assert argv[:2] == ["-m", "brainsync.server"]
     p = app.build_parser()
-    args = p.parse_args(argv[3:])
+    args = p.parse_args(argv[2:])
     app.check_arguments(p, args)              # exits 2 on a bad flag
-    assert args.host == "127.0.0.1" and not args.no_auth
-    assert args.token_file.startswith("/var/lib/brainsync/")
-    assert service["KillSignal"] == "SIGTERM" and service["RestartPreventExitStatus"] == "2"
-    assert "dialout" in service["SupplementaryGroups"]
-    readme = (ROOT / "deploy" / "jetson" / "README.md").read_text()
-    assert "tailscale serve --help" in readme and "aarch64" in readme
+    assert args.host == "127.0.0.1" and args.port == port and not args.no_auth
+    assert args.board == "fake" and args.no_detect
+    assert args.token_file == str(token_file)
+    assert args.origin == [r"https://fake-tunnel-test\.trycloudflare\.com"]
+    # and the pattern lets the tunnel's page in (names are not allowed as the own host), and
+    # only that page
+    pats = [re.compile(o) for o in args.origin]
+    h = "fake-tunnel-test.trycloudflare.com"
+    assert origin_allowed(f"https://{h}", h, pats, args.host)
+    assert not origin_allowed("https://other.trycloudflare.com", "other.trycloudflare.com",
+                              pats, args.host)
+    assert not origin_allowed(f"https://{h}.evil.example", f"{h}.evil.example", pats, args.host)
+
+    readme = (jetson / "README.md").read_text()
+    assert "cloudflare/install.sh" in readme and "trycloudflare.com" in readme
+    assert "aarch64" in readme and "tailscale" not in readme.lower()

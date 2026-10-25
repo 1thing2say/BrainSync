@@ -149,8 +149,9 @@ def origin_allowed(origin: str | None, host_header: str | None = None,
     Allowed: no Origin at all, the Chrome extension, http(s) pages on localhost, 127.0.0.1 or
     [::1], any origin a pattern fully matches, and the server's own address. "Own address"
     means the Origin's host and port equal the request's Host header, and that host is an IP
-    address, the bind host, or a Tailscale name (*.ts.net). Other names are refused even when
-    they match Host, because a DNS rebinding page would match too; add them with --origin.
+    address or the bind host. Other names, a cloudflared tunnel's among them, are refused even
+    when they match Host, because a DNS rebinding page would match too; add them with --origin
+    (deploy/jetson/cloudflare/brainsync-tunnel.sh passes its tunnel's address that way).
     """
     if origin is None:
         return True
@@ -163,8 +164,7 @@ def origin_allowed(origin: str | None, host_header: str | None = None,
     netloc = host if m["port"] is None else f"{host}:{m['port']}"
     if netloc != host_header.strip().lower():
         return False
-    return (_is_ip(host) or host.endswith(".ts.net")
-            or (bind_host is not None and host == bind_host.lower()))
+    return _is_ip(host) or (bind_host is not None and host == bind_host.lower())
 
 
 @dataclass(frozen=True)
