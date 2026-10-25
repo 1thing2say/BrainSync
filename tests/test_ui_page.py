@@ -96,3 +96,14 @@ def test_only_the_session_page_is_held_to_the_window():
     assert bodies == ["body.session"]
     assert '<body class="session">' in (UI / "index.html").read_text(encoding="utf-8")
     assert 'class="session"' not in (UI / "profile.html").read_text(encoding="utf-8")
+
+
+def test_the_phone_layout_has_its_cards_and_calibration_line():
+    # INTERFACE-v2-draft.md section 9: two cards left (s1) and right (s2), each listing its half of
+    # the phrases, a cue ring while calibrating, and the calibration score (ui/view_core.js).
+    css = re.sub(r"/\*.*?\*/", "", (UI / "style.css").read_text(encoding="utf-8"), flags=re.S)
+    for selector in [".targets.sides .pos-left", ".targets.sides .pos-right", ".phrase.more",
+                     ".target.cue", ".calibration.tone-warn"]:
+        assert selector in css, selector
+    page = (UI / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'id="calibration"[^>]*\shidden', page)  # nothing until a calibration

@@ -56,3 +56,22 @@ test("a 120 Hz or uneven screen is reported", () => {
   assert.match(FC.refreshProblem(uneven, 60), /uneven/);
   assert.equal(FC.refreshProblem(null, 60), "");
 });
+
+test("the page flickers only when /api/config says it draws the flicker", () => {
+  assert.equal(FC.drawsFlicker({ flicker: true }), true);  // an older server: no display, no paradigm
+  assert.equal(FC.drawsFlicker({ flicker: true, display: "browser", paradigm: "freq" }), true);
+  assert.equal(FC.drawsFlicker({ flicker: false, display: "browser" }), false);
+  // The iPhone draws c-VEP: this page is a still mirror, even if flicker were left on.
+  assert.equal(FC.drawsFlicker({ flicker: true, display: "phone", paradigm: "code" }), false);
+  assert.equal(FC.drawsFlicker({ flicker: true, display: "psychopy" }), false);
+  assert.equal(FC.drawsFlicker({ flicker: true, paradigm: "code" }), false);
+  assert.equal(FC.drawsFlicker(null), false);
+});
+
+test("c-VEP slots have no frequency and are left out of the flicker loop", () => {
+  assert.deepEqual(FC.freqSlots({ s1: { freq_hz: 13, phase_deg: 0 }, s2: { freq_hz: 15 } }),
+    { s1: { freq_hz: 13, phase_deg: 0 }, s2: { freq_hz: 15, phase_deg: 0 } });
+  assert.deepEqual(FC.freqSlots({ s1: { lag_frames: 0 }, s2: { lag_frames: 31 } }), {});
+  assert.deepEqual(FC.freqSlots({ s1: { freq_hz: null, lag_frames: 0 } }), {});
+  assert.deepEqual(FC.freqSlots(undefined), {});
+});

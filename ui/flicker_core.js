@@ -47,7 +47,29 @@ const FlickerCore = (() => {
     return "";
   }
 
-  return { frameIndex, luminance, measure, refreshProblem };
+  // Whether this page draws the flicker, from /api/config: only with ``flicker`` true, and never
+  // when another screen draws it (``display`` psychopy or phone) or for c-VEP (``paradigm`` code,
+  // drawn by the iPhone app). An older server sends neither key: ``flicker`` alone decides.
+  function drawsFlicker(config) {
+    if (!config || !config.flicker) return false;
+    if (config.display && config.display !== "browser") return false;
+    if (config.paradigm && config.paradigm !== "freq") return false;
+    return true;
+  }
+
+  // The slots that have a frequency, {slot: {freq_hz, phase_deg}}; a c-VEP slot ({lag_frames})
+  // has none and is left out, so the flicker loop never reads a missing freq_hz.
+  function freqSlots(slots) {
+    const out = {};
+    for (const [slot, spec] of Object.entries(slots || {})) {
+      if (spec && Number.isFinite(spec.freq_hz) && spec.freq_hz > 0) {
+        out[slot] = { freq_hz: spec.freq_hz, phase_deg: Number.isFinite(spec.phase_deg) ? spec.phase_deg : 0 };
+      }
+    }
+    return out;
+  }
+
+  return { frameIndex, luminance, measure, refreshProblem, drawsFlicker, freqSlots };
 })();
 
 if (typeof module !== "undefined") module.exports = FlickerCore;
