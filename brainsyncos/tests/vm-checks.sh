@@ -31,7 +31,9 @@
 #                package repository and 60-apt-repo.sh installs its keyring;
 #                75-usb-serial.sh installs the board's udev rules but not the
 #                Jetson-only ch341 module; 70-brainsync.sh the BrainSync apps
-#                (brainsync-voice runs)
+#                (brainsync-voice runs), secrets.env a template
+#                root:BRAINSYNC_USER 0640, and reports the offline voice
+#                (espeak-ng from Ubuntu's archive, or a note without it)
 # Work happens in /scratch (tmpfs); nothing is written to build/.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
@@ -423,7 +425,12 @@ c_hook() {
         || die "brainsync and brainsync-runtime are not installed"
     in_target "$t" /usr/bin/brainsync-voice --help | grep -q 'usage:' || die "brainsync-voice does not run in the target"
     echo "packages: brainsyncos-archive-keyring, brainsync-runtime and brainsync installed from the ISO's repository; repository unmounted"
-    echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
+    [ "$(stat -c '%u %a' "$t/etc/brainsync/secrets.env")" = "0 640" ] \
+        && [ "$(in_target "$t" stat -c %G /etc/brainsync/secrets.env)" = "$BRAINSYNC_USER" ] \
+        && ! grep -qv '^#' "$t/etc/brainsync/secrets.env" || die "secrets.env is not a template root:$BRAINSYNC_USER 640"
+    grep -E '70-brainsync.sh: (offline voice: espeak-ng|note: offline voice espeak-ng)' "$log" \
+        || die "70-brainsync.sh did not report the offline voice"
+    echo "secrets.env: root:$BRAINSYNC_USER 640, template without keys"
     grep -q '75-usb-serial.sh: vm-arm64 edition: no brainsyncos-ch341-tegra' "$log" || die "75-usb-serial.sh did not skip the module"
     [ -s "$t/usr/lib/udev/rules.d/70-brainsync-cerelog.rules" ] || die "the board's udev rules are missing"
     ! in_target "$t" dpkg -s brainsyncos-ch341-tegra > /dev/null 2>&1 || die "the VM got the Jetson-only ch341 module"

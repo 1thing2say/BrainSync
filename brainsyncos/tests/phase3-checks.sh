@@ -15,7 +15,8 @@
 #             the app; brainsync: the app in the venv, the /usr/bin links into
 #             it, the /etc/brainsync conffiles, /usr/share/brainsync), no file
 #             in both, nothing named *.env, no tests folders but numpy/testing,
-#             a .pyc beside every module, root-owned, md5sums OK
+#             a .pyc beside every module, root-owned, md5sums OK; brainsync
+#             Recommends espeak-ng, which is Ubuntu's unchanged .deb
 #   md5map    merge-md5sums.py --map: a mapped tree's files are listed at their
 #             ISO paths with correct sums; bad --map arguments are refused
 #   hook      payload/hook.sh (00-release.sh, 60-apt-repo.sh and
@@ -25,9 +26,20 @@
 #             afterwards, brainsyncos-archive-keyring is installed (no apt error
 #             or warning in the log) and verifies the repository, brainsync and
 #             brainsync-runtime are installed and brainsync-voice runs in the
-#             target, the target's apt sources and lists are unchanged; a re-run
-#             works; a failing later step and a missing repository fail the
-#             hook and leave no mount
+#             target, the target's apt sources and lists are unchanged; without
+#             espeak-ng's libraries and without the account the step notes both
+#             and makes secrets.env root:root 0640, comments only; a re-run
+#             works and leaves secrets.env alone; a failing later step and a
+#             missing repository fail the hook and leave no mount
+#   voice     payload/hook.sh with 00, 60 and 70-brainsync.sh against NVIDIA's
+#             target base layer plus the account (as 30-user.sh makes it) and
+#             espeak-ng's libraries from the pool with their dependencies (as
+#             NVIDIA's late-command installs them): espeak-ng installed from
+#             our repository; brainsync/voice.py without a Cartesia key writes
+#             a real WAV with it, as the account; secrets.env root:ACCOUNT
+#             0640; with keys added, BCI Voice reads all three as the account
+#             (both LLM backends on, the Cartesia key found) and another
+#             account starts without them; a re-run changes nothing
 #   debs      the board packages: brainsyncos-ch341-tegra (jetson only; files,
 #             exact nvidia-l4t-kernel Depends, depmod scripts, unsigned
 #             ch341.ko whose vermagic equals NVIDIA's cp210x.ko and whose
@@ -174,6 +186,15 @@ c_app_debs() {
         || die "brainsync must depend on exactly brainsync-runtime $BRAINSYNCOS_VERSION, has: $(dpkg-deb -f "$app" Depends)"
     [ "$(dpkg-deb -f "$rt" Depends)" = 'python3.12 (>= 3.12.3), python3.12 (<< 3.13), libc6, libgcc-s1, libstdc++6, zlib1g' ] \
         || die "brainsync-runtime Depends: $(dpkg-deb -f "$rt" Depends)"
+    [ "$(dpkg-deb -f "$app" Recommends)" = espeak-ng ] || die "brainsync must recommend espeak-ng, has: $(dpkg-deb -f "$app" Recommends)"
+    (
+        load_env_file "$BRAINSYNCOS_ROOT/packages/espeak-ng/package.env" "DEB_VERSION DEB_SHA256"
+        f="$d/espeak-ng_${DEB_VERSION}_arm64.deb"
+        [ "$(sha256_of "$f")" = "$DEB_SHA256" ] || die "espeak-ng is not Ubuntu's .deb (sha256)"
+        dpkg-deb -c "$f" > "$W/espeak.list"
+        grep -q ' \./usr/bin/espeak-ng$' "$W/espeak.list" || die "espeak-ng has no /usr/bin/espeak-ng"
+        echo "espeak-ng $DEB_VERSION: Ubuntu's .deb, sha256 OK; Depends: $(dpkg-deb -f "$f" Depends)"
+    )
     deb_paths "$rt" > "$W/rt.paths"
     deb_paths "$app" > "$W/app.paths"
 
@@ -296,6 +317,12 @@ c_hook() {
         || die "70-brainsync.sh did not finish"
     grep -q 'BrainSyncOS layer installed (3 steps)' "$log" || die "log lacks the summary"
     ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
+    grep -q '70-brainsync.sh: note: offline voice espeak-ng not installed: its libraries are missing (libespeak-ng1' "$log" \
+        || die "70-brainsync.sh did not note espeak-ng's missing libraries"
+    grep -q "70-brainsync.sh: note: no account $BRAINSYNC_USER; /etc/brainsync/secrets.env is root:root" "$log" \
+        || die "70-brainsync.sh did not note the missing account"
+    secrets_ok "$t" root
+    sha256sum "$t/etc/brainsync/secrets.env" > "$W/secrets.sum"
     "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg -s brainsyncos-archive-keyring | grep -qx 'Status: install ok installed' \
         || die "brainsyncos-archive-keyring is not installed in the target"
     "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg-query -W -f '${Status}\n' brainsync brainsync-runtime \
@@ -313,7 +340,9 @@ c_hook() {
 
     run_hook "$p" "$t" "$REPO" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
     no_mount_left "$t"
-    echo "re-run: OK"
+    sha256sum -c --quiet "$W/secrets.sum" || die "the re-run changed secrets.env"
+    grep -q '70-brainsync.sh: /etc/brainsync/secrets.env exists (root:root 640); left as it is' "$log" || die "re-run: secrets.env not left alone"
+    echo "re-run: OK, secrets.env unchanged"
 
     cp -R "$p" "$W/hp-fail"
     printf '#!/bin/bash\necho failing on purpose; exit 3\n' > "$W/hp-fail/install.d/70-fail.sh"
@@ -327,6 +356,123 @@ c_hook() {
     grep -q 'no package repository at' "$W/norepo.out" || { cat "$W/norepo.out"; die "missing repository: wrong error"; }
     no_mount_left "$t"
     echo "missing repository: hook rc=$rc ($(grep -m1 'no package repository' "$W/norepo.out"))"
+}
+
+# secrets_ok TARGET GROUP: /etc/brainsync/secrets.env is root:GROUP 0640, a
+# template of comments that names the three keys and sets none.
+secrets_ok() {
+    local f="$1/etc/brainsync/secrets.env" k
+    [ -f "$f" ] && [ ! -L "$f" ] || die "no secrets.env in the target"
+    [ "$(stat -c '%u %a' "$f")" = "0 640" ] || die "secrets.env is $(stat -c '%u %a' "$f"), want root 640"
+    [ "$("$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$1" -- stat -c %G /etc/brainsync/secrets.env)" = "$2" ] \
+        || die "secrets.env group is not $2"
+    ! grep -qv '^#' "$f" || die "secrets.env has lines that are not comments: $(grep -cv '^#' "$f")"
+    for k in ANTHROPIC_API_KEY CARTESIA_API_KEY BRAINSYNC_LLAMA_API_KEY; do
+        grep -qx "#$k=" "$f" || die "secrets.env does not name $k"
+    done
+    echo "secrets.env: root:$2 640, $(wc -l < "$f" | tr -d ' ') comment lines, no keys"
+}
+
+# pool_install TARGET PKG...: install PKGs and their dependencies into TARGET
+# from the base ISO's pool, --no-install-recommends, as NVIDIA's late-command
+# does: only the debs apt needs are taken from the ISO.
+pool_install() {
+    local t="$1" r="$1/tmp/pool" f
+    shift
+    mkdir -p "$r/dists/noble/main/binary-arm64"
+    for f in dists/noble/Release dists/noble/main/binary-arm64/Packages dists/noble/main/binary-arm64/Packages.gz; do
+        xorriso -osirrox on -indev "$(resolve_base_iso)" -extract "/$f" "$r/$f" > /dev/null 2>&1 \
+            || die "cannot read /$f from the base ISO"
+    done
+    printf 'Types: deb\nURIs: file:/tmp/pool\nSuites: noble\nComponents: main\nTrusted: yes\n' > "$W/pool.sources"
+    mkdir -p "$t/tmp/pool-apt/lists/partial" "$t/tmp/pool-apt/archives/partial"
+    cp "$W/pool.sources" "$t/tmp/pool-apt/pool.sources"
+    pool_apt() {
+        "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Dir::Etc::SourceList=/dev/null -o Dir::Etc::SourceParts=/tmp/pool-apt \
+            -o Dir::State::Lists=/tmp/pool-apt/lists -o Dir::Cache::Archives=/tmp/pool-apt/archives \
+            -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= -o APT::Sandbox::User=root -o Dpkg::Use-Pty=0 \
+            -y -q --no-install-recommends "$@"
+    }
+    pool_apt update > "$W/pool.log" 2>&1 || { cat "$W/pool.log"; die "apt update from the pool index failed"; }
+    pool_apt -s install "$@" > "$W/pool.sim" 2>&1 || { cat "$W/pool.sim"; die "the pool cannot satisfy: $*"; }
+    for f in $(awk '/^Inst /{print $2}' "$W/pool.sim"); do
+        f="$(awk -v p="$f" '$1 == "Package:" {q = ($2 == p)} q && $1 == "Filename:" {print $2; exit}' \
+            "$r/dists/noble/main/binary-arm64/Packages")"
+        [ -n "$f" ] || die "no Filename in the pool index"
+        mkdir -p "$r/$(dirname "$f")"
+        xorriso -osirrox on -indev "$(resolve_base_iso)" -extract "/$f" "$r/$f" > /dev/null 2>&1 || die "cannot read /$f from the base ISO"
+    done
+    pool_apt install "$@" > "$W/pool.log" 2>&1 || { tail -20 "$W/pool.log"; die "installing from the pool failed"; }
+    force_rm_tree "$r"
+    force_rm_tree "$t/tmp/pool-apt"
+    echo "target: $* from the pool, with $(grep -c '^Inst ' "$W/pool.sim") packages in all"
+}
+
+# as_user TARGET USER CMD...: CMD as USER inside TARGET, with a login-like environment.
+as_user() {
+    local t="$1" u="$2" g
+    shift 2
+    g="$("$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- id -g "$u")"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- \
+        setpriv --reuid="$u" --regid="$g" --init-groups env -i HOME=/tmp PATH=/usr/bin:/bin LANG=C.UTF-8 "$@"
+}
+
+c_voice() {
+    local t="$W/target" p="$W/hp" log="$W/target/var/log/brainsyncos/install.log" u="$BRAINSYNC_USER" out
+    target_layer "$t"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- useradd -m -s /bin/bash "$u"
+    pool_install "$t" libespeak-ng1 espeak-ng-data libpcaudio0 libsonic0
+    hook_payload "$p" 70-brainsync.sh
+    run_hook "$p" "$t" "$REPO" || { tail -30 "$W/live.log"; die "hook failed"; }
+    ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
+    sed -n '/== 70-brainsync.sh/,$p' "$log" | grep '70-brainsync.sh:'
+    grep -q '70-brainsync.sh: offline voice: espeak-ng .*, from the repository' "$log" || die "espeak-ng was not installed from the repository"
+    grep -q "70-brainsync.sh: /etc/brainsync/secrets.env created (template, no keys), root:$u 640" "$log" || die "secrets.env not created"
+    secrets_ok "$t" "$u"
+
+    # The app's offline voice, as the account: no Cartesia key, so espeak-ng writes the clip.
+    out="$(as_user "$t" "$u" BRAINSYNC_TTS_CACHE=/tmp/tts /opt/brainsyncos/venv/bin/python -I -c '
+from brainsync import voice
+s = voice.CartesiaSpeaker(None)
+p = s.clip("Look at the piece you want to move.")
+d = p.read_bytes()
+print(p.name, len(d), d[:4] == b"RIFF" and d[8:12] == b"WAVE")
+s.close()' 2> "$W/voice.err")" || { cat "$W/voice.err"; die "the app's voice failed in the target"; }
+    echo "voice.py, no key: $out ($(cat "$W/voice.err"))"
+    case "$out" in "espeak-"*" True") ;; *) die "no espeak-ng WAV from voice.py: $out" ;; esac
+    [ "$(echo "$out" | cut -d' ' -f2)" -gt 10000 ] || die "the espeak-ng WAV is too short: $out"
+
+    # Keys added (as the owner, or 85-llama.sh, would): BCI Voice reads all three as the account.
+    printf 'ANTHROPIC_API_KEY=sk-ant-test-not-a-key\nCARTESIA_API_KEY=sk-car-test-not-a-key\nBRAINSYNC_LLAMA_API_KEY=llama-test-not-a-key\n' \
+        >> "$t/etc/brainsync/secrets.env"
+    out="$(as_user "$t" "$u" /opt/brainsyncos/venv/bin/python -I -c '
+import json, os
+from app import config
+from app.menus import MenuMaker
+from brainsync import voice
+names = config.load_env()
+cfg = config.load_config()
+m = MenuMaker(cfg.menus, cfg.llm, config.load_intents(), config.load_profile(), keys=os.environ)
+print(json.dumps({"names": sorted(names), "cartesia": voice.find_api_key() == "sk-car-test-not-a-key",
+                  "off": [b.name for b in m.backends if b.why_disabled]}))' 2>&1)" || { echo "$out"; die "BCI Voice cannot read the keys"; }
+    echo "as $u: $out"
+    [ "$out" = '{"names": ["ANTHROPIC_API_KEY", "BRAINSYNC_LLAMA_API_KEY", "CARTESIA_API_KEY"], "cartesia": true, "off": []}' ] \
+        || die "BCI Voice did not get all three keys"
+    out="$(as_user "$t" nobody /opt/brainsyncos/venv/bin/python -I -c 'from app import config; print(config.load_env())' 2>&1)" \
+        || { echo "$out"; die "another account cannot start BCI Voice's config"; }
+    echo "as nobody: $out"
+    printf '%s\n' "$out" | grep -q 'cannot read /etc/brainsync/secrets.env (PermissionError)' && printf '%s\n' "$out" | grep -qx '\[\]' \
+        || die "another account: no note, or keys read"
+    ! printf '%s\n' "$out" | grep -q 'not-a-key' || die "a key was printed"
+
+    sha256sum "$t/etc/brainsync/secrets.env" > "$W/secrets.sum"
+    run_hook "$p" "$t" "$REPO" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
+    sha256sum -c --quiet "$W/secrets.sum" || die "the re-run changed secrets.env"
+    grep -q "70-brainsync.sh: /etc/brainsync/secrets.env exists (root:$u 640); left as it is" "$log" || die "re-run: secrets.env not left alone"
+    grep -q '70-brainsync.sh: offline voice: espeak-ng .*, already installed' "$log" || die "re-run: espeak-ng"
+    no_mount_left "$t"
+    echo "re-run: secrets.env with its keys unchanged, espeak-ng already installed"
 }
 
 # target_layer DIR: NVIDIA's target base layer, unpacked at DIR, with a fake Orin Nano device tree at $W/dt.
@@ -583,6 +729,7 @@ case "$1" in
     app-debs) c_app_debs ;;
     md5map) c_md5map ;;
     hook) c_hook ;;
+    voice) c_voice ;;
     debs) c_debs ;;
     usbserial) c_usbserial ;;
     wheel) c_wheel ;;

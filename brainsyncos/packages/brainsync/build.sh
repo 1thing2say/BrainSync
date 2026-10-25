@@ -15,8 +15,11 @@
 #     /usr/share/brainsync/clients, where brainsync/paths.py looks when
 #     installed.
 # It never holds API keys: they go on the device in
-# /etc/brainsync/secrets.env, and the build refuses any .env file.
-# Depends on brainsync-runtime of exactly this version. The app is installed
+# /etc/brainsync/secrets.env, and the build refuses any .env file. BrainSyncOS's
+# 70-brainsync.sh creates that file; this package does not ship or own it.
+# Depends on brainsync-runtime of exactly this version. Recommends espeak-ng,
+# the offline voice of brainsync/voice.py (the Jetson's comes from our
+# repository, packages/espeak-ng). The app is installed
 # into the venv only while it is staged, then removed again, so the
 # brainsync-runtime build (same container) packages the venv without it.
 
@@ -109,10 +112,13 @@ State:    \$XDG_STATE_HOME/brainsync (default ~/.local/state/brainsync):
           the user's profile, the TTS clip cache, logs/
 Data:     ~/brainsync_data (recordings), or \$BRAINSYNC_DATA_DIR
 
-API keys (ANTHROPIC_API_KEY, CARTESIA_API_KEY) are never part of this package.
-Put them on the device in /etc/brainsync/secrets.env, one KEY=value per line,
-readable only by the accounts that run the apps (for example
-root:brainsync, mode 0640). Each place can be moved with a BRAINSYNC_*
+API keys (ANTHROPIC_API_KEY, CARTESIA_API_KEY, BRAINSYNC_LLAMA_API_KEY) are
+never part of this package. They go in /etc/brainsync/secrets.env, one
+KEY=value per line. BrainSyncOS's install creates it as a commented template,
+root:<the appliance account's group>, mode 0640, and never overwrites it.
+BCI Voice and the spoken prompts read it; brainsync-server needs
+--env-file /etc/brainsync/secrets.env. Offline, the prompts are spoken by
+espeak-ng when it is installed. Each place can be moved with a BRAINSYNC_*
 variable (brainsync/paths.py).
 EOF
 chmod 644 "$s/usr/share/doc/brainsync/README"
@@ -132,6 +138,7 @@ Installed-Size: $installed_kb
 Section: science
 Priority: optional
 Depends: brainsync-runtime (= $BSOS_PKG_VERSION)
+Recommends: espeak-ng
 Description: BrainSync SSVEP brain-computer interface apps
  The BrainSync apps $ver: the SSVEP demo, recorder, checks and stimulus,
  BrainSwipe, BrainChess, BCI Voice (brainsync-voice) and the BrainSync

@@ -13,7 +13,9 @@
 # the install-side apt helper against good and tampered repositories, the
 # contents and dependencies of brainsync-runtime and brainsync, the md5sum
 # merge of mapped trees, and hook.sh mounting the repository for
-# 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer; the
+# 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer
+# (bare, then with the account and espeak-ng's libraries from the pool: the
+# offline voice and secrets.env); the
 # board packages (brainsyncos-ch341-tegra against NVIDIA's kernel,
 # brainsync-udev) and 75-usb-serial.sh installing them there. In a test-only
 # Ubuntu container with Xvfb (tests/runtime-checks.sh): the two BrainSync
@@ -193,7 +195,7 @@ t_packages() {
         (cd "$BRAINSYNCOS_ROOT/$TD/debs/$e" && LC_ALL=C ls ./*.deb) | sed 's|^\./||' | sed 's/_.*//' | tr '\n' ' ' > "$TMP_DIR/names.$e"
         echo "$e: $(cat "$TMP_DIR/names.$e")"
     done
-    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra " ] \
+    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra espeak-ng " ] \
         && [ "$(cat "$TMP_DIR/names.vm")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring " ] \
         || die "wrong package sets per edition"
     expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
@@ -276,6 +278,7 @@ if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check runtime          t_runtime
     check md5-map          in_builder md5map
     check install-hook     in_builder hook
+    check offline-voice    in_builder voice
     check board-debs       in_builder debs
     check usb-serial       in_builder usbserial
 fi
