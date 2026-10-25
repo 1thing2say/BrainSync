@@ -1,0 +1,15 @@
+# Wheels built locally (not from PyPI) that go into the BrainSync runtime venv
+# (/opt/brainsyncos/venv, package brainsync-runtime), one distribution name per
+# line.
+#
+# For each name listed here, scripts/venv.sh needs exactly one wheel of it in
+# build/wheels/, as scripts/build-wheels.sh (scripts/build.sh wheels) leaves
+# it, with its sha256 in build/wheels/SHA256SUMS; it fails without it. Wheels
+# there that are not listed are refused. They are installed with --no-deps
+# after the locked wheels, so their own dependencies must already be in
+# brainsync.lock.txt. Their sha256 is recorded in
+# /usr/share/doc/brainsync-runtime/wheels.txt.
+
+# The Cerelog BrainFlow fork for linux-aarch64 (wheels/brainflow-cerelog, 3c).
+# Its dependencies, numpy and setuptools<81, are in the lock.
+brainflow

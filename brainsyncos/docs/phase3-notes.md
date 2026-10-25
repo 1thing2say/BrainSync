@@ -50,14 +50,30 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
    - `[project.scripts]`: `brainsync-demo`, `-record`, `-check`, `-stimulus`, `-swipe`, `-swipe-web`, `brainchess`, `brainsync-server` (v3), `brainsync-voice`.
    - BrainChess finds `/usr/games/stockfish` (Ubuntu's package) without `PATH`.
    - Checked: a wheel installed with `pip --target` outside the repo runs `brainsync-voice` (page 200, `/api/health`, log in the state folder) with `BRAINSYNC_CONFIG_DIR` and `BRAINSYNC_UI_DIR` set. `tests/test_install_layout.py` covers the wiring.
-   - **Still open:** the speech fallback. `brainsync/voice.py` speaks only through Cartesia; offline it prints. Decide whether to add `espeak-ng` (in the Jetson pool) as an offline voice. Running the whole pytest suite against the installed wheel waits for the builder venv (step 2).
-2. **Package the runtime as `brainsync-runtime`**: a venv at `/opt/brainsyncos/venv`, built in the builder at that exact path.
-   - Build it from the hash-locked wheels in `phase3-research/python/brainsync.lock.txt`: 57 wheels, all with cp312 aarch64 builds.
-   - PsychoPy goes in with `--no-deps` and the trimmed set (`psychopy-excludes.txt`, plus `json-tricks`, `six` and `pyserial`). `from psychopy import visual, event` works under Xvfb this way.
-   - Expect about 350 MB installed and 80 MB as a compressed deb.
-3. **Package the app itself as `brainsync`**: the app wheel in the same venv, config files under `/etc/brainsync`, and the UI under `/usr/share/brainsync`.
-4. **Secrets** (`ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`) are never put into a build. They go on the device in `/etc/brainsync/secrets.env`.
-5. **Install step:** `70-brainsync.sh`, on both editions.
+   - **Still open:** the speech fallback. `brainsync/voice.py` speaks only through Cartesia; offline it prints. Decide whether to add `espeak-ng` (in the Jetson pool) as an offline voice.
+2. **Package the runtime as `brainsync-runtime`**. **Done 2026-10-24** (branch `bsos/3b-runtime`).
+   - A venv at `/opt/brainsyncos/venv`, built by `scripts/venv.sh` in the builder at that exact path, from the 57 hash-locked wheels of `python/brainsync.lock.txt` (moved out of the research folder). pip 26.2.2, pinned by sha256 in `python/pip.env`, runs from its own wheel and installs them with `--no-deps --require-hashes`.
+   - The lock was not re-made: `pyproject.toml`'s dependencies did not change in the merge. `python/check-lock.py` checks this on every build of `brainsync`.
+   - Trimmed (`tests` folders, `psychopy/demos`; `numpy/testing` kept) and compiled to unchecked-hash `.pyc`. 79 MB as an xz deb, 434 MB installed.
+   - Depends: `python3.12 (>= 3.12.3, << 3.13)`, `libc6`, `libgcc-s1`, `libstdc++6`, `zlib1g`. The GL and X libraries are Recommends: NVIDIA's package list has them all; the VM target and NVIDIA's minimal layer do not.
+   - Wheels are cached in `build/wheelhouse/`; rebuilds are offline.
+   - The BrainFlow fork's wheel from 3c (`build/wheels/`, checked against its `SHA256SUMS`) goes into the venv: `python/local-wheels.txt` lists `brainflow`. The build fails if a listed wheel is missing; `scripts/build.sh all` builds the wheels first (skipped while up to date).
+3. **Package the app itself as `brainsync`**. **Done.** The app wheel in the same venv (installed only long enough to take its files), `/usr/bin` links to the 9 console scripts, the 3 YAMLs as conffiles in `/etc/brainsync`, `ui/` and `clients/` (without tests) under `/usr/share/brainsync`. 1.1 MB. Depends on exactly its `brainsync-runtime` version. `scripts/builder.sh` now mounts the BrainSync repository read-only at `/src` for it.
+4. **Secrets** (`ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`) are never put into a build; the `brainsync` build refuses any `.env` file. They go on the device in `/etc/brainsync/secrets.env`. Nothing creates that file yet, or its owner and mode.
+5. **Install step:** `70-brainsync.sh`, on both editions. **Done.** It installs both packages from the ISO's repository, checks that the venv imports the apps and that `brainsync-voice --help` runs, and names missing display libraries.
+
+**Verified (tests/test_phase3.sh, all 12 checks passed, x86-64 WSL2, arm64 under qemu, 53 min):**
+- Each edition's packages are built in a separate container and are byte-identical, the venv included. A first run differed only in `Installed-Size` (counted with `du`); it is now counted per file.
+- In a stock Ubuntu arm64 container with Xvfb: both debs install with `dpkg -i`; all 77 app modules import; PsychoPy's smoke test, the two-target and swipe renderers and the chess renderer draw; the 9 commands answer `--help`; `brainsync-voice` serves its page (200) and `/api/health` offline, with its log in `~/.local/state/brainsync/logs`; nothing is written under `/opt`.
+- In NVIDIA's real target layer, the hook's `70-brainsync.sh` installs both and `brainsync-voice` runs there.
+
+**Not done or not verified:**
+- `tests/test_phase2.sh` and `tests/test_vm.sh` were not run with the new step. Their hook checks now expect 8 steps and the two packages.
+- No real install on a Jetson or in UTM. Display timing only under Xvfb (no vsync).
+- The app's pytest suite was not run against the installed wheel (pytest is not in the venv).
+- Build time under qemu: about 25 minutes per edition at 2 CPUs, mostly xz on the runtime. zstd was not measured.
+- No systemd units, kiosk or display stack: the apps are installed, nothing starts them.
+- The speech fallback (`espeak-ng`) is still open.
 
 ### 3c: the board. **Done 2026-10-24** (branch `bsos/3c-board`)
 

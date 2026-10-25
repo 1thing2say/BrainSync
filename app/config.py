@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
@@ -626,11 +627,17 @@ def load_env(path: str | Path = DEFAULT_ENV_PATH) -> list[str]:
     """Set ``KEY=VALUE`` lines from a ``.env`` file in ``os.environ``, unless already set there.
 
     Returns the names that were set, never the values: secrets must not be printed or logged.
-    A missing file is fine (the environment may already hold the keys).
+    A missing file is fine (the environment may already hold the keys). So is one this account
+    may not read (BrainSyncOS: /etc/brainsync/secrets.env is root:brainsync, mode 0640): a
+    note on stderr, and the keys come from the environment only.
     """
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"note: cannot read {path} ({type(exc).__name__}); API keys only from the "
+              "environment", file=sys.stderr)
         return []
     names = []
     for line in lines:

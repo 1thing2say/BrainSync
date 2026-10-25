@@ -27,7 +27,9 @@
 #                hostname, account (SSH key only, passwordless sudo), sshd
 #                config, OOBE skipped, NVIDIA's default users removed, package
 #                repository keyring installed, the board's udev rules and
-#                ch341 module installed (modules.dep), and the repository
+#                ch341 module installed (modules.dep), brainsync-runtime and
+#                brainsync installed (brainsync-voice runs), secrets.env a
+#                template root:BRAINSYNC_USER 0640, and the repository
 #                unmounted again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
@@ -351,7 +353,25 @@ check_keyring() {
     cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
         || die "the installed keyring is not the build's repository key"
     ! mountpoint -q "$t/tmp/brainsyncos-repo" && [ ! -e "$t/tmp/brainsyncos-repo" ] || die "the repository is still mounted"
-    echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
+    grep -q '70-brainsync.sh: brainsync .*, brainsync-runtime .* installed' "$t/var/log/brainsyncos/install.log" \
+        || die "70-brainsync.sh did not finish"
+    [ "$(in_target "$t" dpkg-query -W -f '${Status}\n' brainsync brainsync-runtime | grep -cx 'install ok installed')" = 2 ] \
+        || die "brainsync and brainsync-runtime are not installed"
+    in_target "$t" /usr/bin/brainsync-voice --help | grep -q 'usage:' || die "brainsync-voice does not run in the target"
+    echo "packages: brainsyncos-archive-keyring, brainsync-runtime and brainsync installed from the ISO's repository; repository unmounted"
+    check_secrets "$t"
+}
+
+# check_secrets TARGET: 70-brainsync.sh made /etc/brainsync/secrets.env, a
+# template without keys, root:BRAINSYNC_USER 0640, and reported the offline voice.
+check_secrets() {
+    local t="$1" f="$1/etc/brainsync/secrets.env"
+    [ "$(stat -c '%u %a' "$f")" = "0 640" ] && [ "$(in_target "$t" stat -c %G /etc/brainsync/secrets.env)" = "$BRAINSYNC_USER" ] \
+        || die "secrets.env is not root:$BRAINSYNC_USER 640"
+    ! grep -qv '^#' "$f" || die "secrets.env holds lines that are not comments"
+    grep -E '70-brainsync.sh: (offline voice: espeak-ng|note: offline voice espeak-ng)' "$t/var/log/brainsyncos/install.log" \
+        || die "70-brainsync.sh did not report the offline voice"
+    echo "secrets.env: root:$BRAINSYNC_USER 640, template without keys"
 }
 
 # check_usb_serial TARGET: 75-usb-serial.sh installed the udev rules and the
@@ -384,7 +404,7 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (8 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (9 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
     check_keyring "$t"
     check_usb_serial "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"

@@ -10,6 +10,8 @@
 #
 # Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
 # only when the ISO is found; commands that do not need it run without),
+# the BrainSync source tree around brainsyncos/ -> /src (ro, as BSOS_APP_SRC,
+# only when it is there: packages/brainsync builds the app from it),
 # a tmpfs at /scratch (squashfs work, GnuPG homes; with CAP_SYS_ADMIN for xattrs).
 # Resources (config/build.env, BSOS_BUILD_* overrides): the container gets
 # BUILD_CPUS CPUs (--cpus), BUILD_MEMORY (--memory), a BUILD_SCRATCH_SIZE
@@ -76,7 +78,7 @@ ensure_image() {
 cmd_run() {
     require_cmd docker
     [ "$#" -gt 0 ] || die "usage: builder.sh run CMD [ARG...]"
-    local iso iso_flags="" io_flags=""
+    local iso iso_flags="" io_flags="" src src_flags=""
     # Mount the real file's directory, so a symlinked $BASE_ISO cannot dangle.
     # Without the ISO the container still runs (e.g. make-password-hash.sh);
     # steps that need it fail inside with "base ISO not found at /in/...".
@@ -84,6 +86,12 @@ cmd_run() {
         iso="$(real_path "$iso")"
         case "$iso" in *' '*) die "the base ISO path must not contain spaces: $iso" ;; esac
         iso_flags="-v $(dirname "$iso"):/in:ro -e BASE_ISO=/in/$(basename "$iso")"
+    fi
+    # The app's source: brainsyncos/ sits inside the BrainSync repository.
+    src="$(cd "$BRAINSYNCOS_ROOT/.." && pwd -P)"
+    if [ -f "$src/pyproject.toml" ] && [ -d "$src/brainsync" ]; then
+        case "$src" in *' '*) die "the BrainSync source path must not contain spaces: $src" ;; esac
+        src_flags="-v $src:/src:ro -e BSOS_APP_SRC=/src"
     fi
     ensure_image
     # -t only for a real terminal; -i only when input is piped in, so a job
@@ -104,7 +112,7 @@ cmd_run() {
         --cap-add SYS_ADMIN \
         --tmpfs "/scratch:rw,exec,size=$BUILD_SCRATCH_SIZE" \
         -v "$BRAINSYNCOS_ROOT:/work" \
-        $iso_flags \
+        $iso_flags $src_flags \
         -e BRAINSYNCOS_IN_CONTAINER=1 \
         -e BRAINSYNCOS_ROOT=/work \
         -e BSOS_GIT_REV="$(host_git_rev)" \

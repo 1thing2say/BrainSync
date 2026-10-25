@@ -93,7 +93,8 @@ def launch_stimulus(args: Sequence[str], stdin: int | IO | None = None, timeout:
 
 
 def speak(text: str, voice: bool | str = True) -> None:
-    """Print ``text`` to stderr and say it aloud with Cartesia text-to-speech.
+    """Print ``text`` to stderr and say it aloud with Cartesia text-to-speech (offline:
+    espeak-ng, when installed).
 
     Returns at once; prompts play one after another (see brainsync.voice). ``voice``
     False stays silent; a string picks the Cartesia voice id.

@@ -490,7 +490,12 @@ check autoinstall          in_builder autoinstall
 check merge-md5sums        in_builder md5
 check build-logins         t_build_logins
 check utm-script           t_utm_script
-check utm-stubbed          t_utm_stubbed
+# The stubs stand in for macOS tools and use macOS's plutil and BSD sed.
+if [ "$(uname -s)" = Darwin ]; then
+    check utm-stubbed      t_utm_stubbed
+else
+    echo "SKIP  utm-stubbed            (macOS only: plutil, BSD sed)"
+fi
 if [ "$nfail" -gt 0 ]; then log "aborting: generators or login checks failed"; exit 1; fi
 check build-vm-iso         t_build
 if [ -f "$ISO" ]; then

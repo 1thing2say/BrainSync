@@ -1,7 +1,8 @@
-"""brainsync.voice: Cartesia prompts without macOS say. A fake Cartesia and a fake player,
-no network and no sound."""
+"""brainsync.voice: Cartesia prompts without macOS say, espeak-ng offline. A fake Cartesia,
+a fake player and a fake espeak-ng (subprocess.run mocked): no network and no sound."""
 from __future__ import annotations
 
+import subprocess
 import threading
 from pathlib import Path
 
@@ -43,11 +44,28 @@ class FakePlayer:
         self.played.append(path.read_bytes()[len(WAV):])
 
 
-def speaker(tmp_path, post=None, play=None, notes=None, key="sk-test") -> CartesiaSpeaker:
+class FakeEspeak:
+    """Stands in for subprocess.run of espeak-ng: writes a WAV holding the text it read on
+    stdin to the -w path; ``fail`` makes it exit 1 instead."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[tuple[list[str], bytes]] = []
+        self.fail = fail
+
+    def __call__(self, cmd, input=None, **kw):
+        self.calls.append((list(cmd), input))
+        if self.fail:
+            raise subprocess.CalledProcessError(1, cmd)
+        Path(cmd[cmd.index("-w") + 1]).write_bytes(WAV + input)
+        return subprocess.CompletedProcess(cmd, 0)
+
+
+def speaker(tmp_path, post=None, play=None, notes=None, key="sk-test",
+            espeak=None) -> CartesiaSpeaker:
     return CartesiaSpeaker(key, "voice-1", tmp_path, post=post or FakeCartesia(),
                            play=play or FakePlayer(),
                            note=(notes.append if notes is not None else lambda m: None),
-                           sleep=lambda s: None)
+                           sleep=lambda s: None, espeak=espeak)
 
 
 def test_request_matches_the_voice_app_settings(tmp_path):
@@ -189,3 +207,55 @@ def test_silenced_by_environment(monkeypatch):
     assert voice.default_speaker() is None
     voice.speak("nothing happens")                    # no speaker, no error
     voice.prefetch(["nothing"])
+
+
+def test_offline_without_a_key_espeak_ng_speaks(tmp_path, monkeypatch):
+    run = FakeEspeak()
+    monkeypatch.setattr(voice.subprocess, "run", run)
+    notes: list[str] = []
+    post, player = FakeCartesia(), FakePlayer()
+    s = speaker(tmp_path, post=post, play=player, notes=notes, key="", espeak="/usr/bin/espeak-ng")
+    assert s.enabled
+    s.say("-v is not an option here")
+    assert s.wait(5)
+    assert player.played == [b"-v is not an option here"] and post.calls == []
+    cmd, text = run.calls[0]
+    assert cmd[:4] == ["/usr/bin/espeak-ng", "-v", "en", "-w"] and cmd[5:] == ["--stdin"]
+    assert text == b"-v is not an option here"            # on stdin, never in argv
+    assert notes == ["CARTESIA_API_KEY is not set (environment or .env); prompts are "
+                     "spoken by espeak-ng"]
+    clip = s.clip("-v is not an option here")
+    assert clip.name.startswith("espeak-") and len(run.calls) == 1   # cached on disk
+    s.close()
+
+
+def test_cartesia_first_then_espeak_ng_when_it_fails(tmp_path, monkeypatch):
+    run = FakeEspeak()
+    monkeypatch.setattr(voice.subprocess, "run", run)
+    notes: list[str] = []
+    bad = FakeCartesia(fail=[TTSError("ConnectError", retry=False)])
+    s = speaker(tmp_path, post=bad, notes=notes, espeak="/usr/bin/espeak-ng")
+    offline = s.clip("Back")
+    assert len(bad.calls) == 1 and offline.name.startswith("espeak-")
+    assert notes == ["Cartesia request failed (ConnectError); that prompt is spoken by espeak-ng"]
+    s.close()
+    online = speaker(tmp_path, espeak="/usr/bin/espeak-ng")    # back online: Cartesia's clip,
+    assert online.clip("Back") != offline and len(run.calls) == 1   # not the espeak-ng one
+    online.close()
+
+
+def test_espeak_ng_failing_prints_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice.subprocess, "run", FakeEspeak(fail=True))
+    notes: list[str] = []
+    s = speaker(tmp_path, notes=notes, key="", espeak="/usr/bin/espeak-ng")
+    assert s.clip("hello") is None
+    assert notes[-1] == "espeak-ng failed (CalledProcessError); that prompt is printed only"
+    assert not list(tmp_path.glob("*.tmp"))
+    s.close()
+
+
+def test_espeak_ng_is_found_on_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice.shutil, "which", lambda n: "/usr/bin/espeak-ng" if n == "espeak-ng" else None)
+    assert CartesiaSpeaker(None, "voice-1", tmp_path, note=lambda m: None).enabled
+    monkeypatch.setattr(voice.shutil, "which", lambda n: None)
+    assert not CartesiaSpeaker(None, "voice-1", tmp_path, note=lambda m: None).enabled

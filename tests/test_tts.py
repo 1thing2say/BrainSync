@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import httpx
 import pytest
@@ -350,3 +351,20 @@ def test_load_env_sets_missing_names_only(tmp_path, monkeypatch):
         os.environ.pop("BS_TEST_A", None)
         os.environ.pop("BS_TEST_B", None)
     assert load_env(tmp_path / "missing.env") == []
+
+
+def test_load_env_unreadable_file_is_a_note_not_a_crash(tmp_path, monkeypatch, capsys):
+    # BrainSyncOS: /etc/brainsync/secrets.env is root:brainsync 0640; another account gets
+    # PermissionError and must still start, with the keys from the environment only.
+    env = tmp_path / "secrets.env"
+    env.write_text("BS_TEST_SECRET=sk-never-shown\n")
+
+    def denied(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    monkeypatch.delenv("BS_TEST_SECRET", raising=False)
+    assert load_env(env) == []
+    assert "BS_TEST_SECRET" not in os.environ
+    err = capsys.readouterr().err
+    assert f"cannot read {env} (PermissionError)" in err and "sk-never-shown" not in err

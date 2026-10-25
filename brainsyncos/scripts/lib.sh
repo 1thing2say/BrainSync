@@ -340,6 +340,14 @@ validate_repo() {
     log "package repository: ${dir#$BRAINSYNCOS_ROOT/} ($(find "$dir/pool" -name '*.deb' | wc -l | tr -d ' ') packages, key $REPO_KEY_FPR)"
 }
 
+# installed_size STAGING: the Installed-Size (KiB) of the tree outside
+# DEBIAN/, counted as dpkg-gencontrol does (each file rounded up to 1 KiB,
+# 1 KiB per directory or link), so it does not depend on the filesystem.
+installed_size() {
+    (cd "$1" && find . -path ./DEBIAN -prune -o ! -path . -printf '%y %s\n') \
+        | awk '{ if ($1 == "f") k += int(($2 + 1023) / 1024); else k += 1 } END { print k + 0 }'
+}
+
 # build_deb STAGING OUT_DIR: build OUT_DIR/PACKAGE_VERSION_ARCH.deb from
 # STAGING (the file tree plus DEBIAN/control). Writes DEBIAN/md5sums, makes
 # directories 755, gives every file root ownership and, when
