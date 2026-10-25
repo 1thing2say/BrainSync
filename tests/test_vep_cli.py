@@ -1,0 +1,120 @@
+"""python -m brainsync.vep: the fake live runs of each paradigm, the comparison table, and
+the argument checks. No display, no headset (--fake --fast --no-stimulus)."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from brainsync.vep import __main__ as cli
+from brainsync.vep.cvep import Template
+
+FAST = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
+
+
+def test_fake_cvep_run_trains_saves_and_decodes(tmp_path: Path, capsys):
+    tpl = tmp_path / "tpl.npz"
+    rc = cli.main(["--paradigm", "code", *FAST, "--train-cycles", "12", "--seconds", "16",
+                   "--switch", "8", "--save-template", str(tpl), "--seed", "3"])
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    assert tpl.is_file() and Template.load(tpl).n_cycles == 12
+    assert "training: 12 cycles" in err and "leave-one-out accuracy" in err
+    assert "committed" in err and "code: " in out and "commits:" in out
+    assert "agreeing with the fake user's gaze" in out
+    # reuse the template: no training stage
+    rc = cli.main(["--paradigm", "code", *FAST, "--template", str(tpl), "--seconds", "8"])
+    out, err = capsys.readouterr()
+    assert rc == 0 and "training:" not in err and "code: " in out
+
+
+def test_fake_tvep_run(capsys):
+    rc = cli.main(["--paradigm", "time", *FAST, "--seconds", "14", "--switch", "7",
+                   "--min-flashes", "3"])
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    assert "time-VEP tvep_4" in err and "time: " in out
+    assert "decisions in" in out
+
+
+def test_fake_fvep_run_uses_the_demo_session(capsys):
+    rc = cli.main(["--paradigm", "freq", *FAST, "--seconds", "8", "--calibrate", "6",
+                   "--window", "2", "--switch", "4"])
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    assert "SNR(" in err and "baseline from" in err
+    assert "windows" in out
+
+
+def test_compare_prints_the_paper_style_table(capsys):
+    rc = cli.main(["--compare", "--fake", "--trials", "2", "--train-trials", "2",
+                   "--max-trial", "8", "--seed", "5"])
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    lines = out.splitlines()
+    assert lines[0].startswith("paradigm") and "bits/min" in lines[0] and "paper" in lines[0]
+    rows = {ln.split()[0]: ln for ln in lines[2:5]}
+    assert set(rows) == {"time-VEP", "freq-VEP", "code-VEP"}
+    assert "92.8 bits/min" in rows["code-VEP"] and "39.7 bits/min" in rows["freq-VEP"]
+    assert "under 30 bits/min" in rows["time-VEP"]
+    for name, ln in rows.items():
+        cells = ln.split()
+        targets, trials, acc = int(cells[1]), int(cells[2]), cells[3]
+        assert trials == 2 * targets and acc.endswith("%")
+        assert targets == (6 if name == "freq-VEP" else 4)
+    assert "leave-one-out" in out and "Synthetic board" in out and "Bin et al. 2009" in out
+
+
+def test_compare_rows_decode_the_fake_user(monkeypatch):
+    args = cli.build_parser().parse_args(["--compare", "--fake", "--trials", "3",
+                                          "--train-trials", "3", "--seed", "1"])
+    code = cli.compare_code(args)
+    time_ = cli.compare_time(args)
+    freq = cli.compare_freq(args)
+    for row in (code, time_, freq):
+        assert row.n == 3 * row.n_targets
+        assert row.acc >= 0.75, (row.paradigm, row.y, row.pred)
+        assert np.isfinite(row.mean_delay())
+    assert code.mean_delay() < freq.mean_delay() + 3.0
+    assert time_.mean_delay() > code.mean_delay()          # the slow paradigm
+    table = cli.compare_table([time_, freq, code], gaze_s=1.0, max_trial=args.max_trial)
+    assert len(table) > 6
+
+
+def test_argument_checks(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--compare"])
+    assert e.value.code == 2 and "--fake" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(["--paradigm", "code", "--no-stimulus"])
+    with pytest.raises(SystemExit):
+        cli.main(["--fast"])
+    with pytest.raises(SystemExit):
+        cli.main(["--fake", "--votes", "0"])
+    with pytest.raises(SystemExit):
+        cli.main(["--fake", "--names", "a,b"])
+    # a config of the wrong paradigm is a usage error (exit 2), not a crash
+    assert cli.main(["--paradigm", "code", "-c", "fvep_6", *FAST]) == 2
+    assert "[freq] config" in capsys.readouterr().err
+    assert cli.main(["--paradigm", "freq", "-c", "cvep_4", *FAST]) == 2
+    assert cli.main(["--paradigm", "time", "-c", "missing", *FAST]) == 2
+
+
+def test_log_tail_reads_new_marker_lines_only(tmp_path: Path):
+    log = tmp_path / "stim.log"
+    log.write_text("measured refresh: 60.00 Hz\n[marker 10.5] stim_on:0\n[marker 10.5] cyc")
+    tail = cli.LogTail(log)
+    assert tail.events() == [(10.5, "stim_on", 0)]
+    with open(log, "a") as f:
+        f.write("le:0\n[marker 11.55] cycle:1\nnoise\n")
+    assert tail.events() == [(10.5, "cycle", 0), (11.55, "cycle", 1)]
+    assert tail.events() == []
+
+
+def test_coded_stimulus_args():
+    args = cli.build_parser().parse_args(["--paradigm", "code", "--ignore-refresh"])
+    cfg = cli.config_for(args)
+    a = cli.coded_stimulus_args(cfg, args)
+    assert a[:2] == ["-c", str(cfg.path)] and "--free" in a and "--ignore-refresh" in a
+    assert a[a.index("--markers") + 1] == "unix" and "--seconds" not in a

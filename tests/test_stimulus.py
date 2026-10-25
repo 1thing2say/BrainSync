@@ -217,7 +217,10 @@ def test_overrides():
 
 def test_depth_defaults_to_full_and_is_checked():
     assert _cfg().depth == 1.0
-    assert all(load_config(name).depth == 1.0 for name in available_configs())
+    shipped = [load_config(name) for name in available_configs()]
+    # every flicker config is full depth; tvep_4 (flashes) rests at 0.1 by design
+    assert all(c.depth == 1.0 for c in shipped if not c.coded)
+    assert {c.depth for c in shipped if c.coded} == {1.0, 0.8}
     half = _cfg(stimulus={"depth": 0.5})
     assert half.depth == 0.5 and _cfg(stimulus={"depth": 1}).depth == 1.0
     for bad in (0.0, 1.5, -0.2, math.nan, math.inf):
