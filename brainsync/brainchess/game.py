@@ -376,7 +376,7 @@ class ChessSession:
     """
 
     def __init__(self, board: chess.Board, engine: Engine, display: Display | None = None, *,
-                 user_color: chess.Color = chess.WHITE, gate: MoveGate | None = None,
+                 user_color: chess.Color = chess.WHITE, gate: MoveGate | CodeGate | None = None,
                  confirm: bool = True, hold_s: float = 2.0, max_moves: int = 0,
                  clock: Callable[[], float] = time.monotonic,
                  speak: Callable[[str], None] = _silent, pieces_dir: str | Path | None = None,

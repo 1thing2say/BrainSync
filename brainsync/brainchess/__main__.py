@@ -69,7 +69,7 @@ from ..stimulus.config import config_warnings
 from ..vep.cvep import Template
 from ..vep.live import CodeVepDecoder, standard_fake_board
 from .gate import CodeGate, MoveGate
-from .game import (BACK_LABEL, GROUP_NAMES, ChessSession, NullDisplay, SimulatedUser,
+from .game import (GROUP_NAMES, ChessSession, NullDisplay, SimulatedUser,
                    StimulusDisplay, game_outcome)
 from .prior import Engine, find_stockfish
 from .trace import TraceFeed
