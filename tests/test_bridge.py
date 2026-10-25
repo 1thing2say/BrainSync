@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 
+import numpy as np
 import pytest
 
 pytest.importorskip("websockets")
@@ -13,9 +15,11 @@ from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosed, InvalidStatus  # noqa: E402
 
 from brainsync.bridge import (DEFAULT_EEG, DEFAULT_PHASE, Bridge,  # noqa: E402
-                              config_message, cue_message, eeg_message, origin_allowed,
+                              config_message, cue_message, cycle_problem,
+                              decision_message, eeg_message, hex_color, origin_allowed,
                               parse_client_message, phase_message, scroll_message,
-                              status_message)
+                              status_message, toggle_message, train_message,
+                              trained_message)
 from brainsync.stimulus import load_config, override  # noqa: E402
 
 CONFIG = config_message(load_config("reels"))
@@ -318,3 +322,106 @@ def test_port_in_use_raises_a_clear_error(bridge):
 def test_bad_arguments(kwargs):
     with pytest.raises(ValueError):
         Bridge(**kwargs)
+
+
+# -- c-VEP (docs/CVEP-STANDARD.md 4.3) -------------------------------------------------------
+
+def test_code_config_message_carries_the_standard():
+    from brainsync.vep.live import BITS
+
+    msg = config_message(load_config("reels_cvep"))
+    assert msg["paradigm"] == "code" and msg["name"] == "reels_cvep"
+    assert msg["code"] == {"bits": list(BITS), "lag_frames": 21, "cycle_frames": 63,
+                           "train_cycles": 30, "fill": "#ffffff"}
+    assert [(t["label"], t["lag"], t["freq"]) for t in msg["targets"]] == [
+        ("up", 0, None), ("pause", 21, None), ("down", 42, None)]
+    assert [(t["x"], t["y"], t["size"]) for t in msg["targets"]] == [
+        (0.58, 0.3, 0.2), (0.58, 0.0, 0.2), (0.58, -0.3, 0.2)]
+    assert json.loads(json.dumps(msg, allow_nan=False)) == msg   # no nan anywhere
+    assert config_message(load_config("reels_cvep"), train_cycles=12)["code"][
+        "train_cycles"] == 12
+    assert "paradigm" not in CONFIG                               # f-VEP: unchanged
+
+
+def test_config_message_refuses_what_the_browser_cannot_draw():
+    with pytest.raises(ValueError, match="t-VEP"):
+        config_message(load_config("tvep_4"))
+    with pytest.raises(ValueError, match="train_cycles"):
+        config_message(load_config("reels_cvep"), train_cycles=1)
+    import dataclasses
+
+    from brainsync.stimulus.config import CodeSpec
+    slow = dataclasses.replace(load_config("reels_cvep"), code=CodeSpec(63, 21, 2))
+    with pytest.raises(ValueError, match="one bit per frame"):
+        config_message(slow)
+
+
+def test_hex_color():
+    assert hex_color((1.0, 1.0, 1.0)) == "#ffffff"
+    assert hex_color((0.0, 0.5, 2.0)) == "#0080ff"
+
+
+def test_code_message_builders():
+    from brainsync.online import Decision
+    from brainsync.vep.live import confidence
+
+    assert phase_message("train", True, None, "Look at the UP square")["phase"] == "train"
+    assert toggle_message(4) == {"type": "toggle", "id": 4}
+    assert train_message(12, 30) == {"type": "train", "cycle": 12, "of": 30}
+    for bad in ((31, 30), (-1, 30), (1.5, 30), (True, 30), (1, 0)):
+        with pytest.raises(ValueError):
+            train_message(*bad)
+    assert trained_message(0.8333, 1 / 3, 30) == {"type": "trained", "accuracy": 0.8333,
+                                                  "chance": 0.3333, "cycles": 30}
+    assert trained_message(math.nan, 1 / 3, 30)["accuracy"] is None   # a loaded template
+    for bad in ((1.5, 1 / 3, 30), (0.5, 0.0, 30), (0.5, 1 / 3, 0)):
+        with pytest.raises(ValueError):
+            trained_message(*bad)
+    d = Decision(time=1.0, scores=np.array([0.42, 0.11, -0.03]), raw=0, committed=0,
+                 changed=True, gap=0.31)
+    msg = decision_message(confidence(d, ("up", "pause", "down")))
+    assert msg == {"type": "decision", "scores": {"up": 0.42, "pause": 0.11, "down": -0.03},
+                   "raw": "up", "committed": "up", "lead": 0.31, "changed": True}
+    none = Decision(time=1.0, scores=np.array([0.1, np.nan, 0.0]), raw=-1, committed=-1,
+                    changed=False, gap=np.nan)
+    msg = decision_message(confidence(none, ("up", "pause", "down")))
+    assert msg["raw"] is None and msg["committed"] is None and msg["lead"] is None
+    assert msg["scores"]["pause"] == 0.0                   # a nan score shows as 0
+    for bad in ({"scores": {}}, {"scores": {"up": math.nan}},
+                {"scores": {"up": 0.1}, "raw": "down"},
+                {"scores": {"up": 0.1}, "lead": math.inf}):
+        with pytest.raises(ValueError):
+            decision_message(bad)
+
+
+def test_cycle_problem():
+    assert cycle_problem({"n": 0, "t": 1792809201.5}) is None
+    for bad in ({"n": -1, "t": 1.0}, {"n": 1.5, "t": 1.0}, {"n": True, "t": 1.0},
+                {"n": 1}, {"n": 1, "t": math.nan}, {"n": 1, "t": 0}, {"n": 1, "t": "now"}):
+        assert cycle_problem(bad) is not None, bad
+
+
+def test_cycles_and_toggles_are_queued_with_their_tab(bridge, capsys):
+    async def main():
+        async with connect(bridge.url) as a, connect(bridge.url) as b:
+            await joined(a)
+            await joined(b)
+            await a.send(json.dumps({"type": "cycle", "n": 0, "t": 100.0}))
+            await b.send(json.dumps({"type": "cycle", "n": 0, "t": 100.2}))
+            await a.send(json.dumps({"type": "cycle", "n": 1, "t": 101.05}))
+            await a.send(json.dumps({"type": "cycle", "n": -1, "t": 102.0}))   # ignored
+            await a.send(json.dumps({"type": "cycle", "n": 2}))                # ignored
+            await a.send(json.dumps({"type": "toggled", "id": 3, "ok": True,
+                                     "playing": False, "method": "video"}))
+            await until(lambda: bridge._events.qsize() == 4)
+            bridge.send(train_message(1, 30))
+            assert await recv(a) == {"type": "train", "cycle": 1, "of": 30}
+
+    asyncio.run(main())
+    events = bridge.events()
+    cycles = [(e["n"], e["t"], e["_client"]) for e in events if e["type"] == "cycle"]
+    (_, _, ca), (_, _, cb), _ = cycles
+    assert ca != cb and cycles == [(0, 100.0, ca), (0, 100.2, cb), (1, 101.05, ca)]
+    assert events[-1]["type"] == "toggled"
+    assert bridge.ignored == 2
+    assert capsys.readouterr().err.count("ignored a cycle message") == 2

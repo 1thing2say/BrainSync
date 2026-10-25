@@ -36,12 +36,24 @@ Server -> client:
              "size"}]}  on connect; x, y are the square's centre and size its side, in
             screen heights from the viewport centre with y up (PsychoPy height units);
             phase in radians; depth in (0, 1] is the modulation depth (luminance
-            0.5 +/- depth/2), absent means 1
-    phase   {"type": "phase", "phase": wait|calibrate|run|stop, "flicker": bool,
-             "seconds": number|null, "text"}  flicker false: squares still at 0.5;
-            stop: hide the squares and show the text
-    cue     {"type": "cue", "target": -1|0|1}  box around the committed target (-1: none)
+            0.5 +/- depth/2), absent means 1. A c-VEP config (docs/CVEP-STANDARD.md 4.3)
+            adds "paradigm": "code" and "code": {"bits": [63 x 0|1], "lag_frames": 21,
+            "cycle_frames": 63, "train_cycles": 30, "fill": "#ffffff"}; its targets carry
+            "freq": null and "lag" (frames: 0, 21, 42). No "paradigm" means "freq".
+    phase   {"type": "phase", "phase": wait|calibrate|train|run|stop, "flicker": bool,
+             "seconds": number|null, "text"}  flicker false: squares still (mid grey,
+            white in code mode); stop: hide the squares and show the text; train (code
+            mode): flicker, with a "cue" message putting the box on the training target
+    cue     {"type": "cue", "target": -1|0|1|2}  box around a target (-1: none)
     scroll  {"type": "scroll", "dir": up|down, "id": increasing int}
+    toggle  {"type": "toggle", "id": increasing int}  pause or play the reel showing; ids
+            share the scroll counter
+    train   {"type": "train", "cycle": k, "of": 30}  c-VEP training progress
+    trained {"type": "trained", "accuracy": 0..1|null, "chance": 0.333, "cycles": 30}  the
+            template is ready; accuracy on held-out training cycles
+    decision {"type": "decision", "scores": {label: correlation}, "raw": label|null,
+             "committed": label|null, "lead": number|null, "changed": bool}  after every
+            c-VEP decision (vep.live.Confidence.message()); drives the confidence lines
     status  {"type": "status", "text"}  optional HUD text
     eeg     {"type": "eeg", "state": unknown|absent|connecting|connected|streaming|no-data|
              error|unused, "text"}  the EEG board, for the HUD's EEG line
@@ -53,7 +65,15 @@ Client -> server:
     view     {"type": "view", "showing": bool}  the squares came into or went out of view
     frames   {"type": "frames", "refresh_hz", "dropped"}  every 5 s while flickering
     scrolled {"type": "scrolled", "id", "ok": bool, "method"}  one per scroll
+    toggled  {"type": "toggled", "id", "ok": bool, "playing": bool|null, "method"}  one per
+             toggle
+    cycle    {"type": "cycle", "n": cycle index >= 0, "t": Unix seconds}  code mode: the
+             flip of every cycle's first frame. Queued with "_client", a number per
+             connection, so the run can follow one tab's cycles
     bye      {"type": "bye"}  the viewer pressed Escape
+
+A cycle whose n is not a non-negative integer or whose t is not a positive finite number
+is ignored with a note, like any other malformed message.
 """
 from __future__ import annotations
 
@@ -67,6 +87,8 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from .stimulus.config import StimulusConfig
+from .vep.codes import m_sequence
+from .vep.live import SEED, TRAIN_CYCLES, Confidence
 
 if TYPE_CHECKING:
     from websockets.asyncio.server import ServerConnection
@@ -75,8 +97,8 @@ if TYPE_CHECKING:
 HOST = "127.0.0.1"
 PORT = 8765
 PING_S = 20.0
-EVENT_TYPES = frozenset({"bye", "scrolled", "frames", "view"})
-PHASES = ("wait", "calibrate", "run", "stop")
+EVENT_TYPES = frozenset({"bye", "scrolled", "toggled", "frames", "view", "cycle"})
+PHASES = ("wait", "calibrate", "train", "run", "stop")
 EEG_STATES = ("unknown", "absent", "connecting", "connected", "streaming", "no-data", "error",
               "unused")
 # Chrome extension ids are 32 letters a-p; the mock page is served by http.server.
@@ -85,14 +107,46 @@ ORIGINS = re.compile(r"chrome-extension://[a-p]{32}|https?://(127\.0\.0\.1|local
 
 # -- protocol messages ----------------------------------------------------------------------
 
-def config_message(cfg: StimulusConfig) -> dict[str, Any]:
-    """The "config" message: targets with centre (x, y) and side in screen heights, y up."""
-    return {"type": "config", "name": cfg.name, "waveform": cfg.waveform, "depth": cfg.depth,
-            "refresh_hz": cfg.display.refresh_hz,
-            "refresh_tolerance_hz": cfg.display.refresh_tolerance_hz,
-            "targets": [{"label": t.label, "freq": t.freq, "phase": t.phase,
-                         "x": t.pos[0], "y": t.pos[1], "size": cfg.size}
-                        for t in cfg.targets]}
+def config_message(cfg: StimulusConfig, train_cycles: int = TRAIN_CYCLES) -> dict[str, Any]:
+    """The "config" message: targets with centre (x, y) and side in screen heights, y up.
+
+    A [code] (c-VEP) config adds "paradigm": "code" and the "code" object of
+    docs/CVEP-STANDARD.md; its targets carry "freq": None and their "lag" in frames. A
+    [time] config has no browser renderer and is refused (ValueError).
+    """
+    if cfg.paradigm == "time":
+        raise ValueError(f"config {cfg.name!r} is a t-VEP ([time]) config; the browser draws "
+                         "frequency (freq) or code (c-VEP) squares only")
+    msg: dict[str, Any] = {
+        "type": "config", "name": cfg.name, "waveform": cfg.waveform, "depth": cfg.depth,
+        "refresh_hz": cfg.display.refresh_hz,
+        "refresh_tolerance_hz": cfg.display.refresh_tolerance_hz,
+        "targets": [{"label": t.label, "freq": t.freq, "phase": t.phase,
+                     "x": t.pos[0], "y": t.pos[1], "size": cfg.size}
+                    for t in cfg.targets]}
+    if cfg.paradigm == "code":
+        code = cfg.code
+        assert code is not None
+        if code.frames_per_bit != 1:
+            raise ValueError(f"config {cfg.name!r}: the browser shows one bit per frame, "
+                             f"got frames_per_bit = {code.frames_per_bit}")
+        if isinstance(train_cycles, bool) or int(train_cycles) != train_cycles \
+                or train_cycles < 2:
+            raise ValueError(f"train_cycles must be an integer >= 2, got {train_cycles!r}")
+        msg["paradigm"] = "code"
+        msg["code"] = {"bits": [int(b) for b in m_sequence(code.length, SEED)],
+                       "lag_frames": code.lag_frames, "cycle_frames": code.cycle_frames,
+                       "train_cycles": int(train_cycles), "fill": hex_color(cfg.fill)}
+        for k, t in enumerate(msg["targets"]):
+            t["freq"] = None
+            t["phase"] = 0.0
+            t["lag"] = k * code.lag_frames
+    return msg
+
+
+def hex_color(rgb: tuple[float, float, float]) -> str:
+    """"#rrggbb" of a [stimulus] fill (each channel in 0..1)."""
+    return "#" + "".join(f"{round(min(1.0, max(0.0, float(c))) * 255):02x}" for c in rgb)
 
 
 def phase_message(phase: str, flicker: bool, seconds: float | None = None,
@@ -111,6 +165,70 @@ def cue_message(target: int) -> dict[str, Any]:
 
 def scroll_message(direction: str, scroll_id: int) -> dict[str, Any]:
     return {"type": "scroll", "dir": direction, "id": int(scroll_id)}
+
+
+def toggle_message(action_id: int) -> dict[str, Any]:
+    """Pause or play the reel showing; ``action_id`` shares the scroll ids."""
+    return {"type": "toggle", "id": int(action_id)}
+
+
+def train_message(cycle: int, of: int) -> dict[str, Any]:
+    """c-VEP training progress: ``cycle`` of ``of`` cycles recorded."""
+    if (isinstance(cycle, bool) or isinstance(of, bool) or not isinstance(of, int)
+            or not isinstance(cycle, int) or of < 1 or not 0 <= cycle <= of):
+        raise ValueError(f"train needs integer cycles 0..of, got {cycle!r} of {of!r}")
+    return {"type": "train", "cycle": cycle, "of": of}
+
+
+def trained_message(accuracy: float, chance: float, cycles: int) -> dict[str, Any]:
+    """The template is ready: leave-one-cycle-out ``accuracy`` (nan: unknown, sent as null)
+    against ``chance``, from ``cycles`` training cycles."""
+    if not (_finite(chance) and 0 < chance < 1):
+        raise ValueError(f"chance must be in (0, 1), got {chance!r}")
+    acc = float(accuracy)
+    if math.isfinite(acc) and not 0 <= acc <= 1:
+        raise ValueError(f"accuracy must be in 0..1, got {accuracy!r}")
+    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+        raise ValueError(f"cycles must be a positive integer, got {cycles!r}")
+    return {"type": "trained", "accuracy": round(acc, 4) if math.isfinite(acc) else None,
+            "chance": round(float(chance), 4), "cycles": cycles}
+
+
+def decision_message(confidence: Confidence | dict[str, Any]) -> dict[str, Any]:
+    """A c-VEP decision for the confidence lines, from ``vep.live.confidence(d, labels)``
+    (or its message()); ValueError for scores that are not finite numbers or a raw /
+    committed label that is not among them."""
+    body = confidence.message() if isinstance(confidence, Confidence) else dict(confidence)
+    scores = body.get("scores")
+    if not isinstance(scores, dict) or not scores:
+        raise ValueError(f"decision scores must be a non-empty {{label: score}}, got {scores!r}")
+    for label, v in scores.items():
+        if not isinstance(label, str) or not _finite(v):
+            raise ValueError(f"decision score {label!r} must be a finite number, got {v!r}")
+    for key in ("raw", "committed"):
+        if body.get(key) is not None and body[key] not in scores:
+            raise ValueError(f"decision {key} {body[key]!r} is not one of {list(scores)}")
+    lead = body.get("lead")
+    if lead is not None and not _finite(lead):
+        raise ValueError(f"decision lead must be a finite number or None, got {lead!r}")
+    return {"type": "decision", "scores": {k: float(v) for k, v in scores.items()},
+            "raw": body.get("raw"), "committed": body.get("committed"),
+            "lead": None if lead is None else float(lead),
+            "changed": bool(body.get("changed", False))}
+
+
+def _finite(v: Any) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+
+
+def cycle_problem(msg: dict[str, Any]) -> str | None:
+    """Why a client "cycle" message is malformed, or None."""
+    n, t = msg.get("n"), msg.get("t")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        return f"n must be a non-negative integer, got {n!r}"
+    if not _finite(t) or t <= 0:
+        return f"t must be a positive number of Unix seconds, got {t!r}"
+    return None
 
 
 def status_message(text: str) -> dict[str, Any]:
@@ -176,6 +294,8 @@ class Bridge:
         self._hello: dict[str, Any] | None = None
         self._hello_seen = threading.Event()
         self._views: dict[object, bool] = {}   # client -> its squares are in view
+        self._ids: dict[object, int] = {}      # client -> its number, for "cycle" events
+        self._next_id = 1
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -329,6 +449,7 @@ class Bridge:
             self._clients.discard(conn)
             with self._lock:
                 self._views.pop(conn, None)
+                self._ids.pop(conn, None)
 
     def _receive(self, text: str | bytes, client: object = None) -> None:
         msg = parse_client_message(text)
@@ -345,7 +466,12 @@ class Bridge:
         elif kind == "view" and not isinstance(msg.get("showing"), bool):
             self.ignored += 1
             _note(f"ignored a view message without a true/false \"showing\": {text[:80]!r}")
+        elif kind == "cycle" and cycle_problem(msg) is not None:
+            self.ignored += 1
+            _note(f"ignored a cycle message: {cycle_problem(msg)}")
         elif kind in EVENT_TYPES:
+            if kind == "cycle":
+                msg["_client"] = self._client_id(client)
             if kind == "view":
                 with self._lock:
                     self._views[client] = msg["showing"]
@@ -353,6 +479,14 @@ class Bridge:
         else:
             self.ignored += 1
             _note(f"ignored a message of unknown type {kind!r}")
+
+    def _client_id(self, client: object) -> int:
+        """A number per connection, never reused within a run."""
+        with self._lock:
+            if client not in self._ids:
+                self._ids[client] = self._next_id
+                self._next_id += 1
+            return self._ids[client]
 
     @property
     def n_clients(self) -> int:
@@ -375,7 +509,8 @@ class Bridge:
         return self.latest_hello
 
     def events(self) -> list[dict[str, Any]]:
-        """Client messages received since the last call (hello, bye, scrolled, frames, view)."""
+        """Client messages received since the last call (hello, bye, scrolled, toggled,
+        frames, view, cycle)."""
         out = []
         while True:
             try:
