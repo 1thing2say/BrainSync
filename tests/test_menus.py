@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import load_config, load_intents, load_profile
+from app.config import LLMConfig, load_config, load_intents, load_profile
 from app.context import Conversation, PageRequest, Turn, time_of_day
 from app.log import EventLog, read_events
 from app.menus import (TOOL_NAME, MenuMaker, normalized, rank_keys, reply_tool, shorten_label,
@@ -74,12 +74,19 @@ def event_log(tmp_path):
     log.close()
 
 
+def llm_with(**claude) -> LLMConfig:
+    """The default backends (local, then claude) with ``claude``'s fields changed. Without a
+    BRAINSYNC_LLAMA_API_KEY the local backend is off, as on a laptop."""
+    backends = [b.model_copy(update=claude) if b.name == "claude" else b for b in CFG.llm.backends]
+    return CFG.llm.model_copy(update={"backends": backends})
+
+
 def maker(fake, event_log=None, timeout_s: float = 4.0, hedge_after_s: float | None = None,
           **menus) -> MenuMaker:
     llm = {"timeout_s": timeout_s}
     if hedge_after_s is not None:
         llm["hedge_after_s"] = hedge_after_s
-    return MenuMaker(CFG.menus.model_copy(update=menus), CFG.llm.model_copy(update=llm),
+    return MenuMaker(CFG.menus.model_copy(update=menus), llm_with(**llm),
                      INTENTS, PROFILE, api_key=None, log=event_log, create=fake)
 
 
@@ -243,8 +250,7 @@ class FakeWarm:
 
 
 def warm_maker(fake, warm, event_log=None, keepalive_s: float = 0.1, timeout_s: float = 4.0):
-    return MenuMaker(CFG.menus, CFG.llm.model_copy(update={"timeout_s": timeout_s,
-                                                          "keepalive_s": keepalive_s}),
+    return MenuMaker(CFG.menus, llm_with(timeout_s=timeout_s, keepalive_s=keepalive_s),
                      INTENTS, PROFILE, api_key=None, log=event_log, create=fake, warm=warm)
 
 
@@ -344,15 +350,17 @@ async def test_an_sdk_too_old_for_the_parameters_is_not_retried(event_log):
 async def test_request_calls_done_with_the_request_id():
     got = []
     m = maker(FakeClaude(reply(GOOD)))
-    m.request(request(request_id=42), lambda rid, options: got.append((rid, options)))
+    m.request(request(request_id=42), lambda rid, options, **info: got.append((rid, options, info)))
     await asyncio.sleep(0.05)
     assert got and got[0][0] == 42 and len(got[0][1]) == 3
+    assert got[0][2] == {"backend": "claude", "error": ""}
     await m.stop()
 
 
 def test_disabled_without_a_key_or_with_dynamic_off():
     no_key = MenuMaker(CFG.menus, CFG.llm, INTENTS, PROFILE, api_key=None)
-    assert not no_key.enabled and no_key.why_disabled == "ANTHROPIC_API_KEY is not set"
+    assert not no_key.enabled
+    assert no_key.why_disabled == "BRAINSYNC_LLAMA_API_KEY and ANTHROPIC_API_KEY are not set"
     off = maker(FakeClaude(reply(GOOD)), dynamic=False)
     assert not off.enabled and off.why_disabled == "menus.dynamic is false"
 
@@ -478,7 +486,7 @@ async def test_the_hedge_starts_after_hedge_after_s_and_wins_when_the_first_call
     assert options[0].utterance == "That sounds good to me."
     assert len(fake.calls) == 2 and fake.started[1] - started >= 0.1
     assert fake.calls[0] == fake.calls[1]  # the same request again
-    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+    assert fake.cancelled == 1 and m.busy == 0 and no_other_tasks()
     hedge, ok = [e for e in llm_events(event_log) if e["event"] in ("llm_hedge", "llm_ok")]
     assert hedge["event"] == "llm_hedge" and hedge["after_ms"] >= 100
     assert ok["call"] == "hedge" and ok["attempt"] == 2 and ok["cancelled"] == ["first"]
@@ -489,7 +497,7 @@ async def test_the_first_usable_answer_wins_and_the_other_call_is_cancelled(even
     m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.1)
     options = await m.make_page(request())
     assert options[0].utterance == "Yes, let's go outside." and len(fake.calls) == 2
-    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+    assert fake.cancelled == 1 and m.busy == 0 and no_other_tasks()
     ok = llm_events(event_log)[-1]
     assert ok["call"] == "first" and ok["cancelled"] == ["hedge"]
 
@@ -520,7 +528,7 @@ async def test_repeated_network_errors_stop_at_one_retry(event_log, hedge_after_
     assert await m.make_page(request()) is None
     assert len(fake.calls) == 2
     assert [e["event"] for e in llm_events(event_log)].count("llm_failed") == 2
-    assert m._busy == 0 and no_other_tasks()
+    assert m.busy == 0 and no_other_tasks()
 
 
 async def test_hedge_after_s_zero_means_no_hedge(event_log):
@@ -537,7 +545,7 @@ async def test_the_deadline_still_gives_none_and_cancels_both_calls(event_log):
     started = loop.time()
     assert await m.make_page(request()) is None
     assert loop.time() - started < 0.6
-    assert fake.cancelled == 2 and m._busy == 0 and no_other_tasks()
+    assert fake.cancelled == 2 and m.busy == 0 and no_other_tasks()
     failed = llm_events(event_log)[-1]
     assert failed["event"] == "llm_failed" and failed["reason"] == "timeout"
     assert failed["calls"] == ["first", "hedge"] and 250 <= failed["ms"] < 600
@@ -548,7 +556,7 @@ async def test_a_permanent_error_gives_up_at_once_without_a_hedge(event_log):
     m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
     assert await m.make_page(request()) is None
     await asyncio.sleep(0.1)
-    assert len(fake.calls) == 1 and m._busy == 0
+    assert len(fake.calls) == 1 and m.busy == 0
     assert "llm_hedge" not in [e["event"] for e in llm_events(event_log)]
 
 
@@ -556,7 +564,7 @@ async def test_a_permanent_error_from_the_hedge_cancels_the_first_call():
     fake = SlowClaude((1.0, reply(GOOD)), (0.0, APIStatusError(403)))
     m = maker(fake, timeout_s=0.5, hedge_after_s=0.05)
     assert await m.make_page(request()) is None
-    assert fake.cancelled == 1 and m._busy == 0 and no_other_tasks()
+    assert fake.cancelled == 1 and m.busy == 0 and no_other_tasks()
 
 
 async def test_an_invalid_hedge_answer_is_retried_while_the_first_call_runs(event_log):
@@ -578,7 +586,7 @@ async def test_at_most_three_calls_per_page(event_log):
     fake = SlowClaude((0.2, bad), (0.0, bad), (0.0, bad), (0.0, reply(GOOD)))
     m = maker(fake, event_log, timeout_s=0.5, hedge_after_s=0.05)
     assert await m.make_page(request()) is None
-    assert len(fake.calls) == 3 and m._busy == 0
+    assert len(fake.calls) == 3 and m.busy == 0
     events = [e["event"] for e in llm_events(event_log)]
     assert events.count("llm_invalid") == 3 and "llm_failed" not in events
 
@@ -598,7 +606,7 @@ async def test_stop_cancels_a_page_and_its_calls():
     m.request(request(), lambda rid, options: got.append(options))
     await asyncio.sleep(0.1)
     await m.stop()
-    assert fake.cancelled == 2 and m._busy == 0 and not got and no_other_tasks()
+    assert fake.cancelled == 2 and m.busy == 0 and not got and no_other_tasks()
 
 
 # ---------------------------------------------------------------------------

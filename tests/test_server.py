@@ -367,8 +367,11 @@ def test_health_without_keys_bridge_or_page(client):
     assert h["partner_page"] == {"connected": False, "mic": "", "mic_muted": False,
                                  "stt_mode": BASE.speech.stt_mode}
     assert h["llm"]["enabled"] is False and "ANTHROPIC_API_KEY" in h["llm"]["why_disabled"]
-    assert h["llm"]["model"] == BASE.llm.model and h["llm"]["warm_ok"] is None
+    assert h["llm"]["model"] == BASE.llm.backends[0].model and h["llm"]["warm_ok"] is None
     assert h["llm"]["dynamic"] is BASE.menus.dynamic
+    assert [b["name"] for b in h["llm"]["backends"]] == [b.name for b in BASE.llm.backends]
+    assert not any(b["enabled"] for b in h["llm"]["backends"])
+    assert h["llm"]["last_backend"] == "" and h["llm"]["page_timeout_s"] == BASE.llm.page_timeout_s
     assert h["tts"]["enabled"] is False and "CARTESIA_API_KEY" in h["tts"]["why_disabled"]
     assert h["tts"]["model"] == BASE.speech.model
 

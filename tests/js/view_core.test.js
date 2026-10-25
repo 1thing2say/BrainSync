@@ -30,9 +30,13 @@ test("problems come first and name what is wrong", () => {
 test("a fallback that still works is a warning, not a problem", () => {
   const h = VC.health({ ...READY, llm: "off", llm_ok: false, mic_muted: true });
   assert.equal(h.level, "warn");
-  assert.equal(h.text, "Ready · Fixed replies only (no Claude) · Mic muted");
+  assert.equal(h.text, "Ready · Fixed replies only (no LLM) · Mic muted");
   assert.equal(VC.health({ ...READY, llm: "failed", llm_ok: false }).text,
-    "Ready · Claude's last page failed: fixed list shown");
+    "Ready · Last reply page failed: fixed list shown");
+  // The server names each backend that failed.
+  assert.equal(VC.health({ ...READY, llm: "failed", llm_ok: false,
+                           llm_error: "local: timeout; claude: APIConnectionError" }).text,
+    "Ready · Last reply page failed (local: timeout; claude: APIConnectionError): fixed list shown");
 });
 
 test("Claude not asked yet is no warning", () => {

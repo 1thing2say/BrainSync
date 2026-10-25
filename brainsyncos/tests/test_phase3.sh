@@ -13,11 +13,16 @@
 # the install-side apt helper against good and tampered repositories, the
 # contents and dependencies of brainsync-runtime and brainsync, the md5sum
 # merge of mapped trees, and hook.sh mounting the repository for
-# 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer. In
-# a test-only Ubuntu container with Xvfb (tests/runtime-checks.sh): the two
-# BrainSync packages installed, imported, PsychoPy drawing, every command,
-# and brainsync-voice serving its page offline. Last, shellcheck over
-# every BrainSyncOS shell script (koalaman/shellcheck:v0.10.0, used offline).
+# 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer; the
+# board packages (brainsyncos-ch341-tegra against NVIDIA's kernel,
+# brainsync-udev) and 75-usb-serial.sh installing them there. In a test-only
+# Ubuntu container with Xvfb (tests/runtime-checks.sh): the two BrainSync
+# packages installed, imported, PsychoPy drawing, every command, and
+# brainsync-voice serving its page offline. Then the BrainFlow wheel in
+# build/wheels (built by scripts/build-wheels.sh unless up to date): its
+# manifest, contents, and a venv install that reports 250 Hz. Last, every
+# BrainSyncOS shell script through shellcheck (koalaman/shellcheck:v0.10.0,
+# used offline).
 # Builds no ISO: tests/test_phase2.sh and test_vm.sh build test ISOs that
 # carry a repository and run the full hook. Everything goes to
 # build/tmp/phase3/ (deleted at the end unless --keep). Per-check logs:
@@ -110,8 +115,10 @@ t_builder_caps() {
     grep -q "^BSOS_JOBS=$BUILD_JOBS MAKEFLAGS=-j$BUILD_JOBS CMAKE_BUILD_PARALLEL_LEVEL=$BUILD_JOBS$" "$TMP_DIR/env.out" || die "job variables wrong"
     [ "$(awk 'NR==2 {print $2}' "$TMP_DIR/env.out")" = $(( $(size_mb "$BUILD_SCRATCH_SIZE") * 1024 )) ] || die "/scratch is not $BUILD_SCRATCH_SIZE"
     [ "$(BSOS_BUILD_CPUS=1 "$B" run cat /sys/fs/cgroup/cpu.max)" = "100000 100000" ] || die "BSOS_BUILD_CPUS=1 not applied"
-    "$B" run bash -c 'command -v apt-ftparchive gpg gpgv faketime dpkg-deb' > /dev/null || die "builder lacks Phase 3 tools"
-    echo "override BSOS_BUILD_CPUS=1: cpu.max 100000 100000; apt-ftparchive, gpg, gpgv, faketime present"
+    "$B" run bash -c 'command -v apt-ftparchive gpg gpgv faketime dpkg-deb git cmake g++ make modinfo depmod udevadm patch' > /dev/null \
+        || die "builder lacks Phase 3 tools"
+    "$B" run python3 -c 'import venv, numpy, pkg_resources' || die "builder lacks python3-venv, -numpy or -setuptools"
+    echo "override BSOS_BUILD_CPUS=1: cpu.max 100000 100000; apt-ftparchive, gpg, gpgv, faketime, git, cmake, g++, kmod, udevadm present"
 }
 
 t_build_sh() {
@@ -176,20 +183,34 @@ t_packages() {
     # Each edition's packages come from a separate builder run: the same bytes
     # in both, the venv included, means the build is reproducible.
     local n=0
-    for deb in "$BRAINSYNCOS_ROOT/$TD/debs/jetson/"*.deb; do
-        cmp "$deb" "$BRAINSYNCOS_ROOT/$TD/debs/vm/$(basename "$deb")" \
+    for deb in "$BRAINSYNCOS_ROOT/$TD/debs/vm/"*.deb; do
+        cmp "$deb" "$BRAINSYNCOS_ROOT/$TD/debs/jetson/$(basename "$deb")" \
             || die "$(basename "$deb") differs between editions (not reproducible)"
         echo "$(basename "$deb"): $(file_size "$deb") bytes, the same in both editions"
         n=$((n + 1))
     done
-    [ "$n" = "$(find "$BRAINSYNCOS_ROOT/$TD/debs/vm" -name '*.deb' | wc -l | tr -d ' ')" ] || die "the editions have different packages"
-    for deb in brainsync brainsync-runtime; do
-        [ -f "$BRAINSYNCOS_ROOT/$TD/debs/jetson/${deb}_${BRAINSYNCOS_VERSION}_arm64.deb" ] || die "no $deb package"
+    for e in jetson vm; do
+        (cd "$BRAINSYNCOS_ROOT/$TD/debs/$e" && LC_ALL=C ls ./*.deb) | sed 's|^\./||' | sed 's/_.*//' | tr '\n' ' ' > "$TMP_DIR/names.$e"
+        echo "$e: $(cat "$TMP_DIR/names.$e")"
     done
+    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra " ] \
+        && [ "$(cat "$TMP_DIR/names.vm")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring " ] \
+        || die "wrong package sets per edition"
     expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
     expect_fail 'no repository signing key' "$B" run scripts/build-packages.sh --edition vm --key "$TD/none.asc" --out "$TD/x"
     expect_fail 'no package named nope' "$B" run scripts/build-packages.sh --edition vm --only nope --key "$KEY" --out "$TD/x"
-    echo "$n packages for both editions, byte-identical (SOURCE_DATE_EPOCH); keyring root-owned, md5sums OK, holds $fpr"
+    echo "$n packages in both editions, byte-identical (SOURCE_DATE_EPOCH); keyring root-owned, md5sums OK, holds $fpr"
+}
+
+# The BrainFlow wheel: build/wheels is a cache like the builder image, so an
+# up-to-date wheel is checked as it is (building it takes long under emulation).
+t_wheel() {
+    "$B" run scripts/build-wheels.sh
+    "$B" run scripts/build-wheels.sh 2>&1 | tee "$TMP_DIR/wheels.out"
+    grep -q 'brainflow-cerelog: up to date' "$TMP_DIR/wheels.out" || die "a second build-wheels.sh run rebuilt the wheel"
+    expect_fail 'no wheel named nope' "$B" run scripts/build-wheels.sh --only nope
+    expect_fail 'wheels takes only --force' "$S/build.sh" wheels --fast
+    in_builder wheel
 }
 
 t_repo() {
@@ -234,7 +255,7 @@ t_shellcheck() {
         || die "$SHELLCHECK_IMAGE is not available locally (docker pull $SHELLCHECK_IMAGE)"
     local files
     files="$(cd "$BRAINSYNCOS_ROOT" && ls scripts/*.sh tests/*.sh tests/shims/curtin payload/hook.sh payload/install.d/*.sh \
-        payload/lib/*.sh packages/*/build.sh)"
+        payload/lib/*.sh packages/*/build.sh wheels/*/build.sh)"
     # shellcheck disable=SC2086
     docker run --rm --network none --cpus "$BUILD_CPUS" -v "$BRAINSYNCOS_ROOT:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
         -x -S warning $files
@@ -251,11 +272,14 @@ check packages             t_packages
 check repo                 t_repo
 if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check apt-helper       in_builder apt
-    check debs             in_builder debs
+    check app-debs         in_builder app-debs
     check runtime          t_runtime
     check md5-map          in_builder md5map
     check install-hook     in_builder hook
+    check board-debs       in_builder debs
+    check usb-serial       in_builder usbserial
 fi
+check wheel                t_wheel
 check shellcheck           t_shellcheck
 
 finish "Phase 3"

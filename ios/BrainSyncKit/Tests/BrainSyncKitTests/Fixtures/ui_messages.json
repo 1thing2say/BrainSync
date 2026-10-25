@@ -221,6 +221,8 @@
       "decoder_message": "posterior RMS 12-20 uV",
       "decoder_name": "ssvep-fbcca",
       "llm": "ok",
+      "llm_backend": "local",
+      "llm_error": "",
       "mic_muted": false,
       "mic": "listening",
       "resume_ready": true
@@ -237,6 +239,8 @@
       "decoder_message": "hello rejected: refresh 120 Hz",
       "decoder_name": "fake-random",
       "llm": "failed",
+      "llm_backend": "",
+      "llm_error": "local: timeout; claude: APIConnectionError",
       "mic_muted": true,
       "mic": "muted",
       "resume_ready": false
@@ -253,6 +257,8 @@
       "decoder_message": "",
       "decoder_name": "",
       "llm": "waiting",
+      "llm_backend": "",
+      "llm_error": "",
       "mic_muted": false,
       "mic": "denied",
       "resume_ready": false
@@ -269,6 +275,8 @@
       "decoder_message": "",
       "decoder_name": "",
       "llm": "off",
+      "llm_backend": "",
+      "llm_error": "",
       "mic_muted": false,
       "mic": "",
       "resume_ready": false

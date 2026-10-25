@@ -1,36 +1,46 @@
-"""LLM option ranking: one Claude call per page, validated, with the fixed lists as fallback
-(PLAN.md V3, items 2-4).
+"""LLM option ranking: one page of reply options per request, from the first LLM backend that
+answers in time, validated, with the fixed lists as fallback (PLAN.md V3, items 2-4).
 
-``MenuMaker.request(page_request, done)`` starts the call in the background and later calls
-``done(request_id, options)`` with exactly ``menus.option_count`` options ranked most likely first,
-or ``None`` when the call failed, timed out or returned nothing valid (the orchestrator then keeps
-the fixed list from config/intents.yaml). The LLM only writes options: it never picks or changes a
-selection (rule 1), and an option is spoken exactly as shown (rule 2).
+``MenuMaker.request(page_request, done)`` starts the page in the background and later calls
+``done(request_id, options, backend=..., error=...)`` with exactly ``menus.option_count`` options
+ranked most likely first and the name of the backend that wrote them, or ``None`` and why each
+backend failed (the orchestrator then keeps the fixed list from config/intents.yaml). The LLM only
+writes options: it never picks or changes a selection (rule 1), and an option is spoken exactly as
+shown (rule 2).
+
+The backends (``llm.backends``) are tried in order: on BrainSyncOS a local llama-server first, then
+Claude. A backend whose key (``api_key_env``) is not set is off, so a laptop without llama-server
+behaves as before. Each backend gets its own ``timeout_s`` for its whole turn, starting when its
+turn starts; one that fails early (a refused connection, a bad key, an error a retry cannot fix)
+hands over at once, so the next one still gets its full time and a page takes at most the sum
+(``page_timeout_s``, which the orchestrator waits). A refused connection costs milliseconds, not
+the budget: a backend with another one after it is not retried after a connection error.
 
 The call forces one strict tool call, ``propose_replies``, whose input has one field per rank
 (``option_1`` .. ``option_4`` with the defaults), so the output is schema-valid JSON with the
-ranking explicit. It asks for ``menus.spare_options`` more candidates than a page shows, ranked
-last. Lengths, intents, duplicates and repeats of options already shown are checked here, for
-each candidate on its own (strict schemas cannot express them): the page is the first
-``menus.option_count`` usable candidates in rank order, so one bad candidate costs a spare, not the
-page. Duplicates and repeats are compared without case, punctuation or extra spaces ("Yes,
-please." repeats "yes please"). A label that is too long is shortened rather than rejected: it is
-only the short tag beside a square, and the utterance (what is spoken) is never changed.
+ranking explicit. llama-server drops ``strict`` (and ``output_config``) and turns the forced
+tool_choice into "required", so nothing here trusts the schema: lengths, intents, duplicates and
+repeats of options already shown are checked here, for each candidate on its own, for every
+backend. The page is the first ``menus.option_count`` usable candidates in rank order, so one bad
+candidate costs a spare (``menus.spare_options``), not the page. Duplicates and repeats are
+compared without case, punctuation or extra spaces ("Yes, please." repeats "yes please"). A label
+that is too long is shortened rather than rejected: it is only the short tag beside a square, and
+the utterance (what is spoken) is never changed.
 
-Each page gets at most three calls, all inside ``llm.timeout_s``: the first; a second, identical
-one (the hedge) if the first has not answered after ``llm.hedge_after_s``, since a call stuck on a
-congested network rarely recovers in time; and one retry after an answer with too few usable
-candidates (the problems named) or a transient error. The first usable answer wins and the other
-calls are cancelled. A permanent error (bad request, key, model) gives up at once.
+Within its turn a backend gets at most three calls: the first; a second, identical one (the hedge)
+if the first has not answered after its ``hedge_after_s``, since a call stuck on a congested
+network rarely recovers in time; and one retry after an answer with too few usable candidates (the
+problems named) or a transient error. The first usable answer wins and the other calls are
+cancelled. A permanent error (bad request, key, model) ends that backend's turn at once.
 
-The API key comes from the environment (``ANTHROPIC_API_KEY``, loaded from ``.env`` by the
-server's ``main``) and is never logged.
+Keys come from the environment (``ANTHROPIC_API_KEY``, ``BRAINSYNC_LLAMA_API_KEY``, loaded from the
+env file by the server's ``main``) and are never logged.
 
-``start()`` (server lifespan) opens the connection to the API at once and keeps it open with a
-cheap call (``models.retrieve``, no tokens) every ``llm.keepalive_s`` while idle, and right after a
-failed page (a call cut off by the time limit closes its connection). A page then skips DNS, TCP
+``start()`` (server lifespan) opens the connection to the Claude API at once and keeps it open with
+a cheap call (``models.retrieve``, no tokens) every ``keepalive_s`` while idle, and right after a
+failed turn (a call cut off by the time limit closes its connection). A page then skips DNS, TCP
 and TLS: three round trips, 1-2 s on a good network and 3-9 s on the congested venue Wi-Fi of
-2026-10-24, all of it inside ``llm.timeout_s``.
+2026-10-24, all of it inside the backend's ``timeout_s``.
 """
 
 from __future__ import annotations
@@ -39,12 +49,13 @@ import asyncio
 import contextlib
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 from pydantic import ValidationError
 
-from app.config import IntentsConfig, LLMConfig, MenusConfig, Profile
+from app.config import IntentsConfig, LLMBackend, LLMConfig, MenusConfig, Profile
 from app.context import Conversation, PageRequest
 from app.log import EventLog
 from app.schemas import Option, validate_option
@@ -54,21 +65,67 @@ MAX_TOKENS = 1024  # a few short options; a forced tool call skips thinking on C
 # HTTP statuses a retry cannot fix: bad request, key, permissions, model name.
 PERMANENT_STATUS = {400, 401, 403, 404}
 
-Done = Callable[[int, "list[Option] | None"], None]
+Done = Callable[..., None]  # done(request_id, options | None, backend=str, error=str)
 Create = Callable[..., Awaitable[Any]]
 Warm = Callable[[], Awaitable[Any]]
 
 
 class Call(NamedTuple):
-    """One Claude call of a page: ``first``, ``hedge`` or ``retry``, numbered in start order."""
+    """One call of a backend's turn: ``first``, ``hedge`` or ``retry``, numbered in start order."""
 
     name: str
     attempt: int
     started: float  # time.monotonic()
 
 
+class PageResult(NamedTuple):
+    options: list[Option] | None
+    backend: str  # the backend that wrote the page; "" when it fell back
+    error: str  # why each backend failed ("local: timeout; claude: APIConnectionError"), or ""
+
+
+@dataclass
+class Backend:
+    """One configured backend and its connection state."""
+
+    cfg: LLMBackend
+    create: Create | None = None
+    warm: Warm | None = None
+    why_disabled: str = ""
+    client: Any = None
+    warm_ok: bool | None = None  # the last keep-alive call answered; None before the first one
+    keeper: asyncio.Task[None] | None = None
+    rewarm: asyncio.Event = field(default_factory=asyncio.Event)  # set after a failed turn
+    busy: int = 0  # page calls in flight (a keep-alive call then would open a second connection)
+
+    @property
+    def name(self) -> str:
+        return self.cfg.name
+
+    @property
+    def enabled(self) -> bool:
+        return self.create is not None
+
+
+def unreachable(exc: BaseException) -> bool:
+    """A connection error (refused, DNS, the SDK's own time limit): the server is not there.
+    Checked by class name so the slow SDK need not be imported."""
+    names = {c.__name__ for c in type(exc).__mro__}
+    return isinstance(exc, OSError) or "APIConnectionError" in names
+
+
+def failure(exc: BaseException) -> str:
+    status = getattr(exc, "status_code", None)
+    return f"HTTP {status}" if status else type(exc).__name__
+
+
+def joined(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 class MenuMaker:
-    """Writes pages of reply options with Claude. Disabled (``enabled`` False) without a key."""
+    """Writes pages of reply options with the configured backends. Disabled (``enabled`` False)
+    when no backend has its key."""
 
     def __init__(
         self,
@@ -76,69 +133,126 @@ class MenuMaker:
         llm: LLMConfig,
         intents: IntentsConfig,
         profile: Profile,
-        api_key: str | None,
+        api_key: str | None = None,
         log: EventLog | None = None,
-        create: Create | None = None,
-        warm: Warm | None = None,
+        create: Create | Mapping[str, Create] | None = None,
+        warm: Warm | Mapping[str, Warm] | None = None,
+        *,
+        keys: Mapping[str, str] | None = None,
     ) -> None:
-        """``create`` replaces ``AsyncAnthropic().messages.create`` and ``warm`` the keep-alive
-        call (tests). Without ``warm`` nothing is kept open."""
+        """``keys`` maps each backend's ``api_key_env`` to its key (``main`` passes the
+        environment); ``api_key`` is Claude's key (``ANTHROPIC_API_KEY``) when ``keys`` lacks it.
+
+        ``create`` replaces ``AsyncAnthropic().messages.create`` and ``warm`` the keep-alive call
+        (tests): a mapping gives one per backend name, and a single callable stands in for the
+        backends of kind ``anthropic`` (Claude). A backend with a fake needs no key. Without
+        ``warm`` nothing is kept open."""
         self.menus = menus
         self.llm = llm
         self.intents = intents
         self.profile = profile
         self.log = log
-        self._create = create
-        self._warm = warm
-        self._client: Any = None
-        if create is None and api_key:
-            # Imported only here: the SDK has thousands of files, and from a venv on /mnt/c (WSL)
-            # importing it takes about 2 minutes, which tests and keyless runs should not pay.
-            import anthropic
-            import httpx2  # the SDK's HTTP library, installed with it
+        env = dict(keys or {})
+        if api_key:
+            env.setdefault("ANTHROPIC_API_KEY", api_key)
 
-            # httpx closes a connection after 5 s idle; keep it open between keep-alive calls.
-            keep = llm.keepalive_s
-            http = anthropic.DefaultAsyncHttpxClient(limits=httpx2.Limits(
-                max_connections=10, max_keepalive_connections=2,
-                keepalive_expiry=2 * keep if keep else 5.0))
-            # Our own retry and time limit apply, so the SDK's are turned off.
-            client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=llm.timeout_s,
-                                              http_client=http)
-            self._client = client
-            self._create = client.messages.create
-            # More time than a page gets: on a slow network the connection still opens, for the next.
-            warm_timeout = max(keep, llm.timeout_s)
-            self._warm = lambda: client.models.retrieve(llm.model, timeout=warm_timeout)
+        def pick(given: Any, b: LLMBackend) -> Any:
+            if isinstance(given, Mapping):
+                return given.get(b.name)
+            return given if b.kind == "anthropic" else None
+
+        self.backends: list[Backend] = []
+        for cfg in llm.backends:
+            b = Backend(cfg, create=pick(create, cfg), warm=pick(warm, cfg))
+            if b.create is None:
+                key = env.get(cfg.api_key_env)
+                if key:
+                    self._connect(b, key)
+                else:
+                    b.why_disabled = f"{cfg.api_key_env} is not set"
+            self.backends.append(b)
         self.system = system_prompt(profile, intents, menus)
         self.tool = reply_tool(intents, menus)
         self._tasks: set[asyncio.Task[None]] = set()
-        self._keeper: asyncio.Task[None] | None = None
-        self._rewarm = asyncio.Event()  # set after a failed page: open a new connection now
-        self._busy = 0  # page calls in flight (a keep-alive call then would open a second connection)
-        self._warm_ok: bool | None = None
+
+    @staticmethod
+    def _connect(b: Backend, key: str) -> None:
+        # Imported only here: the SDK has thousands of files, and from a venv on /mnt/c (WSL)
+        # importing it takes about 2 minutes, which tests and keyless runs should not pay.
+        import anthropic
+        import httpx2  # the SDK's HTTP library, installed with it
+
+        cfg = b.cfg
+        # httpx closes a connection after 5 s idle; keep it open between keep-alive calls.
+        keep = cfg.keepalive_s
+        http = anthropic.DefaultAsyncHttpxClient(limits=httpx2.Limits(
+            max_connections=10, max_keepalive_connections=2,
+            keepalive_expiry=2 * keep if keep else 5.0))
+        # Our own retry and time limit apply, so the SDK's are turned off. The SDK sends the key
+        # as "Authorization: Bearer", which llama-server's --api-key-file checks too.
+        extra = {"base_url": cfg.base_url} if cfg.base_url else {}
+        client = anthropic.AsyncAnthropic(api_key=key, max_retries=0, timeout=cfg.timeout_s,
+                                          http_client=http, **extra)
+        b.client = client
+        b.create = client.messages.create
+        if cfg.kind == "anthropic":
+            # More time than a page gets: on a slow network the connection still opens, for the next.
+            warm_timeout = max(keep, cfg.timeout_s)
+            b.warm = lambda: client.models.retrieve(cfg.model, timeout=warm_timeout)
+
+    # -- state ----------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:
         return not self.why_disabled
 
     @property
-    def warm_ok(self) -> bool | None:
-        """Whether the last keep-alive call answered; None before the first one (or keep-alive off)."""
-        return self._warm_ok
-
-    @property
-    def keepalive_running(self) -> bool:
-        return self._keeper is not None
+    def active(self) -> list[Backend]:
+        """The backends that write pages, in order (those with a key or a fake)."""
+        return [b for b in self.backends if b.enabled]
 
     @property
     def why_disabled(self) -> str:
-        """Empty when Claude writes the options; otherwise why only the fixed lists are used."""
+        """Empty when an LLM writes the options; otherwise why only the fixed lists are used."""
         if not self.menus.dynamic:
             return "menus.dynamic is false"
-        if self._create is None:
-            return "ANTHROPIC_API_KEY is not set"
+        if not self.active:
+            missing = [b.cfg.api_key_env for b in self.backends]
+            return f"{joined(missing)} {'is' if len(missing) == 1 else 'are'} not set"
         return ""
+
+    @property
+    def page_timeout_s(self) -> float:
+        """The longest a page can take: the active backends' turns one after the other."""
+        return sum(b.cfg.timeout_s for b in self.active) or self.llm.page_timeout_s
+
+    def _warmable(self) -> list[Backend]:
+        return [b for b in self.active if b.warm is not None and b.cfg.keepalive_s > 0]
+
+    @property
+    def warm_ok(self) -> bool | None:
+        """Whether the first kept-open backend's last keep-alive call answered; None before the
+        first one (or keep-alive off)."""
+        warm = self._warmable()
+        return warm[0].warm_ok if warm else None
+
+    @property
+    def busy(self) -> int:
+        """Backend turns in flight (0 once every page has finished)."""
+        return sum(b.busy for b in self.backends)
+
+    @property
+    def keepalive_running(self) -> bool:
+        return any(b.keeper is not None for b in self.backends)
+
+    def describe(self) -> list[dict[str, Any]]:
+        """Each backend for /api/health: names, flags and reasons only, never keys."""
+        return [{"name": b.name, "kind": b.cfg.kind, "model": b.cfg.model,
+                 "base_url": b.cfg.base_url, "timeout_s": b.cfg.timeout_s,
+                 "enabled": b.enabled, "why_disabled": b.why_disabled,
+                 "keepalive_s": b.cfg.keepalive_s if b.warm is not None else 0.0,
+                 "warm_ok": b.warm_ok, "keepalive_running": b.keeper is not None}
+                for b in self.backends]
 
     def set_profile(self, profile: Profile) -> None:
         """Use ``profile`` from the next page on (the profile page saved a new one)."""
@@ -147,8 +261,8 @@ class MenuMaker:
 
     async def preview(self, profile: Profile, partner_text: str, now_unix: float) -> list[Option] | None:
         """One page for ``partner_text`` written with ``profile`` (not saved), for the profile page."""
-        trial = MenuMaker(self.menus, self.llm, self.intents, profile, api_key=None, log=self.log,
-                          create=self._create)
+        trial = MenuMaker(self.menus, self.llm, self.intents, profile, log=self.log,
+                          create={b.name: b.create for b in self.active})
         conv = Conversation(history_turns=1)
         conv.partner_said(partner_text)
         return await trial.make_page(conv.page_request(0, "partner", now_unix))
@@ -162,71 +276,99 @@ class MenuMaker:
         task.add_done_callback(self._tasks.discard)
 
     async def start(self) -> None:
-        """Open the API connection now and keep it open (server lifespan; needs a running loop)."""
-        if self.enabled and self._warm is not None and self.llm.keepalive_s > 0 and not self._keeper:
-            self._keeper = asyncio.get_running_loop().create_task(self._keep_warm())
+        """Open the Claude connection now and keep it open (server lifespan; needs a running loop)."""
+        if not self.enabled:
+            return
+        for b in self._warmable():
+            if b.keeper is None:
+                b.keeper = asyncio.get_running_loop().create_task(self._keep_warm(b))
 
     async def stop(self) -> None:
-        tasks = list(self._tasks) + ([self._keeper] if self._keeper else [])
+        keepers = [b.keeper for b in self.backends if b.keeper is not None]
+        tasks = list(self._tasks) + keepers
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self._keeper = None
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
+        for b in self.backends:
+            b.keeper = None
+            if b.client is not None:
+                await b.client.close()
+                b.client = None
 
-    async def _keep_warm(self) -> None:
+    async def _keep_warm(self, b: Backend) -> None:
         while True:
             # Cleared before the call, so a page that fails during it still asks for a rewarm.
-            self._rewarm.clear()
-            if not self._busy:
-                await self.warm()
+            b.rewarm.clear()
+            if not b.busy:
+                await self.warm(b)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._rewarm.wait(), self.llm.keepalive_s)
+                await asyncio.wait_for(b.rewarm.wait(), b.cfg.keepalive_s)
 
-    async def warm(self) -> bool:
-        """One keep-alive call. Logs the first result and every change, not each call."""
+    async def warm(self, b: Backend | None = None) -> bool:
+        """One keep-alive call (the first kept-open backend by default). Logs the first result and
+        every change, not each call."""
+        if b is None:
+            warmable = self._warmable() or [x for x in self.active if x.warm is not None]
+            if not warmable:
+                return False
+            b = warmable[0]
         started = time.monotonic()
         fields: dict[str, object] = {}
         try:
-            await self._warm()
+            await b.warm()
         except Exception as exc:  # never fatal: the page calls report their own failures
             fields = {"reason": type(exc).__name__, "status": getattr(exc, "status_code", None)}
         ok = not fields
-        if ok != self._warm_ok:
-            self._log("llm_warm" if ok else "llm_warm_failed",
+        if ok != b.warm_ok:
+            self._log("llm_warm" if ok else "llm_warm_failed", backend=b.name,
                       ms=round((time.monotonic() - started) * 1000), **fields)
-        self._warm_ok = ok
+        b.warm_ok = ok
         return ok
 
     async def _run(self, req: PageRequest, done: Done) -> None:
-        done(req.request_id, await self.make_page(req))
+        result = await self.page(req)
+        done(req.request_id, result.options, backend=result.backend, error=result.error)
 
     async def make_page(self, req: PageRequest) -> list[Option] | None:
         """The ranked options for ``req``, or None (fall back to the fixed list)."""
-        self._busy += 1
-        try:
-            options = await self._make_page(req)
-        finally:
-            self._busy -= 1
-        if options is None:
-            self._rewarm.set()  # a call cut off by the time limit closed its connection
-        return options
+        return (await self.page(req)).options
 
-    async def _make_page(self, req: PageRequest) -> list[Option] | None:
-        """Up to three calls (first, hedge, retry) inside ``llm.timeout_s``; the first usable
-        answer wins. Calls still running when it returns are cancelled and awaited."""
+    async def page(self, req: PageRequest) -> PageResult:
+        """Each active backend in turn until one writes a usable page."""
         self._log("llm_request", request_id=req.request_id, reason=req.reason,
                   partner_last=req.partner_last)
-        loop = asyncio.get_running_loop()
         page_started = time.monotonic()
-        deadline = loop.time() + self.llm.timeout_s
-        hedge_s = self.llm.hedge_after_s
-        hedge_at = loop.time() + hedge_s if 0 < hedge_s < self.llm.timeout_s else None
+        failures: list[str] = []
+        active = self.active
+        for i, b in enumerate(active):
+            after = active[i + 1].name if i + 1 < len(active) else None
+            b.busy += 1
+            try:
+                options, why = await self._turn(b, req, page_started, after)
+            finally:
+                b.busy -= 1
+            if options is not None:
+                return PageResult(options, b.name, "")
+            b.rewarm.set()  # a call cut off by the time limit closed its connection
+            failures.append(f"{b.name}: {why}")
+        return PageResult(None, "", "; ".join(failures))
+
+    async def _turn(self, b: Backend, req: PageRequest, page_started: float,
+                    after: str | None) -> tuple[list[Option] | None, str]:
+        """Up to three calls (first, hedge, retry) inside ``b``'s ``timeout_s``; the first usable
+        answer wins. Returns the options or None and why. ``after``: the backend that comes next
+        (logged as ``next`` on the failure that ends this turn). Calls still running when it
+        returns are cancelled and awaited."""
+        loop = asyncio.get_running_loop()
+        cfg = b.cfg
+        deadline = loop.time() + cfg.timeout_s
+        hedge_s = cfg.hedge_after_s
+        hedge_at = loop.time() + hedge_s if 0 < hedge_s < cfg.timeout_s else None
         calls: dict[asyncio.Task[Any], Call] = {}  # the calls still running
         attempts = 0  # calls started (at most 3: first, hedge, retry)
         retried = False  # the one retry is used (after an invalid answer or a transient error)
+        why = "no answer"
+        handover = {"next": after} if after else {}
 
         def ms_since(started: float) -> int:
             return round((time.monotonic() - started) * 1000)
@@ -238,7 +380,7 @@ class MenuMaker:
             # Called inside the task, so an SDK that rejects the parameters (TypeError when the
             # call is made) fails that call like any other error.
             async def send() -> Any:
-                return await self._create(**self.params(req, feedback))
+                return await b.create(**self.params(req, feedback, cfg))
 
             task = loop.create_task(send())
             calls[task] = Call(name, attempts, time.monotonic())
@@ -257,13 +399,22 @@ class MenuMaker:
                         msg = task.result()
                     except Exception as exc:  # the SDK's APIStatusError carries .status_code
                         status = getattr(exc, "status_code", None)
-                        self._log("llm_failed", request_id=req.request_id, reason=type(exc).__name__,
-                                  status=status, attempt=call.attempt, call=call.name, ms=ms)
-                        # A TypeError is an SDK too old for these parameters: a retry cannot fix it.
-                        if status in PERMANENT_STATUS or isinstance(exc, TypeError):
-                            return None
+                        why = failure(exc)
+                        # A TypeError is an SDK too old for these parameters: a retry cannot fix
+                        # it. A refused connection with another backend waiting is not retried
+                        # (the server is not there): hand over, unless the hedge still runs.
+                        permanent = status in PERMANENT_STATUS or isinstance(exc, TypeError)
+                        absent = after is not None and unreachable(exc)
                         # Connection errors, 429, 5xx: retry if time allows.
-                        if not retried and loop.time() < deadline:
+                        retry = (not permanent and not absent and not retried
+                                 and loop.time() < deadline)
+                        ends = permanent or (not calls and not retry)
+                        self._log("llm_failed", request_id=req.request_id, backend=b.name,
+                                  reason=type(exc).__name__, status=status, attempt=call.attempt,
+                                  call=call.name, ms=ms, **(handover if ends else {}))
+                        if permanent:
+                            return None, why
+                        if retry:
                             retried = True
                             start("retry", [])
                         continue
@@ -272,50 +423,64 @@ class MenuMaker:
                     tokens = {"input_tokens": getattr(usage, "input_tokens", None),
                               "output_tokens": getattr(usage, "output_tokens", None)}
                     if options is not None:
-                        self._log("llm_ok", request_id=req.request_id, attempt=call.attempt,
-                                  call=call.name, ms=ms, page_ms=ms_since(page_started),
+                        self._log("llm_ok", request_id=req.request_id, backend=b.name,
+                                  attempt=call.attempt, call=call.name, ms=ms,
+                                  page_ms=ms_since(page_started),
                                   options=[o.utterance for o in options], dropped=problems,
                                   labels_shortened=shortened,
                                   cancelled=[c.name for c in calls.values()], **tokens)
-                        return options
-                    self._log("llm_invalid", request_id=req.request_id, attempt=call.attempt,
-                              call=call.name, ms=ms, problems=problems, **tokens)
-                    if not retried and loop.time() < deadline:
+                        return options, ""
+                    why = "invalid answer"
+                    retry = not retried and loop.time() < deadline
+                    self._log("llm_invalid", request_id=req.request_id, backend=b.name,
+                              attempt=call.attempt, call=call.name, ms=ms, problems=problems,
+                              **tokens, **(handover if not calls and not retry else {}))
+                    if retry:
                         retried = True
                         start("retry", problems)  # the problems named, so it can fix them
                 if hedge_at is not None and loop.time() >= hedge_at:
                     hedge_at = None
                     if first in calls:  # the first call has not answered: send the same one again
                         start("hedge", [])
-                        self._log("llm_hedge", request_id=req.request_id, attempt=attempts,
-                                  after_ms=ms_since(page_started))
+                        self._log("llm_hedge", request_id=req.request_id, backend=b.name,
+                                  attempt=attempts, after_ms=ms_since(page_started))
                 if calls and loop.time() >= deadline:
                     running = sorted(calls.values(), key=lambda c: c.attempt)
-                    self._log("llm_failed", request_id=req.request_id, reason="timeout",
-                              attempt=running[-1].attempt, calls=[c.name for c in running],
-                              ms=ms_since(page_started))
-                    return None
-            return None
+                    self._log("llm_failed", request_id=req.request_id, backend=b.name,
+                              reason="timeout", attempt=running[-1].attempt,
+                              calls=[c.name for c in running], ms=ms_since(page_started),
+                              **handover)
+                    return None, "timeout"
+            return None, why
         finally:
             for task in calls:
                 task.cancel()
             await asyncio.gather(*calls, return_exceptions=True)
 
-    def params(self, req: PageRequest, feedback: list[str] | None = None) -> dict[str, Any]:
-        """The Messages API request for one page; ``feedback`` names what a rejected answer broke."""
+    def params(self, req: PageRequest, feedback: list[str] | None = None,
+               backend: LLMBackend | None = None) -> dict[str, Any]:
+        """The Messages API request for one page (for ``backend``, the first active one by
+        default); ``feedback`` names what a rejected answer broke."""
+        if backend is None:
+            backend = self.active[0].cfg if self.active else self.llm.backends[-1]
         content = user_message(req, first_name(self.profile))
         if feedback:
             content += ("\n\nYour previous answer could not be used: " + "; ".join(feedback)
                         + f". Call {TOOL_NAME} again with every rule met.")
-        return {
-            "model": self.llm.model,
+        params: dict[str, Any] = {
+            "model": backend.model,
             "max_tokens": MAX_TOKENS,
             "system": self.system,
             "tools": [self.tool],
+            # llama-server turns this into tool_choice "required" (one tool, so the same call)
             "tool_choice": {"type": "tool", "name": TOOL_NAME},
-            "output_config": {"effort": "low"},
             "messages": [{"role": "user", "content": content}],
         }
+        if backend.kind == "anthropic":
+            params["output_config"] = {"effort": "low"}  # llama-server ignores it
+        if backend.extra_body:
+            params["extra_body"] = backend.extra_body  # the SDK merges it into the JSON body
+        return params
 
     # -- validation ---------------------------------------------------------
 

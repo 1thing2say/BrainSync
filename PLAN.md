@@ -393,10 +393,11 @@ BrainSync/
 | `menus.label_max_words` | 3 | |
 | `menus.utterance_max_words` | 14 | |
 | `menus.spare_options` | 1 | Extra lower-ranked candidates Claude writes; a bad or repeated option is dropped and the next one fills the page, so one slip no longer loses it |
-| `llm.model` | `claude-haiku-5-5` | |
-| `llm.timeout_s` | 4.0 | The whole budget per page: at most 3 calls (first, hedge, one retry), then fallback |
-| `llm.hedge_after_s` | 2.5 | No answer by then: the same call again, in parallel; the first usable answer wins. 0 = off; must be below `timeout_s` |
-| `llm.keepalive_s` | 20.0 | While idle, a free API call this often keeps the connection open; 0 = off |
+| `llm.backends` | `local`, then `claude` | Tried in order for each page, then the fixed lists. A backend whose key (`api_key_env`) is not set is off, so a laptop without llama-server runs Claude alone, as before. Each backend gets its own `timeout_s`, from the start of its turn; one that fails early (refused connection, bad key) hands over at once. A page takes at most the sum, and the orchestrator waits that long. The old single-Claude keys (`llm.model`, `llm.timeout_s`, ...) still load as one `claude` backend |
+| `llm.backends[local]` | `kind: llama`, `http://127.0.0.1:9931`, `qwen3.5-2b`, `BRAINSYNC_LLAMA_API_KEY`, 10 s | llama-server's `/v1/messages`. It drops `strict` and `output_config`, so the pydantic checks do the work. No hedge (one slot), no keep-alive. `extra_body: {chat_template_kwargs: {enable_thinking: false}}`. A refused connection hands over in milliseconds, without a retry. 10 s is an estimate for a 2B model on the Orin Nano, not measured |
+| `llm.backends[claude]` | `kind: anthropic`, `claude-haiku-5-5`, `ANTHROPIC_API_KEY`, 4 s | As before: at most 3 calls (first, hedge, one retry), effort `low`. A Claude model that rejects a forced `tool_choice` (Opus 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1) is a config error |
+| `llm.backends[].hedge_after_s` | 0 / 2.5 | No answer by then: the same call again, in parallel; the first usable answer wins. 0 = off; must be below that backend's `timeout_s` |
+| `llm.backends[].keepalive_s` | 0 / 20.0 | Claude only: while idle, a free API call this often keeps the connection open; 0 = off |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
 | `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
@@ -464,7 +465,8 @@ STIMULATING --partner_text--> stop trial (reason context_changed) --> MENU_CUE (
 any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)--> BASELINE
 ```
 
-- `MENU_CUE` waits for the next page up to `llm.timeout_s`, then uses a fallback page.
+- `MENU_CUE` waits for the next page up to the active backends' `timeout_s` added up (4 s with
+  Claude alone), then uses a fallback page.
 - `CONFIRMING` is its own trial (new `trial_id`) with only two active slots: "Say it" on s1
   (13 Hz) and "Back" on s4 (11 Hz), so the confirm step is a 2-class decision. A timeout counts as
   Back: nothing is ever spoken by default.

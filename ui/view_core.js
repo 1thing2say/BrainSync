@@ -74,10 +74,13 @@ const ViewCore = (() => {
       if (s.decoder_connected && !s.board_ok) warnings.push("Board?");
     }
     if (MIC_PROBLEMS.has(s.mic) && s.mic !== "hidden") problems.push(`Mic: ${MIC[s.mic][0].toLowerCase()}`);
-    // Before Claude's first page there is nothing to warn about; an older server sends no "llm".
+    // Before the LLM's first page there is nothing to warn about; an older server sends no "llm".
+    // llm_error names each backend that failed ("local: timeout; claude: APIConnectionError").
     const llm = s.llm || (s.llm_ok ? "ok" : "off");
-    if (llm === "off") warnings.push("Fixed replies only (no Claude)");
-    else if (llm === "failed") warnings.push("Claude's last page failed: fixed list shown");
+    if (llm === "off") warnings.push("Fixed replies only (no LLM)");
+    else if (llm === "failed") {
+      warnings.push(`Last reply page failed${s.llm_error ? ` (${s.llm_error})` : ""}: fixed list shown`);
+    }
     if (s.mic_muted) warnings.push("Mic muted");
     const flags = [];
     if (s.fake_decoder) flags.push("FAKE DECODER");

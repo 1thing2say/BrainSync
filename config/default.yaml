@@ -47,11 +47,31 @@ menus:
   utterance_max_words: 14
 
 llm:
-  model: claude-haiku-5-5
-  timeout_s: 4.0               # all calls of a page (first, hedge, retry) in this time, then fallback list
-  hedge_after_s: 2.5           # no answer by then -> a second, identical call; the first good answer
-                               # wins. Good pages took 1.9 s median, 3.4 s max (2026-10-24); 0 = off
-  keepalive_s: 20.0            # while idle, a free API call this often keeps the connection open; 0 = off
+  # Tried in order for each page; a backend whose key is not set is off. Each backend gets its own
+  # timeout_s (its first call, hedge and retry); one that fails early (refused connection, bad
+  # key) hands over at once, so a page takes at most the sum. After the last: the fixed lists.
+  backends:
+    - name: local                # llama-server on this computer (BrainSyncOS: brainsyncos-llama)
+      kind: llama
+      base_url: http://127.0.0.1:9931
+      model: qwen3.5-2b          # llama-server answers with the one model it loaded; logged only
+      api_key_env: BRAINSYNC_LLAMA_API_KEY   # not set (a laptop): this backend is off
+      timeout_s: 10.0            # a 2B model on an Orin Nano: about 2 s prompt + 150 tokens at
+                                 # 20-30 tok/s (estimated, not measured); measure in 3e
+      hedge_after_s: 0           # one slot (-np 1): a second call would only queue behind the first
+      keepalive_s: 0             # no connection setup to save on 127.0.0.1
+      extra_body:
+        chat_template_kwargs: {enable_thinking: false}   # Qwen3.5: no reasoning before the call
+    - name: claude
+      kind: anthropic
+      base_url: ""               # the Claude API
+      model: claude-haiku-5-5
+      api_key_env: ANTHROPIC_API_KEY
+      timeout_s: 4.0             # all calls of its turn (first, hedge, retry) in this time
+      hedge_after_s: 2.5         # no answer by then -> a second, identical call; the first good answer
+                                 # wins. Good pages took 1.9 s median, 3.4 s max (2026-10-24); 0 = off
+      keepalive_s: 20.0          # while idle, a free API call this often keeps the connection open; 0 = off
+      extra_body: {}
 
 context:
   history_turns: 8             # partner + user turns sent to the LLM

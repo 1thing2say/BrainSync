@@ -108,6 +108,7 @@ scripts/build.sh test phase3           # tests: phase1 phase2 phase3 vm
 
 The steps of `all` also run one at a time:
 - `packages` builds the edition's packages into `build/debs/EDITION/`.
+- `wheels` (not part of `all` yet) builds the Python wheels into `build/wheels/`. It is the same for both editions and skips a wheel that is up to date.
 - `repo` signs them into `build/repo/EDITION/`.
 - `iso` writes the installer ISO. Its options go to `build-iso.sh` / `build-vm-iso.sh`, e.g. `scripts/build.sh iso --name test`.
 
@@ -462,10 +463,14 @@ brainsyncos/
   docs/base-iso-inventory.md tracked copy of the inventory report (deterministic)
   packages/NAME/             one folder per BrainSyncOS package: package.env + build.sh
     brainsyncos-archive-keyring/   the repository's public key, for apt
+    brainsyncos-ch341-tegra/       ch341.c (Linux 6.8.12) built for NVIDIA's kernel (Jetson only)
+    brainsync-udev/                udev rules for the Cerelog X8's serial port (both editions)
     brainsync-runtime/       the apps' Python venv, /opt/brainsyncos/venv (scripts/venv.sh)
     brainsync/               the apps: their wheel in that venv, /usr/bin links, /etc/brainsync, /usr/share/brainsync
   python/                    the venv's inputs: brainsync.in, brainsync.lock.txt (hash-locked wheels),
                              psychopy-excludes.txt, pip.env (pinned pip), local-wheels.txt, check-lock.py
+  wheels/NAME/               one folder per Python wheel BrainSyncOS compiles: wheel.env + build.sh
+    brainflow-cerelog/       the BrainFlow Cerelog fork: pins, patches/, requires.txt
   payload/                   copied to /brainsyncos on the ISO
     hook.sh                  late-command: installs the payload, mounts the package
                              repository, runs install.d in-target
@@ -475,9 +480,11 @@ brainsyncos/
   scripts/
     lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO and package helpers
     venv.sh                  the BrainSync venv: wheelhouse, pinned pip, build at /opt/brainsyncos/venv
-    build.sh                 one entry point: doctor | key | packages | repo | iso | all | test | clean
+    build.sh                 one entry point: doctor | key | wheels | packages | repo | iso | all | test | clean
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
     make-repo-key.sh         the repository signing key (Ed25519, sign-only, expiring)
+    build-wheels.sh          wheels/*/build.sh -> build/wheels/ (+ manifest, SHA256SUMS, requirements.txt)
+    pack-wheel.py            a reproducible wheel from a staged tree
     build-packages.sh        packages/*/build.sh -> build/debs/EDITION/
     build-repo.sh            build/debs/EDITION -> signed apt repository build/repo/EDITION
     verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer (--edition vm)
@@ -497,14 +504,15 @@ brainsyncos/
     write-usb.sh             macOS: guarded dd of an ISO to an external disk
     make-password-hash.sh    console password hash for the brainsync account
   tests/
-    testlib.sh               PASS/FAIL check runner
+    testlib.sh               PASS/FAIL check runner; nvidia-l4t-kernel stub for hook targets
     test_phase1.sh           end-to-end Phase-1 test
     test_phase2.sh           end-to-end Phase-2 test (host side)
     phase2-checks.sh         its in-container checks
     test_vm.sh               end-to-end VM edition test (host side)
     vm-checks.sh             its in-container checks
-    test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository (host side)
-    phase3-checks.sh         its in-container checks: apt helper, BrainSync debs, md5 maps, hook + 60/70
+    test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository, wheel (host side)
+    phase3-checks.sh         its in-container checks: apt helper, BrainSync debs, md5 maps, hook + 60/70,
+                             board packages, 75-usb-serial.sh, the BrainFlow wheel
     runtime-checks.sh        the BrainSync packages installed and run (runtime test container)
     runtime/*.py             its Xvfb smoke scripts and the import-everything check
     boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
@@ -520,9 +528,10 @@ brainsyncos/
     stage-vm/                files build-vm-iso.sh maps over the Ubuntu ISO
     debs/{jetson,vm}/        built packages (scripts/build-packages.sh)
     wheelhouse/, pip/        the downloaded wheels and pip (scripts/venv.sh), for offline rebuilds
-    wheels/local/            locally built wheels named in python/local-wheels.txt
     repo/{jetson,vm}/        signed apt repositories (scripts/build-repo.sh), mapped onto the ISOs
-    downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg)
+    downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg);
+                             brainflow-cerelog.git (sparse partial clone of the fork)
+    wheels/                  built wheels, NAME.env manifests, SHA256SUMS, requirements.txt
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
     test-logs/{phase1,phase2,phase3,vm}/  one log per test check
     vm/                      utm-vm.sh serial console captures
@@ -669,21 +678,44 @@ packages.
 - **Re-locking**, after a dependency change in `pyproject.toml`: mirror the change in `python/brainsync.in`, then in `python/` run, with uv 0.13.5:
   `uv pip compile brainsync.in --excludes psychopy-excludes.txt --python-version 3.12 --python-platform aarch64-manylinux_2_39 --only-binary :all: --generate-hashes -o brainsync.lock.txt`.
   A PsychoPy update must pass the `runtime` check: a missing undeclared dependency can show up only as a vague error when a window opens.
-- **Locally built wheels**, such as the Cerelog BrainFlow fork (Phase 3c), go into the same venv:
-  - name the distribution in `python/local-wheels.txt`;
-  - put its wheel in `build/wheels/local/` before `scripts/build.sh packages`.
-  - The build fails when a listed wheel is missing and refuses unlisted ones. Their own dependencies must already be in the lock.
+- **Locally built wheels** go into the same venv: the Cerelog BrainFlow fork (Phase 3c) is the one listed today.
+  - `python/local-wheels.txt` names them; `scripts/build.sh wheels` leaves them in `build/wheels/` with `SHA256SUMS`, and `scripts/build.sh all` runs that step first (it is skipped while up to date).
+  - The venv build fails when a listed wheel is missing or does not match `SHA256SUMS`, and refuses unlisted ones. Their own dependencies must already be in the lock.
+  - The `runtime` check requires BrainFlow in the installed venv to report the Cerelog X8 at 250 Hz.
 
-**Verified by `tests/test_phase3.sh`** (12 checks):
+**Verified by `tests/test_phase3.sh`** (15 checks):
 - the container really runs at the configured CPU and memory caps;
 - the key, packages and repositories for both editions; every package, the venv included, is byte-identical between the two editions' separate builds;
-- `debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
+- `app-debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
 - `runtime`: both packages installed with `dpkg -i` in a stock Ubuntu 24.04 arm64 container with Xvfb (`docker/Dockerfile.runtime-test`, test only, no network): every module imports, PsychoPy and the apps' own renderers draw, the nine commands answer `--help`, `brainsync-voice` serves its page and `/api/health` with its log in the user's state folder, and nothing is written under `/opt` while they run;
 - in NVIDIA's real target layer, the hook mounts the repository, `60-apt-repo.sh` installs the keyring, `70-brainsync.sh` installs the apps and `brainsync-voice` runs there, the target's apt state is unchanged, and the mount is gone afterwards (also when a later step fails or the repository is missing);
 - the apt helper accepts a clock set to 2001;
-- the apt helper refuses: a tampered index, a tampered `.deb`, an unsigned repository, the wrong key, a missing repository.
+- the apt helper refuses: a tampered index, a tampered `.deb`, an unsigned repository, the wrong key, a missing repository;
+- the board packages: contents, the exact kernel Depends, and `ch341.ko` against the ISO's own kernel (vermagic, and every modversion CRC against the headers' `Module.symvers` and against the CRCs NVIDIA's 1352 modules import); the udev rules pass `udevadm verify`;
+- `75-usb-serial.sh` in NVIDIA's target layer with `nvidia-l4t-kernel` from the pool: modprobe resolves `ch341` to `updates/ch341.ko` after `usbserial.ko`, a re-run works, a purge takes it out of `modules.dep`, and the VM edition gets the rules only;
+- the BrainFlow wheel: manifest, contents, a `--require-hashes` install into a fresh venv that reports 250 Hz and EEG channels 1 to 8, and a tampered copy refused.
 
-`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all eight steps in each edition's target.
+**Not tested here:** anything on hardware. Nobody has loaded the module on an Orin, plugged in a board, or streamed from BrainFlow on Linux.
+
+`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all nine steps in each edition's target.
+
+**The EEG board (Phase 3c).** The Cerelog X8 is a USB serial device: V1 boards have a CH340 bridge (vendor `1a86`, driver `ch341`, `/dev/ttyUSB*`), V2 boards an ESP32-S3 (vendor `303a`, driver `cdc_acm`, `/dev/ttyACM*`).
+- `brainsyncos-ch341-tegra` (Jetson only) is the CH340 driver. NVIDIA's kernel leaves `CONFIG_USB_SERIAL_CH341` unset.
+  - `ch341.c` from Linux 6.8.12 is built against `nvidia-l4t-kernel-headers` from the base ISO's pool and installed as `/lib/modules/6.8.12-1021-tegra/updates/ch341.ko`.
+  - The build checks it against NVIDIA's `nvidia-l4t-kernel`: the same vermagic as `cp210x.ko`, and `usbserial.ko` present.
+  - Its postinst and postrm run `depmod`. It depends on exactly `nvidia-l4t-kernel (= 6.8.12-tegra-39.2.1-20260806224157)`, so a kernel update becomes an apt conflict instead of a missing driver.
+  - **The module is not signed.** It loads only while module signature enforcement is off, as on stock JetPack.
+- `brainsync-udev` (both editions) installs `/usr/lib/udev/rules.d/70-brainsync-cerelog.rules`. Tty devices of vendors `1a86` and `303a` get `GROUP=dialout`, `MODE=0660`, the symlink `/dev/cerelog`, and `ID_MM_DEVICE_IGNORE=1`, so ModemManager does not probe them (its DTR toggle resets an ESP32-S3). The postinst reloads udev only on a running system, not in the installer's chroot.
+- `75-usb-serial.sh` installs both on the Jetson. On the VM it installs only `brainsync-udev`: Ubuntu's kernel has `ch341` in `linux-modules-extra`.
+- **The BrainFlow fork is a wheel, not a package.** It goes into the BrainSync venv (`/opt/brainsyncos/venv`, `brainsync-runtime`), which cannot see system site-packages.
+  - `scripts/build.sh wheels` (`build-wheels.sh`) builds `wheels/brainflow-cerelog/` into `build/wheels/`.
+  - It fetches the fork at commit `932b3944` without credentials, as a sparse partial clone cached in `build/downloads/` (40 MB instead of 351 MB), and checks the tree hash.
+  - It applies `patches/0001-cerelog-connect_v1-raw-timeout.patch` (sha256-pinned), runs CMake with `BUILD_SYNCHRONI_SDK=OFF BUILD_BLE=OFF BUILD_BLUETOOTH=OFF BUILD_ONNX=OFF`, and builds only `BoardController DataHandler MLModule`.
+  - The wheel `brainflow-5.0.0+cerelog932b394.1-py3-none-linux_aarch64.whl` holds `brainflow/*.py` and the three stripped libraries, nothing else. The fork's own `lib/` folder also collects x86-64 and 32-bit ARM vendor blobs.
+  - `Requires-Dist: numpy, setuptools<81`: the fork imports `pkg_resources`.
+  - Before it lands in `build/wheels/`, the build installs it with pip into a fresh venv, where `BoardShim.get_sampling_rate(BoardIds.CERELOG_X8_BOARD)` must print 250.
+  - Output: the wheel; `brainflow-cerelog.env`, a KEY=value manifest (file, sha256, size, version, source commit and tree, patches, CMake flags, toolchain, inputs hash); `SHA256SUMS`; `requirements.txt` for `pip install --no-index --find-links build/wheels --require-hashes --no-deps -r build/wheels/requirements.txt`.
+  - A rebuild is skipped while the inputs hash (the recipe, `pack-wheel.py`, the builder's Dockerfile) and the wheel's sha256 still match; `--force` rebuilds. Under x86-64 emulation the compile takes about 47 minutes at 3 jobs.
 
 ## Appliance identity (Phase 2.5)
 
@@ -772,8 +804,8 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
     - Make the app installable outside the repo: configurable paths instead of the repo-root lookups, console commands, a speech fallback without macOS `say`.
     - Ship it as a self-contained Python venv (`brainsync-runtime`, built from a hash-locked set of wheels) plus the app package. PsychoPy goes in with a trimmed dependency set, because wxPython has no arm64 wheels.
     - Core apps: the SSVEP demo and tools, BrainSwipe, BrainChess and BCI Voice. Reels is left out, because it needs Chrome and Instagram.
-  - **3c, the board.**
-    - The Cerelog BrainFlow fork, built for arm64 at a pinned commit plus its one local patch.
+  - **3c, the board: built, not yet tried on hardware** (see [The package repository](#the-package-repository-phase-3)).
+    - The Cerelog BrainFlow fork, built for arm64 at a pinned commit plus its one local patch, as a wheel for the BrainSync venv.
     - udev rules for the board.
     - The **CH340 driver**. NVIDIA's kernel lacks it: `CONFIG_USB_SERIAL_CH341` is not set, while `USB_ACM`, `CP210X` and `FTDI_SIO` are modules. It ships as `brainsyncos-ch341-tegra`, built for the exact L4T kernel; the VM's Ubuntu kernel already has it.
   - **3d, local LLMs.**
@@ -785,7 +817,7 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
 - **Phase 4: appliance runtime.**
   - Kiosk session: gdm autologin on X11 (the AI file disables Wayland), with systemd units starting BrainSync.
   - Disable suspend (errata 6235055).
-  - Set nvpmodel, add udev rules for the Cerelog board, and validate vsync/frame timing for the PsychoPy flicker on real hardware.
+  - Set nvpmodel and validate vsync/frame timing for the PsychoPy flicker on real hardware.
 - **Phase 5: firmware and provisioning.**
   - The ISO prompts for a QSPI capsule update ("press Y within 30 s"), so a fully unattended install needs firmware at 39.2.x first.
   - Document the macOS path: balenaEtcher plus the serial console, with the Orin Nano JP5→JP6 SD-card bridge where needed.

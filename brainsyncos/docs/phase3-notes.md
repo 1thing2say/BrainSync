@@ -53,7 +53,7 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
    - Trimmed (`tests` folders, `psychopy/demos`; `numpy/testing` kept) and compiled to unchecked-hash `.pyc`. 79 MB as an xz deb, 434 MB installed.
    - Depends: `python3.12 (>= 3.12.3, << 3.13)`, `libc6`, `libgcc-s1`, `libstdc++6`, `zlib1g`. The GL and X libraries are Recommends: NVIDIA's package list has them all; the VM target and NVIDIA's minimal layer do not.
    - Wheels are cached in `build/wheelhouse/`; rebuilds are offline.
-   - **For 3c:** put the BrainFlow fork's wheel in `build/wheels/local/` and its name (`brainflow`) in `python/local-wheels.txt`. The build fails if a listed wheel is missing.
+   - The BrainFlow fork's wheel from 3c (`build/wheels/`, checked against its `SHA256SUMS`) goes into the venv: `python/local-wheels.txt` lists `brainflow`. The build fails if a listed wheel is missing; `scripts/build.sh all` builds the wheels first (skipped while up to date).
 3. **Package the app itself as `brainsync`**. **Done.** The app wheel in the same venv (installed only long enough to take its files), `/usr/bin` links to the 9 console scripts, the 3 YAMLs as conffiles in `/etc/brainsync`, `ui/` and `clients/` (without tests) under `/usr/share/brainsync`. 1.1 MB. Depends on exactly its `brainsync-runtime` version. `scripts/builder.sh` now mounts the BrainSync repository read-only at `/src` for it.
 4. **Secrets** (`ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`) are never put into a build; the `brainsync` build refuses any `.env` file. They go on the device in `/etc/brainsync/secrets.env`. Nothing creates that file yet, or its owner and mode.
 5. **Install step:** `70-brainsync.sh`, on both editions. **Done.** It installs both packages from the ISO's repository, checks that the venv imports the apps and that `brainsync-voice --help` runs, and names missing display libraries.
@@ -71,22 +71,40 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
 - No systemd units, kiosk or display stack: the apps are installed, nothing starts them.
 - The speech fallback (`espeak-ng`) is still open.
 
-### 3c: the board
+### 3c: the board. **Done 2026-10-24** (branch `bsos/3c-board`)
 
-1. **The BrainFlow fork.**
-   - Source: `https://github.com/shakimiansky/Shared_brainflow-cerelog`, commit `932b3944bfe6c0f4e29a46b4a34afdeba39edd85` (public, fetchable without credentials).
-   - Apply `phase3-research/brainflow/0001-cerelog-connect_v1-raw-timeout.patch`. **It exists nowhere else**: it was an uncommitted change on the Mac.
-   - Build with CMake: `BUILD_SYNCHRONI_SDK=OFF BUILD_BLE=OFF BUILD_BLUETOOTH=OFF BUILD_ONNX=OFF`, then `make BoardController DataHandler MLModule`.
-   - Install it into the venv (not as a system deb, which the venv could not see). Check: `BoardShim.get_sampling_rate(BoardIds.CERELOG_X8_BOARD)` prints 250.
-2. **`brainsyncos-ch341-tegra`.**
-   - Build `phase3-research/ch341/ch341.c` (GPL-2.0, from Linux 6.8) against `nvidia-l4t-kernel-headers` from the ISO pool; the build takes about 11 s.
-   - Install it to `/lib/modules/6.8.12-1021-tegra/updates/` and run `depmod` in its postinst.
-   - Depend on `nvidia-l4t-kernel (= 6.8.12-tegra-39.2.1-20260806224157)`.
-   - The module is unsigned. It loads only while Secure Boot and module signature enforcement are off.
-3. **`brainsync-udev`.**
-   - Match `idVendor` `1a86` (V1, CH340) and `303a` (V2, ESP32-S3).
-   - Set `GROUP=dialout` and `MODE=0660`, add `SYMLINK+=cerelog`, and set `ID_MM_DEVICE_IGNORE=1` so ModemManager leaves the port alone.
-4. **Install step:** `75-usb-serial.sh`. The module part is Jetson only; the step skips it cleanly on the VM.
+The pins below are the ones the research found; the README section "The package repository (Phase 3)" describes the result.
+
+1. **The BrainFlow fork as a wheel**, `scripts/build.sh wheels` (`scripts/build-wheels.sh`, recipe in `wheels/brainflow-cerelog/`).
+   - Source: `https://github.com/shakimiansky/Shared_brainflow-cerelog`, commit `932b3944bfe6c0f4e29a46b4a34afdeba39edd85`, tree `f31dd196…` (checked). Fetched without credentials as a sparse partial clone, cached in `build/downloads/brainflow-cerelog.git` (40 MB checked out); a rebuild works offline.
+   - The patch moved to `wheels/brainflow-cerelog/patches/0001-cerelog-connect_v1-raw-timeout.patch`, pinned by sha256 (`eace7b03…`, the same file as before). It is still the only copy outside the Mac.
+   - CMake as in the research: `BUILD_SYNCHRONI_SDK=OFF BUILD_BLE=OFF BUILD_BLUETOOTH=OFF BUILD_ONNX=OFF BUILD_TESTS=OFF`, `BRAINFLOW_VERSION=5.0.0`, targets `BoardController DataHandler MLModule`. The fork has no release version; 5.0.0 is the research's label.
+   - The wheel is `brainflow-5.0.0+cerelog932b394.1-py3-none-linux_aarch64.whl`: `brainflow/*.py` plus the three stripped libraries, `Requires-Dist: numpy, setuptools<81`. `scripts/pack-wheel.py` writes it reproducibly (sorted entries, the fork commit's time).
+   - The build checks the libraries (aarch64, only the C/C++ runtime needed), then installs the wheel with pip into a fresh venv and requires `get_sampling_rate(CERELOG_X8_BOARD)` = 250 before anything lands in `build/wheels/`.
+   - **For 3b (`brainsync-runtime`):** take the wheel from `build/wheels/`. `brainflow-cerelog.env` is the manifest, plain KEY=value for `load_env_file`: `WHEEL_FILE`, `WHEEL_SHA256`, `WHEEL_SIZE`, `WHEEL_DIST`, `WHEEL_VERSION`, `WHEEL_TAG`, `INPUTS_SHA256`, `BUILD_REV`, `SOURCE_*`, `PATCHES`, `CMAKE_*`, `TOOLCHAIN`, `VERIFIED_SAMPLING_RATE`. Install it with `pip install --no-index --find-links build/wheels --require-hashes --no-deps -r build/wheels/requirements.txt`. The venv's lock already has `numpy` and `setuptools==80.10.2`. Never let upstream `brainflow` into the venv: same import name, board ID 65 means another board there.
+   - `wheels` is not part of `scripts/build.sh all` yet, since nothing on the ISO uses it. When `brainsync-runtime` exists, `all` (or that package's build) should run it first.
+   - The builder image now has `git`, `cmake`, `g++`, `make`, `patch`, `kmod`, `udev`, `python3-venv`, `python3-numpy` and `python3-setuptools`.
+2. **`brainsyncos-ch341-tegra`** (Jetson only; `packages/brainsyncos-ch341-tegra/`, with `ch341.c` and `Kbuild` moved there).
+   - Built against `nvidia-l4t-kernel-headers` from the base ISO's pool. The build checks: the headers are for `6.8.12-1021-tegra`, `CONFIG_USB_SERIAL_CH341` is unset and `CONFIG_USB_SERIAL=m`, NVIDIA's `nvidia-l4t-kernel` has `usbserial.ko` and no ch341, and the vermagic equals NVIDIA's `cp210x.ko`. The `.ko` is stripped of debug info (18 KB).
+   - Installs `/lib/modules/6.8.12-1021-tegra/updates/ch341.ko`; postinst and postrm run `depmod -a 6.8.12-1021-tegra`. `Depends: nvidia-l4t-kernel (= 6.8.12-tegra-39.2.1-20260806224157), kmod`. The source ships in `/usr/share/doc/brainsyncos-ch341-tegra/` (GPL-2.0).
+   - NVIDIA's autoinstall installs `nvidia-l4t-kernel` in late-command Step 5 (`ai/altkernel-pkgs`), before our hook, so the exact Depends is met offline.
+   - **Unsigned.** It loads only while module signature enforcement is off, as on stock JetPack.
+3. **`brainsync-udev`** (both editions): `/usr/lib/udev/rules.d/70-brainsync-cerelog.rules`, tty devices of vendors `1a86` and `303a` get `GROUP=dialout`, `MODE=0660`, `SYMLINK+=cerelog` and `ENV{ID_MM_DEVICE_IGNORE}=1`. The postinst reloads udev and replays tty events only outside a chroot and with udevd running. `brainsync/board.py` still finds the board by `/dev/ttyUSB*` and `/dev/ttyACM*`; `/dev/cerelog` is for people, so the app is unchanged.
+4. **Install step `75-usb-serial.sh`:** both packages on a Jetson edition, `brainsync-udev` only on `vm-*`. It then checks that `modprobe -S 6.8.12-1021-tegra --show-depends ch341` resolves to `updates/ch341.ko` after `usbserial.ko`.
+
+**Verified** (x86-64 WSL2, arm64 builder under qemu): see "Test status of 3c" below.
+- The wheel build: the source fetch, the patch, CMake and the three libraries, the venv check (250 Hz, versions 5.0.0). The compile took 47 minutes at 3 jobs under emulation (`BSOS_BUILD_CPUS=3 BSOS_BUILD_JOBS=3`), with no compiler warnings. The stripped libraries have exactly the sizes of the research build on the M4: 1,972,472, 790,320 and 265,624 bytes. The wheel is 1,196,414 bytes, sha256 `6ed6d54c…`.
+- `ch341.ko` against the ISO's own kernel: same vermagic as `cp210x.ko`; all its modversion CRCs match the headers' `Module.symvers`, and match the CRCs NVIDIA's 1352 shipped modules import for the same symbols, so the headers fit the kernel that ships. `depmod` with NVIDIA's modules resolves it to `usbserial.ko`.
+- The install in NVIDIA's real target layer with `nvidia-l4t-kernel` from the pool (without its maintainer scripts): packages installed, modules.dep and modules.alias updated, re-run works, purge removes it from modules.dep.
+
+**Not verified** (no hardware here): the module loading on an Orin; a CH340 or ESP32-S3 board appearing as `/dev/cerelog`; BrainFlow streaming from it; ModemManager really leaving the port alone; the udev postinst on a running system. Note: noble's `depmod -E` misreads Ubuntu's variable-length `__versions` records and warns about every module, NVIDIA's included; the CRCs were compared with a small parser instead.
+
+**Open decisions:**
+- Do you have V1 (CH340) boards, V2 (ESP32-S3), or both? With V2 only, `brainsyncos-ch341-tegra` could go.
+- Secure Boot on the Jetson would need a module signing key and MOK enrollment for `ch341.ko`.
+- Whether to hold `nvidia-l4t-kernel` on the device: a kernel update from NVIDIA's online repository now stops at the exact Depends instead of silently dropping V1 support.
+- Push the patch upstream to `shakimiansky/Shared_brainflow-cerelog`, or mirror the fork: a force-push there breaks fresh builds without the cache.
+- When `wheels` joins `all` (see 1.).
 
 ### 3d: CUDA and llama.cpp
 
@@ -104,9 +122,14 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
    - Sandboxing and low priority (`Nice=10`, `CPUWeight=50`); memory limits measured on the device.
    - Do not enable `--tools`, `--mcp-*` or router mode.
 4. **The model** ships as its own package, pinned by Hugging Face revision and sha256.
-5. **BCI Voice**: `llm.backends` in `config/default.yaml`, tried in order: local, then Claude, then the fixed lists.
-   - The 4 s timeout will need raising for local inference.
-   - llama-server ignores `strict`, so keep the pydantic validation.
+5. **BCI Voice** (done 2026-10-24, branch `bsos/3d-llm-backends`): `llm.backends` in `config/default.yaml`, tried in order: local, then Claude, then the fixed lists.
+   - `local`: `kind: llama`, `http://127.0.0.1:9931`, key from `BRAINSYNC_LLAMA_API_KEY`, 10 s, `chat_template_kwargs: {enable_thinking: false}`. Without that key the backend is off, so a laptop runs Claude alone as before.
+   - Each backend has its own timeout. A refused connection or a bad key hands over at once; a page takes at most the sum (14 s).
+   - The pydantic checks run for every backend, since llama-server ignores `strict`.
+   - A Claude model that rejects a forced `tool_choice` is a config error.
+   - Status, logs and preflight name the backend; preflight checks `/health` and `/v1/models` on the local server.
+   - Verified with fakes only: a stand-in HTTP server that answers `/v1/messages` the way llama-server does, driven through the real SDK, and a closed port. No real llama-server or model was run.
+   - Still to do: the install step (`85-llama.sh`) must also write the key in llama-server's `--api-key-file` to `/etc/brainsync/secrets.env` as `BRAINSYNC_LLAMA_API_KEY`, and the 10 s needs measuring on the Orin (3e).
 6. **Install steps:** `80-cuda.sh` (Jetson only) and `85-llama.sh`.
 
 ### 3e: integration
@@ -176,6 +199,13 @@ Use one repository signing key for every ISO you build. If you build on both
 machines, copy `config/repo-signing-key.asc` securely instead of making a
 second key: a device only trusts the key its ISO came with.
 
+## Test status of 3c (2026-10-25, x86-64 WSL2, arm64 builder under qemu, 2-CPU cap)
+
+- `tests/test_phase3.sh`: **all 13 checks passed**, including the new `board-debs`, `usb-serial` and `wheel`.
+- `tests/test_phase2.sh`: **all 16 checks passed**, with the 8-step hook (now including `75-usb-serial.sh` and `nvidia-l4t-kernel` from the pool) in NVIDIA's target layer. `boot-compare` needs `build/meta` from `scripts/extract-iso.sh` first; on a fresh checkout it fails until then.
+- `tests/test_vm.sh`: **not completed on this host.** It stops before the VM ISO build: `verify-base` needs `xorriso` or `bsdtar` on the host (WSL has neither), and `utm-stubbed` needs macOS property lists. So the VM hook check with `75-usb-serial.sh` (expecting 8 steps and the udev rules only) has not run. The VM path of the step itself is covered by `usb-serial` in `test_phase3.sh`. Run `test_vm.sh` on the Mac.
+- shellcheck v0.10.0 (`-x -S warning`) is clean over all scripts.
+
 ## Test status (2026-10-24, on the Mac, 2-CPU cap)
 
 - `tests/test_phase3.sh`: **all 10 checks passed**: configs, builder caps, `build.sh`, key, packages, repo, apt helper, md5 maps, install hook, shellcheck.
@@ -188,7 +218,7 @@ second key: a device only trusts the key its ISO came with.
 
 ## Open items
 
-- **Confirm on the new machine:** run `tests/test_phase3.sh` once under x86-64 emulation.
+- **Confirmed on x86-64 (2026-10-24):** `tests/test_phase3.sh` passes all 10 checks on a WSL2 laptop with Docker Desktop, under arm64 emulation, from a clone under `~`. It needed two fixes: `builder.sh` hands root-owned output back to the user, and the key-mode check reads GNU `stat` first. From `/mnt/c` the key check fails by design (Windows drives ignore `chmod`).
 - **Review of 3a not finished.** A three-lens review (correctness, key handling and apt trust, install-time robustness on the real installers) was running when this was pushed; its results are not in this commit.
 - **Not exercised yet:** a real UTM install of a 3a ISO, i.e. the repository bind mount under real subiquity/curtin. The tests use a chroot shim for curtin.
 - **Clock risk:** the apt helper accepts a clock in the past (tested at 2001), and a clock past the key's expiry fails. That is correct, but a Jetson whose RTC jumps far ahead would fail the install.

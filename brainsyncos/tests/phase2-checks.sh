@@ -22,12 +22,14 @@
 #   hook         hook.sh from the built ISO against NVIDIA's real target base
 #                layer (ubuntu-server-minimal.squashfs) in the state NVIDIA's
 #                late-commands leave it (vendor groups, OOBE default target,
-#                openssh-server from the pool), curtin via chroot shim, a fake
-#                Orin Nano device tree: release, issue, hostname, account
-#                (SSH key only, passwordless sudo), sshd config, OOBE skipped,
-#                NVIDIA's default users removed, package repository keyring,
-#                brainsync-runtime and brainsync installed (brainsync-voice runs)
-#                and the repository unmounted again; re-run is idempotent
+#                openssh-server and nvidia-l4t-kernel from the pool), curtin
+#                via chroot shim, a fake Orin Nano device tree: release, issue,
+#                hostname, account (SSH key only, passwordless sudo), sshd
+#                config, OOBE skipped, NVIDIA's default users removed, package
+#                repository keyring installed, the board's udev rules and
+#                ch341 module installed (modules.dep), brainsync-runtime and
+#                brainsync installed (brainsync-voice runs), and the repository
+#                unmounted again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -50,6 +52,8 @@ LAYER="casper/$AUTOINSTALL_LAYER"
 W=/scratch/p2
 force_rm_tree "$W"
 mkdir -p "$W"
+# shellcheck source=tests/testlib.sh
+source "$BRAINSYNCOS_ROOT/tests/testlib.sh"
 
 iso_get() {  # iso_get ISO ISO_PATH DEST
     mkdir -p "$(dirname "$3")"
@@ -232,7 +236,8 @@ c_layer() {
 # setup_target: NVIDIA's target base layer unpacked at $W/target, brought to
 # the state NVIDIA's late-commands leave it in before our hook runs (vendor
 # groups, OOBE as default target, openssh-server from the ISO pool with host
-# keys, NVIDIA's nvpmodel link), plus a fake Orin Nano device tree at $W/dt and
+# keys, NVIDIA's nvpmodel link, nvidia-l4t-kernel from the pool without its
+# maintainer scripts), plus a fake Orin Nano device tree at $W/dt and
 # the payload from the built ISO at $W/iso/brainsyncos (read-only, as on /cdrom).
 setup_target() {
     need_out
@@ -261,6 +266,7 @@ setup_target() {
     ln -sf /lib/systemd/system/nv-oobe.service "$t/etc/systemd/system/nv-oobe.target.wants/nv-oobe.service"
     ln -sf /etc/systemd/system/nvpmodel.service "$t/etc/systemd/system/multi-user.target.wants/nvpmodel.service"
     touch "$t/etc/nv/nvautoconfig"
+    l4t_kernel_stub "$BASE" "$t" "$TEGRA_KERNEL"
     mkdir -p "$W/dt"
     printf 'NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\0' > "$W/dt/model"
     printf '1421224ABC123456\0' > "$W/dt/serial-number"
@@ -354,6 +360,19 @@ check_keyring() {
     echo "packages: brainsyncos-archive-keyring, brainsync-runtime and brainsync installed from the ISO's repository; repository unmounted"
 }
 
+# check_usb_serial TARGET: 75-usb-serial.sh installed the udev rules and the
+# ch341 module, and depmod indexed it for NVIDIA's kernel.
+check_usb_serial() {
+    local t="$1" kver
+    kver="$(sed -n 's/^KERNEL_RELEASE=//p' "$BRAINSYNCOS_ROOT/packages/brainsyncos-ch341-tegra/package.env")"
+    grep -q "75-usb-serial.sh: ch341 for $kver: .*/updates/ch341.ko" "$t/var/log/brainsyncos/install.log" \
+        || die "75-usb-serial.sh did not resolve ch341"
+    grep -qx 'updates/ch341.ko: kernel/drivers/usb/serial/usbserial.ko' "$t/lib/modules/$kver/modules.dep" \
+        || die "ch341 is not in modules.dep"
+    [ -s "$t/usr/lib/udev/rules.d/70-brainsync-cerelog.rules" ] || die "the board's udev rules are missing"
+    echo "board: brainsync-udev and brainsyncos-ch341-tegra installed, ch341 in modules.dep for $kver"
+}
+
 c_hook() {
     setup_target
     local t="$W/target" rel
@@ -371,8 +390,9 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (8 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (9 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
     check_keyring "$t"
+    check_usb_serial "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.

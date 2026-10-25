@@ -49,3 +49,25 @@ finish() {
     fi
     echo "$1: all $npass checks PASSED"
 }
+
+# l4t_kernel_stub ISO TARGET VERSION (builder only): dpkg-install
+# nvidia-l4t-kernel VERSION from ISO's pool into TARGET, without its
+# maintainer scripts, triggers and /boot. NVIDIA's late-commands install the
+# real one before the BrainSyncOS hook runs; brainsyncos-ch341-tegra depends
+# on exactly that version and is checked against its /lib/modules tree.
+l4t_kernel_stub() {
+    local iso="$1" t="$2" ver="$3" w f
+    w="$(scratch_dir l4t-kernel)"
+    xorriso -osirrox on -indev "$iso" -extract "/pool/main/n/nvidia-l4t-kernel/nvidia-l4t-kernel_${ver}_arm64.deb" "$w/k.deb" \
+        > /dev/null 2>&1 || die "cannot read nvidia-l4t-kernel $ver from $iso"
+    dpkg-deb -R "$w/k.deb" "$w/k"
+    for f in preinst postinst prerm postrm triggers; do rm -f "$w/k/DEBIAN/$f"; done
+    force_rm_tree "$w/k/boot"
+    sed -i '/  boot\//d' "$w/k/DEBIAN/md5sums"
+    dpkg-deb --root-owner-group -Znone -b "$w/k" "$t/tmp/nvidia-l4t-kernel-stub.deb" > /dev/null
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg -i /tmp/nvidia-l4t-kernel-stub.deb > /dev/null \
+        || die "dpkg -i of the nvidia-l4t-kernel stub failed in $t"
+    rm_released "$t/tmp/nvidia-l4t-kernel-stub.deb"
+    force_rm_tree "$w"
+    echo "target: nvidia-l4t-kernel $ver from the pool (no maintainer scripts, no /boot)"
+}
