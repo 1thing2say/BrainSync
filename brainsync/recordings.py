@@ -20,6 +20,11 @@ from .signal import preprocess
 
 MONTAGE = ("Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2")
 POSTERIOR = ("P7", "P8", "O1", "O2")
+# The C3/C4 pins never reach the scalp on the dry headset; with their leads moved to gel
+# pads at the left and right outer canthus (LO, RO) they record the horizontal EOG, and
+# Fp1/Fp2 against the mastoid reference give the vertical one (brainsync.eog).
+EOG = ("LO", "RO")
+EOG_MONTAGE = ("Fp1", "Fp2", "LO", "RO", "P7", "P8", "O1", "O2")
 KINDS = ("trials", "cued")
 
 Marker = tuple[float, str, int]

@@ -61,6 +61,11 @@ def test_sites_match_the_10_20_geometry() -> None:
         assert layout.SITES[name] == pytest.approx((x, y), abs=1e-9)
     for x, y in layout.SITES.values():
         assert math.hypot(x, y) < 1.0
+    # The EOG pads at the outer canthi (brainsync.eog): forward of the ears, mirrored,
+    # just inside the head circle.
+    (lx, ly), (rx, ry) = layout.SITES["LO"], layout.SITES["RO"]
+    assert lx < layout.SITES["Fp1"][0] < 0 < rx and lx == -rx and ly == ry > 0
+    assert math.hypot(rx, ry) == pytest.approx(0.95, abs=1e-3)   # coordinates are rounded
 
 
 def test_positions_follow_the_given_order_and_reject_unknown_sites() -> None:
@@ -78,6 +83,7 @@ def test_regions_cover_the_montage() -> None:
     assert layout.REGIONS["Fp1"] == "prefrontal"
     assert layout.REGIONS["C3"] == "sensorimotor"
     assert layout.REGIONS["P8"] == "temporal-parietal"
+    assert layout.REGIONS["LO"] == layout.REGIONS["RO"] == "eye (EOG)"
     assert layout.regions(MONTAGE) == {n: layout.REGIONS[n] for n in MONTAGE}
     with pytest.raises(ValueError):
         layout.regions(["T3"])

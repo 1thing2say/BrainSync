@@ -77,6 +77,10 @@ class ServerConfig(Strict):
 
 class DisplayConfig(Strict):
     expected_refresh_hz: float = Field(gt=0)
+    # Who draws the flicker the user looks at: "browser" (the session page, ui/flicker_core.js;
+    # the bridge runs without its PsychoPy window) or "psychopy" (the bridge's display window;
+    # the page is then a still mirror).
+    flicker: Literal["browser", "psychopy"] = "browser"
 
 
 class ConfirmSlots(Strict):
@@ -104,6 +108,10 @@ class StimConfig(Strict):
     waveform: Waveform = "sine"  # freq only
     code: CodeConfig | None = None  # code only
     cue_s: float = Field(ge=0)
+    # Reading time before a page's trial: cue_s plus this per word on a new page, up to cue_max_s.
+    read_s_per_word: float = Field(default=0.2, ge=0)
+    cue_max_s: float = Field(default=6.0, ge=0)
+    confirm_cue_s: float = Field(default=1.5, ge=0)  # the confirm screen: its sentence was just picked
     max_trial_s: float = Field(gt=0)
     rest_s: float = Field(ge=0)
 

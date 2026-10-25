@@ -11,6 +11,9 @@ server:
 
 display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
+  flicker: psychopy            # psychopy: the bridge's PsychoPy window flickers the code and stamps each
+                               # cycle's flip (c-VEP needs those times), the page is a still mirror;
+                               # browser: the session page flickers (config/fvep_page.yaml uses it)
 
 stim:
   paradigm: code               # c-VEP (docs/CVEP-STANDARD.md); f-VEP fallbacks: config/fvep_*.yaml
@@ -33,7 +36,10 @@ stim:
     length: 63                 # bits in one m-sequence period
     cycle_frames: 63           # one bit per frame: 1.05 s per cycle at 60 Hz
     train_cycles: 30           # recorded on s1 at the start of a session (about 32 s)
-  cue_s: 1.0                   # option shown, no flicker, before each trial
+  cue_s: 2.0                   # still screen before each trial (a page already read gets only this)
+  read_s_per_word: 0.2         # a new page: + this per word on it, so the user can read every option
+  cue_max_s: 6.0               #   before anything flickers, up to this many seconds in all
+  confirm_cue_s: 1.5           # still screen before the Say it / Back trial
   max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (c-VEP commits after about 2.6 s)
   rest_s: 1.0                  # still screen after a trial
 

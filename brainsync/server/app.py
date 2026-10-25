@@ -64,6 +64,8 @@ from pathlib import Path
 from typing import Any
 
 from ..envfile import load_env_file
+from ..eog import GazeDecoder
+from ..recordings import EOG_MONTAGE
 from ..vep.live import TRAIN_CYCLES
 from . import protocol as P
 from .decoding import DecoderBank
@@ -377,13 +379,14 @@ def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
     standard's fake board (vep.live.standard_fake_board) in code mode."""
     from ..board import CerelogBoard, FakeBoard
 
+    names = EOG_MONTAGE if getattr(args, "eog", False) else None
     if args.board == "fake":
         if getattr(args, "paradigm", "freq") == "code":
             from ..vep.live import standard_fake_board
             return standard_fake_board(fixated=-1, clock=time.time,
                                        refresh=args.refresh_rates[0])
-        return FakeBoard(freqs, clock=time.time)
-    return CerelogBoard(serial_port=args.serial_port)
+        return FakeBoard(freqs, clock=time.time, ch_names=names)
+    return CerelogBoard(serial_port=args.serial_port, ch_names=names)
 
 
 def make_bank(args: argparse.Namespace, board: Any) -> Any:
@@ -392,7 +395,9 @@ def make_bank(args: argparse.Namespace, board: Any) -> Any:
         from .coding import CodeBank
         return CodeBank(board.fs, ch_names=board.ch_names, refresh=args.refresh_rates[0],
                         train_cycles=args.train_cycles)
-    return DecoderBank(board.fs, ch_names=board.ch_names)
+    gaze = GazeDecoder(board.fs, board.ch_names) if getattr(args, "eog", False) else None
+    return DecoderBank(board.fs, ch_names=board.ch_names,
+                       model=getattr(args, "decoder_model", None), gaze=gaze)
 
 
 # -- command line -------------------------------------------------------------------------
@@ -426,9 +431,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--train-cycles", type=int, default=TRAIN_CYCLES,
                    help=f"code mode: cycles (1.05 s each) recorded on the first slot for the "
                         f"template (default {TRAIN_CYCLES}; at least 2)")
+    p.add_argument("--eog", action="store_true",
+                   help="freq mode: the C3/C4 leads sit on gel pads at the left and right temple "
+                        f"(channels {','.join(EOG_MONTAGE)}): the eye's horizontal and vertical "
+                        "EOG becomes a gaze prior added to the SSVEP scores for layouts whose "
+                        "target positions are known (point mode); brainsync.eog")
     p.add_argument("--freqs", default=",".join(f"{f:g}" for f in DEFAULT_FREQS),
                    help="freq mode: stimulus frequencies in Hz, best first (default "
                         "15,17,12,20); point mode shows len-1 buttons plus \"more\"")
+    p.add_argument("--decoder-model", metavar="FILE", default=None,
+                   help="freq mode: trained SSVEP classifier saved by brainsync.calibrate, "
+                        "instead of FBCCA; every layout's targets must be the ones it was "
+                        "trained for (same frequencies and phases), or activating that layout "
+                        "fails")
     p.add_argument("--calibrate-s", type=float, default=CALIBRATE_S,
                    help=f"freq mode: rest-baseline seconds for each new controller (default "
                         f"{CALIBRATE_S:g}; at least about 3.75)")
@@ -488,6 +503,9 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         if args.train_cycles < 2:
             p.error(f"--train-cycles must be at least 2 (the held-out accuracy leaves one "
                     f"cycle out), got {args.train_cycles}")
+        if args.eog or args.decoder_model:
+            p.error("--eog and --decoder-model are for --paradigm freq (the c-VEP decoder "
+                    "trains its own template)")
     else:
         lowest, top = min(args.refresh_rates), max(args.freqs)
         if lowest - P.REFRESH_TOLERANCE_HZ <= 2 * top:
@@ -577,6 +595,8 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
     code = getattr(args, "paradigm", "freq") == "code"
     try:
         bank = make_bank(args, board)
+        if getattr(bank, "gaze", None) is not None:
+            _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
         if detector is None:
             detector = make_detector(args)
         elif args.no_detect:

@@ -1,4 +1,4 @@
-// ui/view_core.js: the banner, health line, mic card and selection timer the partner page shows.
+// ui/view_core.js: the state line, health line, mic card and selection timer the session page shows.
 "use strict";
 
 const test = require("node:test");
@@ -14,6 +14,16 @@ test("the banner names what the user does now, with a tone", () => {
   assert.equal(VC.banner("PAUSED", "Stop pressed", "page").text, "Paused — Stop pressed");
   assert.equal(VC.banner("SPEAKING", "Yes, let's go.", "page").text, "Speaking");  // shown elsewhere
   assert.equal(VC.banner("SOMETHING_NEW", "", "page").text, "SOMETHING_NEW");
+});
+
+test("the state line in the diamond's centre is empty while the user picks", () => {
+  for (const name of ["MENU_CUE", "STIMULATING", "CONFIRMING", "SELECTED", "SPEAKING", "REST"]) {
+    assert.equal(VC.status(name, "", "page").text, "", name);
+  }
+  assert.deepEqual(VC.status("PAUSED", "Decoder disconnected", "page"),
+                   { text: "Paused — Decoder disconnected", tone: "stop" });
+  assert.deepEqual(VC.status("NOT_CAUGHT", "", "page"), { text: "Didn't catch that: look again", tone: "warn" });
+  assert.equal(VC.status("IDLE", "", "page").text, "Waiting to start");
 });
 
 test("all fine is Ready", () => {

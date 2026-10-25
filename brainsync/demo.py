@@ -49,11 +49,12 @@ from typing import Any
 import numpy as np
 
 from .board import Board, CerelogBoard, FakeBoard
-from .classify import ABSTAIN, make
+from .classify import ABSTAIN, TRAINING_FREE, make
 from .launch import Stimulus, launch_stimulus, speak
 from .online import TUNED, Decision, Decoder, calibrate, threshold_arg
 from .recordings import MONTAGE, POSTERIOR, Event
 from .stimulus import StimulusConfig, load_config
+from .templates import load_model
 from .vep import live
 
 STALL_S = 5.0
@@ -116,8 +117,12 @@ def add_live_arguments(p: argparse.ArgumentParser, config: str = FREQ_CONFIG,
     code.add_argument("--save-template", type=Path, default=None, metavar="FILE",
                       help="save the trained template to FILE (.npz)")
     freq = p.add_argument_group("f-VEP (--paradigm freq)")
-    freq.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
-                      help=f"default {TUNED.classifier}")
+    freq.add_argument("--classifier", default=TUNED.classifier, choices=TRAINING_FREE,
+                      help=f"training-free classifier (default {TUNED.classifier}); a trained "
+                           "one comes from --model")
+    freq.add_argument("--model", default=None, metavar="FILE",
+                      help="trained model saved by brainsync.calibrate (its targets must match "
+                           "the config); replaces --classifier and --harmonics")
     freq.add_argument("--window", type=float, default=TUNED.window_s,
                       help=f"window seconds (default {TUNED.window_s:g})")
     freq.add_argument("--step", type=float, default=TUNED.step_s,
@@ -243,8 +248,16 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
                                clock=None if args.fast else time.time, ch_names=args.names)
     else:
         board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
-    clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
-               phases=cfg.phases, margin=margin, threshold=args.threshold)
+    if args.model:
+        clf = load_model(args.model)
+        if (clf.freqs.size != cfg.n_targets or np.any(np.abs(clf.freqs - cfg.freqs) > 0.01)
+                or abs(clf.fs - board.fs) > 1e-6):
+            raise ValueError(f"model {args.model} was trained for {clf.freqs.tolist()} Hz at "
+                             f"{clf.fs:g} Hz, not {cfg.freqs.tolist()} Hz at {board.fs:g} Hz")
+        clf.margin, clf.threshold = margin, args.threshold
+    else:
+        clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
+                   phases=cfg.phases, margin=margin, threshold=args.threshold)
     decoder = Decoder(clf, board.fs, window_s=args.window, step_s=args.step,
                       votes=votes, channels=args.channels, pad_s=args.pad,
                       ch_names=args.names)
@@ -437,7 +450,11 @@ def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: 
                 ended = f"{gone} before the flicker started"
             else:
                 speak(prompts[1], voice)
-                board.read()  # drop what arrived during the prompt
+                _, t_read = board.read()  # drop what arrived during the prompt
+                # the flicker began with that line; trained templates are locked to the board's
+                # clock at this moment (the free-run display prints no onset marker, so the
+                # newest sample is the best estimate, a prompt's length late)
+                decoder.set_onset(float(t_read[-1]) if len(t_read) else None)
                 began = decoder.n_seen
                 ended = "started"
 

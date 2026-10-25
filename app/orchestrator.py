@@ -186,12 +186,14 @@ class Orchestrator:
         self.roles = dict(cfg.stim.roles)
         self.option_slots = [slot for slot in self.slots if self.roles[slot] == "option"]
         self.state = St.IDLE
+        self.state_detail = ""
         self.deadline: float | None = None
 
         self.trial_id = 0
         self.active_trial: int | None = None
         self.selected_slot: str | None = None
         self.screen: Screen | None = None  # fixed from MENU_CUE until the trial ends
+        self.read_page: tuple | None = None  # the last page or list item given its reading time
 
         self._list_ids = itertools.count(1)
         self._utterance_ids = itertools.count(1)
@@ -415,13 +417,25 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- events: browser
 
+    def on_ui_disconnected(self) -> None:
+        """The page closed or lost its connection. When the page draws the flicker
+        (display.flicker: browser) nothing flickers any more: pause, as for a lost display, so the
+        decoder never picks from a still screen."""
+        self._record("ui_disconnected")
+        if self.cfg.display.flicker == "browser" and self.state not in (St.IDLE, St.PAUSED):
+            self._pause_session("Screen closed", "screen_closed")
+
     def on_ui_connected(self) -> None:
-        """A partner page connected: bring it up to date."""
+        """A page connected: bring it up to date."""
         self._record("ui_connected")
+        if self.cfg.display.flicker == "browser" and self.state not in (St.IDLE, St.PAUSED):
+            # A new page (one replacing the old, a reload) flickers only after its own start
+            # button: until then nothing flickers, so the session waits paused.
+            self._pause_session("New screen: press start", "screen_replaced")
         self._send_status()
         if self.shown is not None:
             self._send_ui(self.shown)
-        self._send_state()
+        self._send_state(self.state_detail)
         # A reloaded or reconnected page gets the mic state again and resumes by itself.
         if self.cfg.speech.stt_mode == "always":
             self._sync_mic(force=True, reason="reconnect")
@@ -436,7 +450,18 @@ class Orchestrator:
                 if problem:
                     self._send_state(problem)  # stay put; the page shows why
                 else:
+                    if msg.start:
+                        self._fresh_start()
                     self._enter_baseline()
+            elif msg.start:
+                # A newly opened page while the session runs (a reload): start over from the
+                # home page; a trial in progress ends first, so the screen may change.
+                in_trial = self.state in TRIAL_STATES
+                if in_trial:
+                    self._stop_trial("context_changed")
+                self._fresh_start()
+                if in_trial or self.state in (St.MENU_CUE, St.PREPARING):
+                    self._enter_menu_cue()
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
@@ -562,6 +587,7 @@ class Orchestrator:
 
     def _enter(self, state: St, seconds: float | None, detail: str = "") -> None:
         self.state = state
+        self.state_detail = detail  # sent again to a page that connects later
         self.deadline = None if seconds is None else self.clock() + seconds
         self._send_state(detail)
         self._sync_mic()  # every way into SPEAKING or PAUSED closes the mic, every way out opens it
@@ -618,10 +644,25 @@ class Orchestrator:
             self._set_list(self.pending_list)
             self.pending_list = None
         self.screen = self._build_screen()
-        self._enter(St.MENU_CUE, self.cfg.stim.cue_s)
+        self._enter(St.MENU_CUE, self._cue_seconds(self.screen.show))
         self._send_ui(self.screen.show)
         self._send_ui(Trial(trial_id=self.trial_id + 1, phase="cue"))
         self._send_decoder(self.screen.display)
+
+    def _cue_seconds(self, show: ShowPage) -> float:
+        """How long a screen stays still before its trial, so the user can read it before anything
+        flickers (gaze that rests on an option while reading would pick it). A new page: cue_s
+        plus read_s_per_word for each word on it, up to cue_max_s. The same page again (after
+        Didn't catch that or Back): cue_s. The confirm screen: confirm_cue_s."""
+        stim = self.cfg.stim
+        if show.mode == "confirm":
+            return stim.confirm_cue_s
+        key = (show.list_id, show.page, show.highlight_index if show.mode == "list" else None)
+        if key == self.read_page:
+            return stim.cue_s
+        self.read_page = key
+        text = show.text if show.mode == "list" else " ".join(s.utterance or s.label for s in show.slots)
+        return min(stim.cue_s + stim.read_s_per_word * len(text.split()), max(stim.cue_s, stim.cue_max_s))
 
     def _start_trial(self) -> None:
         self.trial_id += 1
@@ -846,6 +887,17 @@ class Orchestrator:
         fixed = self.intents.fallback_lists[name][:self.cfg.menus.option_count]
         options = [Option(**o.model_dump()) for o in fixed]
         return OptionList(list_id=f"m{next(self._list_ids)}", name=name, options=options)
+
+    def _fresh_start(self) -> None:
+        """The start button of a newly opened page: a new conversation, from the home page. Lines
+        heard before (the room, the last session) no longer shape Claude's pages."""
+        self.conversation = Conversation(self.cfg.context.history_turns)
+        self.awaiting = None  # a page still on its way for the old conversation is dropped
+        self.pending_list = None
+        self.picked = None
+        self.more_in_a_row = 0
+        self._set_list(self._fallback(HOME_LIST))
+        self._record("fresh_start")
 
     def _set_list(self, options: OptionList) -> None:
         self.options, self.index = options, 0

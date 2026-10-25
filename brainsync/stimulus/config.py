@@ -435,6 +435,22 @@ def grid_positions(n: int, rows: int, cols: int, spacing: float) -> list[tuple[f
     return [(float(x) + 0.0, float(y) + 0.0) for x, y in zip(xs, ys)]  # + 0.0 drops -0.0
 
 
+def explicit_positions(value: Any, n: int) -> list[tuple[float, float]]:
+    """[layout] positions: one [x, y] pair per target in screen heights from the centre
+    (y up), for layouts a grid cannot express, such as the four-target diamond."""
+    if not isinstance(value, (list, tuple)) or len(value) != n:
+        raise ValueError(f"[layout] positions must list {n} [x, y] pairs (one per target), "
+                         f"got {value!r}")
+    out = []
+    for k, pair in enumerate(value):
+        ok = (isinstance(pair, (list, tuple)) and len(pair) == 2
+              and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pair))
+        if not ok or not all(math.isfinite(float(v)) for v in pair):
+            raise ValueError(f"[layout] positions[{k}] must be two finite numbers, got {pair!r}")
+        out.append((float(pair[0]) + 0.0, float(pair[1]) + 0.0))
+    return out
+
+
 def parse_config(data: Mapping[str, Any], default_name: str = "config",
                  path: Path | None = None) -> StimulusConfig:
     """Build a StimulusConfig from parsed TOML, raising ValueError on bad values or types."""

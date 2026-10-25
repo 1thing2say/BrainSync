@@ -581,9 +581,12 @@ class Stop(Message):
 
 
 class Resume(Message):
-    """Resume after STOP."""
+    """Resume after STOP. ``start``: the start button of a newly opened page (the flicker
+    warning), a fresh session: an empty conversation and the home page. Left out (None) by the
+    Resume button and by clients that do not send it."""
 
     type: Literal["resume"] = "resume"
+    start: bool | None = None
 
 
 class MicSet(Message):

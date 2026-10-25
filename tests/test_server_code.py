@@ -47,7 +47,9 @@ def client(tmp_path):
 
 def test_the_page_config_says_code_and_its_three_slots(client):
     c = client.get("/api/config").json()
-    assert (c["paradigm"], c["layout"], c["slots"]) == ("code", "cvep", ["s1", "s2", "s3"])
+    assert (c["paradigm"], c["layout"], c["slot_order"]) == ("code", "cvep", ["s1", "s2", "s3"])
+    assert c["slots"]["s2"] == {"freq_hz": None, "phase_deg": 0.0, "lag_frames": 21}
+    assert c["flicker"] is False   # code mode: the PsychoPy display draws the code
 
 
 def test_screen_layouts():

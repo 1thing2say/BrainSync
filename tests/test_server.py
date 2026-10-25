@@ -23,7 +23,7 @@ HELLO = DecoderHello(protocol=PROTOCOL, name="test", refresh_hz=60.0, waveform="
 def fast_config():
     """The default config with every wait shortened so a full trial takes well under a second."""
     return BASE.model_copy(update={
-        "stim": BASE.stim.model_copy(update={"cue_s": 0.05, "rest_s": 0.05, "max_trial_s": 2.0}),
+        "stim": BASE.stim.model_copy(update={"cue_s": 0.05, "read_s_per_word": 0.0, "confirm_cue_s": 0.05, "rest_s": 0.05, "max_trial_s": 2.0}),
         "baseline": BASE.baseline.model_copy(update={"seconds": 0.05, "timeout_s": 1.0}),
         "selection": BASE.selection.model_copy(update={"chosen_highlight_s": 0.05}),
         "speech": BASE.speech.model_copy(update={"max_speak_s": 2.0}),
@@ -72,8 +72,10 @@ def test_partner_page_is_served(client):
         "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
         "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
         "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
-        "paradigm": "freq", "layout": "diamond", "slots": ["s1", "s2", "s3", "s4"],
-        "app_link": ""}
+        "paradigm": "freq", "layout": "diamond", "slot_order": ["s1", "s2", "s3", "s4"],
+        "app_link": "", "flicker": True, "waveform": "sine", "refresh_hz": 60.0,
+        "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg, "lag_frames": None}
+                  for s in BASE.stim.slots}}
 
 
 def test_a_connecting_page_gets_the_mic_state(kb_client):

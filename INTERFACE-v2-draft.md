@@ -20,6 +20,13 @@ teammate. The teammate's own bridge, if they build one, must pass the same
 bars. Everything above stays valid for a frequency-coded bridge; our server runs it with
 `--config config/fvep_page.yaml`, while its default config and our bridge now use code mode.
 
+**Since 2026-10-25 the flicker the user looks at can be drawn by our page in Chrome**
+(`display.flicker: browser`, `PLAN.md` status), not by the PsychoPy display. The protocol is
+unchanged: the bridge runs with `--no-stimulus`, still gets `display`, `stim_start` and
+`stim_stop`, and answers `stim_onset` from its own clock at `stim_start`; the display commands
+of section 7 apply only with `display.flicker: psychopy`. Code mode needs each cycle's flip
+time from whoever draws the flicker, so the default code-mode config uses the PsychoPy display.
+
 ## Open questions for the teammate (SYNC 1)
 
 > **Claude session on the decoder side:** if you are working for the teammate (the `ssvep` repo or
@@ -365,7 +372,7 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 | Layout | diamond: s1 top, s2 left, s3 right, s4 bottom; fixation mark in each square, sentence beside it | |
 | Waveform | sine (17 Hz does not divide 60) | |
 | Decoder window | 4 s now; 2 s if the replay tuning agrees | |
-| Cue before each trial | 1.0 s | |
+| Cue before each trial | the server's: 2 s + 0.2 s per word on a new page, up to 6 s; 2 s for a page seen again; 1.5 s before Say it / Back (changed from 1.0 s on 2026-10-25, reading time) | |
 | Rest after each trial | 1.0 s | |
 | Max trial length | 10.0 s | |
 | Baseline length | 10.0 s | |
