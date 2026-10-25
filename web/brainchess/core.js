@@ -1,6 +1,10 @@
 /* BrainChess core: a JavaScript port of brainsync/brainchess split.py (straight-cut
  * two-target move selection), prior.py (heuristic move scores, prior, opponent) and the
  * gate.py fresh-window pick rule, plus a simulated SSVEP decoder for the browser mockup.
+ * The c-VEP standard (docs/CVEP-STANDARD.md, the default of python -m brainsync.brainchess)
+ * adds a third target, Back: MoveSelector({undo: true}) undoes the last pick, userLook()
+ * is game.py's SimulatedUser with Back, and MockCodeDecoder simulates CodeGate +
+ * CodeVepDecoder (one decision per 1.05 s code cycle, scores per target, 2 votes).
  *
  * Pure logic, no DOM. Works in the browser (global BrainChessCore) and in Node
  * (module.exports). Chess rules come from a chess.js 0.10.3 instance passed in.
@@ -404,7 +408,7 @@
      * Feed each decoded pick to choose(); draw groups(), panels(), arrow() and prompt()
      * after each. `move` (a UCI string) is set once stage === 'done'.
      */
-    constructor(chess, weights, { confirm = true, balanceTol = 0.15, minGap = 1 } = {}) {
+    constructor(chess, weights, { confirm = true, balanceTol = 0.15, minGap = 1, undo = false } = {}) {
       _checkChess(chess);
       _checkSplitOpts(balanceTol, minGap);
       this.fen = chess.fen();
@@ -422,7 +426,9 @@
       this.confirm = Boolean(confirm);
       this.balanceTol = balanceTol;
       this.minGap = minGap;
+      this.undoTarget = Boolean(undo); // c-VEP: a third target, Back, undoes the last pick
       this.picks = 0;
+      this.undos = 0;
       this._restart();
     }
 
@@ -436,6 +442,7 @@
       this._promo = null;
       this.stage = "piece";
       this.move = null;
+      this._history = []; // the state before each pick, for undo()
       this._settle();
     }
 
@@ -517,6 +524,11 @@
       if (target !== 0 && target !== 1) throw new RangeError(`target must be 0 or 1, got ${target}`);
       if (this.stage === "done") throw new Error("the move is already chosen; call back() to choose again");
       this.picks += 1;
+      if (this.stage === "confirm" && target === 1) {
+        this._restart();
+        return;
+      }
+      this._history.push([[...this._moves], this._origin, this._dest, this._groups, this._promo, this.stage]);
       if (this.stage === "piece" || this.stage === "dest") {
         const keep = this._groups[target];
         const key = this.stage === "piece" ? "from" : "to";
@@ -525,11 +537,7 @@
         const keep = new Set(this._promo[target]);
         this._moves = this._moves.filter((m) => keep.has(m));
       } else {
-        // confirm
-        if (target === 1) {
-          this._restart();
-          return;
-        }
+        // confirm, target 0: play it
         this.stage = "done";
       }
       this._settle();
@@ -538,6 +546,27 @@
     /** Start the move over from the piece stage; `picks` keeps counting. */
     back() {
       this._restart();
+    }
+
+    /** True when there is a pick to take back (not at a move's first pick, nor once chosen). */
+    get canUndo() {
+      return this._history.length > 0 && this.stage !== "done";
+    }
+
+    /**
+     * The Back target (split.py undo): take back the last pick, back to the screen before
+     * it. Counts as a pick; returns false, changing nothing else, when there is nothing to
+     * undo (the move's first pick, or right after RESTART).
+     */
+    undo() {
+      if (this.stage === "done") throw new Error("the move is already chosen; there is nothing to undo");
+      this.picks += 1;
+      if (this._history.length === 0) return false;
+      const [moves, origin, dest, groups, promo, stage] = this._history.pop();
+      Object.assign(this, { _moves: moves, _origin: origin, _dest: dest, _groups: groups, _promo: promo, stage });
+      this.move = null;
+      this.undos += 1;
+      return true;
     }
 
     // -- what to draw ------------------------------------------------------------------
@@ -572,7 +601,7 @@
 
     /** [label0, label1] for the two side panels, or null when the board itself flickers. */
     panels() {
-      if (this.stage === "confirm") return ["PLAY", "BACK"];
+      if (this.stage === "confirm") return this.undoTarget ? ["PLAY", "RESTART"] : ["PLAY", "BACK"];
       if (this.stage === "promo") {
         return this._promo.map((grp) => grp.map((m) => PROMO_NAMES[this._info.get(m).promotion]).join(" / "));
       }
@@ -597,7 +626,7 @@
       if (this.stage === "dest") return "Look at its destination";
       if (this.stage === "promo") return "Promote to?";
       const san = this._info.get(this._moves[0]).san;
-      if (this.stage === "confirm") return `Play ${san}? Look at PLAY or BACK`;
+      if (this.stage === "confirm") return this.undoTarget ? `Play ${san}? Look at PLAY` : `Play ${san}? Look at PLAY or BACK`;
       return `Playing ${san}`;
     }
 
@@ -675,6 +704,22 @@
       }
     }
     return move;
+  }
+
+  /** The c-VEP Back target's index (target 0 and 1 are the groups). */
+  const BACK = 2;
+
+  /**
+   * What game.py's SimulatedUser looks at with a Back target (c-VEP): Back as soon as a
+   * wrong pick has ruled `intended` out, and on the PLAY screen when the wrong move is
+   * shown (RESTART when there is nothing to undo); otherwise as userTarget().
+   */
+  function userLook(selector, intended) {
+    if (selector.undoTarget && selector.canUndo && !selector.reachable(intended)) return BACK;
+    if (selector.undoTarget && selector.stage === "confirm" && selector.shownMove !== intended) {
+      return selector.canUndo ? BACK : 1;
+    }
+    return userTarget(selector, intended);
   }
 
   /** Expected picks to choose a move drawn from the (normalised, floored) weights. Exact. */
@@ -1061,8 +1106,207 @@
     }
   }
 
+  // ---------------------------------------------------------------------------------
+  // Simulated c-VEP decoder: gate.py CodeGate + brainsync.vep.live.CodeVepDecoder
+
+  function _gauss(rng) {
+    let u = 0;
+    while (u === 0) u = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rng());
+  }
+
+  class MockCodeDecoder {
+    /**
+     * One decision per code cycle, as CodeVepDecoder behind CodeGate: every screen restarts
+     * the code, cycle k of it begins at switchT + k * cycle, and a cycle counts only if it
+     * began `cooldown` s after the change (so with the defaults the first is dropped). Its
+     * decision comes `pad` s after the cycle ends, from the mean of the last `cycles`
+     * counted cycles: a score per target (a simulated correlation), raw = the best target
+     * (ABSTAIN while the best mean stays under `floor`), lead = best - runner-up. `votes`
+     * agreeing decisions fire a pick, which is a screen change at that decision. Per cycle
+     * the gazed target's response shows with pCorrect, another target's with pWrong, none
+     * otherwise; looking at nothing (gaze null) shows a random target's with pStray. So a
+     * perfect decoder fires (ceil(cooldown / cycle) + votes) * cycle + pad after a change:
+     * 3 * 1.05 + 0.5 = 3.65 s with the defaults.
+     */
+    constructor({ cycle = 63 / 60, cycles = 2, votes = 2, cooldown = 0.5, pad = 0.5, nTargets = 3,
+      pCorrect = 0.9, pWrong = 0.05, pStray = 0.1, signal = 0.6, noise = 0.06, floor = 0.25, rng } = {}) {
+      for (const [name, v] of [["cycle", cycle], ["signal", signal]]) {
+        if (typeof v !== "number" || !Number.isFinite(v) || !(v > 0)) throw new RangeError(`${name} must be a positive finite number, got ${v}`);
+      }
+      for (const [name, v] of [["cycles", cycles], ["votes", votes], ["nTargets", nTargets]]) {
+        if (!Number.isInteger(v) || v < 1) throw new RangeError(`${name} must be a positive integer, got ${v}`);
+      }
+      for (const [name, v] of [["cooldown", cooldown], ["pad", pad], ["noise", noise], ["floor", floor]]) {
+        if (typeof v !== "number" || !Number.isFinite(v) || v < 0) throw new RangeError(`${name} must be finite and >= 0, got ${v}`);
+      }
+      _prob("pCorrect", pCorrect);
+      _prob("pWrong", pWrong);
+      _prob("pStray", pStray);
+      if (pCorrect + pWrong > 1 + 1e-12) throw new RangeError(`pCorrect + pWrong must be <= 1, got ${pCorrect + pWrong}`);
+      if (rng === undefined) rng = mulberry32(0);
+      if (typeof rng !== "function") throw new TypeError("rng must be a function returning floats in [0, 1)");
+      Object.assign(this, { cycle, cycles, votes, cooldown, pad, nTargets, pCorrect, pWrong, pStray, signal, noise, floor, rng });
+      this.lastT = 0;
+      this.stale = 0; // cycles dropped because they began before the screen settled
+      this.fired = 0;
+      this.windows = 0; // decisions made
+      this.last = null; // the last decision event (for the confidence display)
+      this.screenChanged(0);
+    }
+
+    get switchT() {
+      return this._switch;
+    }
+
+    get freshFrom() {
+      return this._switch + this.cooldown;
+    }
+
+    get pending() {
+      return this._pending;
+    }
+
+    get streak() {
+      return this._streak;
+    }
+
+    get committed() {
+      return this._committed;
+    }
+
+    /** Index (in this screen) of the first cycle that counts. */
+    get firstCycle() {
+      return Math.max(0, Math.ceil(this.cooldown / this.cycle - TIME_EPS));
+    }
+
+    /** Time of the first decision that can count after the current screen change. */
+    get firstFreshEnd() {
+      return this._switch + (this.firstCycle + 1) * this.cycle + this.pad;
+    }
+
+    /** Earliest possible pick time for the current screen (perfect decoder). */
+    get earliestPick() {
+      return this.firstFreshEnd + (this.votes - 1) * this.cycle;
+    }
+
+    /** The screen changed at `t` (default: lastT): the code restarts, cycles and votes reset. */
+    screenChanged(t) {
+      const at = t === undefined ? this.lastT : t;
+      if (typeof at !== "number" || !Number.isFinite(at)) throw new RangeError(`screenChanged time must be finite, got ${at}`);
+      this._switch = at;
+      this._k = 0;
+      this._recent = [];
+      this._pending = ABSTAIN;
+      this._streak = 0;
+      this._committed = ABSTAIN;
+    }
+
+    /** One cycle's simulated scores with the user looking at `g` (a target or null). */
+    _cycleScores(g) {
+      let hot = null;
+      const u = this.rng();
+      if (g === null) {
+        if (u < this.pStray) hot = Math.floor(this.rng() * this.nTargets);
+      } else if (u < this.pCorrect) {
+        hot = g;
+      } else if (u < this.pCorrect + this.pWrong) {
+        hot = (g + 1 + Math.floor(this.rng() * (this.nTargets - 1))) % this.nTargets;
+      }
+      const out = [];
+      for (let k = 0; k < this.nTargets; k++) out.push((k === hot ? this.signal : 0) + this.noise * _gauss(this.rng));
+      return out;
+    }
+
+    /**
+     * Decide every cycle whose decision time falls in (lastT, t], with the user looking at
+     * `gaze` (a target, null, or a function (decisionTime) => target|null). Returns one
+     * event per cycle: {t, raw, fresh, scores, lead, pending, streak, committed, changed,
+     * fired}; a dropped cycle comes back with fresh false and is not counted. Stops at a
+     * fired pick (lastT becomes its time) so the caller can redraw first.
+     */
+    advance(t, gaze) {
+      if (typeof t !== "number" || !Number.isFinite(t)) throw new RangeError(`advance time must be finite, got ${t}`);
+      const gazeFn = typeof gaze === "function" ? gaze : null;
+      const check = (g) => {
+        if (g === undefined) g = null;
+        if (g !== null && !(Number.isInteger(g) && g >= 0 && g < this.nTargets)) {
+          throw new RangeError(`gaze must be 0..${this.nTargets - 1} or null, got ${g}`);
+        }
+        return g;
+      };
+      const fixed = gazeFn ? null : check(gaze);
+      const events = [];
+      if (t <= this.lastT) return events;
+      for (;;) {
+        const begin = this._switch + this._k * this.cycle;
+        const at = begin + this.cycle + this.pad;
+        if (at > t + TIME_EPS) break;
+        this._k += 1;
+        const g = gazeFn ? check(gazeFn(at)) : fixed;
+        const cyc = this._cycleScores(g);
+        if (begin < this.freshFrom - TIME_EPS) {
+          this.stale += 1;
+          events.push({ t: at, raw: ABSTAIN, fresh: false, scores: cyc, lead: null, pending: this._pending,
+            streak: this._streak, committed: this._committed, changed: false, fired: null });
+          continue;
+        }
+        const ev = this.push(at, cyc);
+        events.push(ev);
+        if (ev.fired !== null) {
+          this.lastT = at;
+          return events;
+        }
+      }
+      this.lastT = t;
+      return events;
+    }
+
+    /** One counted cycle's scores decided at time `at` (public for tests). */
+    push(at, cycleScores) {
+      if (!Array.isArray(cycleScores) || cycleScores.length !== this.nTargets) {
+        throw new RangeError(`cycleScores must hold ${this.nTargets} numbers`);
+      }
+      this._recent.push(cycleScores.slice());
+      while (this._recent.length > this.cycles) this._recent.shift();
+      this.windows += 1;
+      const scores = [];
+      for (let k = 0; k < this.nTargets; k++) {
+        scores.push(this._recent.reduce((a, c) => a + c[k], 0) / this._recent.length);
+      }
+      const order = scores.map((s, k) => [s, k]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+      const raw = order[0][0] >= this.floor ? order[0][1] : ABSTAIN;
+      const lead = order.length > 1 ? order[0][0] - order[1][0] : order[0][0];
+      if (raw === ABSTAIN) {
+        this._pending = ABSTAIN;
+        this._streak = 0;
+      } else if (raw === this._pending) {
+        this._streak += 1;
+      } else {
+        this._pending = raw;
+        this._streak = 1;
+      }
+      let fired = null;
+      let changed = false;
+      if (this._pending !== ABSTAIN && this._streak >= this.votes && this._committed !== this._pending) {
+        fired = this._pending;
+        changed = true;
+        this._committed = fired;
+      }
+      const ev = { t: at, raw, fresh: true, scores, lead, pending: this._pending, streak: this._streak,
+        committed: this._committed, changed, fired };
+      this.last = ev;
+      if (fired !== null) {
+        this.fired += 1;
+        this.screenChanged(at);
+      }
+      return ev;
+    }
+  }
+
   const api = Object.freeze({
     ABSTAIN,
+    BACK,
     BOARD,
     STAGES,
     FLOOR_SHARE,
@@ -1083,6 +1327,7 @@
     MoveSelector,
     userTarget,
     userMove,
+    userLook,
     pyLegalMoves,
     positionKey,
     gameOutcome,
@@ -1093,6 +1338,7 @@
     sampleWeighted,
     opponentReply,
     MockDecoder,
+    MockCodeDecoder,
     _internal: Object.freeze({ pySum, npSum, pyRound9, attackers: _attackers, board64: _board64 }),
   });
   root.BrainChessCore = api;

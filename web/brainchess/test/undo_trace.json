@@ -1,0 +1,156 @@
+{
+ "note": "written by tests/test_brainchess_web.py (it fails when this is stale): split.py MoveSelector(chess.Board(), uniform, undo=True) driven by script (2 = undo); each trace row is [stage, groups, panels, prompt, can_undo]",
+ "script": [
+  0,
+  2,
+  1,
+  0,
+  2,
+  2,
+  1,
+  1,
+  0,
+  0,
+  2,
+  0,
+  0,
+  1,
+  2,
+  0,
+  0
+ ],
+ "trace": [
+  [
+   "piece",
+   ".0....1.00001111................................................",
+   null,
+   "Look at the piece you want to move",
+   false
+  ],
+  [
+   "piece",
+   ".0......0011....................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   ".0....1.00001111................................................",
+   null,
+   "Look at the piece you want to move",
+   false
+  ],
+  [
+   "piece",
+   "......1.....0011................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   "............01..................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   "......1.....0011................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   ".0....1.00001111................................................",
+   null,
+   "Look at the piece you want to move",
+   false
+  ],
+  [
+   "piece",
+   "......1.....0011................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   "......0.......01................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   "......0.......1.................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "dest",
+   "......s..............0.1........................................",
+   null,
+   "Look at its destination",
+   true
+  ],
+  [
+   "piece",
+   "......0.......1.................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "dest",
+   "......s..............0.1........................................",
+   null,
+   "Look at its destination",
+   true
+  ],
+  [
+   "confirm",
+   "......s..............s..........................................",
+   [
+    "PLAY",
+    "RESTART"
+   ],
+   "Play Nf3? Look at PLAY",
+   true
+  ],
+  [
+   "piece",
+   ".0....1.00001111................................................",
+   null,
+   "Look at the piece you want to move",
+   false
+  ],
+  [
+   "piece",
+   ".0....1.00001111................................................",
+   null,
+   "Look at the piece you want to move",
+   false
+  ],
+  [
+   "piece",
+   ".0......0011....................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ],
+  [
+   "piece",
+   ".1......01......................................................",
+   null,
+   "Look at the piece you want to move",
+   true
+  ]
+ ],
+ "picks": 17,
+ "undos": 4,
+ "move": null
+}
