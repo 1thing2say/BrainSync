@@ -413,7 +413,10 @@ c_hook() {
         || die "/etc/issue line 1: $(head -1 "$t/etc/issue")"
     head -2 "$t/etc/issue"
     tail -1 "$log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$log")"
-    grep -q 'BrainSyncOS layer installed (9 steps)' "$log" || die "log lacks the summary"
+    n="$(ls "$W/iso/brainsyncos/install.d"/[0-9][0-9]-*.sh | wc -l | tr -d ' ')"
+    grep -q "BrainSyncOS layer installed ($n steps)" "$log" || die "log lacks the summary ($n steps)"
+    # The test repositories have no model package (testlib.sh test_repo).
+    grep -q '86-model.sh: vm-arm64 edition: the repository has no model package' "$log" || die "86-model.sh did not skip"
     grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$log" || die "60-apt-repo.sh did not finish"
     cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
         || die "the installed keyring is not the build's repository key"
