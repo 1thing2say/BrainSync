@@ -6,6 +6,70 @@ clients reach it through Tailscale. Nothing here has been run on a Jetson yet: n
 was attached while it was written. Treat it as the plan, and fix it where the board
 disagrees.
 
+The laptop that shows the flicker can be a Mac or a Windows PC: it only runs a client (the
+reference page in a browser, the Python client or BrainPoint). BrainFlow and the headset are
+only on the Jetson, so the macOS-only vendored BrainFlow no longer limits the laptop.
+
+## Quick start
+
+1. **Flash the Jetson** with JetPack 6 (Ubuntu 22.04) or 7 (Ubuntu 24.04), finish the first-boot
+   setup (user name, password, network), and connect it to the network the laptop is on.
+2. **SSH from the laptop** (below), so setup and updates can run from the laptop, by you or by
+   a Claude Code session.
+3. **Install**, on the Jetson:
+
+   ```bash
+   sudo git clone https://github.com/1thing2say/BrainSync /opt/brainsync
+   sudo /opt/brainsync/deploy/jetson/install.sh                 # builds BrainFlow, --board cerelog
+   sudo /opt/brainsync/deploy/jetson/install.sh --board fake    # quicker first try, no headset
+   ```
+
+   `install.sh` does steps 1-4 below and the BrainFlow build ([brainflow/INSTALL.md](brainflow/INSTALL.md)
+   (b)-(c)) in one go, then waits for `/health`. Run it again after
+   `sudo git -C /opt/brainsync pull` to update. The BrainFlow build takes several minutes the
+   first time; later runs reuse the wheel in `~/.cache/brainsync-brainflow`. Add the API key
+   (step 3) and Tailscale (step 5) by hand.
+4. **Plug in the headset** and check that `/dev/ttyUSB0` (V1) or `/dev/ttyACM0` (V2) appears,
+   then `journalctl -u brainsync-server -f`.
+
+## SSH from the laptop
+
+On the **Jetson** (keyboard and screen, or the USB serial console):
+
+```bash
+sudo systemctl enable --now ssh   # on by default in JetPack
+hostname -I                       # its address, e.g. 192.168.1.42
+```
+
+On the **laptop**: a Mac's Terminal, or WSL on Windows (Windows' own OpenSSH in PowerShell works
+too, with the same commands):
+
+```bash
+ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+ssh-copy-id <user>@192.168.1.42      # asks the Jetson password once
+cat >> ~/.ssh/config <<'EOF'
+Host jetson
+    HostName 192.168.1.42
+    User <user>
+    ServerAliveInterval 30
+EOF
+ssh -o BatchMode=yes jetson 'cat /proc/device-tree/model; echo'   # no password prompt
+```
+
+- WSL often cannot resolve `.local` names (`<hostname>.local`); use the IP address.
+- Venue and campus Wi-Fi often stops devices from reaching each other (client isolation).
+  Then use an Ethernet cable from the laptop, a phone hotspot both join, or Tailscale on both
+  (`ssh <user>@<jetson>` over its tailnet name, step 5).
+- `install.sh` needs root. To let a Claude Code session run it without typing the password,
+  allow passwordless sudo for the setup and remove it afterwards:
+
+  ```bash
+  echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-setup && sudo chmod 0440 /etc/sudoers.d/90-setup
+  sudo rm /etc/sudoers.d/90-setup     # when setup is done
+  ```
+
+  Or run `sudo .../install.sh` yourself in an `ssh jetson` terminal and leave sudo as it is.
+
 ## First: BrainFlow for Linux aarch64
 
 `--board cerelog` needs the Cerelog fork of BrainFlow, not the PyPI package (that one has no
