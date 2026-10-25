@@ -1,54 +1,85 @@
 #!/usr/bin/env bash
 # Set up (or update) the BrainSync server on a Jetson Orin Nano in one command: the steps of
-# deploy/jetson/README.md and brainflow/INSTALL.md (b)-(c). Safe to run again after a pull.
+# deploy/jetson/README.md, brainflow/INSTALL.md (b)-(c) and the Cloudflare tunnel. Safe to run
+# again after a pull. Run it with sudo from the login user: the server runs as that user.
 #
 #   sudo git clone https://github.com/1thing2say/BrainSync /opt/brainsync
 #   sudo /opt/brainsync/deploy/jetson/install.sh                 # headset: --board cerelog
 #   sudo /opt/brainsync/deploy/jetson/install.sh --board fake    # no BrainFlow build, fake EEG
 #
 # Update: sudo git -C /opt/brainsync pull && sudo /opt/brainsync/deploy/jetson/install.sh
+# Without --board a rerun keeps the board in /etc/brainsync/tunnel.env (cerelog when none).
+# With cerelog, plug the headset in first: without it the server exits, and every restart
+# gives a new link.
 #
 # What it does:
 #   1. apt packages; Python 3.12 (deadsnakes on Ubuntu 22.04 / JetPack 6, apt on 24.04)
 #   2. removes brltty (it grabs the Cerelog V1's CH340 on Ubuntu desktop images) and stops
 #      ModemManager (it probes new /dev/ttyACM* ports, the Cerelog V2, with AT commands)
-#   3. the `brainsync` service user, in dialout (owns /dev/ttyUSB*, /dev/ttyACM*)
-#   4. --board cerelog: builds the Cerelog BrainFlow wheel natively, as the user who ran sudo,
+#   3. --board cerelog: builds the Cerelog BrainFlow wheel natively, as the user who ran sudo,
 #      in ~/.cache/brainsync-brainflow (once; --rebuild-brainflow to redo it)
-#   5. /opt/brainsync/.venv: setuptools<81, the wheel, pip install -e .
-#   6. /etc/brainsync/env (0600, for ANTHROPIC_API_KEY), the systemd unit, restart, /health
+#   4. /opt/brainsync/.venv: setuptools<81, the wheel, pip install -e .; checks that the login
+#      user can import the server from it (and adds read access to the checkout's tracked
+#      files and the venv when a strict umask left them unreadable; untracked files such as
+#      a .env stay as they are)
+#   5. /etc/brainsync/env (0600, for ANTHROPIC_API_KEY); removes an old brainsync-server.service
+#   6. cloudflare/install.sh: cloudflared, brainsync-tunnel.service as the login user (in
+#      dialout and tty) with BOARD set, started; then waits for ~/brainsync-link.txt and
+#      checks that the link stays the same for 20 s (the server did not restart)
 #
 # Environment: JOBS (compile jobs; default from CPUs and memory), WHEEL (use this wheel
 # instead of building one).
 set -euo pipefail
+umask 022   # the venv and the checkout stay readable by the login user the server runs as
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 KIT="$HERE/brainflow"
 INSTALL_DIR=/opt/brainsync
-UNIT=brainsync-server
-PORT=8765
-BOARD=cerelog
+UNIT=brainsync-tunnel
+OLD_UNIT=brainsync-server
+TUNNEL_ENV=/etc/brainsync/tunnel.env
+BOARD=""
+BOARD_GIVEN=""
 REBUILD=0
+LINK_WAIT=120
+STABLE_WAIT=20
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
 log() { printf '\n==> %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# The journal names the host only, but hide a #token= anyway, as the tunnel script does.
+redact() { sed -E 's/#token=[^[:space:]]*/#token=<redacted>/g'; }
 
 while (($#)); do
     case "$1" in
-        --board) BOARD="${2:-}"; shift 2 ;;
-        --board=*) BOARD="${1#*=}"; shift ;;
+        --board) BOARD="${2:-}"; BOARD_GIVEN=1; shift $(($# >= 2 ? 2 : 1)) ;;
+        --board=*) BOARD="${1#*=}"; BOARD_GIVEN=1; shift ;;
         --rebuild-brainflow) REBUILD=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
-[[ "$BOARD" == cerelog || "$BOARD" == fake ]] || die "--board must be cerelog or fake"
+if [[ -z "${BOARD_GIVEN:-}" ]]; then
+    # a rerun (an update) keeps the board set before, so a fake setup stays fake
+    BOARD="$(sed -n 's/^BOARD=//p' "$TUNNEL_ENV" 2>/dev/null | tail -n 1 || true)"
+    BOARD="${BOARD:-cerelog}"
+fi
+if [[ "$BOARD" != cerelog && "$BOARD" != fake ]]; then
+    [[ -n "${BOARD_GIVEN:-}" ]] || die "BOARD=$BOARD in $TUNNEL_ENV: --board must be cerelog or fake"
+    die "--board must be cerelog or fake"
+fi
 ((EUID == 0)) || die "run with sudo"
+[[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] \
+    || die "run with sudo from the login user (not as root): the server runs as that user"
+USER_NAME="$SUDO_USER"
+USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+[[ "$USER_HOME" == /* ]] || die "no home directory for $USER_NAME"
 [[ "$ROOT" == "$INSTALL_DIR" ]] || die "the unit runs $INSTALL_DIR; clone the repo there (see the top of this file), not $ROOT"
 ARCH="$(uname -m)"
+SYSTEMD=0
+[[ -d /run/systemd/system ]] && SYSTEMD=1
 
 log "machine"
 model="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "not a Jetson ($ARCH)")"
@@ -57,6 +88,7 @@ note "L4T:    $(head -n1 /etc/nv_tegra_release 2>/dev/null || echo none)"
 . /etc/os-release
 note "Ubuntu: $VERSION_ID ($PRETTY_NAME)"
 note "code:   $(git -c safe.directory="$ROOT" -C "$ROOT" log -1 --format='%h %s' 2>/dev/null || echo 'not a git checkout')"
+note "user:   $USER_NAME ($USER_HOME), runs the server"
 [[ "$ARCH" == aarch64 ]] || note "warning: $ARCH, not aarch64; fine for a container test, not a Jetson"
 
 # 1. packages
@@ -88,31 +120,31 @@ if systemctl list-unit-files ModemManager.service >/dev/null 2>&1 \
 fi
 ports="$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true)"
 note "USB serial ports now: ${ports:-none (headset not plugged in?)}"
-
-# 3. service user
-log "service user"
-if ! id brainsync >/dev/null 2>&1; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin --groups dialout brainsync
-    note "created brainsync (groups: $(id -nG brainsync))"
-else
-    usermod -aG dialout brainsync
-    note "brainsync exists (groups: $(id -nG brainsync))"
-fi
-if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root && " $(id -nG "$SUDO_USER") " != *" dialout "* ]]; then
-    usermod -aG dialout "$SUDO_USER"
-    note "added $SUDO_USER to dialout (log in again before reading the board by hand)"
+if [[ "$BOARD" == cerelog && -z "$ports" ]]; then
+    note "warning: --board cerelog and no headset: the server exits until it is plugged in, and"
+    note "         every restart gives a new link. Plug it in now, or use --board fake for now."
 fi
 
-# 4. BrainFlow wheel
+# The login user runs the BrainFlow build from the checkout (step 3) and the server from it,
+# so a checkout cloned under a strict umask gets read access first. Only the tracked files
+# and the venv: an untracked secret in the checkout (a .env with API keys) stays private.
+grant_read() {
+    find "$INSTALL_DIR" -path "$INSTALL_DIR/.git" -prune -o -type d -exec chmod a+rx {} +
+    git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" ls-files -z \
+        | while IFS= read -r -d '' f; do
+            if [[ -e "$INSTALL_DIR/$f" ]]; then chmod a+rX -- "$INSTALL_DIR/$f"; fi
+        done
+    if [[ -d "$INSTALL_DIR/.venv" ]]; then chmod -R a+rX "$INSTALL_DIR/.venv"; fi
+}
+if ! sudo -u "$USER_NAME" test -r "$KIT/build_brainflow.sh"; then
+    note "$USER_NAME cannot read the checkout: adding read access to its tracked files"
+    grant_read
+fi
+
+# 3. BrainFlow wheel
 if [[ "$BOARD" == cerelog && -z "${WHEEL:-}" ]]; then
     log "BrainFlow (Cerelog fork) for linux_$ARCH"
-    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
-        builder="$SUDO_USER"
-        cache="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.cache/brainsync-brainflow"
-    else
-        builder=root
-        cache=/var/cache/brainsync-brainflow
-    fi
+    cache="$USER_HOME/.cache/brainsync-brainflow"
     shopt -s nullglob
     wheels=("$cache"/out/brainflow-*-py3-none-linux_"$ARCH".whl)
     shopt -u nullglob
@@ -123,12 +155,13 @@ if [[ "$BOARD" == cerelog && -z "${WHEEL:-}" ]]; then
             JOBS=$(( mem_kb / 1500000 )); ((JOBS >= 1)) || JOBS=1
             ((JOBS <= $(nproc))) || JOBS=$(nproc)
         fi
-        note "building as $builder in $cache with $JOBS jobs (several minutes)"
-        sudo -u "$builder" mkdir -p "$cache"
-        sudo -u "$builder" env SRC="$cache/src" BUILD_SRC="$cache/build-src" OUT="$cache/out" \
-            JOBS="$JOBS" PYTHON="$PY" HOME="$(getent passwd "$builder" | cut -d: -f6)" \
-            "$KIT/build_brainflow.sh"
+        note "building as $USER_NAME in $cache with $JOBS jobs (several minutes)"
+        sudo -u "$USER_NAME" mkdir -p "$cache"
+        sudo -u "$USER_NAME" env SRC="$cache/src" BUILD_SRC="$cache/build-src" OUT="$cache/out" \
+            JOBS="$JOBS" PYTHON="$PY" HOME="$USER_HOME" "$KIT/build_brainflow.sh"
+        shopt -s nullglob
         wheels=("$cache"/out/brainflow-*-py3-none-linux_"$ARCH".whl)
+        shopt -u nullglob
     else
         note "using the wheel built earlier (--rebuild-brainflow to build it again)"
     fi
@@ -137,7 +170,7 @@ if [[ "$BOARD" == cerelog && -z "${WHEEL:-}" ]]; then
 fi
 [[ -z "${WHEEL:-}" || -f "$WHEEL" ]] || die "WHEEL=$WHEEL does not exist"
 
-# 5. venv
+# 4. venv
 log "venv $INSTALL_DIR/.venv"
 VPY="$INSTALL_DIR/.venv/bin/python"
 if [[ -x "$VPY" ]] && ! "$VPY" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 12))' 2>/dev/null; then
@@ -161,51 +194,67 @@ if [[ "$BOARD" == cerelog ]]; then
     [[ "$rate" == 250 ]] || die "Cerelog X8 sampling rate is $rate, expected 250"
     note "Cerelog X8 board loads, 250 Hz"
 fi
+# The service runs the venv as the login user, so check it as that user (from /, a directory
+# every user can enter). A venv made earlier under a stricter umask gets read access added.
+user_imports() { (cd / && sudo -u "$USER_NAME" "$VPY" -c 'import brainsync.server') >/dev/null 2>&1; }
+if ! user_imports; then
+    note "$USER_NAME cannot import brainsync.server from the venv: adding read access to it"
+    grant_read
+    user_imports || die "$USER_NAME still cannot run $VPY -c 'import brainsync.server' (try it by hand)"
+fi
+note "$USER_NAME can run the server from the venv"
 
-# 6. config, unit, start
-log "systemd unit"
+# 5. config; the unit of earlier versions
+log "config"
 install -d -m 0755 /etc/brainsync
 [[ -f /etc/brainsync/env ]] || install -m 0600 /dev/null /etc/brainsync/env
 note "/etc/brainsync/env: $(grep -c '^ANTHROPIC_API_KEY=.' /etc/brainsync/env || true) API key line(s) (sudoedit /etc/brainsync/env)"
-install -m 0644 "$HERE/$UNIT.service" /etc/systemd/system/
-DROPIN="/etc/systemd/system/$UNIT.service.d"
-if [[ "$BOARD" == fake ]]; then
-    install -d -m 0755 "$DROPIN"
-    cat >"$DROPIN/board.conf" <<EOF
-# written by deploy/jetson/install.sh --board fake; install.sh --board cerelog removes it
-[Service]
-ExecStart=
-ExecStart=$INSTALL_DIR/.venv/bin/python -m brainsync.server \\
-    --board fake --host 127.0.0.1 --port $PORT \\
-    --token-file /var/lib/brainsync/token \\
-    --log /var/log/brainsync/session.jsonl
-EOF
-    note "--board fake (drop-in $DROPIN/board.conf)"
-else
-    rm -f "$DROPIN/board.conf"
-    rmdir "$DROPIN" 2>/dev/null || true
+if [[ -e "/etc/systemd/system/$OLD_UNIT.service" || -d "/etc/systemd/system/$OLD_UNIT.service.d" ]]; then
+    if ((SYSTEMD)); then systemctl disable --now "$OLD_UNIT.service" 2>/dev/null || true; fi
+    rm -rf "/etc/systemd/system/$OLD_UNIT.service" "/etc/systemd/system/$OLD_UNIT.service.d"
+    if ((SYSTEMD)); then systemctl daemon-reload; fi
+    note "removed the old $OLD_UNIT.service: the server now runs inside $UNIT.service"
+    [[ ! -d /var/lib/brainsync ]] \
+        || note "its token in /var/lib/brainsync is not used any more (sudo rm -rf /var/lib/brainsync /var/log/brainsync)"
 fi
 
-if [[ ! -d /run/systemd/system ]]; then
-    log "systemd is not running here (a container?): unit installed, not started"
-    note "start by hand: sudo -u brainsync $VPY -m brainsync.server --board $BOARD --token-file /tmp/token"
+# 6. the tunnel, which runs the server
+log "Cloudflare tunnel ($UNIT.service, as $USER_NAME, --board $BOARD)"
+LINK="$USER_HOME/brainsync-link.txt"
+rm -f "$LINK"   # so the wait below sees the new link, not one from before the restart
+"$HERE/cloudflare/install.sh" --user "$USER_NAME" --dir "$INSTALL_DIR" --board "$BOARD"
+
+if ((!SYSTEMD)); then
+    # cloudflare/install.sh has said "systemd is not running here: unit installed, not started"
+    note "start by hand: sudo -u $USER_NAME BOARD=$BOARD $HERE/cloudflare/brainsync-tunnel.sh"
     exit 0
 fi
-systemctl daemon-reload
-systemctl enable "$UNIT" >/dev/null 2>&1
-systemctl restart "$UNIT"
-note "waiting for http://127.0.0.1:$PORT/health"
-for _ in $(seq 60); do
-    if health="$(curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null)"; then
-        note "health: $health"
+note "waiting up to $LINK_WAIT s for $LINK (Wi-Fi, then Cloudflare)"
+for _ in $(seq "$LINK_WAIT"); do
+    if [[ -s "$LINK" ]]; then
+        # The server answers /health before it opens the board, so a link can appear and go
+        # again when the board fails. Done only when the same link is still there a bit later.
+        first="$(head -n 1 "$LINK")"
+        note "link written; checking for $STABLE_WAIT s that the server stays up"
+        sleep "$STABLE_WAIT"
+        if ! systemctl is-active --quiet "$UNIT" || [[ ! -s "$LINK" ]] \
+                || [[ "$(head -n 1 "$LINK")" != "$first" ]]; then
+            journalctl -u "$UNIT" -n 30 --no-pager | redact
+            [[ "$BOARD" != cerelog ]] || note "is the headset plugged in? (or: install.sh --board fake)"
+            die "the server keeps restarting (log above), each time with a new link: journalctl -u $UNIT -f"
+        fi
+        host="$(sed -E -n '1s|^https://([^/#]+).*|\1|p' "$LINK")"
         log "done: $UNIT is running with --board $BOARD"
+        note "link:   https://${host:-?}/ plus the token: cat $LINK (do not post it)"
+        note "        a new link after every restart; also on the serial console"
         note "logs:   journalctl -u $UNIT -f"
-        note "token:  sudo cat /var/lib/brainsync/token"
-        note "next:   clients reach it through Tailscale or a tunnel (deploy/jetson/README.md, step 5)"
+        note "next:   API key for point mode: sudoedit /etc/brainsync/env, then"
+        note "        sudo systemctl restart $UNIT; settings: /etc/brainsync/tunnel.env"
+        note "        (deploy/jetson/cloudflare/README.md)"
         exit 0
     fi
-    systemctl is-active --quiet "$UNIT" || break
+    systemctl is-failed --quiet "$UNIT" && break
     sleep 1
 done
-journalctl -u "$UNIT" -n 30 --no-pager | sed -E 's/#token=[^[:space:]]*/#token=<redacted>/g'
-die "$UNIT did not answer /health (log above)"
+journalctl -u "$UNIT" -n 30 --no-pager | redact
+die "no link in $LINK after $LINK_WAIT s (log above); the service keeps retrying: journalctl -u $UNIT -f"

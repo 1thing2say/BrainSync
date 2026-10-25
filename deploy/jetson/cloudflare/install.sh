@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # Install the boot-time Cloudflare quick tunnel for BrainSync on a Jetson (see README.md here).
+# The tunnel service runs the server too. ../install.sh runs this as its last step.
 #
-#   sudo deploy/jetson/cloudflare/install.sh [--user NAME] [--dir DIR]
+#   sudo deploy/jetson/cloudflare/install.sh [--user NAME] [--dir DIR] [--board cerelog|fake]
 #   sudo deploy/jetson/cloudflare/install.sh --uninstall [--user NAME]
 #   deploy/jetson/cloudflare/install.sh --print-unit --user NAME [--home DIR] [--dir DIR]
 #
 # Installing: cloudflared (the official arm64 .deb) and qrencode when missing; the user joins
-# dialout and tty; /etc/brainsync/tunnel.env is written when absent; the unit is rendered for
-# the user and installed; brainsync-server.service is disabled when it is enabled (both use
-# port 8765); brainsync-tunnel.service is enabled and (re)started. Running it again is safe.
+# dialout and tty; /etc/brainsync/tunnel.env is written when absent (--board sets its BOARD=
+# line and keeps the rest); the unit is rendered for the user and installed; an old
+# brainsync-server.service is disabled and removed (it used the same port 8765);
+# brainsync-tunnel.service is enabled and (re)started. Running it again is safe. Without a
+# running systemd (a container) the unit is installed but not started.
 #
 #   --user NAME   whose home gets ~/brainsync-link.txt and who runs the service (default: the
 #                 user who ran sudo, $SUDO_USER)
 #   --dir DIR     the BrainSync checkout with its .venv (default: the checkout holding this
 #                 script, normally /opt/brainsync)
+#   --board B     cerelog (the headset) or fake (the simulated board), written to tunnel.env;
+#                 left out: tunnel.env keeps what it has (cerelog when it has nothing)
 #   --home DIR    with --print-unit only: the home to use instead of NAME's
 #   --uninstall   stop, disable and remove the unit and the link file; cloudflared, qrencode,
 #                 the groups and /etc/brainsync/tunnel.env stay
@@ -24,24 +29,49 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT=brainsync-tunnel.service
 UNIT_DST="/etc/systemd/system/$UNIT"
 TUNNEL_ENV=/etc/brainsync/tunnel.env
+OLD_UNIT=brainsync-server.service
 DEB_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb"
 
 user=""
 dir=""
 home=""
+board=""
 action=install
 
 say() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # apt_install PACKAGE...: apt-get install, after an apt-get update when the first try fails
 apt_install() { apt-get install -y "$@" || { apt-get update && apt-get install -y "$@"; }; }
-usage() { sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# set_board FILE: make FILE's BOARD= line say $board. An existing BOARD= line is changed in
+# place (later duplicates dropped), else the line goes under the commented #BOARD= example, or
+# at the end; every other line stays as it was. Portable awk, the file keeps its mode.
+set_board() {
+    local f="$1" tmp
+    if grep -qx "BOARD=$board" "$f" && (($(grep -c '^BOARD=' "$f") == 1)); then
+        say "kept BOARD=$board in $f"
+        return 0
+    fi
+    tmp="$(mktemp)"
+    awk -v board="$board" -v active="$(grep -c '^BOARD=' "$f" || true)" '
+        /^BOARD=/ { if (!done) print "BOARD=" board; done = 1; next }
+        { print }
+        active == 0 && !done && /^#BOARD=/ { print "BOARD=" board; done = 1 }
+        END { if (!done) print "BOARD=" board }
+    ' "$f" >"$tmp"
+    cat "$tmp" >"$f"
+    rm -f "$tmp"
+    say "set BOARD=$board in $f"
+}
 
 while (($#)); do
     case "$1" in
         --user) (($# >= 2)) || die "--user needs a name"; user="$2"; shift 2 ;;
         --dir) (($# >= 2)) || die "--dir needs a path"; dir="$2"; shift 2 ;;
         --home) (($# >= 2)) || die "--home needs a path"; home="$2"; shift 2 ;;
+        --board) (($# >= 2)) || die "--board needs cerelog or fake"; board="$2"; shift 2 ;;
+        --board=*) board="${1#*=}"; shift ;;
         --uninstall) action=uninstall; shift ;;
         --print-unit) action=print; shift ;;
         -h | --help) usage; exit 0 ;;
@@ -49,6 +79,7 @@ while (($#)); do
     esac
 done
 
+[[ -z "$board" || "$board" == cerelog || "$board" == fake ]] || die "--board must be cerelog or fake, not $board"
 dir="${dir:-$(cd "$HERE/../../.." && pwd)}"
 user="${user:-${SUDO_USER:-}}"
 [[ -n "$user" ]] || die "pass --user NAME, or run with sudo from the login user"
@@ -76,18 +107,19 @@ fi
 ((EUID == 0)) || die "run with sudo"
 [[ "$user" != root ]] || die "the tunnel should not run as root; pass --user NAME"
 id "$user" >/dev/null 2>&1 || die "no user $user"
-command -v systemctl >/dev/null 2>&1 || die "systemctl not found: this needs systemd"
+# systemd as the init (not merely installed): a container has none, and gets the files only
+SYSTEMD=0
+[[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1 && SYSTEMD=1
 LINK="$home/brainsync-link.txt"
 
 if [[ "$action" == uninstall ]]; then
     say "stopping and removing $UNIT"
-    systemctl disable --now "$UNIT" 2>/dev/null || true
+    if ((SYSTEMD)); then systemctl disable --now "$UNIT" 2>/dev/null || true; fi
     rm -f "$UNIT_DST"
-    systemctl daemon-reload
+    if ((SYSTEMD)); then systemctl daemon-reload; fi
     rm -f "$LINK"
     say "removed $UNIT_DST and $LINK"
     say "kept: cloudflared, qrencode, the dialout/tty groups of $user, $TUNNEL_ENV"
-    say "the Tailscale setup, if you want it back: sudo systemctl enable --now brainsync-server"
     exit 0
 fi
 
@@ -144,7 +176,8 @@ else
 # Settings for brainsync-tunnel.service (deploy/jetson/cloudflare/README.md): KEY=VALUE lines,
 # comments on their own lines only. After a change: sudo systemctl restart brainsync-tunnel
 #
-# fake: the simulated board, to try everything without the headset
+# cerelog (the headset) or fake (the simulated board, to try everything without the headset);
+# install.sh --board sets it
 #BOARD=cerelog
 # more server arguments, e.g. --no-detect, or --log /home/<you>/session.jsonl
 #SERVER_ARGS=
@@ -160,6 +193,7 @@ EOF
     chmod 0644 "$TUNNEL_ENV"
     say "wrote $TUNNEL_ENV (all settings commented out: the defaults)"
 fi
+if [[ -n "$board" ]]; then set_board "$TUNNEL_ENV"; fi
 for cfg in "$home/.cloudflared/config.yml" "$home/.cloudflared/config.yaml" \
     /etc/cloudflared/config.yml /etc/cloudflared/config.yaml; do
     [[ ! -e "$cfg" ]] || say "warning: $cfg exists; quick tunnels refuse to start while it does (rename it)"
@@ -171,9 +205,15 @@ printf '%s\n' "$rendered" >"$UNIT_DST.tmp"
 chmod 0644 "$UNIT_DST.tmp"
 mv -f "$UNIT_DST.tmp" "$UNIT_DST"
 say "installed $UNIT_DST (User=$user, $dir)"
-if systemctl is-enabled --quiet brainsync-server.service 2>/dev/null; then
-    systemctl disable --now brainsync-server.service
-    say "disabled brainsync-server.service: it uses the same port 8765 (back to Tailscale: sudo $0 --uninstall, then sudo systemctl enable --now brainsync-server)"
+# Earlier versions ran the server in its own unit on the same port; the tunnel unit runs it now.
+if [[ -e "/etc/systemd/system/$OLD_UNIT" || -d "/etc/systemd/system/$OLD_UNIT.d" ]]; then
+    if ((SYSTEMD)); then systemctl disable --now "$OLD_UNIT" 2>/dev/null || true; fi
+    rm -rf "/etc/systemd/system/$OLD_UNIT" "/etc/systemd/system/$OLD_UNIT.d"
+    say "removed the old $OLD_UNIT: $UNIT runs the server now (same port 8765)"
+fi
+if ((!SYSTEMD)); then
+    say "systemd is not running here (a container?): unit installed, not started"
+    exit 0
 fi
 systemctl daemon-reload
 systemctl enable "$UNIT"

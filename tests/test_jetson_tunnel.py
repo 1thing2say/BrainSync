@@ -346,3 +346,30 @@ def test_install_refuses_odd_user_names_and_paths(args):
     r = subprocess.run(["bash", str(INSTALL), "--print-unit", *args, "--dir", "/opt/b"],
                        capture_output=True, text=True)
     assert r.returncode != 0
+
+
+@pytest.mark.parametrize("board", ["cerelog", "fake"])
+def test_install_takes_a_board(board):
+    r = subprocess.run(["bash", str(INSTALL), "--print-unit", "--user", "jetson",
+                        "--home", "/home/jetson", "--dir", "/opt/b", "--board", board],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "\nUser=jetson\n" in r.stdout
+
+
+@pytest.mark.parametrize("args", [["--board", "pi"], ["--board=FAKE"], ["--board"]])
+def test_install_refuses_a_bad_board(args):
+    r = subprocess.run(["bash", str(INSTALL), "--print-unit", "--user", "jetson",
+                        "--home", "/home/jetson", "--dir", "/opt/b", *args],
+                       capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "--board" in r.stderr
+
+
+def test_install_needs_root_and_never_mentions_the_old_setup():
+    text = INSTALL.read_text()
+    assert "tailscale" not in text.lower()
+    if os.geteuid() != 0:
+        r = subprocess.run(["bash", str(INSTALL), "--user", "jetson", "--home", "/home/jetson",
+                            "--board", "fake"], capture_output=True, text=True)
+        assert r.returncode != 0 and "run with sudo" in r.stderr

@@ -4,6 +4,7 @@
 # A template: install.sh fills in @USER@ (the login user, so the link lands in that home),
 # @HOME@ and @BRAINSYNC_DIR@, then installs it as /etc/systemd/system/brainsync-tunnel.service:
 #
+#   sudo deploy/jetson/install.sh          # everything; or only the tunnel:
 #   sudo deploy/jetson/cloudflare/install.sh
 #   journalctl -u brainsync-tunnel -f      # "tunnel up: https://<name>.trycloudflare.com ..."
 #
@@ -14,7 +15,8 @@
 Description=BrainSync server behind a Cloudflare quick tunnel (link on serial and in ~/brainsync-link.txt)
 Documentation=file:@BRAINSYNC_DIR@/deploy/jetson/cloudflare/README.md
 Wants=network-online.target
-# Both serve 127.0.0.1:8765: starting this one stops brainsync-server first.
+# An old brainsync-server.service from earlier versions served 127.0.0.1:8765 too: starting
+# this one stops it first (install.sh removes it).
 Conflicts=brainsync-server.service
 After=network-online.target brainsync-server.service
 # Never give up: at a venue the Wi-Fi may come up minutes after boot.

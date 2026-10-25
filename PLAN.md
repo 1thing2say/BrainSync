@@ -690,7 +690,10 @@ Take shifts with the teammate. Commit a working state before sleeping.
   FBCCA as `python -m brainsync.server` (`PROTOCOL-v3.md`); the laptop that shows the flicker,
   Mac or Windows, is only a client. `sudo deploy/jetson/install.sh` sets a fresh JetPack 6/7
   board up in one command (Python 3.12, the Cerelog BrainFlow wheel built natively, venv,
-  systemd unit); `deploy/jetson/README.md` has it and the SSH setup. Tested in arm64
+  then `brainsync-tunnel.service`: the server as the login user behind a Cloudflare quick
+  tunnel, link in `~/brainsync-link.txt` and on the serial console); `deploy/jetson/README.md`
+  has it and the SSH setup. Cloudflare quick tunnels are the only way other machines reach
+  the server (no account, works with client isolation); Tailscale is gone. Tested in arm64
   containers only, not yet on the Jetson or with the headset.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
   so a Jetson boots straight into BrainSync. JetPack 7 supports AGX Thor, AGX Orin and Orin
