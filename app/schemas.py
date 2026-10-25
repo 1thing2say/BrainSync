@@ -8,6 +8,12 @@ way to write them, so they would turn into null and break the round trip.
 Protocol 1 (``INTERFACE.md``, browser-drawn flicker) is dropped: the bridge owns the display, and
 the server speaks only protocol 2 (PLAN.md section 13, decisions of 2026-10-23).
 
+Code mode (the c-VEP standard, docs/CVEP-STANDARD.md; draft section 9, proposed): a hello with
+``paradigm: "code"`` whose slots carry ``lag_frames`` instead of ``freq_hz``, the ``train`` /
+``train_progress`` / ``trained`` exchange in place of ``baseline`` / ``baseline_done``, and a
+``decision`` message (per-slot correlations) after every decoder decision in a trial. The
+frequency-coded protocol is unchanged: a hello without ``paradigm`` is ``"freq"``.
+
 Sections:
 - Decoder (bridge) -> server.
 - Server -> decoder (bridge).
@@ -23,7 +29,15 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    model_serializer,
+    model_validator,
+)
 
 PROTOCOL = 2
 # Handshake tolerances (draft section 2): contract values, not tunables.
@@ -32,6 +46,7 @@ REFRESH_TOLERANCE_HZ = 1.0
 
 SlotId = Annotated[str, StringConstraints(pattern=r"^s[0-9]+$")]
 Waveform = Literal["sine", "square"]
+Paradigm = Literal["freq", "code"]
 # option: one reply (page mode); next: new page or move the highlight; say / back: the confirm
 # screen in page mode, or SAY in list mode.
 Role = Literal["option", "next", "say", "back"]
@@ -48,11 +63,26 @@ class Message(BaseModel):
 
 
 class SlotSpec(Message):
-    """One stimulus target: slot id, flicker frequency and phase."""
+    """One stimulus target: slot id, then its flicker frequency and phase (paradigm ``freq``)
+    or its code lag in frames (paradigm ``code``: frame n shows bit (n - lag_frames) mod length
+    of the shared m-sequence). Which of the two a slot needs is checked by the hello (and the
+    config) for its paradigm."""
 
     slot: SlotId
-    freq_hz: float = Field(gt=0)
+    freq_hz: float | None = Field(default=None, gt=0)
     phase_deg: float = 0
+    lag_frames: int | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _leave_out_unused(self, handler: Any) -> dict[str, Any]:
+        # A freq slot is sent as before (no lag_frames: null), a code slot as {slot, lag_frames}.
+        data = handler(self)
+        for key in ("freq_hz", "lag_frames"):
+            if data.get(key, 0) is None:
+                del data[key]
+        if "lag_frames" in data and "freq_hz" not in data and not data.get("phase_deg"):
+            data.pop("phase_deg", None)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -68,17 +98,48 @@ class DecoderParams(Message):
     votes: int = Field(ge=1)
 
 
+class CodeParams(Message):
+    """Code mode: the m-sequence every target shows, delayed by its slot's ``lag_frames``."""
+
+    length: int = Field(ge=2)  # bits in one m-sequence period (63)
+    cycle_frames: int = Field(ge=2)  # frames in one cycle (63: one bit per frame)
+    train_cycles: int = Field(default=30, ge=2)  # cycles recorded on the training slot
+
+
 class DecoderHello(Message):
-    """Sent by the bridge right after connecting, from its stimulus config and refresh check."""
+    """Sent by the bridge right after connecting, from its stimulus config and refresh check.
+
+    ``paradigm`` ``freq`` (the default, protocol 2 as first written): every slot has
+    ``freq_hz`` and ``waveform`` is required. ``code`` (c-VEP): every slot has ``lag_frames``,
+    ``code`` is required and ``waveform`` is not used.
+    """
 
     type: Literal["hello"] = "hello"
     protocol: int
     name: str
+    paradigm: Paradigm = "freq"
     refresh_hz: float = Field(gt=0)
-    waveform: Waveform
+    waveform: Waveform | None = None
     slots: list[SlotSpec] = Field(min_length=1)
+    code: CodeParams | None = None
     decoder: DecoderParams | None = None
     score_kind: str | None = None  # set only if selections carry scores
+
+    @model_validator(mode="after")
+    def _fits_paradigm(self) -> DecoderHello:
+        if self.paradigm == "freq":
+            if self.waveform is None:
+                raise ValueError("a freq hello needs waveform")
+            missing = [s.slot for s in self.slots if s.freq_hz is None]
+            if missing:
+                raise ValueError(f"a freq hello needs freq_hz on every slot, missing on {missing}")
+        else:
+            if self.code is None:
+                raise ValueError("a code hello needs code {length, cycle_frames}")
+            missing = [s.slot for s in self.slots if s.lag_frames is None]
+            if missing:
+                raise ValueError(f"a code hello needs lag_frames on every slot, missing on {missing}")
+        return self
 
 
 class StimOnset(Message):
@@ -115,6 +176,44 @@ class BaselineDone(Message):
     baseline_id: int
     ok: bool
     message: str = ""
+
+
+class TrainProgress(Message):
+    """Code mode: complete training cycles recorded so far for ``train_id``."""
+
+    type: Literal["train_progress"] = "train_progress"
+    train_id: int
+    cycle: int = Field(ge=0)
+    of: int = Field(ge=1)
+
+
+class Trained(Message):
+    """Code mode: the answer to ``train``. ``accuracy`` is the template's leave-one-cycle-out
+    accuracy (0..1) against ``chance`` (1 / number of targets); ``ok`` false (with a message such as
+    "interrupted", "not_ready", "display_down") means there is no template to decode with."""
+
+    type: Literal["trained"] = "trained"
+    train_id: int
+    ok: bool
+    accuracy: float | None = Field(default=None, ge=0, le=1)
+    chance: float | None = Field(default=None, ge=0, le=1)
+    cycles: int = Field(default=0, ge=0)
+    message: str = ""
+
+
+class Decision(Message):
+    """Code mode: one decoder decision during a trial (one per cycle, about 1 s): the Pearson
+    correlation of every slot (its confidence; not a probability), the best active slot this
+    decision (``raw``), the slot committed so far (``committed``; the selection follows the
+    first commit), the lead over the runner-up, and whether this decision moved the commitment."""
+
+    type: Literal["decision"] = "decision"
+    trial_id: int
+    scores: dict[SlotId, float]
+    raw: SlotId | None = None
+    committed: SlotId | None = None
+    lead: float | None = None
+    changed: bool = False
 
 
 class DecoderStatus(Message):
@@ -158,6 +257,20 @@ class Baseline(Message):
     type: Literal["baseline"] = "baseline"
     baseline_id: int
     seconds: float = Field(gt=0)
+
+
+class Train(Message):
+    """Code mode, in place of baseline: record ``cycles`` cycles while the user looks at
+    ``slot``'s square (the cue box on it, every square flickering, the display saying "Look at the
+    <label> square"), and fit the template. ``retrain`` false lets a bridge that already has a
+    template answer ``trained`` at once; true always records anew (a new session or headset fit)."""
+
+    type: Literal["train"] = "train"
+    train_id: int
+    slot: SlotId
+    label: str = ""
+    cycles: int = Field(default=30, ge=2)
+    retrain: bool = False
 
 
 class Display(Message):
@@ -217,18 +330,35 @@ def hello_problems(
     slots: list[SlotSpec],
     waveform: str,
     refresh_hz: float,
+    paradigm: str = "freq",
+    code: Any = None,
 ) -> list[str]:
-    """Why the bridge's hello does not match our config; an empty list means hello_ack."""
+    """Why the bridge's hello does not match our config; an empty list means hello_ack.
+
+    ``paradigm`` and ``code`` are the config's (``stim.paradigm``, ``stim.code``): a freq hello is
+    checked on its frequencies and waveform, a code hello on its lags and the code's length and
+    cycle.
+    """
     problems: list[str] = []
     if hello.protocol != PROTOCOL:
         problems.append(f"protocol {hello.protocol}, server speaks {PROTOCOL}")
+    if hello.paradigm != paradigm:
+        other = "config/fvep_page.yaml" if hello.paradigm == "freq" else "config/default.yaml"
+        problems.append(f"paradigm {hello.paradigm}, this server runs {paradigm} "
+                        f"(start it with --config {other})")
+        return problems
     if abs(hello.refresh_hz - refresh_hz) > REFRESH_TOLERANCE_HZ:
         problems.append(
             f"display refresh is {hello.refresh_hz:g} Hz, expected {refresh_hz:g} Hz "
             "(turn ProMotion / variable refresh off)"
         )
-    if hello.waveform != waveform:
+    if paradigm == "freq" and hello.waveform != waveform:
         problems.append(f"waveform {hello.waveform}, expected {waveform}")
+    if paradigm == "code" and code is not None and hello.code is not None:
+        for name in ("length", "cycle_frames"):
+            got_value, want_value = getattr(hello.code, name), getattr(code, name)
+            if got_value != want_value:
+                problems.append(f"code {name} {got_value}, expected {want_value}")
     theirs = {s.slot: s for s in hello.slots}
     ours = {s.slot: s for s in slots}
     if len(theirs) != len(hello.slots):
@@ -236,8 +366,15 @@ def hello_problems(
     if set(theirs) != set(ours):
         problems.append(f"slots {sorted(theirs)}, expected {sorted(ours)}")
     for slot_id in sorted(set(theirs) & set(ours)):
+        if paradigm == "code":
+            got_lag, want_lag = theirs[slot_id].lag_frames, ours[slot_id].lag_frames
+            if got_lag != want_lag:
+                problems.append(f"{slot_id} lags {got_lag} frames, expected {want_lag}")
+            continue
         got, want = theirs[slot_id].freq_hz, ours[slot_id].freq_hz
-        if abs(got - want) > FREQ_TOLERANCE_HZ:
+        if got is None or want is None:
+            problems.append(f"{slot_id} has no frequency")
+        elif abs(got - want) > FREQ_TOLERANCE_HZ:
             problems.append(f"{slot_id} is {got:g} Hz, expected {want:g} Hz")
     return problems
 
@@ -283,11 +420,40 @@ class ShowPage(Message):
 
 class Trial(Message):
     """Trial phase change, for the mirror. ``paused``: the session paused (STOP, display Esc,
-    decoder lost, baseline failed), so nothing flickers and a selection timer stops."""
+    decoder lost, baseline failed), so nothing flickers and a selection timer stops. ``train``
+    (code mode): every square flickers while the user looks at the training square."""
 
     type: Literal["trial"] = "trial"
     trial_id: int
-    phase: Literal["cue", "flicker", "rest", "baseline", "paused"]
+    phase: Literal["cue", "flicker", "rest", "baseline", "paused", "train"]
+
+
+class Training(Message):
+    """Code mode: the training step, for the mirror. While it runs, ``cycle`` of ``of`` cycles are
+    recorded with the user looking at ``slot`` ("Look at the <label> square"); once done,
+    ``accuracy`` (0..1, leave-one-cycle-out) and ``chance`` are set, or ``message`` says why not."""
+
+    type: Literal["training"] = "training"
+    slot: SlotId
+    label: str = ""
+    cycle: int = Field(default=0, ge=0)
+    of: int = Field(ge=1)
+    accuracy: float | None = Field(default=None, ge=0, le=1)
+    chance: float | None = Field(default=None, ge=0, le=1)
+    message: str = ""
+
+
+class Confidence(Message):
+    """Code mode: the decoder's latest decision in this trial, for the bars under each option:
+    a correlation per slot (the bar clips it to 0..1; not a probability), the best slot this
+    decision and the slot committed so far."""
+
+    type: Literal["confidence"] = "confidence"
+    trial_id: int
+    scores: dict[SlotId, float]
+    raw: SlotId | None = None
+    committed: SlotId | None = None
+    lead: float | None = None
 
 
 class Highlight(Message):
@@ -491,17 +657,19 @@ def validate_option(
 # ---------------------------------------------------------------------------
 
 DecoderToServer = Annotated[
-    Union[DecoderHello, StimOnset, Selection, NoSelection, BaselineDone, DecoderStatus],
+    Union[DecoderHello, StimOnset, Selection, NoSelection, BaselineDone, DecoderStatus,
+          TrainProgress, Trained, Decision],
     Field(discriminator="type"),
 ]
 ServerToDecoder = Annotated[
-    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause],
+    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause, Train],
     Field(discriminator="type"),
 ]
 ShowPage.model_rebuild()
 
 ServerToUI = Annotated[
-    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus],
+    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus, Training,
+          Confidence],
     Field(discriminator="type"),
 ]
 UIToServer = Annotated[
@@ -560,16 +728,21 @@ __all__ = [
     "REFRESH_TOLERANCE_HZ",
     "SlotId",
     "Waveform",
+    "Paradigm",
     "Role",
     "Message",
     "SlotSpec",
     "DecoderParams",
+    "CodeParams",
     "DecoderHello",
     "StimOnset",
     "Selection",
     "NoSelection",
     "BaselineDone",
     "DecoderStatus",
+    "TrainProgress",
+    "Trained",
+    "Decision",
     "HelloAck",
     "ProtocolError",
     "Baseline",
@@ -578,6 +751,7 @@ __all__ = [
     "StimStopReason",
     "StimStop",
     "Pause",
+    "Train",
     "hello_problems",
     "UISlot",
     "ShowPage",
@@ -588,6 +762,8 @@ __all__ = [
     "State",
     "Transcript",
     "UIStatus",
+    "Training",
+    "Confidence",
     "TTSDone",
     "PartnerText",
     "Key",

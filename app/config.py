@@ -22,11 +22,15 @@ from typing import Annotated, Any, Literal, TypeVar
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from app.schemas import Option, SlotId, SlotSpec, Waveform, validate_option
+from app.schemas import Option, Paradigm, SlotId, SlotSpec, Waveform, validate_option
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
-DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"  # c-VEP: 3 targets, 2 options + NEXT
+# The frequency-coded fallbacks (the teammate's protocol-2 bridge speaks these): 4 targets in
+# page mode (13/15/17/11 Hz, four_diamond.toml) and 2 in list mode (15/17 Hz).
+FVEP_PAGE_CONFIG_PATH = CONFIG_DIR / "fvep_page.yaml"
+FVEP_LIST_CONFIG_PATH = CONFIG_DIR / "fvep_list.yaml"
 DEFAULT_INTENTS_PATH = CONFIG_DIR / "intents.yaml"
 DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"  # the fictional demo persona (committed)
 USER_PROFILE_PATH = REPO_ROOT / "profiles" / "user.yaml"  # a real user's profile: gitignored
@@ -82,11 +86,23 @@ class ConfirmSlots(Strict):
     back: SlotId
 
 
+class CodeConfig(Strict):
+    """Code mode (c-VEP, docs/CVEP-STANDARD.md): the m-sequence every slot shows, delayed by its
+    ``lag_frames``; checked against the bridge's hello."""
+
+    length: int = Field(ge=2)
+    cycle_frames: int = Field(ge=2)
+    train_cycles: int = Field(ge=2)  # cycles recorded on the training slot (about 1.05 s each)
+
+
 class StimConfig(Strict):
+    # code: c-VEP, slots carry lag_frames (the default config); freq: f-VEP, slots carry freq_hz
+    paradigm: Paradigm = "freq"
     slots: list[SlotConfig] = Field(min_length=1)
     roles: dict[SlotId, Role]
     confirm: ConfirmSlots
-    waveform: Waveform
+    waveform: Waveform = "sine"  # freq only
+    code: CodeConfig | None = None  # code only
     cue_s: float = Field(ge=0)
     max_trial_s: float = Field(gt=0)
     rest_s: float = Field(ge=0)
@@ -99,6 +115,14 @@ class StimConfig(Strict):
 class BaselineConfig(Strict):
     seconds: float = Field(gt=0)
     timeout_s: float = Field(gt=0)
+
+
+class TrainConfig(Strict):
+    """Code mode's training step (in place of the baseline): the user looks at the first slot's
+    square while ``stim.code.train_cycles`` cycles are recorded."""
+
+    label: str = Field(default="left", min_length=1)  # "Look at the <label> square"
+    timeout_s: float = Field(default=60.0, gt=0)  # no trained from the bridge by then -> pause
 
 
 class MenusConfig(Strict):
@@ -160,6 +184,7 @@ class AppConfig(Strict):
     display: DisplayConfig
     stim: StimConfig
     baseline: BaselineConfig
+    train: TrainConfig = Field(default_factory=TrainConfig)
     menus: MenusConfig
     llm: LLMConfig
     context: ContextConfig
@@ -212,6 +237,58 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     if cfg.speech.model.endswith("-latest"):
         problems.append(f"speech.model: pin a model version, not {cfg.speech.model}")
 
+    if stim.paradigm == "code":
+        problems += _check_code(stim, cfg.train)
+    else:
+        problems += _check_freq(stim, refresh)
+    if cfg.baseline.timeout_s <= cfg.baseline.seconds:
+        problems.append(
+            f"baseline.timeout_s ({cfg.baseline.timeout_s:g}) must be longer than "
+            f"baseline.seconds ({cfg.baseline.seconds:g})"
+        )
+    return problems
+
+
+def _check_code(stim: StimConfig, train: TrainConfig) -> list[str]:
+    """Code mode: every slot has a distinct lag inside one cycle, and no frequency."""
+    problems: list[str] = []
+    code = stim.code
+    if code is None:
+        return ["stim.code: code mode needs {length, cycle_frames, train_cycles}"]
+    for s in stim.slots:
+        if s.freq_hz is not None:
+            problems.append(f"stim.slots: {s.slot} has freq_hz in code mode (use lag_frames)")
+        if s.lag_frames is None:
+            problems.append(f"stim.slots: {s.slot} needs lag_frames in code mode")
+        elif s.lag_frames >= code.cycle_frames:
+            problems.append(f"stim.slots: {s.slot} lags {s.lag_frames} frames, past the "
+                            f"{code.cycle_frames}-frame cycle")
+    lags = [s.lag_frames for s in stim.slots if s.lag_frames is not None]
+    if len(set(lags)) != len(lags):
+        problems.append("stim.slots: two slots share the same lag")
+    # The training slot is the first one (target 0 of the standard), so its lag must be 0.
+    if stim.slots and stim.slots[0].lag_frames not in (0, None):
+        problems.append(f"stim.slots: the first slot ({stim.slots[0].slot}) is the training "
+                        "target and must lag 0 frames")
+    needed = code.train_cycles * code.cycle_frames / 60.0
+    if train.timeout_s <= needed:
+        problems.append(f"train.timeout_s ({train.timeout_s:g}) must be longer than the "
+                        f"{code.train_cycles} training cycles ({needed:.1f} s at 60 Hz)")
+    return problems
+
+
+def _check_freq(stim: StimConfig, refresh: float) -> list[str]:
+    """Freq mode: every slot has a frequency below Nyquist, and no lag."""
+    problems: list[str] = []
+    if stim.code is not None:
+        problems.append("stim.code: only for paradigm code")
+    for s in stim.slots:
+        if s.lag_frames is not None:
+            problems.append(f"stim.slots: {s.slot} has lag_frames in freq mode (use freq_hz)")
+        if s.freq_hz is None:
+            problems.append(f"stim.slots: {s.slot} needs freq_hz in freq mode")
+    if problems:
+        return problems
     nyquist = refresh / 2
     for s in stim.slots:
         if not 0 < s.freq_hz < nyquist:
@@ -229,11 +306,6 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     pairs = [(s.freq_hz, round(s.phase_deg % 360, 6)) for s in stim.slots]
     if len(set(pairs)) != len(pairs):
         problems.append("stim.slots: two slots share the same frequency and phase")
-    if cfg.baseline.timeout_s <= cfg.baseline.seconds:
-        problems.append(
-            f"baseline.timeout_s ({cfg.baseline.timeout_s:g}) must be longer than "
-            f"baseline.seconds ({cfg.baseline.seconds:g})"
-        )
     return problems
 
 
@@ -305,10 +377,10 @@ def check_intents(
 
     for name, options in cfg.fallback_lists.items():
         where = f"fallback_lists.{name}"
-        if len(options) != option_count:
+        if len(options) < option_count:
             problems.append(
-                f"{where}: has {len(options)} options, needs exactly {option_count} "
-                "(menus.option_count)"
+                f"{where}: has {len(options)} options, needs at least {option_count} "
+                "(menus.option_count; a page shows the first option_count, in rank order)"
             )
         for k, opt in enumerate(options):
             if opt.intent_id not in known:
@@ -499,6 +571,8 @@ __all__ = [
     "REPO_ROOT",
     "CONFIG_DIR",
     "DEFAULT_CONFIG_PATH",
+    "FVEP_PAGE_CONFIG_PATH",
+    "FVEP_LIST_CONFIG_PATH",
     "DEFAULT_INTENTS_PATH",
     "DEFAULT_PROFILE_PATH",
     "REQUIRED_FALLBACK_LISTS",
@@ -508,7 +582,9 @@ __all__ = [
     "ServerConfig",
     "DisplayConfig",
     "StimConfig",
+    "CodeConfig",
     "BaselineConfig",
+    "TrainConfig",
     "MenusConfig",
     "LLMConfig",
     "ContextConfig",

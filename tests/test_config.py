@@ -12,6 +12,8 @@ import yaml
 from app.config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_INTENTS_PATH,
+    FVEP_LIST_CONFIG_PATH,
+    FVEP_PAGE_CONFIG_PATH,
     DEFAULT_PROFILE_PATH,
     AppConfig,
     ConfigError,
@@ -38,9 +40,27 @@ def _write(tmp_path: Path, data: Any, name: str = "cfg.yaml") -> Path:
 
 
 def test_default_config_loads() -> None:
+    """The default is the c-VEP standard: 3 slots, option / option / next, confirm on s1 / s3."""
     cfg = load_config()
     assert isinstance(cfg, AppConfig)
     assert cfg.server.host == "127.0.0.1" and cfg.server.port == 8000
+    assert cfg.stim.paradigm == "code"
+    assert [(s.slot, s.lag_frames, s.freq_hz) for s in cfg.stim.slots] == [
+        ("s1", 0, None), ("s2", 21, None), ("s3", 42, None)]
+    assert cfg.stim.code.length == 63 and cfg.stim.code.cycle_frames == 63
+    assert cfg.stim.code.train_cycles == 30
+    assert cfg.stim.roles == {"s1": "option", "s2": "option", "s3": "next"}
+    assert cfg.stim.slot_for("next") == "s3"
+    assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s3")
+    assert cfg.menus.mode == "page" and cfg.menus.option_count == 2
+    assert cfg.train.label == "left" and cfg.train.timeout_s == 60.0
+    assert cfg.selection.confirm_mode == "always"
+
+
+def test_fvep_page_config_loads() -> None:
+    """The 4-target f-VEP fallback (the old default)."""
+    cfg = load_config(FVEP_PAGE_CONFIG_PATH)
+    assert cfg.stim.paradigm == "freq" and cfg.stim.code is None
     assert [(s.slot, s.freq_hz) for s in cfg.stim.slots] == [
         ("s1", 13.0), ("s2", 15.0), ("s3", 17.0), ("s4", 11.0)]
     assert cfg.stim.roles == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
@@ -54,13 +74,26 @@ def test_default_config_loads() -> None:
 
 
 def test_list_mode_fallback_loads(tmp_path: Path) -> None:
-    cfg = load_config(_write(tmp_path, _list_mode(_raw(DEFAULT_CONFIG_PATH))))
+    cfg = load_config(_write(tmp_path, _list_mode(_raw(FVEP_PAGE_CONFIG_PATH))))
     assert cfg.menus.mode == "list"
     assert cfg.stim.slot_for("say") == "s1" and cfg.stim.slot_for("next") == "s2"
+    shipped = load_config(FVEP_LIST_CONFIG_PATH)
+    assert shipped.menus.mode == "list" and shipped.selection.confirm_mode == "never"
+    assert [(s.slot, s.freq_hz) for s in shipped.stim.slots] == [("s1", 15.0), ("s2", 17.0)]
+    assert shipped.stim.roles == {"s1": "say", "s2": "next"}
 
 
-def test_default_config_accepts_a_matching_bridge_hello() -> None:
+def test_default_config_accepts_a_matching_code_hello() -> None:
     cfg = load_config()
+    hello = DecoderHello(protocol=PROTOCOL, name="bridge", paradigm="code", refresh_hz=59.94,
+                         code={"length": 63, "cycle_frames": 63, "train_cycles": 30},
+                         slots=[SlotSpec(slot=s.slot, lag_frames=s.lag_frames) for s in cfg.stim.slots])
+    assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform, cfg.display.expected_refresh_hz,
+                          paradigm="code", code=cfg.stim.code) == []
+
+
+def test_fvep_config_accepts_a_matching_bridge_hello() -> None:
+    cfg = load_config(FVEP_PAGE_CONFIG_PATH)
     hello = DecoderHello(protocol=PROTOCOL, name="bridge", refresh_hz=59.94, waveform="sine",
                          slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in cfg.stim.slots])
     assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform,
@@ -68,11 +101,16 @@ def test_default_config_accepts_a_matching_bridge_hello() -> None:
 
 
 def test_default_intents_load() -> None:
+    """Every fixed list has 3 options, ranked: f-VEP page mode shows 3, c-VEP the first 2."""
     cfg = load_intents()
-    menus = load_config().menus
     assert "yes" in cfg.intent_ids and "no" in cfg.intent_ids  # not parsed as YAML booleans
     for name in ("home", "yes_no", "more"):
-        assert len(cfg.fallback_lists[name]) == menus.option_count
+        assert len(cfg.fallback_lists[name]) == 3
+    for path in (DEFAULT_CONFIG_PATH, FVEP_PAGE_CONFIG_PATH, FVEP_LIST_CONFIG_PATH):
+        menus = load_config(path).menus
+        assert load_intents(option_count=menus.option_count, label_max_chars=menus.label_max_chars,
+                            utterance_max_words=menus.utterance_max_words,
+                            label_max_words=menus.label_max_words)
 
 
 def test_default_profile_loads() -> None:
@@ -196,13 +234,56 @@ INVALID_CONFIGS = [
 ]
 
 
+CODE_SLOTS = [{"slot": "s1", "lag_frames": 0}, {"slot": "s2", "lag_frames": 21},
+              {"slot": "s3", "lag_frames": 42}]
+INVALID_CODE_CONFIGS = [
+    ("no code table", _delete("stim", "code"), "code mode needs"),
+    ("a frequency in code mode", _set("stim", "slots", [{**CODE_SLOTS[0], "freq_hz": 13.0},
+                                                        *CODE_SLOTS[1:]]), "has freq_hz in code mode"),
+    ("a slot without a lag", _set("stim", "slots", [{"slot": "s1"}, *CODE_SLOTS[1:]]), "needs lag_frames"),
+    ("two slots, one lag", _set("stim", "slots", [CODE_SLOTS[0], {**CODE_SLOTS[1], "lag_frames": 42},
+                                                  CODE_SLOTS[2]]), "same lag"),
+    ("a lag past the cycle", _set("stim", "slots", [*CODE_SLOTS[:2], {**CODE_SLOTS[2], "lag_frames": 63}]),
+     "past the 63-frame cycle"),
+    ("training slot not at lag 0", _set("stim", "slots", [{**CODE_SLOTS[0], "lag_frames": 5},
+                                                          *CODE_SLOTS[1:]]), "must lag 0 frames"),
+    ("train timeout under the cycles", _set("train", "timeout_s", 20.0), "train.timeout_s (20)"),
+    ("three options on three slots", _set("menus", "option_count", 3), "needs 3 'option' slot(s), found 2"),
+    ("unknown paradigm", _set("stim", "paradigm", "time"), "paradigm"),
+    ("a lag in freq mode", _set("stim", "paradigm", "freq"), "has lag_frames in freq mode"),
+    ("one training cycle", _set("stim", "code", {"length": 63, "cycle_frames": 63, "train_cycles": 1}),
+     "train_cycles"),
+]
+
+
+@pytest.mark.parametrize(
+    "mutate, expected", [(m, e) for _, m, e in INVALID_CODE_CONFIGS],
+    ids=[n for n, _, _ in INVALID_CODE_CONFIGS]
+)
+def test_invalid_code_config_raises(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], None], expected: str
+) -> None:
+    raw = copy.deepcopy(_raw(DEFAULT_CONFIG_PATH))
+    mutate(raw)
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, raw))
+    assert expected in str(exc.value)
+
+
+def test_a_code_table_in_freq_mode_is_rejected(tmp_path: Path) -> None:
+    raw = _raw(FVEP_PAGE_CONFIG_PATH)
+    raw["stim"]["code"] = {"length": 63, "cycle_frames": 63, "train_cycles": 30}
+    with pytest.raises(ConfigError, match="only for paradigm code"):
+        load_config(_write(tmp_path, raw))
+
+
 @pytest.mark.parametrize(
     "mutate, expected", [(m, e) for _, m, e in INVALID_CONFIGS], ids=[n for n, _, _ in INVALID_CONFIGS]
 )
 def test_invalid_config_raises(
     tmp_path: Path, mutate: Callable[[dict[str, Any]], None], expected: str
 ) -> None:
-    raw = copy.deepcopy(_raw(DEFAULT_CONFIG_PATH))
+    raw = copy.deepcopy(_raw(FVEP_PAGE_CONFIG_PATH))
     mutate(raw)
     with pytest.raises(ConfigError) as exc:
         load_config(_write(tmp_path, raw))
@@ -219,7 +300,7 @@ def test_hedge_and_spares_can_be_turned_off(tmp_path: Path) -> None:
 
 
 def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:
-    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw = _raw(FVEP_PAGE_CONFIG_PATH)
     raw["stim"]["waveform"] = "square"
     raw["stim"]["slots"] = [S1, {**S2, "freq_hz": 10.0}, S3, S4]  # 60 / f is a whole number of frames
     assert load_config(_write(tmp_path, raw)).stim.waveform == "square"
@@ -238,7 +319,7 @@ def test_every_problem_is_listed(tmp_path: Path) -> None:
 
 
 def test_every_cross_field_problem_is_listed(tmp_path: Path) -> None:
-    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw = _raw(FVEP_PAGE_CONFIG_PATH)
     raw["stim"]["waveform"] = "square"
     raw["stim"]["roles"] = {"s1": "option"}
     with pytest.raises(ConfigError) as exc:
@@ -308,7 +389,7 @@ THREE = [_opt(f"Opt {k}") for k in range(3)]
 INVALID_INTENTS = [
     ("missing home", _without_list("home"), "'home' is missing"),
     ("missing yes_no", _without_list("yes_no"), "'yes_no' is missing"),
-    ("too few options", _intents(home=THREE), "needs exactly 4"),
+    ("too few options", _intents(home=THREE), "needs at least 4"),
     ("too many options", _intents(extra=THREE + THREE[:2]), "fallback_lists.extra"),
     ("unknown intent", _intents(home=THREE + [_opt("Hmm", intent_id="ponder")]), "ponder"),
     (
@@ -344,8 +425,10 @@ def test_invalid_intents_raise(tmp_path: Path, data: dict[str, Any], expected: s
 def test_intents_limits_follow_arguments(tmp_path: Path) -> None:
     path = _write(tmp_path, _intents(), "intents.yaml")
     assert load_intents(path, **LIMITS)
-    with pytest.raises(ConfigError, match="needs exactly 3"):
-        load_intents(path, **{**LIMITS, "option_count": 3})
+    # A list may hold more than a page (the page shows the first option_count), not fewer.
+    assert load_intents(path, **{**LIMITS, "option_count": 3})
+    with pytest.raises(ConfigError, match="needs at least 5"):
+        load_intents(path, **{**LIMITS, "option_count": 5})
 
 
 # ---------------------------------------------------------------------------

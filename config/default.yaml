@@ -1,4 +1,6 @@
 # BCI Voice: every tunable number for the voice + UI side (PLAN.md section 5).
+# c-VEP by default: 3 targets, 2 options + NEXT (docs/CVEP-STANDARD.md section 5). The f-VEP
+# fallbacks: config/fvep_page.yaml (4 targets) and config/fvep_list.yaml (2 targets).
 # Loaded and validated by app/config.py; unknown keys are an error, so typos fail loudly.
 
 server:
@@ -11,37 +13,42 @@ display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
 
 stim:
-  # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.
-  # Page mode: a diamond, s1 top, s2 left, s3 right, s4 bottom (PLAN.md section 14, 4-target gate).
-  # All four sit clear of the user's alpha (9.25 Hz) and the 18-21 Hz venue interference.
-  # NEXT sits on 11 Hz, the lowest (nearest alpha), so the likeliest error only turns a page.
-  # List-mode fallback: s1 15 Hz (say) and s2 17 Hz (next) only.
+  paradigm: code               # c-VEP (docs/CVEP-STANDARD.md); f-VEP fallbacks: config/fvep_*.yaml
+  # The c-VEP standard: three white squares in a row (left, middle, right), one 63-bit
+  # m-sequence, square k delayed by k x 21 frames (350 ms at 60 Hz). The bridge's hello must
+  # match (brainsync.voice_bridge, stimulus config voice_cvep3). Option 1 on s1 (left, the
+  # training square), option 2 on s2 (middle), NEXT on s3 (right). Confirm: Say it on s1, Back on s3.
   slots:
-    - {slot: s1, freq_hz: 13.0, phase_deg: 0}
-    - {slot: s2, freq_hz: 15.0, phase_deg: 0}
-    - {slot: s3, freq_hz: 17.0, phase_deg: 0}
-    - {slot: s4, freq_hz: 11.0, phase_deg: 0}
+    - {slot: s1, lag_frames: 0}
+    - {slot: s2, lag_frames: 21}
+    - {slot: s3, lag_frames: 42}
   roles:                       # page mode: option_count "option" slots + one "next"
     s1: option
     s2: option
-    s3: option
-    s4: next
+    s3: next
   confirm:                     # page mode's confirm screen: only these two flicker
     say: s1                    # "Say it"
-    back: s4                   # "Back"
-  waveform: sine               # sine or square; 17 Hz does not divide 60 Hz, so square is rejected
+    back: s3                   # "Back"
+  code:
+    length: 63                 # bits in one m-sequence period
+    cycle_frames: 63           # one bit per frame: 1.05 s per cycle at 60 Hz
+    train_cycles: 30           # recorded on s1 at the start of a session (about 32 s)
   cue_s: 1.0                   # option shown, no flicker, before each trial
-  max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (decoder needs about 5 s)
+  max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (c-VEP commits after about 2.6 s)
   rest_s: 1.0                  # still screen after a trial
 
-baseline:
+baseline:                      # f-VEP only (code mode trains instead); keyboard mode's still screen
   seconds: 10.0                # still screen at start for the decoder's resting baseline
   timeout_s: 15.0              # no baseline_done from the bridge by then -> pause
 
+train:                         # code mode, in place of the baseline: train the template on s1
+  label: left                  # "Look at the left square"
+  timeout_s: 60.0              # no trained from the bridge by then -> pause (30 cycles take 32 s)
+
 menus:
-  mode: page                   # page: 3 options + NEXT, each on its own target; list: SAY / NEXT fallback
+  mode: page                   # page: 2 options + NEXT, each on its own target (list: fvep_list.yaml)
   dynamic: true                # false = fallback lists from intents.yaml only
-  option_count: 3              # ranked options per page, most likely first (one per option slot)
+  option_count: 2              # ranked options per page, most likely first (one per option slot)
   spare_options: 1             # extra candidates Claude writes, ranked last (0-3): one fills the page
                                # when an option is invalid or repeats one already shown
   label_max_chars: 18

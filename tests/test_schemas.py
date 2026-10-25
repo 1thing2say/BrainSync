@@ -51,6 +51,16 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     (s.StimStart(trial_id=5, active_slots=["s1", "s2"]), s.parse_server_to_decoder),
     (s.StimStop(trial_id=5, reason="no_selection"), s.parse_server_to_decoder),
     (s.Pause(reason="stop_button"), s.parse_server_to_decoder),
+    # Code mode (draft section 9)
+    (s.Train(train_id=3, slot="s1", label="left", cycles=30, retrain=True), s.parse_server_to_decoder),
+    (s.TrainProgress(train_id=3, cycle=12, of=30), s.parse_decoder_to_server),
+    (s.Trained(train_id=3, ok=True, accuracy=0.83, chance=0.333, cycles=30), s.parse_decoder_to_server),
+    (s.Trained(train_id=3, ok=False, message="interrupted"), s.parse_decoder_to_server),
+    (s.Decision(trial_id=42, scores={"s1": 0.42, "s2": 0.11, "s3": -0.03}, raw="s1", lead=0.31),
+     s.parse_decoder_to_server),
+    (s.DecoderHello(protocol=2, name="brainsync-cvep", paradigm="code", refresh_hz=60.0,
+                    slots=[s.SlotSpec(slot="s1", lag_frames=0), s.SlotSpec(slot="s2", lag_frames=21)],
+                    code=s.CodeParams(length=63, cycle_frames=63)), s.parse_decoder_to_server),
     # server -> browser
     (
         s.ShowPage(
@@ -90,6 +100,11 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     ),
     (s.Trial(trial_id=7, phase="flicker"), s.parse_server_to_ui),
     (s.Trial(trial_id=7, phase="paused"), s.parse_server_to_ui),
+    (s.Trial(trial_id=7, phase="train"), s.parse_server_to_ui),
+    (s.Training(slot="s1", label="left", cycle=12, of=30), s.parse_server_to_ui),
+    (s.Training(slot="s1", label="left", cycle=30, of=30, accuracy=0.83, chance=0.333), s.parse_server_to_ui),
+    (s.Confidence(trial_id=4, scores={"s1": 0.42, "s2": 0.1}, raw="s1", committed="s1", lead=0.32),
+     s.parse_server_to_ui),
     (s.Highlight(slot="s2"), s.parse_server_to_ui),
     (s.Speak(text="Yes, let's go outside.", utterance_id="u1"), s.parse_server_to_ui),
     (s.Listen(seconds=10.0, delay_s=0.5, reason="turn"), s.parse_server_to_ui),
@@ -153,14 +168,17 @@ def test_display_sends_only_the_fields_that_were_set() -> None:
 # Every JSON example in the v2 draft, read from the document itself so the tests follow it.
 DRAFT = (REPO_ROOT / "INTERFACE-v2-draft.md").read_text()
 DRAFT_EXAMPLES = re.findall(r"```json\n(.*?)```", DRAFT, re.S)
-DECODER_TYPES = {"hello", "stim_onset", "selection", "no_selection", "baseline_done", "status"}
+DECODER_TYPES = {"hello", "stim_onset", "selection", "no_selection", "baseline_done", "status",
+                 "train_progress", "trained", "decision"}
 
 
 def test_draft_has_all_its_examples() -> None:
     types = [json.loads(raw)["type"] for raw in DRAFT_EXAMPLES]
-    assert len(types) == 13  # two display examples: a page and the confirm screen
+    # two display examples (a page and the confirm screen), two hellos (freq, and code in
+    # section 9 with train, train_progress, trained and decision)
+    assert len(types) == 18
     assert set(types) == DECODER_TYPES | {
-        "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause"
+        "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause", "train"
     }
 
 
@@ -426,3 +444,87 @@ def test_invalid_mic_messages(parse, raw):
 ])
 def test_is_fake_name(name: str, fake: bool) -> None:
     assert s.is_fake_name(name) is fake
+
+
+# ---------------------------------------------------------------------------
+# Code mode (draft section 9): the code hello, train / trained, decision
+# ---------------------------------------------------------------------------
+
+CODE_SLOTS = [s.SlotSpec(slot="s1", lag_frames=0), s.SlotSpec(slot="s2", lag_frames=21),
+              s.SlotSpec(slot="s3", lag_frames=42)]
+CODE = s.CodeParams(length=63, cycle_frames=63, train_cycles=30)
+
+
+def code_hello(**changes) -> s.DecoderHello:
+    fields = dict(protocol=2, name="brainsync-cvep", paradigm="code", refresh_hz=59.94,
+                  slots=CODE_SLOTS, code=CODE)
+    fields.update(changes)
+    return s.DecoderHello(**fields)
+
+
+def test_a_hello_without_paradigm_is_freq_and_its_slots_are_sent_as_before() -> None:
+    msg = s.parse_decoder_to_server(V2_HELLO)
+    assert msg.paradigm == "freq" and msg.code is None
+    assert json.loads(s.to_json(msg))["slots"][0] == {"slot": "s1", "freq_hz": 15.0, "phase_deg": 0.0}
+    code = json.loads(s.to_json(code_hello()))
+    assert code["slots"][1] == {"slot": "s2", "lag_frames": 21} and code["waveform"] is None
+
+
+@pytest.mark.parametrize("raw, fragment", [
+    ({**V2_HELLO, "waveform": None}, "needs waveform"),
+    ({**V2_HELLO, "slots": [{"slot": "s1", "lag_frames": 0}]}, "freq_hz on every slot"),
+    ({"type": "hello", "protocol": 2, "name": "x", "paradigm": "code", "refresh_hz": 60,
+      "slots": [{"slot": "s1", "lag_frames": 0}]}, "needs code"),
+    ({"type": "hello", "protocol": 2, "name": "x", "paradigm": "code", "refresh_hz": 60,
+      "code": {"length": 63, "cycle_frames": 63}, "slots": [{"slot": "s1", "freq_hz": 13}]},
+     "lag_frames on every slot"),
+    ({**V2_HELLO, "paradigm": "time"}, "paradigm"),
+], ids=["freq without waveform", "freq with lags", "code without code", "code with freqs",
+        "unknown paradigm"])
+def test_a_hello_must_fit_its_paradigm(raw, fragment) -> None:
+    with pytest.raises(ValidationError, match=fragment):
+        s.parse_decoder_to_server(raw)
+
+
+@pytest.mark.parametrize("parse, raw", [
+    (s.parse_server_to_decoder, {"type": "train", "train_id": 1, "slot": "s1", "cycles": 1}),
+    (s.parse_server_to_decoder, {"type": "train", "train_id": 1, "slot": "x1"}),
+    (s.parse_decoder_to_server, {"type": "train_progress", "train_id": 1, "cycle": 3, "of": 0}),
+    (s.parse_decoder_to_server, {"type": "trained", "train_id": 1, "ok": True, "accuracy": 1.5}),
+    (s.parse_decoder_to_server, {"type": "decision", "trial_id": 1, "scores": {"s1": "high"}}),
+    (s.parse_decoder_to_server, {"type": "decision", "trial_id": 1, "scores": {"s1": 0.1},
+                                 "raw": "left"}),
+    (s.parse_server_to_ui, {"type": "training", "slot": "s1", "cycle": 1, "of": 0}),
+    (s.parse_server_to_ui, {"type": "confidence", "trial_id": 1}),
+    (s.parse_decoder_to_server, {"type": "train", "train_id": 1, "slot": "s1"}),  # wrong way
+], ids=["one cycle", "bad slot", "of zero", "accuracy over 1", "text score", "bad raw slot",
+        "training of zero", "confidence without scores", "train from the bridge"])
+def test_invalid_code_messages_raise(parse, raw) -> None:
+    with pytest.raises(ValidationError):
+        parse(raw)
+
+
+@pytest.mark.parametrize(("changes", "expect"), [
+    ({}, []),
+    ({"slots": list(reversed(CODE_SLOTS))}, []),  # order does not matter
+    ({"refresh_hz": 120.0}, ["refresh is 120 Hz"]),
+    ({"slots": [*CODE_SLOTS[:2], s.SlotSpec(slot="s3", lag_frames=40)]}, ["s3 lags 40 frames, expected 42"]),
+    ({"slots": CODE_SLOTS[:2]}, ["slots ['s1', 's2'], expected ['s1', 's2', 's3']"]),
+    ({"code": s.CodeParams(length=127, cycle_frames=127)},
+     ["code length 127, expected 63", "code cycle_frames 127, expected 63"]),
+    ({"code": s.CodeParams(length=63, cycle_frames=63, train_cycles=12)}, []),  # the bridge's call
+])
+def test_code_hello_problems(changes: dict, expect: list[str]) -> None:
+    problems = s.hello_problems(code_hello(**changes), CODE_SLOTS, "sine", 60.0, paradigm="code",
+                                code=CODE)
+    assert len(problems) == len(expect), problems
+    for problem, fragment in zip(problems, expect):
+        assert fragment in problem
+
+
+def test_a_hello_of_the_other_paradigm_names_the_config_to_use() -> None:
+    (problem,) = s.hello_problems(code_hello(), SLOTS, "sine", 60.0)  # a freq server
+    assert problem == ("paradigm code, this server runs freq (start it with --config "
+                       "config/default.yaml)")
+    (problem,) = s.hello_problems(hello(), CODE_SLOTS, "sine", 60.0, paradigm="code", code=CODE)
+    assert "start it with --config config/fvep_page.yaml" in problem

@@ -1,6 +1,7 @@
 # Allowed intents for LLM options, plus fallback option lists used when the LLM is slow,
-# down or returns something invalid. Each fallback list has exactly menus.option_count options (one page),
-# ranked most likely first, written in the first person as the user.
+# down or returns something invalid. Each fallback list has at least menus.option_count options (a page
+# shows the first option_count: 2 in c-VEP, 3 in f-VEP page mode), ranked most likely first, written
+# in the first person as the user.
 
 # "yes" and "no" are quoted: unquoted, YAML reads them as booleans.
 intents:

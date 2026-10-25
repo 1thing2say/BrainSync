@@ -1,0 +1,99 @@
+# BCI Voice, f-VEP page mode (the fallback): 4 frequency-coded targets, 3 options + NEXT.
+# python -m app.server --config config/fvep_page.yaml. The teammate's protocol-2 bridge and
+# brainsync.voice_bridge --paradigm freq speak this. The default (config/default.yaml) is c-VEP.
+# Loaded and validated by app/config.py; unknown keys are an error, so typos fail loudly.
+
+server:
+  host: 127.0.0.1              # 0.0.0.0 later for a phone or the Jetson
+  port: 8000
+  tunnel_wait_s: 30.0          # --tunnel: how long to wait for cloudflared's address (the server
+                               # listens meanwhile)
+
+display:
+  expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
+
+stim:
+  paradigm: freq               # f-VEP: each slot flickers at its own frequency
+  # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.
+  # Page mode: a diamond, s1 top, s2 left, s3 right, s4 bottom (PLAN.md section 14, 4-target gate).
+  # All four sit clear of the user's alpha (9.25 Hz) and the 18-21 Hz venue interference.
+  # NEXT sits on 11 Hz, the lowest (nearest alpha), so the likeliest error only turns a page.
+  # List-mode fallback: s1 15 Hz (say) and s2 17 Hz (next) only.
+  slots:
+    - {slot: s1, freq_hz: 13.0, phase_deg: 0}
+    - {slot: s2, freq_hz: 15.0, phase_deg: 0}
+    - {slot: s3, freq_hz: 17.0, phase_deg: 0}
+    - {slot: s4, freq_hz: 11.0, phase_deg: 0}
+  roles:                       # page mode: option_count "option" slots + one "next"
+    s1: option
+    s2: option
+    s3: option
+    s4: next
+  confirm:                     # page mode's confirm screen: only these two flicker
+    say: s1                    # "Say it"
+    back: s4                   # "Back"
+  waveform: sine               # sine or square; 17 Hz does not divide 60 Hz, so square is rejected
+  cue_s: 1.0                   # option shown, no flicker, before each trial
+  max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (decoder needs about 5 s)
+  rest_s: 1.0                  # still screen after a trial
+
+baseline:
+  seconds: 10.0                # still screen at start for the decoder's resting baseline
+  timeout_s: 15.0              # no baseline_done from the bridge by then -> pause
+
+menus:
+  mode: page                   # page: 3 options + NEXT, each on its own target; list: SAY / NEXT fallback
+  dynamic: true                # false = fallback lists from intents.yaml only
+  option_count: 3              # ranked options per page, most likely first (one per option slot)
+  spare_options: 1             # extra candidates Claude writes, ranked last (0-3): one fills the page
+                               # when an option is invalid or repeats one already shown
+  label_max_chars: 18
+  label_max_words: 3
+  utterance_max_words: 14
+
+llm:
+  model: claude-haiku-5-5
+  timeout_s: 4.0               # all calls of a page (first, hedge, retry) in this time, then fallback list
+  hedge_after_s: 2.5           # no answer by then -> a second, identical call; the first good answer
+                               # wins. Good pages took 1.9 s median, 3.4 s max (2026-10-24); 0 = off
+  keepalive_s: 20.0            # while idle, a free API call this often keeps the connection open; 0 = off
+
+context:
+  history_turns: 8             # partner + user turns sent to the LLM
+
+speech:
+  provider: cartesia           # cartesia, or browser (speechSynthesis only); key from .env CARTESIA_API_KEY
+  voice_id: 47c38ca4-5f35-497b-b1a3-415245fb35e1   # Cartesia voice
+  model: sonic-3.5             # pinned; never sonic-latest
+  api_version: "2026-03-01"    # Cartesia-Version header
+  language: en
+  format: mp3                  # mp3 (about 17 KB a sentence) or wav (pcm_s16le, about 180 KB at
+                               # 44.1 kHz); venue Wi-Fi slowed to ~30 KB/s at times (2026-10-24)
+  sample_rate: 22050
+  bit_rate: 64000              # mp3 only
+  cache_dir: cache/tts         # clips kept on disk (gitignored): they survive a restart, and the
+                               # fixed lists are pre-generated (python tools/prerender_tts.py)
+  tts_timeout_s: 8.0           # per clip, once sent; slower or failed -> the browser speaks it.
+                               # A clip is needed >= 13 s after its page appears; venue Wi-Fi alone
+                               # took 1-3 s per request (2026-10-24), so 2 s timed every clip out.
+  max_concurrent: 2            # Cartesia plan limit (HTTP 429 concurrency_limited above it)
+  tts_rate: 1.0                # speechSynthesis fallback only
+  stt_mode: always             # always: the mic listens the whole session, hands-free, except while
+                               # a reply plays, paused, idle or muted; turn: listen_window_s at the
+                               # start and after each reply; push_to_talk: only the Listen button
+  listen_window_s: 10.0        # turn mode, and the Listen button while paused
+  stt_tail_s: 0.5              # wait after a reply ends before listening (raise to ~0.8 for a
+                               # Bluetooth speaker), so it never hears itself
+  stt_interrupts: question     # question: a spoken question may stop a page trial (never a pick in
+                               # progress); never: every spoken line waits for the next cue.
+                               # Typed text always interrupts
+  stt_interrupt_cooldown_s: 20.0  # at most one spoken interrupt in this time; 0 = no limit
+  stt_gap_s: 1.2               # silence that ends a partner line
+  stt_max_line_s: 15.0         # a line is sent after this long even if the partner keeps talking
+  stt_echo_s: 4.0              # lines heard this soon after the mic reopens are checked for echo
+  start_muted: false           # true = the session starts with the mic muted
+  max_speak_s: 15.0            # move on if the browser never reports tts_done (no page open)
+
+selection:
+  confirm_mode: always         # always in page mode (a wrong pick is never spoken); never in list mode
+  chosen_highlight_s: 0.6      # how long the picked target stays highlighted
