@@ -138,7 +138,7 @@ def test_missing_config_exits_2(capsys):
 
 BASE = load_config()
 CHECK_CFG = BASE.model_copy(update={
-    "stim": BASE.stim.model_copy(update={"cue_s": 0.02, "rest_s": 0.02, "max_trial_s": 6.0}),
+    "stim": BASE.stim.model_copy(update={"cue_s": 0.02, "read_s_per_word": 0.0, "confirm_cue_s": 0.02, "rest_s": 0.02, "max_trial_s": 6.0}),
 })
 
 

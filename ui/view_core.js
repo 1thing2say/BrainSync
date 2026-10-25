@@ -1,10 +1,10 @@
-// What the partner page shows, as pure functions of the server's messages: the status banner, the
+// What the session page shows, as pure functions of the server's messages: the state line, the
 // one-line health summary, the mic card and the selection progress. Pure, so node can test it
 // (tests/js/view_core.test.js); app.js only puts the results on the page. Loaded before app.js.
 "use strict";
 
 const ViewCore = (() => {
-  // The banner over the mirror: what the user is doing now, and its tone (a colour in style.css).
+  // The state line: what the user is doing now, and its tone (a colour in style.css).
   const BANNER = {
     IDLE: ["Waiting to start", "idle"],
     BASELINE: ["Baseline: keep still", "idle"],
@@ -28,6 +28,16 @@ const ViewCore = (() => {
     return { text, tone };
   }
 
+  // On the page the state line sits in the still centre of the diamond and says something only
+  // when the user is not picking: while they read, look, confirm or hear the reply it is empty,
+  // so nothing new appears between the targets.
+  const QUIET = new Set(["MENU_CUE", "STIMULATING", "CONFIRMING", "SELECTED", "SPEAKING", "REST"]);
+
+  function status(name, detail, mode) {
+    const b = banner(name, detail, mode);
+    return QUIET.has(name) ? { text: "", tone: b.tone } : b;
+  }
+
   const MIC_PROBLEMS = new Set(["denied", "nomic", "offline", "unsupported", "error", "needs_tap", "hidden"]);
   // The mic card: a short title, the detail line and a tone. ``state`` comes from the listener
   // (ui/listen_core.js), ``text`` is what it heard so far (shown while the partner talks).
@@ -43,11 +53,11 @@ const ViewCore = (() => {
     disconnected: ["Mic off", "The server is not connected."],
     needs_tap: ["Tap to start the mic", "Chrome wants a tap first: tap anywhere."],
     hidden: ["Keep this tab visible", "Listening may pause while the tab is hidden."],
-    denied: ["Microphone blocked", "Allow it in Chrome's address bar, then tap Restart mic. Typing works."],
-    nomic: ["No microphone", "Plug the lapel mic in. Typing works."],
-    offline: ["Speech recognition offline", "Retrying. Typing works."],
-    unsupported: ["No speech recognition", "Use Chrome. Typing works."],
-    error: ["Speech recognition failed", "Tap Restart mic, or type below."],
+    denied: ["Microphone blocked", "Allow it in Chrome's address bar, then tap Restart mic."],
+    nomic: ["No microphone", "Plug the lapel mic in."],
+    offline: ["Speech recognition offline", "Retrying."],
+    unsupported: ["No speech recognition", "Use Chrome."],
+    error: ["Speech recognition failed", "Tap Restart mic."],
   };
 
   function micCard(state, text, muted) {
@@ -95,7 +105,7 @@ const ViewCore = (() => {
     return { fraction, label: `${Math.floor(t)} s` };
   }
 
-  return { banner, micCard, health, progress, MIC_PROBLEMS };
+  return { banner, status, micCard, health, progress, MIC_PROBLEMS };
 })();
 
 if (typeof module !== "undefined") module.exports = ViewCore;

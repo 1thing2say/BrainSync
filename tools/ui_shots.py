@@ -68,49 +68,49 @@ def trial(phase: str) -> dict:
     return {"type": "trial", "trial_id": 5, "phase": phase}
 
 
-# name -> (window width, height, server messages, mic card (state, words), open the health details)
-STATES: dict[str, tuple[int, int, list[dict], tuple[str, str], bool]] = {
+# name -> (window width, height, server messages, mic card (state, words))
+STATES: dict[str, tuple[int, int, list[dict], tuple[str, str]]] = {
     "page": (1440, 900, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-             ("listening", ""), False),
+             ("listening", "")),
     "page-laptop": (1366, 768, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-                    ("listening", "do you want to go"), False),
+                    ("listening", "do you want to go")),
     "picked": (1440, 900, [READY, *TALK, PAGE, state("SELECTED"), trial("rest"),
-                           {"type": "highlight", "slot": "s1"}], ("listening", ""), False),
+                           {"type": "highlight", "slot": "s1"}], ("listening", "")),
     "confirm": (1440, 900, [READY, *TALK, CONFIRM, state("CONFIRMING"), trial("flicker")],
-                ("listening", ""), False),
+                ("listening", "")),
     "speaking": (1440, 900, [READY, *TALK, CONFIRM, state("SPEAKING", "Yes, let's go outside."),
-                             trial("rest")], ("speaking", ""), False),
+                             trial("rest")], ("speaking", "")),
     "problems": (1440, 900, [{**READY, "decoder_connected": False, "decoder_ok": False,
                               "display_ok": False, "board_ok": False, "llm_ok": False, "llm": "failed",
                               "decoder_name": "", "mic": "denied", "resume_ready": True},
                              *TALK, PAGE, state("PAUSED", "Decoder disconnected")],
-                 ("denied", ""), True),
+                 ("denied", "")),
     "fake": (1440, 900, [{**READY, "fake_decoder": True, "decoder_name": "fake-decoder"}, *TALK, PAGE,
-                         state("STIMULATING"), trial("flicker")], ("muted", ""), False),
+                         state("STIMULATING"), trial("flicker")], ("muted", "")),
     "list": (1440, 900, [READY, *TALK, LIST, state("STIMULATING"), trial("flicker")],
-             ("listening", ""), False),
+             ("listening", "")),
     # A 1366 x 768 laptop once the browser's bars take their part: a long talk, a reply being
     # spoken and the phone links must still fit without a page scroll.
     "laptop-busy": (1366, 650, [READY, *LONG_TALK, CONFIRM, state("SPEAKING", "Yes, let's go outside."),
-                                trial("rest")], ("speaking", ""), False),
+                                trial("rest")], ("speaking", "")),
     # A small laptop window: the diamond's side targets must stay inside their thirds of the mirror.
     "laptop-narrow": (1024, 768, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-                      ("listening", ""), False),
+                      ("listening", "")),
     # A tablet or narrow window (one column): Stop in the bar fixed at the bottom.
     "tablet": (800, 700, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-               ("listening", ""), False),
+               ("listening", "")),
     # Headless Chrome on Windows lays out no narrower than about 510 px; 520 is still a phone
     # (the 600 px breakpoint in style.css).
     "phone": (520, 960, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-              ("listening", "do you want"), False),
+              ("listening", "do you want")),
     # Tall enough to show the mirror under the partner's part: the page as a list of phrase cards,
     # and the confirm screen's Say it and Back side by side.
     "phone-page": (520, 1400, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
-                   ("listening", ""), False),
+                   ("listening", "")),
     "phone-confirm": (520, 1300, [READY, *TALK, CONFIRM, state("CONFIRMING"), trial("flicker")],
-                      ("listening", ""), False),
+                      ("listening", "")),
     # The flicker warning, as it opens before the first trial.
-    "warning": (1440, 900, [READY, *TALK, PAGE, state("IDLE")], ("idle", ""), False),
+    "warning": (1440, 900, [READY, *TALK, PAGE, state("IDLE")], ("idle", "")),
 }
 # States that keep the flicker warning open (the others close it, as after the start tap).
 WARNING_STATES = {"warning"}
@@ -128,7 +128,7 @@ STATE_CONFIG: dict[str, dict] = {
 
 def harness(name: str, base_url: str) -> str:
     """ui/index.html with a stand-in WebSocket and /api/config that play ``name``'s messages."""
-    _, _, messages, (mic_state, mic_words), details = STATES[name]
+    _, _, messages, (mic_state, mic_words) = STATES[name]
     if mic_state == "muted":
         messages = [*messages, {"type": "listen", "seconds": 0, "delay_s": 0, "until_stopped": False,
                                 "muted": True, "reason": "muted"}]
@@ -152,7 +152,6 @@ window.WebSocket = ShotSocket;
     postlude = f"""<script>
 setTimeout(() => {{
   micState = {json.dumps(mic_state)}; micText = {json.dumps(mic_words)}; renderMic();
-  if ({json.dumps(details)}) document.getElementById("health").click();
 }}, 60);
 </script>"""
     page = (UI_DIR / "index.html").read_text(encoding="utf-8")
