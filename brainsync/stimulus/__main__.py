@@ -13,14 +13,16 @@
 
 Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>" (a [code] or
 [time] config adds cycle:<n> on each m-sequence cycle's first frame and flash:<k> on each
-flash onset), printed and flushed right after the flip that shows the event. Once the window is up and its measured
-refresh has passed the check against [display] refresh_hz (or --refresh auto adopted it),
-"measured refresh: <x> Hz" goes to stderr; a refused rate exits with code 2 before that
-line. Space starts, Escape quits.
+flash onset; a free run adds one "free_on" on its first flicker frame, the onset a
+phase-locked decoder needs), printed and flushed right after the flip that shows the event.
+Once the window is up and its measured refresh has passed the check against [display]
+refresh_hz (or --refresh auto adopted it), "measured refresh: <x> Hz" goes to stderr; a
+refused rate exits with code 2 before that line. Space starts, Escape quits.
 
 With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card between
 the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
-lights target k's box (see brainsync.stimulus.feedback).
+lights target k's box (see brainsync.stimulus.feedback). Any free run with --feedback stdin
+also takes "lean <k> <percent> <n> <m>" lines: the decoder's lean meter.
 
 A bridge drives the free run with JSON lines on stdin next to the integer ones
 (brainsync.stimulus.feedback): {"labels": [...]} puts a sentence beside each square,
@@ -297,6 +299,7 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                 frames = free_frames(cfg, args.seconds, cue=cue, stop=stop, hold=hold,
                                      card=card,
                                      flash=None if reader is None else (lambda: reader.flash),
+                                     lean=None if reader is None else (lambda: reader.lean),
                                      control=control)
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)

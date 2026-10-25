@@ -155,6 +155,7 @@ class Decision:
     gap: float = 0.0
     level: float = 0.0
     offset_s: float = math.nan   # window start in seconds after the onset; nan without one
+    locked: bool = False   # scored with the templates locked to the flicker onset's phase
 
 
 class Voter:
@@ -183,18 +184,32 @@ class Voter:
 
 
 class Decoder:
-    """Sliding-window decoder over board data (rows named by ``ch_names``)."""
+    """Sliding-window decoder over board data (rows named by ``ch_names``).
+
+    With ``lock`` the classifier (a trained brainsync.trca.TRCA, "trca-phase") scores each
+    window with its templates locked to the flicker's phase, once ``onset`` holds the unix
+    time of the first flickering frame (set_onset, the same clock the offset-scored
+    classifiers use; the demo takes it from the display's ``free_on`` marker): the phase is
+    2 pi f (offset - latency) per target. Until then windows are scored phase-free and
+    ``Decision.locked`` is False. The rest baseline of a locking decoder is fitted at random
+    phases (fit_rest), what noise scores under a lock.
+    """
 
     def __init__(self, classifier: CCA, fs: float, window_s: float = 4.0, step_s: float = 0.5,
                  votes: int = 3, channels: Sequence[str | int] | None = POSTERIOR,
                  pad_s: float = 2.0, band: Band | None = (1.0, 100.0), notch_hz: float = 60.0,
                  ch_names: Sequence[str] = MONTAGE,
-                 prior: Callable[[], np.ndarray | None] | None = None) -> None:
+                 prior: Callable[[], np.ndarray | None] | None = None,
+                 lock: bool = False) -> None:
         self.fs = float(fs)
         if not np.isfinite(self.fs) or self.fs <= 0:
             raise ValueError(f"fs must be positive, got {fs}")
         if abs(classifier.fs - self.fs) > 1e-6:
             raise ValueError(f"classifier runs at {classifier.fs} Hz but the decoder at {self.fs} Hz")
+        if lock and not callable(getattr(classifier, "phase_offsets", None)):
+            raise ValueError(f"lock needs a trained TRCA model, not {classifier.name}: "
+                             f"only its templates have a phase to lock")
+        self.lock = bool(lock)
         for name, value in (("window_s", window_s), ("step_s", step_s)):
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
@@ -351,13 +366,18 @@ class Decoder:
             return None
         return self._score()
 
+    def window_start(self) -> float:
+        """Unix time of the newest window's first sample (after the pad)."""
+        return float(self._times.last(self.n_window)[0, 0])
+
     def _score(self) -> Decision:
         window = self.prepare(self._data.last(self.needed))
         offset = math.nan
         if self.onset is not None:
-            offset = float(self._times.last(self.n_window)[0, 0]) - self.onset
+            offset = self.window_start() - self.onset
         clf = self.classifier
         covers = getattr(clf, "covers", None)
+        locked = self.lock and self.onset is not None
         if self.needs_onset and (math.isnan(offset)
                                  or (covers is not None and not covers(self.n_window, offset))):
             # templates cannot be placed: no onset yet, or a raw template that does not
@@ -366,8 +386,13 @@ class Decoder:
             scores = np.zeros((1, clf.n_targets))
             gap = level = 0.0
         else:
-            # an offset only for classifiers that use it: one that ignores it keeps its default
-            scores = clf.scores(window, offset) if self.needs_onset else clf.scores(window)
+            if locked:
+                # brainsync.trca's TRCA: each template at the phase the flicker has reached
+                scores = clf.scores(window, offset, psi=clf.phase_offsets(offset))
+            else:
+                # an offset only for classifiers that use it: one that ignores it keeps its
+                # default
+                scores = clf.scores(window, offset) if self.needs_onset else clf.scores(window)
             bonus = None if self.prior is None else self.prior()
             if bonus is not None:
                 bonus = np.asarray(bonus, dtype=float).reshape(-1)
@@ -382,7 +407,7 @@ class Decoder:
         changed = self.voter.push(raw)
         return Decision(time=float(self._times.last(1)[0, 0]), scores=scores[0], raw=raw,
                         committed=self.committed, changed=changed, end=self.n_seen, gap=gap,
-                        level=level, offset_s=offset)
+                        level=level, offset_s=offset, locked=locked)
 
 
 # -- calibration -----------------------------------------------------------------------
@@ -412,7 +437,10 @@ def fit_rest(decoder: Decoder, windows: np.ndarray, reject: float = REJECT_FACTO
         raise ValueError(f"only {int(keep.sum())} of {windows.shape[0]} still windows passed "
                          f"artifact rejection (factor {reject})")
     clf = decoder.classifier
-    clf.fit_baseline(windows[keep])
+    if decoder.lock:
+        clf.fit_baseline(windows[keep], locked=True)
+    else:
+        clf.fit_baseline(windows[keep])
     return Calibration(int(keep.sum()), int((~keep).sum()), clf.baseline_mean.copy(),
                        float(clf.baseline_spread))
 
@@ -706,7 +734,7 @@ def _relabel(decisions: list[Decision], margin: float, votes: int,
         raw = int(np.argmax(d.scores)) if keep else ABSTAIN
         changed = voter.push(raw)
         out.append(Decision(d.time, d.scores, raw, voter.committed, changed, d.end, d.gap,
-                            d.level, d.offset_s))
+                            d.level, d.offset_s, d.locked))
     return out
 
 

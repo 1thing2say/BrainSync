@@ -19,7 +19,7 @@ import pytest
 
 from brainsync.stimulus import __main__ as cli
 from brainsync.stimulus.config import load_config, parse_config
-from brainsync.stimulus.display import (FLICKER_OFF, FLICKER_ON, MarkerWriter, TextBox,
+from brainsync.stimulus.display import (FLICKER_OFF, FLICKER_ON, FREE_ON, MarkerWriter, TextBox,
                                         free_frames, play, text_boxes, text_overlaps)
 from brainsync.stimulus.feedback import (CONTROL, Command, Control, FeedbackReader,
                                          apply_control, initial_control, parse_command)
@@ -221,13 +221,17 @@ def test_integer_only_decoder_keeps_the_old_hold_still():
     for i, fr in enumerate(frames[3:]):
         np.testing.assert_array_equal(
             fr.lum, frame_luminances(cfg.freqs, cfg.phases, i, cfg.refresh, cfg.waveform))
-        assert fr.events == () and fr.cue == 1
+        # the legacy free run marks only its first flicker frame: "free_on", the onset a
+        # phase-locked decoder reads (never "flicker_on", which is the JSON lines' marker)
+        assert fr.events == ((FREE_ON,) if i == 0 else ()) and fr.cue == 1
 
 
 def test_a_json_line_stops_a_flicker_started_by_an_integer_line():
     cfg = _diamond()
     frames = _frames(cfg, {4: {"labels": ["", "", "", ""]}}, 8)
-    assert [fr.events for fr in frames] == [()] * 4 + [(FLICKER_OFF,)] + [()] * 3
+    # the integer-started flicker's first frame is marked free_on (the legacy onset)
+    assert [fr.events for fr in frames] == \
+        [(FREE_ON,)] + [()] * 3 + [(FLICKER_OFF,)] + [()] * 3
     still = frame_luminances(cfg.freqs, cfg.phases, 0, cfg.refresh, cfg.waveform)
     for fr in frames[4:]:
         np.testing.assert_array_equal(fr.lum, still)

@@ -655,6 +655,11 @@ TRAINED = ("itcca", "ecca", "trca", "etrca", "etrcar", "sfcca")   # brainsync.te
 SPATIAL_FILTERS = ("trca-sf", "trca-r-sf", "etrca-sf", "etrca-r-sf", "mscca")   # Trained, above
 NAMES = TRAINING_FREE + TRAINED + SPATIAL_FILTERS
 METHODS = NAMES
+# brainsync.trca's TRCA, phase-locked to the flicker with --lock (demo --classifier
+# trca-phase): trained and saved by brainsync.train, loaded by brainsync.trca.load_model,
+# never built by make(), so it is not in NAMES (what score_cued, nakanishi, calibrate and
+# online build and fit themselves)
+PHASE_LOCKED = ("trca-phase",)
 
 _SPATIAL: dict[str, tuple[type[Trained], dict]] = {
     "trca-sf": (TRCA, {}), "trca-r-sf": (TRCA, {"reference": True}),
@@ -668,10 +673,10 @@ def _key(name: str) -> str:
 
 
 def is_trained(name: str) -> bool:
-    """True for classifiers that need ``fit`` on labelled trials before scoring (either
-    family: ``TRAINED`` from brainsync.templates or the ``SPATIAL_FILTERS`` here)."""
+    """True for classifiers that need ``fit`` on labelled trials before scoring: ``TRAINED``
+    from brainsync.templates, the ``SPATIAL_FILTERS`` here and ``PHASE_LOCKED``."""
     key = _key(name)
-    return key in TRAINED or key in SPATIAL_FILTERS
+    return key in TRAINED or key in SPATIAL_FILTERS or key in PHASE_LOCKED
 
 
 def kinds() -> dict[str, type[CCA]]:
@@ -693,6 +698,9 @@ def make(name: str, **kw) -> CCA:
     if key in _SPATIAL:
         cls, fixed = _SPATIAL[key]
         return cls(**kw, **fixed)
+    if key in PHASE_LOCKED:
+        raise ValueError(f"{key} is loaded from a brainsync.train model "
+                         f"(brainsync.trca.load_model), not built by make()")
     cls = kinds().get(key)
     if cls is None:
         raise ValueError(f"unknown classifier {name!r}; choose from {list(NAMES)}")

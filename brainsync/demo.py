@@ -2,13 +2,32 @@
 
     python -m brainsync.demo                                  # Cerelog X8 + full-screen stimulus
     python -m brainsync.demo --fake --fast --no-stimulus      # synthetic board, faster than real time
+    python -m brainsync.demo -c four_targets_low_first --classifier trca-phase --model latest
+
+--model FILE alone loads a classifier trained by brainsync.calibrate (brainsync.templates),
+which replaces --classifier. The phase-locked TRCA (--classifier trca-phase, brainsync.trca)
+needs a model fitted on the user's own cued trials with the same targets, channels and
+preprocessing: record them with
+``python -m brainsync.record -c four_targets_low_first --trials 32``, train with
+``python -m brainsync.train <file>_cued.npz`` (it says whether TRCA beats FBCCA on held-out
+trials and saves the model to data/models), then pass --model PATH or --model latest. The
+model's rest baseline is not saved: it is fitted on this session's still screen like
+FBCCA's, so recalibrating every session costs nothing extra. With --lock the model's
+templates are locked to the flicker's phase: the stimulus marks the unix time of its first
+flickering frame ("free_on" in its log), and each window is scored at the phase the
+flicker has reached (brainsync.trca.phase_offsets). Offline this decoded the
+2026-10-24_235732 recording's 2 s windows at 76 % against 62 % phase-free; the rest
+baseline is then fitted at random phases, and windows before the onset is known are
+scored phase-free ("locked" in the status line says which).
 
 Sequence: connect to the board, start the stimulus in free-run mode with decoder feedback
 on its stdin and the squares held still, ask the user to keep still and calibrate the rest
 baseline on that still screen (--calibrate s, default 30: shorter baselines misjudge the
 per-target rest levels by about the abstain margin), then start the flicker and decode
 for --seconds. Every committed change is written to the stimulus (-1 clears the box) and
-the target's label is spoken. One status line per window goes to stderr, a summary to
+the target's label is spoken. Every window also sends the lean meter (unless --no-lean):
+an amber box on the target the scores favour, its confidence and how many of the --votes
+agreeing windows a commit needs are in. One status line per window goes to stderr, a summary to
 stdout. Ctrl-C, the stimulus exiting, its pipe closing or the board going silent for 5 s
 ends the run cleanly; Ctrl-C during calibration ends the program before any decoding.
 Exit code 0 for a run that ended by time, Ctrl-C or Escape; 1 when the board stalled, the
@@ -17,26 +36,34 @@ stimulus failed or exited with an error; 130 when interrupted during calibration
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 import time
-
-import numpy as np
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from . import trca
 from .board import Board, CerelogBoard, FakeBoard
-from .classify import ABSTAIN, TRAINING_FREE, make
+from .classify import ABSTAIN, PHASE_LOCKED, TRAINING_FREE, make
 from .launch import Stimulus, launch_stimulus, speak
 from .online import TUNED, Decision, Decoder, calibrate, threshold_arg
-from .recordings import MONTAGE, POSTERIOR
+from .recordings import MONTAGE, POSTERIOR, channel_indices
 from .stimulus import StimulusConfig, load_config
+from .stimulus.display import free_onset
 from .templates import load_model
 
+# brainsync.trca's phase-locked TRCA, trained by brainsync.train. Not "trca": that name is
+# brainsync.templates' TRCA, which a --model from brainsync.calibrate brings.
+PHASE_TRCA = PHASE_LOCKED[0]
 STALL_S = 5.0
 POLL_S = 0.1
+ONSET_WAIT_S = 1.0     # the free_on marker follows the first feedback line within a frame
 # A 10 s baseline (about 4 independent 1.5 s windows) got the 15-vs-17 Hz rest offset wrong
 # by 0.58 spreads (SD over 40 FakeBoard seeds), more than the 0.5 margin; 30 s gives ~0.33.
 CALIBRATE_S = 30.0
@@ -65,12 +92,18 @@ def add_live_arguments(p: argparse.ArgumentParser, config: str = "two_targets",
     """
     p.add_argument("-c", "--config", default=config,
                    help=f"stimulus config name or .toml path (default {config})")
-    p.add_argument("--classifier", default=TUNED.classifier, choices=TRAINING_FREE,
+    p.add_argument("--classifier", default=TUNED.classifier,
+                   choices=(*TRAINING_FREE, PHASE_TRCA),
                    help=f"training-free classifier (default {TUNED.classifier}); a trained one "
-                        "comes from --model")
+                        f"comes from --model, and {PHASE_TRCA} (brainsync.trca) needs one")
     p.add_argument("--model", default=None, metavar="FILE",
                    help="trained model saved by brainsync.calibrate (its targets must match "
-                        "the config); replaces --classifier and --harmonics")
+                        "the config; replaces --classifier and --harmonics), or with "
+                        f"--classifier {PHASE_TRCA} a .npz from brainsync.train or 'latest' "
+                        "(the newest in data/models)")
+    p.add_argument("--lock", action="store_true",
+                   help=f"with --classifier {PHASE_TRCA}: lock the templates to the flicker's "
+                        "phase, from the onset the stimulus reports")
     p.add_argument("--window", type=float, default=TUNED.window_s,
                    help=f"window seconds (default {TUNED.window_s:g})")
     p.add_argument("--step", type=float, default=TUNED.step_s,
@@ -114,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.demo", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     add_live_arguments(p)
+    p.add_argument("--no-lean", action="store_true",
+                   help="do not show which target the decoder leans towards, or its confidence")
     return p
 
 
@@ -132,6 +167,12 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         p.error(f"--margin and --pad must be >= 0, got {args.margin}, {args.pad}")
     if len(args.names) != len(MONTAGE):
         p.error(f"--names needs {len(MONTAGE)} names, got {len(args.names)}: {args.names}")
+    if args.classifier == PHASE_TRCA and args.model is None:
+        p.error(f"--classifier {PHASE_TRCA} needs --model PATH or --model latest "
+                "(train one with python -m brainsync.train)")
+    if args.lock and args.classifier != PHASE_TRCA:
+        p.error(f"--lock needs --classifier {PHASE_TRCA} (only its trained templates have a "
+                f"phase to lock), got --classifier {args.classifier}")
 
 
 def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
@@ -145,7 +186,9 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
                                clock=None if args.fast else time.time, ch_names=args.names)
     else:
         board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
-    if args.model:
+    if args.classifier == PHASE_TRCA:
+        clf: Any = _trained(args, cfg, board.fs)
+    elif args.model:
         clf = load_model(args.model)
         if (clf.freqs.size != cfg.n_targets or np.any(np.abs(clf.freqs - cfg.freqs) > 0.01)
                 or abs(clf.fs - board.fs) > 1e-6):
@@ -157,8 +200,56 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
                    phases=cfg.phases, margin=args.margin, threshold=args.threshold)
     decoder = Decoder(clf, board.fs, window_s=args.window, step_s=args.step,
                       votes=args.votes, channels=args.channels, pad_s=args.pad,
-                      ch_names=args.names)
+                      ch_names=args.names, lock=args.lock)
     return cfg, board, decoder
+
+
+def _trained(args: argparse.Namespace, cfg: StimulusConfig, fs: float) -> trca.TRCA:
+    """The --model TRCA, checked against this session's targets, channels and filters."""
+    path = trca.latest_model() if args.model == "latest" else Path(args.model)
+    clf = trca.load_model(path, margin=args.margin, threshold=args.threshold)
+    names = [args.names[i] for i in channel_indices(args.names, args.channels)]
+    # (1, 100) Hz and 60 Hz are the Decoder's defaults; pass the flags if they ever exist
+    trca.check_compatible(clf, cfg.freqs, fs, names, (1.0, 100.0), 60.0, args.harmonics)
+    return clf
+
+
+def confidence(scores: np.ndarray, spread: float) -> np.ndarray:
+    """Softmax of the baseline-corrected scores in rest spreads: one share per target,
+    summing to 1. Chance is 1 / n_targets; on the 2026-10-24_235732 recording (FBCCA,
+    P8,O1,O2, 1.5 s) the leading share had a median of 49 % on still screens and 60 % on
+    correctly led flicker windows, so it is a lean, not a probability of being right."""
+    z = np.asarray(scores, dtype=float) / (spread if spread > 0 else 1.0)
+    e = np.exp(z - z.max())
+    return e / e.sum()
+
+
+class Lean:
+    """The meter line for each decision: the target the scores favour, its confidence in
+    whole percent, and how many consecutive windows have named it (capped at ``votes``;
+    ``votes`` once it is committed)."""
+
+    def __init__(self, votes: int) -> None:
+        self.votes = votes
+        self.target = ABSTAIN
+        self.streak = 0
+
+    def update(self, d: Decision, spread: float) -> tuple[int, int, int]:
+        share = confidence(d.scores, spread)
+        k = int(np.argmax(share))
+        if d.committed == k:
+            self.streak = self.votes
+        elif d.raw == k:
+            self.streak = min(self.votes, self.streak + 1 if self.target == k else 1)
+        else:
+            self.streak = 0
+        self.target = k
+        pct = share[k] * 100.0
+        return k, 0 if not math.isfinite(pct) else int(round(pct)), self.streak
+
+    def line(self, d: Decision, spread: float) -> str:
+        k, pct, n = self.update(d, spread)
+        return f"lean {k} {pct} {n} {self.votes}"
 
 
 @dataclass
@@ -220,6 +311,8 @@ def _status(d: Decision, elapsed: float, labels: tuple[str, ...], truth: int | N
     line = (f"{elapsed:7.2f} s  {scores}  lead {d.gap:4.1f}  level {d.level:+4.1f}  "
             f"window {name(d.raw):>3}  "
             f"committed {name(d.committed):>3}")
+    if d.locked:
+        line += "  locked"
     if d.changed:
         line += "  <- new"
     if truth is not None:
@@ -246,9 +339,10 @@ def _summary(tally: Tally, seconds: float, labels: tuple[str, ...], ended: str) 
 
 def stimulus_args(args: argparse.Namespace, extra: Sequence[str] = ()) -> list[str]:
     """The stimulus command line for a live run: free-run, feedback on stdin, held still
-    until the first feedback line; ``extra`` is appended (e.g. ["--cards", DIR])."""
+    until the first feedback line, unix markers (a free run prints one, its onset);
+    ``extra`` is appended (e.g. ["--cards", DIR])."""
     out = ["-c", str(args.config), "--free", "--seconds", f"{args.seconds:g}",
-           "--markers", "none", "--feedback", "stdin", "--hold-still", "--no-wait"]
+           "--markers", "unix", "--feedback", "stdin", "--hold-still", "--no-wait"]
     if args.ignore_refresh:
         out.append("--ignore-refresh")
     out.extend(str(a) for a in extra)
@@ -270,6 +364,27 @@ def send(stim: Stimulus | None, line: str | int) -> bool:
     except (BrokenPipeError, OSError, ValueError):
         return False
     return True
+
+
+def find_onset(stim: Stimulus | None, decoder: Decoder) -> bool:
+    """Give a locking decoder the free run's onset from the stimulus log, once it is
+    there; True when the decoder has one."""
+    if decoder.lock and decoder.onset is None and stim is not None:
+        decoder.set_onset(free_onset(stim.text()))
+    return decoder.onset is not None
+
+
+def _await_onset(stim: Stimulus | None, decoder: Decoder, wait_s: float = ONSET_WAIT_S) -> None:
+    """Poll the stimulus log for the onset for up to ``wait_s`` and report the result."""
+    deadline = time.monotonic() + wait_s
+    while not find_onset(stim, decoder) and stim is not None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if decoder.onset is not None:
+        print(f"flicker onset at {decoder.onset:.3f}: templates locked to the flicker's phase",
+              file=sys.stderr)
+    else:
+        why = "no stimulus" if stim is None else "the stimulus logged no free_on marker yet"
+        print(f"warning: {why}; decoding phase-free until an onset arrives", file=sys.stderr)
 
 
 def _close(stim: Stimulus | None) -> int | None:
@@ -337,6 +452,7 @@ def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: 
                   + f", spread {cal.spread:.4f}", file=sys.stderr)
 
             def stimulus_gone() -> str | None:
+                find_onset(stim, decoder)       # a late free_on marker still locks the rest
                 if stim is not None and stim.proc.poll() is not None:
                     return f"stimulus exited (code {stim.proc.returncode})"
                 return None
@@ -347,11 +463,14 @@ def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: 
                 ended = f"{gone} before the flicker started"
             else:
                 speak(prompts[1], voice)
+                if decoder.lock:
+                    _await_onset(stim, decoder)
                 _, t_read = board.read()  # drop what arrived during the prompt
-                # the flicker began with that line; trained templates are locked to the board's
-                # clock at this moment (the free-run display prints no onset marker, so the
-                # newest sample is the best estimate, a prompt's length late)
-                decoder.set_onset(float(t_read[-1]) if len(t_read) else None)
+                if not decoder.lock:
+                    # the flicker began with that line; trained templates are locked to the
+                    # board's clock at this moment (estimated: the newest sample, a prompt's
+                    # length late; a locking decoder takes the stimulus's free_on marker)
+                    decoder.set_onset(float(t_read[-1]) if len(t_read) else None)
                 began = decoder.n_seen
                 ended = "started"
 
@@ -402,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     labels = cfg.labels
     voice = not args.no_voice
     tally = Tally()
+    lean = None if args.no_lean else Lean(decoder.votes)
     stim: Stimulus | None = None
 
     def on_flicker(started: Stimulus | None) -> bool:
@@ -413,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
         truth = board.active_target() if args.fake else None
         tally.add(d, elapsed, truth)
         print(_status(d, elapsed, labels, truth), file=sys.stderr, flush=True)
+        if lean is not None and not send(stim, lean.line(d, decoder.classifier.baseline_spread)):
+            return False
         if not d.changed:
             return True
         if d.committed != ABSTAIN:
