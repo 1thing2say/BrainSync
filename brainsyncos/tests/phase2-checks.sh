@@ -25,8 +25,9 @@
 #                openssh-server from the pool), curtin via chroot shim, a fake
 #                Orin Nano device tree: release, issue, hostname, account
 #                (SSH key only, passwordless sudo), sshd config, OOBE skipped,
-#                NVIDIA's default users removed, package repository keyring
-#                installed and the repository unmounted again; re-run is idempotent
+#                NVIDIA's default users removed, package repository keyring,
+#                brainsync-runtime and brainsync installed (brainsync-voice runs)
+#                and the repository unmounted again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -345,7 +346,12 @@ check_keyring() {
     cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
         || die "the installed keyring is not the build's repository key"
     ! mountpoint -q "$t/tmp/brainsyncos-repo" && [ ! -e "$t/tmp/brainsyncos-repo" ] || die "the repository is still mounted"
-    echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
+    grep -q '70-brainsync.sh: brainsync .*, brainsync-runtime .* installed' "$t/var/log/brainsyncos/install.log" \
+        || die "70-brainsync.sh did not finish"
+    [ "$(in_target "$t" dpkg-query -W -f '${Status}\n' brainsync brainsync-runtime | grep -cx 'install ok installed')" = 2 ] \
+        || die "brainsync and brainsync-runtime are not installed"
+    in_target "$t" /usr/bin/brainsync-voice --help | grep -q 'usage:' || die "brainsync-voice does not run in the target"
+    echo "packages: brainsyncos-archive-keyring, brainsync-runtime and brainsync installed from the ISO's repository; repository unmounted"
 }
 
 c_hook() {
@@ -365,7 +371,7 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (7 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (8 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
     check_keyring "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
