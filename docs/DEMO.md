@@ -293,6 +293,10 @@ Go only on GO (no FAIL). A WARN is a fallback you have accepted: say which one i
       (or the teammate's `python -m ssvep.acquisition.spectrum_check -t 10 --names ...` in his
       venv). Want a posterior 9-10 Hz peak and RMS under 20 µV on O1 and O2. No peak or a large DC
       offset: fix that contact (gel or paste on O1/O2) before going on.
+- [ ] **EOG pads, if used** (`brainsync.eog`): the C3/C4 leads on gel pads at the left and right
+      outer canthus, REF still on the mastoid. Check with `--names Fp1,Fp2,LO,RO,P7,P8,O1,O2`:
+      a look left then right should swing `RO − LO` by about ±150 µV, a blink should show on
+      Fp1/Fp2 only. Start the server with `--eog`.
 - [ ] **Nothing else reads the board's serial port** (a live plot splits the stream). Close the
       electrode check, the brain map and any other BrainSync tool before starting the bridge.
 - [ ] Allow **about 16 s** for the board to connect; the "Handshake verification failed" line it
