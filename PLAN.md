@@ -218,6 +218,14 @@ pull requests.
   their eyes rested on could be picked. Now a new page stays still for `stim.cue_s` (2 s) + 0.2 s
   per word on it, up to 6 s; a page seen again (after Didn't catch that or Back) for 2 s; the
   confirm screen for 1.5 s (`Orchestrator._cue_seconds`).
+- **Trained classifiers: three options, none chosen (2026-10-25):** #29 (`brainsync.templates`:
+  `itcca`, `ecca`, `trca`, `etrca`, `etrcar`, `sfcca`), #32 (spatial filters `trca-sf`,
+  `trca-r-sf`, `etrca-sf`, `etrca-r-sf`, `mscca`, learning from confirmed picks in
+  `brainsync.server`) and #30 (`trca-phase`, phase-locked, lean meter in `brainsync.demo`) are all
+  merged side by side under distinct names. `docs/CLASSIFIERS.md` says how to train and run
+  each, compares them, and how to choose on one held-out 4-target recording; the choice goes
+  into section 13, item 11. None is wired into the voice app's bridge yet (`cca` / `fbcca`
+  only).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
