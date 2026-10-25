@@ -170,7 +170,6 @@ function renderState(msg) {
 
 function speakOut(msg) {
   lastSpoken = msg.utterance_id;
-  setJudgment("");
   speaking = true;
   Listener.stop("speaking");  // never listen while the laptop talks
   Listener.heardSpoken(msg.text);
@@ -252,58 +251,23 @@ function addLine(who, text) {
 function renderStatus(s) {
   const modeChanged = keyboardMode !== s.keyboard_mode;
   keyboardMode = s.keyboard_mode;
-  const badges = [
-    [s.decoder_connected ? (s.decoder_ok ? "ok" : "bad") : "bad",
-      s.decoder_connected ? (s.decoder_ok ? "DECODER OK" : "DECODER NOT OK") : "NO DECODER"],
-    [s.display_ok ? "ok" : "bad", s.display_ok ? "DISPLAY OK" : "DISPLAY OFF"],
-    [s.board_ok ? "ok" : "bad", s.board_ok ? "BOARD OK" : "BOARD ?"],
-    { ok: ["ok", "LLM OK"], waiting: ["", "LLM READY"], failed: ["bad", "LLM FAILED"] }[s.llm]
-      || ["", "LLM OFF"],
-  ];
-  if (s.mic_muted) badges.push(["flag", "MIC MUTED"]);
-  else if (s.mic === "listening") badges.push(["ok", "MIC ON"]);
-  else if (["denied", "nomic", "offline", "unsupported", "error", "needs_tap"].includes(s.mic)) {
-    badges.push(["bad", `MIC: ${s.mic.toUpperCase()}`]);
-  }
-  const pill = ([cls, text]) => {
+  // A fake decoder or keyboard mode is always shown on the mirror, so nobody mistakes the demo
+  // for live EEG. The server's health is in /api/health and tools/preflight.py.
+  $("flags").replaceChildren(...ViewCore.health(s).flags.map((f) => {
     const b = document.createElement("span");
-    b.className = `badge ${cls}`;
-    b.textContent = text;
+    b.className = "badge flag";
+    b.textContent = f;
     return b;
-  };
-  $("badges").replaceChildren(...badges.map(pill));
-  // One line for the operator; the details open on a click. A fake decoder or keyboard mode is
-  // always shown on the mirror too, so nobody mistakes the demo for live EEG.
-  const h = ViewCore.health(s);
-  $("health").className = `health level-${h.level}`;
-  $("health-text").textContent = h.text;
-  $("flags").replaceChildren(...h.flags.map((f) => pill(["flag", f])));
-  if (s.decoder_name) {
-    const name = document.createElement("span");
-    name.className = "decoder-name";
-    name.textContent = `Decoder: ${s.decoder_name}`;
-    $("decoder-message").replaceChildren(name, s.decoder_message ? ` · ${s.decoder_message}` : "");
-  } else {
-    $("decoder-message").textContent = s.decoder_message || "";
-  }
+  }));
   const resume = $("resume");
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
-  $("hint").textContent = s.keyboard_mode
-    ? "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply."
-    : "";
   if (shown && modeChanged) renderPage(shown);
 }
 
-// Correct / Wrong: the partner's mark for the last spoken reply (logged for the summary).
+// Keys C / W: the operator's mark for the last spoken reply (logged for the summary).
 function judge(key) {
-  if (!lastSpoken) return;
-  if (send({ type: "key", key })) setJudgment(key === "c" ? "Marked correct" : "Marked wrong");
-}
-
-function setJudgment(text) {
-  $("judged").textContent = text;
-  $("correct").disabled = $("wrong").disabled = !lastSpoken;
+  if (lastSpoken) send({ type: "key", key });
 }
 
 // --- controls -------------------------------------------------------------
@@ -369,25 +333,9 @@ document.addEventListener("visibilitychange", () => {
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", () => Listener.kick());  // lapel plugged in
 }
-$("health").addEventListener("click", () => {
-  const details = $("health-details");
-  details.hidden = !details.hidden;
-  $("health").setAttribute("aria-expanded", String(!details.hidden));
-});
-$("correct").addEventListener("click", () => judge("c"));
-$("wrong").addEventListener("click", () => judge("w"));
-
-$("say-form").addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  const input = $("partner-input");
-  const text = input.value.trim();
-  if (text) send({ type: "partner_text", text, source: "typed" });
-  input.value = "";
-});
-
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") { send({ type: "stop" }); return; }
-  if (ev.target.closest("input, textarea") || ev.repeat || !accepted) return;
+  if (ev.repeat || !accepted) return;
   const key = ev.key.toLowerCase();
   if (key === "c" || key === "w") judge(key);
   else if (["1", "2", "3", "4"].includes(key)) send({ type: "key", key });
@@ -410,6 +358,5 @@ fetch("/api/config")
                          echoMs: (c.stt_echo_s || 4) * 1000 });
   })
   .catch(() => {});
-setJudgment("");
 setConnected(false);
 connect();

@@ -200,13 +200,13 @@ Notes:
   the confirm screen only s1 ("Say it") and s4 ("Back") flicker. In keyboard mode those are keys
   1-4 (confirm: 1 = Say it, 4 = Back).
 - One NEXT only: NEXT twice in a row goes back to the home list.
-- After each spoken reply the operator marks it on the partner page: **C** (correct: it was what
-  the user meant) or **W** (wrong), or the Correct / Wrong buttons. The keys work only outside the
-  text box. These marks are the accuracy numbers in section 8.
+- After each spoken reply the operator marks it with a key on the laptop page: **C** (correct: it
+  was what the user meant) or **W** (wrong). The page has no buttons for it. These marks are the
+  accuracy numbers in section 8.
 - A spoken question can interrupt a page trial in progress (it is recognised by its first word,
   since speech-to-text adds no "?"), at most once per 20 s (`speech.stt_interrupt_cooldown_s`); a
-  remark waits for the next cue. A spoken line never interrupts the confirm screen. Typed text
-  always interrupts at once, even the confirm screen (that pick is dropped and nothing is said).
+  remark waits for the next cue. A spoken line never interrupts the confirm screen. Text typed in
+  the iPhone app always interrupts at once, even the confirm screen (that pick is dropped and nothing is said).
 - **Optional, the profile page:** open `http://127.0.0.1:8000/profile.html` in a separate Chrome
   window, not a tab (Chrome stops the partner page's mic while its tab is hidden). In "Try it",
   type "Do you want to go outside?" and press **Preview replies** (it previews the form as it is,

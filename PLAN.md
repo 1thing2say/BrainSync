@@ -168,6 +168,14 @@ pull requests.
   the user's screen) and a Settings sheet (text size, haptics, speaker test, mic access, pair
   again, show setup again). `Palette.swift` uses the same colours as `ui/style.css`. Not yet
   compiled.
+- **The laptop page is the user's screen (2026-10-25, branch `feat/user-display`):** only the
+  user sees it, so it lost the "Partner" label, the typed text box and the operator footer
+  (health line and its details, Correct / Wrong, keyboard hint). The C / W keys still mark the
+  last reply; FAKE DECODER / KEYBOARD stay on the mirror; health is in `/api/health` and
+  `tools/preflight.py`; the iPhone app link shows only with `--tunnel` or on the LAN, and the
+  iPhone app keeps its own text box. The targets sit further apart: wider diamond gaps, and the
+  confirm screen keeps the diamond's empty middle row, so Say it (top) and Back (bottom) are about
+  230 px apart instead of 30 px (phones: side by side, 3 rem apart).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
@@ -387,8 +395,8 @@ BrainSync/
 - TTS: Cartesia sonic-3.5 via REST `/tts/bytes`, pre-generated per menu; browser `speechSynthesis`
   (local voice) as fallback. Called with `httpx`, not the `cartesia` SDK (older examples use
   outdated model names such as `sonic-english`).
-- STT: Web Speech API (`webkitSpeechRecognition`). It needs internet in Chrome, so a typed text box
-  is always available as fallback.
+- STT: Web Speech API (`webkitSpeechRecognition`). It needs internet in Chrome; the iPhone app's
+  text box is the typed fallback (the laptop page has none since 2026-10-25).
 - LLM: Anthropic Messages API, default `claude-haiku-5-5` for speed; force a single tool call whose
   input schema is the ranked option list, so the output is structured JSON.
 - **Demo machine: the teammate's Mac.** The vendored BrainFlow for the Cerelog X8 ships only macOS

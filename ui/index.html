@@ -38,11 +38,9 @@
     </div>
   </div>
 
-  <!-- Top bar: the name, which page this is, the profile link. -->
+  <!-- Top bar: the name and the profile link. -->
   <header class="topbar">
     <span class="wordmark">BrainSync</span>
-    <span class="topbar-sep" aria-hidden="true">/</span>
-    <span class="topbar-label">Partner</span>
     <nav class="topbar-nav" aria-label="Pages">
       <a href="/profile.html" class="profile-link" title="Edit the user's profile">Profile</a>
     </nav>
@@ -98,37 +96,13 @@
       <h2>Conversation</h2>
       <ol id="conversation" class="conversation" aria-live="polite"></ol>
 
-      <form id="say-form" class="say-form" autocomplete="off">
-        <input id="partner-input" type="text" placeholder="Type what the partner says, Enter to send"
-               aria-label="Partner says">
-        <button type="submit">Send</button>
-      </form>
-
-      <!-- For whoever runs the demo, not the partner. -->
-      <footer class="operator" aria-label="Operator">
-        <button id="health" class="health level-ok" aria-expanded="false" aria-controls="health-details">
-          <span class="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span>
-        </button>
-        <div id="health-details" class="health-details callout" hidden>
-          <p class="callout-title">Details</p>
-          <div class="badges" id="badges"></div>
-          <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
-        </div>
-        <div class="judgment" aria-label="Mark the last spoken reply" title="Keys C / W do the same">
-          <span>Last reply:</span>
-          <button id="correct">Correct</button>
-          <button id="wrong">Wrong</button>
-          <span id="judged" class="judged" aria-live="polite"></span>
-        </div>
-        <p class="hint" id="hint"></p>
-        <!-- With --tunnel (or on the LAN): the pairing link for the BrainSync Partner iPhone app
-             (it carries the access key). The web phone link is printed in the server's terminal. -->
-        <div id="phone" class="phone-link" hidden>
-          <button id="copy-app" type="button">Copy iPhone app link</button>
-          <span id="phone-copied" class="judged" aria-live="polite"></span>
-          <code id="app-url" class="phone-url"></code>
-        </div>
-      </footer>
+      <!-- With --tunnel (or on the LAN) only: the pairing link for the BrainSync Partner iPhone app
+           (it carries the access key). The web phone link is printed in the server's terminal. -->
+      <div id="phone" class="phone-link" hidden>
+        <button id="copy-app" type="button">Copy iPhone app link</button>
+        <span id="phone-copied" class="copied" aria-live="polite"></span>
+        <code id="app-url" class="phone-url"></code>
+      </div>
     </aside>
   </main>
 
