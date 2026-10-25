@@ -22,7 +22,7 @@ RUN apt-get update \
       python3 python3-yaml \
       grub-common openssh-client openssl \
       ca-certificates git patch cmake g++ make kmod udev \
-      python3-venv python3-numpy python3-setuptools \
+      python3-venv python3-numpy python3-setuptools curl \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /usr/share/brainsyncos \
  && dpkg-query -W -f '${Package} ${Version}\n' > /usr/share/brainsyncos/builder-packages.txt

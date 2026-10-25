@@ -124,11 +124,15 @@ check_elf() {
 
 # --- compile ------------------------------------------------------------------
 
+# inputs_sha256: every file in llama/, this script up to the check section
+# (changes to check do not touch what compile makes) and the cross-builder's
+# Dockerfile. scripts/build.sh (llama_compiled) computes the same on the host.
 inputs_sha256() {
     (
         cd "$BRAINSYNCOS_ROOT" || exit 1
         find llama -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
-        sha256sum scripts/build-llama.sh docker/Dockerfile.cross-builder
+        printf '%s  %s\n' "$(sed '/^# --- check /,$d' scripts/build-llama.sh | sha256sum | awk '{print $1}')" scripts/build-llama.sh:compile
+        sha256sum docker/Dockerfile.cross-builder
     ) | sha256sum | awk '{print $1}'
 }
 
@@ -296,7 +300,7 @@ serve() {
     local log="$1"
     shift
     "$LLAMA_PREFIX/bin/llama-server" --host 127.0.0.1 --port "$PORT" -m "$MODEL" --api-key-file "$W/api-key" \
-        -c 512 -np 1 -t 2 --no-webui --offline "$@" > "$log" 2>&1 &
+        -c 512 -np 1 -t 2 --no-webui --offline -lv 5 "$@" > "$log" 2>&1 &
     SERVER=$!
     wait_http "http://127.0.0.1:$PORT/health" || { tail -30 "$log" >&2; die "llama-server did not come up ($log)"; }
 }
@@ -365,7 +369,8 @@ c_check() {
     printf '%s' "$out" | python3 -I -c 'import json, sys; d = json.load(sys.stdin); assert d["type"] == "message" and d["content"][0]["text"], d' \
         || die "/v1/messages answered: $out"
     stop_server
-    backend="$(grep -o "loaded CPU backend from $LLAMA_PREFIX/lib/ggml/libggml-cpu-[a-z0-9._]*\.so" "$W/server.log" | head -n 1)"
+    # llama-server names the backend it loaded only at verbosity 5 (-lv 5 in serve).
+    backend="$(grep -o "loaded CPU backend from $LLAMA_PREFIX/lib/ggml/libggml-cpu-[a-z0-9._]*\.so" "$W/server.log" | head -n 1 || true)"
     [ -n "$backend" ] || { tail -30 "$W/server.log" >&2; die "llama-server did not load a CPU backend from lib/ggml"; }
     backend="${backend##*/}"
     log "generation: 8 tokens from /completion ($(cat "$W/content")), /v1/messages answers, 401 without the key; $backend"
@@ -384,14 +389,15 @@ c_check() {
         done
         lib="$(dirname "$(find "$cuda" -name 'libcudart.so.13' | head -n 1)")"
         [ -f "$lib/libcublas.so.13" ] || die "the Jetson runtime debs hold no libcublas.so.13 next to libcudart.so.13"
-        f="$OUT/cuda/libggml-cuda.so"
+        # Where it is installed: its RUNPATH finds libggml-base.so.0 from there.
+        cp "$OUT/cuda/libggml-cuda.so" "$TREE/lib/ggml/"
+        f="$TREE/lib/ggml/libggml-cuda.so"
         check_elf "$f" "$CUDA_RE"
         miss="$(ldd "$f" 2>&1 | awk '/not found/ {print $1}' | LC_ALL=C sort | paste -sd' ' -)"
         [ "$miss" = "libcublas.so.13 libcudart.so.13" ] || [ "$miss" = "libcublas.so.13 libcublasLt.so.13 libcudart.so.13" ] \
             || die "without the CUDA runtime, libggml-cuda.so should miss only cudart and cublas, misses: $miss"
         out="$(LD_LIBRARY_PATH="$lib" ldd "$f" 2>&1)"
         ! printf '%s\n' "$out" | grep -q 'not found' || die "ldd libggml-cuda.so with NVIDIA's runtime: $(printf '%s\n' "$out" | grep 'not found')"
-        cp "$f" "$TREE/lib/ggml/"
         LD_LIBRARY_PATH="$lib" "$TREE/bin/llama-server" --list-devices > "$W/devices.log" 2>&1 \
             || { cat "$W/devices.log" >&2; die "llama-server --list-devices fails with the CUDA backend in lib/ggml"; }
         grep -q 'ggml_cuda_init: failed to initialize CUDA' "$W/devices.log" \

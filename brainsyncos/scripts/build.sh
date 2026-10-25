@@ -164,10 +164,37 @@ c_wheels() {
     "$B" run scripts/build-wheels.sh $rest
 }
 c_repo()     { "$B" run scripts/build-repo.sh --edition "$edition"; }
+# llama_compiled: build/llama holds both parts (PARTS=cpu,cuda) for today's
+# inputs and matches its SHA256SUMS. Checked on the host, so a compiled tree
+# copied from another machine (docs/phase3-handoff.md) skips the amd64
+# cross-builder, which on Apple Silicon would itself run emulated. The inputs
+# hash must stay the same as inputs_sha256 in scripts/build-llama.sh.
+llama_compiled() {
+    local o="$BUILD_DIR/llama" sha=sha256sum inputs
+    command -v sha256sum > /dev/null 2>&1 || sha='shasum -a 256'
+    [ -f "$o/llama.env" ] && [ -f "$o/SHA256SUMS" ] && grep -qx 'PARTS=cpu,cuda' "$o/llama.env" || return 1
+    # shellcheck disable=SC2086  # $sha is a command and its options
+    (cd "$o" && $sha -c --quiet --strict SHA256SUMS > /dev/null 2>&1) || return 1
+    # shellcheck disable=SC2086
+    inputs="$(cd "$BRAINSYNCOS_ROOT" && {
+        find llama -type f -print0 | LC_ALL=C sort -z | xargs -0 $sha
+        printf '%s  %s\n' "$(sed '/^# --- check /,$d' scripts/build-llama.sh | $sha | awk '{print $1}')" scripts/build-llama.sh:compile
+        $sha docker/Dockerfile.cross-builder
+    } | $sha | awk '{print $1}')"
+    grep -qx "INPUTS_SHA256=$inputs" "$o/llama.env"
+}
+c_llama_compile() {
+    if [ "${1:-}" != --force ] && llama_compiled; then
+        log "llama.cpp: build/llama is compiled for these inputs; the cross-builder is not needed"
+        return 0
+    fi
+    # shellcheck disable=SC2086  # [--force], split as given
+    "$B" --cross run scripts/build-llama.sh compile ${1:-}
+}
 c_llama() {
     case "$rest" in ''|' --force') ;; *) die "llama takes only --force:$rest" ;; esac
     # shellcheck disable=SC2086  # [--force], split as given
-    "$B" --cross run scripts/build-llama.sh compile $rest
+    c_llama_compile $rest
     # shellcheck disable=SC2086
     "$B" run scripts/build-llama.sh check $rest
 }
@@ -185,7 +212,7 @@ c_all() {
     c_doctor || die "prerequisites missing (see above)"
     [ "$edition" = jetson ] || "$S/fetch-vm-base.sh"
     "$B" run scripts/build-wheels.sh   # skipped while up to date; brainsync-runtime needs them
-    "$B" --cross run scripts/build-llama.sh compile   # both skipped while up to date; brainsyncos-llama needs them
+    c_llama_compile   # both skipped while up to date; brainsyncos-llama needs them
     "$B" run scripts/build-llama.sh check
     c_packages
     c_repo
