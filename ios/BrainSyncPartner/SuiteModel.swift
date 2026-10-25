@@ -1,6 +1,6 @@
 // The suite's state: one PROTOCOL-v3 connection to brainsync.server (code mode, slots mode), one
 // c-VEP flicker driver, and the app the user is in. The phone is the screen the user looks at:
-// it draws three squares (slots t0, t1, t2 at lags 0, 21, 42 frames) and each app decides what
+// it draws two squares, never more (slots t0, t1 at lags 0 and 31 frames), and each app decides what
 // they mean (SuiteCore, CameraCore, ReelsCore). The server owns training and decoding; this only
 // turns its selections into each app's effects and gates the flicker.
 //
@@ -61,8 +61,6 @@ final class SuiteModel {
     private(set) var reels = ReelsCore(count: ReelContent.count)
     /// Counts up after each photo: the viewfinder's shutter effect.
     private(set) var shutterTrigger = 0
-    /// Counts up on Up at the first reel: the feed's bump.
-    private(set) var reelTopBumps = 0
     /// Dim the playing reel while choosing (moving content next to the squares weakens the
     /// response). On by default.
     var dimReels: Bool {
@@ -124,7 +122,7 @@ final class SuiteModel {
     /// The server is training the template: the user looks at the cue square.
     var isTraining: Bool { phase?.name == .train }
 
-    /// The labels on the three squares now (one per slot).
+    /// The labels on the two squares now (one per slot).
     var labels: [String] {
         switch app {
         case .home, .voice: return home.labels
@@ -195,10 +193,13 @@ final class SuiteModel {
             && phase?.flicker == true && !(layout?.targets.isEmpty ?? true)
     }
 
-    /// The square's lag in frames: the layout's, or the standard's for its position.
+    /// The square's lag in frames: the layout's, else its position times the server's code
+    /// spacing (the welcome's `lag_frames`), else the two-square standard's (0, 31).
     func lag(of index: Int) -> Int {
         let slot = SuiteSlots.ids[index]
-        return layout?.target(slot)?.lag ?? SuiteSlots.lags[index]
+        if let lag = layout?.target(slot)?.lag { return lag }
+        if let spacing = welcome?.code?.lagFrames, spacing > 0 { return index * spacing }
+        return SuiteSlots.lags[index]
     }
 
     // MARK: Pairing
@@ -454,6 +455,7 @@ final class SuiteModel {
         guard next != app else { return }
         leave(app)
         app = next
+        home.highlight(next)   // back on Home, Open names the app just used
         decision = nil
         switchedAt = Date()
         if gazeSlot != nil {
@@ -492,7 +494,10 @@ final class SuiteModel {
         ring(s.slot)
         switch app {
         case .home:
-            if let next = home.select(s.slot) { open(next) }
+            switch home.select(s.slot) {
+            case .open(let next)?: open(next)
+            case .highlight?, nil: break   // Home's labels follow `home.current`
+            }
         case .camera:
             if let effect = camera.select(s.slot) { perform(effect) }
         case .reels:
@@ -529,15 +534,13 @@ final class SuiteModel {
                 // The core already counted the photo gone: start it again from the store.
                 camera = CameraCore(photoCount: photos.count, lens: camera.lens)
             }
-        case .openGallery, .showPhoto, .closeGallery, .confirmDelete, .keep:
+        case .openMenu, .closeMenu, .openGallery, .showPhoto, .closeGallery, .confirmDelete, .keep:
             break   // the screens follow `camera.screen` and `camera.photoIndex`
         }
     }
 
     private func perform(_ effect: ReelsCore.Effect) {
         switch effect {
-        case .top:
-            reelTopBumps += 1
         case .scroll, .likeAndPause, .pause, .play:
             break   // the feed follows `reels.index`, `reels.liked` and `reels.paused`
         }

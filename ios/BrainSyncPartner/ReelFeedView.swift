@@ -1,8 +1,8 @@
 // The Reels app's feed: one full-height reel at a time that snaps up or down like Instagram
 // Reels, ported from the Chrome extension's mock (extension/test/reels_mock.html on
 // cvep3/reels). It only draws: the current index, the liked set and the paused flag come in as
-// plain values from ReelsCore, and the three c-VEP squares (Up / Like-pause / Down, stacked on
-// the right as in extension/overlay.js) go in the right rail the caller passes in. Nothing here
+// plain values from ReelsCore, and the two c-VEP squares (Like-pause / Next, stacked on the
+// right, never more than two) go in the right rail the caller passes in. Nothing here
 // flickers; the motion is a few shapes redrawn at most 30 times a second, and only on the reel
 // showing, so it never costs the squares' 60 Hz display-link frames.
 
@@ -289,11 +289,11 @@ private struct ReelProgress: View {
 
 // MARK: - Previews
 
-/// Stand-in for the integrator's three stacked squares (still, never flickering).
+/// Stand-in for the integrator's two stacked squares (still, never flickering).
 private struct PreviewRail: View {
     var body: some View {
         VStack(spacing: 28) {
-            ForEach(["Up", "Like", "Down"], id: \.self) { label in
+            ForEach(["Like", "Next"], id: \.self) { label in
                 VStack(spacing: 6) {
                     Rectangle().fill(.white).frame(width: 72, height: 72)
                     MonoLabel(label)

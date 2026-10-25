@@ -3,21 +3,26 @@
 A suite of small apps driven by c-VEP, plus Voice, the BCI Voice partner app.
 
 - **Home, Camera, Reels** (the suite): the iPhone is the screen the user looks at. It draws
-  three white squares showing the c-VEP code (`docs/CVEP-STANDARD.md`), and `brainsync.server`
-  (`PROTOCOL-v3.md`, code mode) reads the headset and says which square the user looked at.
-  Each app gives the three squares its own meaning. See "The c-VEP suite" below.
+  two white squares, never more, showing the c-VEP code 31 frames apart
+  (`docs/CVEP-STANDARD.md`), and `brainsync.server` (`PROTOCOL-v3.md`, code mode) reads the
+  headset and says which square the user looked at. Each app gives the two squares its own
+  meaning. See "The c-VEP suite" below.
 - **Voice**: the partner app below, unchanged; it talks to `app.server` instead.
 
 ## The c-VEP suite
 
-| App | Left (t0) | Middle (t1) | Right (t2) |
-| --- | --- | --- | --- |
-| Home | Camera | Reels | Voice |
-| Camera, viewfinder | Shutter | Flip camera | Gallery |
-| Camera, gallery | Next photo | Back to camera | Delete (then Delete / Keep) |
-| Reels | Up | Like / pause (a paused reel: Play) | Down |
+Two squares at most (lags 0 and 31 frames, the widest two allow), at the screen's edges:
 
-In Reels the squares are stacked on the right (Up on top). Home (top left) goes back by touch.
+| App | Left (t0, lag 0) | Right (t1, lag 31) |
+| --- | --- | --- |
+| Home | Open (the highlighted app) | Next (Camera, Reels, Voice, ...) |
+| Camera, viewfinder | Shutter | More |
+| Camera, More | Flip camera | Gallery (no photos: Back) |
+| Camera, gallery | Next photo | More |
+| Camera, gallery More | Delete (then Delete / Keep) | Back to camera |
+| Reels | Like / pause (a paused reel: Play) | Next |
+
+In Reels the squares are stacked on the right (Like on top). Home (top left) goes back by touch.
 
 1. Start the headset server on the Mac or the Jetson: `python -m brainsync.server` (Cerelog
    X8; c-VEP is the default), or `python -m brainsync.server --board fake --no-auth` to try it
@@ -31,7 +36,7 @@ In Reels the squares are stacked on the right (Up on top). Home (top left) goes 
    connects.
 4. Training: the left square has a blue box; look at it for about 32 s (30 code cycles). The
    status line shows `training: keep looking at …`, then `template ready: 83 % on held-out
-   cycles (chance 33 %)`. The server keeps the template for 10 minutes, across apps.
+   cycles (chance 50 %)`. The server keeps the template for 10 minutes, across apps.
 5. Look at a square to pick it. Under each square: its confidence bar and score, `<` on the
    decoder's current best; the status line shows `lead … choice: …`. A pick rings the square
    yellow.
@@ -44,13 +49,13 @@ In Reels the squares are stacked on the right (Up on top). Home (top left) goes 
 - With `--board fake`, tapping a square points the fake EEG at it (a dashed ring), so the whole
   loop can be tried by touch. With a headset, taps on the squares do nothing.
 - Settings (Home): forget the server, dim the reel while choosing (on: moving pictures next to
-  the squares weaken the response), copy photos to Photos, and the **Flicker lab** (three squares
+  the squares weaken the response), copy photos to Photos, and the **Flicker lab** (the two squares
   with the measured refresh, late frames and cycle times, to check a phone's timing).
 - Photos stay in the app (Application Support/Photos) unless the Photos copy is on.
 - Simulator smoke run without taps (DEBUG builds; `SuiteDebugLaunch.swift`):
   `xcrun simctl launch booted org.calhacks.brainsync.partner -debugSuiteLink
-  http://127.0.0.1:8765/ -debugSuiteAccept YES -debugSuiteApp reels -debugSuiteGaze t2`
-  trains on the fake board, then scrolls Reels down every few seconds while the gaze holds.
+  http://127.0.0.1:8765/ -debugSuiteAccept YES -debugSuiteApp reels -debugSuiteGaze t1`
+  trains on the fake board, then scrolls Reels to the next reel every few seconds while the gaze holds.
 
 Not yet done: a run with the headset on the phone (the c-VEP response to a phone-sized square,
 and iOS frame timing on a device, are unmeasured).

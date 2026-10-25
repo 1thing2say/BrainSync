@@ -403,7 +403,7 @@ public struct V3TrainProgress: Codable, Equatable {
 public struct V3Trained: Codable, Equatable {
     /// Leave-one-cycle-out accuracy in [0, 1], or nil when it could not be measured.
     public var accuracy: Double?
-    /// 1 / 3 with three targets.
+    /// 1 / 2 with two targets.
     public var chance: Double
     public var cycles: Int
 

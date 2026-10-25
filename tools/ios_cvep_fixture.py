@@ -3,8 +3,9 @@
 Every expected value comes from the reference implementations, so the Swift port is checked
 against the real code rather than against a copy of it:
 
-- the bits and the lit / dark frames 0..189 of lags 0, 21, 42 from ``brainsync.vep.live``
-  (``BITS``, ``frame_bit``), checked equal to ``clients/js/cvep.js`` (``bit``);
+- the bits and the lit / dark frames 0..189 of lags 0 and 31 (the two-square standard: never
+  more than two targets, 31 frames apart) from ``brainsync.vep.live`` (``BITS``,
+  ``frame_bit``), checked equal to ``clients/js/cvep.js`` (``bit``);
 - the confidence text from ``clients/js/cvep.js`` (``bar``, ``labelLine``, ``statusLine``) and
   ``ConfidenceState`` in ``clients/js/brainsync-client.js`` (decision, training and trained
   lines), run with ``node``. The Python helpers (``brainsync.server.client.decision_lines``,
@@ -38,7 +39,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "ios/BrainSyncKit/Tests/BrainSyncKitTests/Fixtures/cvep_frames.json"
 JS_DIR = REPO_ROOT / "clients/js"
 FRAMES = 190
-LAGS = (0, 21, 42)
+LAG_FRAMES = 31          # the two-square standard: 63 // 2, the widest two targets allow
+LAGS = (0, LAG_FRAMES)   # never more than two squares
 
 BARS = [-0.5, 0.0, 0.06, 0.0625, 0.1875, 0.3125, 0.42, 0.5, 0.99, 1.0, 1.7, None]
 BAR_TIES = {0.0625, 0.1875, 0.3125}
@@ -56,12 +58,11 @@ STATUS_LINES = [  # lead, committed, changed
 ]
 
 DECISIONS = [  # slots (label = slot), scores, raw, committed, lead, changed; tie
-    (["yes", "no", "help"], {"yes": 0.42, "no": 0.11, "help": -0.03}, "yes", "yes", 0.31, True, False),
-    (["yes", "no", "help"], {"yes": 0.42, "no": 0.11, "help": -0.03}, "yes", "yes", 0.31, False, False),
-    (["up", "like", "down"], {"up": 0.05, "like": 0.2, "down": 0.18}, "like", None, 0.02, False, False),
-    (["shutter", "flip", "gallery"], {"shutter": 0.7, "flip": -0.2, "gallery": 0.1}, "shutter",
-     "gallery", 0.6, True, False),
-    (["t0", "t1", "t2"], {"t0": 0.0625, "t1": 0.125, "t2": 0.0}, "t1", "t1", 0.0625, False, True),
+    (["yes", "no"], {"yes": 0.42, "no": 0.11}, "yes", "yes", 0.31, True, False),
+    (["yes", "no"], {"yes": 0.42, "no": -0.03}, "yes", "yes", 0.31, False, False),
+    (["like", "next"], {"like": 0.2, "next": 0.18}, "like", None, 0.02, False, False),
+    (["shutter", "more"], {"shutter": 0.7, "more": 0.1}, "shutter", "more", 0.6, True, False),
+    (["t0", "t1"], {"t0": 0.0625, "t1": 0.125}, "t1", "t1", 0.0625, False, True),
 ]
 
 TRAINING = [  # cue slot, its label, cycles in the phase, progress (cycle, of) or None
@@ -109,7 +110,7 @@ out.bits = Array.from(K.BITS);
 out.frames = {};
 for (const lag of cases.lags) {
   let s = "";
-  for (let n = 0; n < cases.frames; n++) s += String(K.bit(lag / K.LAG_FRAMES, n));
+  for (let n = 0; n < cases.frames; n++) s += String(K.bit(lag / cases.lag_frames, n, cases.lag_frames));
   out.frames[lag] = s;
 }
 out.bars = cases.bars.map((v) => K.bar(num(v)));
@@ -127,7 +128,7 @@ out.decisions = cases.decisions.map(([slots, scores, raw, committed, lead, chang
 });
 out.training = cases.training.map(([cue, label, cycles, prog]) => {
   const st = new C.ConfidenceState();
-  st.handle(layoutOf([cue, "x1", "x2"], [label, "a", "b"]));
+  st.handle(layoutOf([cue, "x1"], [label, "a"]));
   st.handle({ type: "phase", phase: "train", flicker: true, cue, cycles });
   if (prog) st.handle({ type: "train", cycle: prog[0], of: prog[1] });
   return st.status();
@@ -140,11 +141,11 @@ out.trained = cases.trained.map(([acc, chance]) => {
 out.clock = cases.clock.map(({ name, stamps }) => {
   const fs = new C.FlickerState({ wall: (t) => t / 1000 });
   fs.handle({ type: "welcome", refresh_hz: 60, refresh_tolerance_hz: 1, refresh_rates: [60],
-              paradigm: "code", code: { bits: Array.from(K.BITS), lag_frames: 21, cycle_frames: 63 } });
+              paradigm: "code", code: { bits: Array.from(K.BITS), lag_frames: cases.lag_frames, cycle_frames: 63 } });
   fs.accept();
   fs.setOpen(true);
   fs.handle({ type: "phase", phase: "run", flicker: true });
-  fs.handle(layoutOf(["t0", "t1", "t2"]));
+  fs.handle(layoutOf(["t0", "t1"]));
   const ticks = stamps.map((t) => {
     const frame = fs.frame(t);
     const onset = fs.onsetDue(t);
@@ -172,7 +173,7 @@ def run_js(cases: dict) -> dict:
 def build() -> dict:
     sequences = clock_sequences()
     cases = {
-        "lags": list(LAGS), "frames": FRAMES, "bars": BARS,
+        "lags": list(LAGS), "lag_frames": LAG_FRAMES, "frames": FRAMES, "bars": BARS,
         "label_lines": [list(c) for c in LABEL_LINES],
         "status_lines": [list(c) for c in STATUS_LINES],
         "decisions": [list(c[:6]) for c in DECISIONS],
@@ -188,7 +189,7 @@ def build() -> dict:
         raise SystemExit("clients/js/cvep.js BITS differ from brainsync.vep.live.BITS")
     frames = {}
     for lag in LAGS:
-        py = "".join(str(live.frame_bit(lag // live.LAG_FRAMES, n)) for n in range(FRAMES))
+        py = "".join(str(live.frame_bit(lag // LAG_FRAMES, n, LAG_FRAMES)) for n in range(FRAMES))
         if py != js["frames"][str(lag)]:
             raise SystemExit(f"frame rule differs between Python and JS at lag {lag}")
         frames[str(lag)] = py
@@ -213,7 +214,7 @@ def build() -> dict:
         "source": "tools/ios_cvep_fixture.py: brainsync/vep/live.py, clients/js/cvep.js, "
                   "clients/js/brainsync-client.js",
         "bits": bits,
-        "lag_frames": live.LAG_FRAMES,
+        "lag_frames": LAG_FRAMES,
         "cycle_frames": live.CYCLE_FRAMES,
         "lit": frames,
         "bars": [{"value": _finite(v), "bar": b} for v, b in zip(BARS, js["bars"])],

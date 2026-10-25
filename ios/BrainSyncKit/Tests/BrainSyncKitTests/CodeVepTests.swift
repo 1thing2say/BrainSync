@@ -33,7 +33,7 @@ final class CodeVepTests: XCTestCase {
 
     func testFrameRuleMatchesReference() throws {
         let lit = try XCTUnwrap(try cvepFixture()["lit"] as? [String: String])
-        XCTAssertEqual(Set(lit.keys), ["0", "21", "42"])
+        XCTAssertEqual(Set(lit.keys), ["0", "31"])
         for (lagText, expected) in lit {
             let lag = try XCTUnwrap(Int(lagText))
             let got = (0..<expected.count).map { V.isLit(frame: $0, lag: lag) ? "1" : "0" }.joined()
@@ -151,15 +151,17 @@ final class CodeVepTests: XCTestCase {
     // MARK: - Frame rule and code
 
     func testFrameRuleAndLags() {
-        // Target k shows the sequence k * 21 frames late.
+        // Target k shows the sequence k * 31 frames late (two targets at most).
         for n in 0..<200 {
-            XCTAssertEqual(V.isLit(frame: n + 21, lag: 21), V.isLit(frame: n, lag: 0))
-            XCTAssertEqual(V.bit(target: 2, frame: n + 42), V.bit(target: 0, frame: n))
+            XCTAssertEqual(V.isLit(frame: n + 31, lag: 31), V.isLit(frame: n, lag: 0))
+            XCTAssertEqual(V.bit(target: 1, frame: n + 31), V.bit(target: 0, frame: n))
         }
         XCTAssertFalse(V.isLit(frame: 0, lag: 0))       // the sequence starts 00000 1
         XCTAssertTrue(V.isLit(frame: 5, lag: 0))
         XCTAssertEqual(V.isLit(frame: -1, lag: 0), V.isLit(frame: 62, lag: 0))
-        XCTAssertEqual(V.lag(ofTarget: 2), 42)
+        XCTAssertEqual(V.lag(ofTarget: 1), 31)
+        XCTAssertEqual(V.targetCount, 2)
+        XCTAssertEqual(V.maxTargets, 2)
         XCTAssertTrue(V.isCycleStart(frame: 126))
         XCTAssertFalse(V.isCycleStart(frame: 127))
         XCTAssertEqual(V.cycleIndex(frame: 125), 1)
