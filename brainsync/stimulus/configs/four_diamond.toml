@@ -1,0 +1,52 @@
+# Page mode: four squares in a diamond, three reply options and NEXT (PLAN.md section 1).
+# The same targets as the teammate's ssvep four_diamond.toml, so the bridge's hello
+# matches our server's stim.slots (s1 13, s2 15, s3 17, s4 11 Hz):
+# 15 and 17 Hz keep the left and right places of two_targets.toml; 13 Hz goes on top and
+# 11 Hz at the bottom, so only one pair of neighbouring squares is 2 Hz apart. All four sit
+# clear of the user's eyes-closed alpha (9.25 Hz) and of the 18-21 Hz interference seen at
+# the 2026-10-24 venue. NEXT is the bottom square on 11 Hz, the lowest and nearest alpha,
+# so its likeliest error turns a page instead of picking an option.
+# Sine flicker: 11, 13 and 17 Hz do not divide 60; with sine they share no harmonics
+# below 45 Hz.
+# A fixation mark sits at the centre of every square: in live use no cue box can be held
+# on the target, and without a point to rest on gaze drifts after about 2 s.
+# Untested on EEG with four squares: [session] below is the 4-target gate recording
+# (PLAN.md section 14), cued with the box held on the target through the flicker.
+# Record it with `python -m brainsync.calibrate -c four_diamond`: the gate decision and the
+# trained classifiers' calibration data are the same session.
+name = "four_diamond"
+
+[targets]
+freqs = [13.0, 15.0, 17.0, 11.0]   # Hz: top (s1), left (s2), right (s3), bottom (s4, NEXT)
+phases_pi = [0.0, 0.0, 0.0, 0.0]   # multiples of pi
+labels = ["13", "15", "17", "11"]
+
+[layout]
+size = 0.3   # side length, screen heights
+# centres in screen heights from the screen centre: 0.33 + 0.165 (cue box) keeps the top
+# and bottom squares on a 1-height screen, and 0.55 sideways keeps the left and right
+# squares well clear of them on a 1.5:1 or wider screen
+positions = [[0.0, 0.33], [-0.55, 0.0], [0.55, 0.0], [0.0, -0.33]]
+
+[stimulus]
+waveform = "sine"
+hold_cue = true      # the gate recording keeps the cue box on the target (gaze drift)
+cue_scale = 1.1      # 1.2 would put the top cue box 0.51 from the centre, past the edge
+fixation = true
+fixation_size = 0.03
+labels_during_flicker = true   # false if SYNC 1.5 shows text during the flicker drops frames
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+# 4-target gate: 8 blocks x 4 targets = 32 trials, 8 per target, 8 s each: about 4.3 min
+blocks = 8
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true

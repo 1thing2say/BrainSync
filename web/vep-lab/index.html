@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VEP Lab</title>
+<link rel="icon" href="data:,">
+<style>
+/* VEP Lab: the three VEP codings of Bin et al. (2009) drawn from the same toy model the
+   Python demo uses (brainsync/vep, brainsync/synthetic.py). A dark page like Flicker Lab,
+   so the live squares sit on black. No network: system fonts, vep_core.js beside it. */
+:root {
+  --bg: #0E1011;
+  --surface: #171A1C;
+  --surface-2: #1F2326;
+  --rule: #2E3438;
+  --ink: #E7EAE6;
+  --ink-2: #9AA4A8;
+  --time: #E59A4B;      /* t-VEP */
+  --freq: #6FA8E8;      /* f-VEP */
+  --code: #7CC98A;      /* c-VEP */
+  --warn: #F0C05A;
+  --danger: #E0645A;
+  --focus: #F4F6F2;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.5 var(--sans); min-height: 100vh; }
+button, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 20px 16px 48px; }
+
+header.top {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+  gap: 8px 24px; padding-bottom: 14px; border-bottom: 1px solid var(--rule);
+}
+h1 { font-size: 22px; margin: 0; }
+h1 small { font-weight: 400; color: var(--ink-2); font-size: 15px; margin-left: 8px; }
+.status { font: 13px/1.4 var(--mono); color: var(--ink-2); display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.status b { color: var(--ink); font-weight: 500; }
+.btn { background: var(--surface-2); border: 1px solid var(--rule); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 700; }
+.btn.stop { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 700; padding: 4px 10px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+kbd { font: 12px var(--mono); border: 1px solid var(--rule); border-radius: 4px; padding: 0 4px; color: var(--ink-2); }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+.intro { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 18px 0 8px; }
+@media (max-width: 860px) { .intro { grid-template-columns: 1fr; } }
+.intro article { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; }
+.intro h2 { margin: 0 0 6px; font-size: 16px; }
+.intro p { margin: 0; color: var(--ink-2); font-size: 14.5px; }
+.intro p strong { color: var(--ink); }
+.tag { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: 1px; }
+[data-p="time"] .tag { background: var(--time); }
+[data-p="freq"] .tag { background: var(--freq); }
+[data-p="code"] .tag { background: var(--code); }
+.lede { color: var(--ink-2); max-width: 78ch; margin: 14px 0 20px; }
+
+section.paradigm {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
+  padding: 16px; margin-top: 18px; display: grid; gap: 14px;
+}
+section.paradigm > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; }
+section.paradigm h2 { margin: 0; font-size: 19px; }
+section.paradigm h2 small { color: var(--ink-2); font-weight: 400; font-size: 14px; margin-left: 8px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; font-size: 14px; color: var(--ink-2); }
+.controls label { display: inline-flex; gap: 8px; align-items: center; }
+select { background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.seg label { padding: 5px 12px; cursor: pointer; position: relative; gap: 0; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label:has(input:checked) { background: var(--ink); color: var(--bg); }
+.figs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+@media (max-width: 860px) { .figs { grid-template-columns: 1fr; } }
+.fig { display: grid; gap: 6px; min-width: 0; }
+.fig h3 { margin: 0; font-size: 14px; color: var(--ink-2); font-weight: 500; }
+.fig h3 b { color: var(--ink); font-weight: 600; }
+.fig canvas { width: 100%; height: 170px; display: block; background: var(--bg); border-radius: 6px; }
+.fig canvas.tall { height: 190px; }
+.fig p { margin: 0; font-size: 13px; color: var(--ink-2); }
+.decoder { margin: 0; padding: 10px 12px; border-left: 3px solid var(--rule); background: var(--surface-2); border-radius: 0 8px 8px 0; font-size: 14.5px; }
+.decoder b { font-weight: 600; }
+.decoder .num { font: 13px var(--mono); color: var(--ink-2); display: block; margin-top: 4px; }
+[data-p="time"] .decoder { border-color: var(--time); }
+[data-p="freq"] .decoder { border-color: var(--freq); }
+[data-p="code"] .decoder { border-color: var(--code); }
+
+.live { display: grid; gap: 10px; }
+.live .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.live .note { color: var(--ink-2); font-size: 14px; margin: 0; }
+.live canvas { width: 100%; height: 220px; display: block; background: #000; border-radius: 8px; }
+.live canvas.grid { height: 360px; }
+
+footer.end { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 14px; display: grid; gap: 8px; }
+footer.end p { margin: 0; max-width: 90ch; }
+footer.end a { color: var(--ink); }
+footer.end table { border-collapse: collapse; font-size: 14px; }
+footer.end th, footer.end td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--rule); }
+footer.end th { color: var(--ink-2); font-weight: 400; font-size: 13px; }
+footer.end td.num { font-family: var(--mono); }
+
+dialog {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); border-radius: 14px;
+  max-width: 520px; width: calc(100% - 32px); padding: 22px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
+dialog h2 { margin: 0 0 8px; font-size: 19px; color: var(--warn); }
+dialog p { margin: 0 0 12px; color: var(--ink-2); }
+dialog .actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>VEP Lab <small>time, frequency and code modulation</small></h1>
+    <div class="status" aria-live="polite">
+      <span>frame clock <b>60 Hz</b> (wall clock, not vsync)</span>
+      <span>live <b id="live-what">off</b></span>
+      <button class="btn stop" id="stop-all" hidden>Stop flicker <kbd>Esc</kbd></button>
+    </div>
+  </header>
+
+  <p class="lede">A visual evoked potential (VEP) BCI puts several targets on a screen and reads
+    from the EEG which one the user is looking at. Bin, Gao, Wang, Hong and Gao (2009) sort
+    these systems by how the targets are told apart, the way radio channels share one band:
+    by <strong>time</strong>, by <strong>frequency</strong>, or by <strong>code</strong>. The
+    panels below draw each coding's stimulus and its evoked response from one linear toy
+    model, so the figures the paper uses to explain them come out of the same arithmetic the
+    Python demo (<code>python -m brainsync.vep</code>) runs.</p>
+
+  <div class="intro">
+    <article data-p="time">
+      <h2><span class="tag"></span>t-VEP: time division (TDMA)</h2>
+      <p>Targets take turns. Each square flashes briefly in its own slot and no two flashes
+        ever overlap, so every flash belongs to exactly one target. The brain answers each
+        flash with a short <strong>flash VEP</strong>; averaging the EEG after one target's
+        own onsets keeps its response and averages the others' out. Slow: the paper keeps
+        flash rates under 4 Hz and needs many flashes per decision.</p>
+    </article>
+    <article data-p="freq">
+      <h2><span class="tag"></span>f-VEP: frequency division (FDMA)</h2>
+      <p>Every target flickers at its own frequency, all at the same time. Above about 6 Hz
+        the responses to consecutive flashes merge into a <strong>steady-state VEP</strong>
+        at that frequency and its harmonics, so the power spectrum of the EEG peaks at the
+        fixated target's frequency. Simple and training-free, which is why BrainSync's own
+        decoder is one, but the usable frequencies are few and their responses differ in size.</p>
+    </article>
+    <article data-p="code">
+      <h2><span class="tag"></span>c-VEP: code division (CDMA)</h2>
+      <p>Every target shows the <strong>same pseudorandom m-sequence</strong>, each delayed by
+        its own lag. An m-sequence is nearly uncorrelated with its own shifts, so the targets
+        evoke the same waveform at different delays, and one template learned on one target,
+        shifted, identifies any of them. The response is broadband, which helps against the
+        EEG's narrow rhythms; it needs a training stage and a sync marker every cycle.</p>
+    </article>
+  </div>
+
+  <!-- t-VEP -->
+  <section class="paradigm" data-p="time" id="p-time">
+    <header>
+      <h2><span class="tag"></span>t-VEP <small>four targets, 2-frame flashes in 15-frame slots, shuffled order (<code>tvep_4</code>)</small></h2>
+      <div class="controls">
+        <label>Fixated target <select id="time-fix"></select></label>
+      </div>
+    </header>
+    <div class="figs">
+      <div class="fig"><h3><b>a</b> Stimulus, one second (Fig. 2a)</h3>
+        <canvas id="time-seq" role="img" aria-label="Four rows of frames; each target flashes for two frames once per round"></canvas>
+        <p>Rows are targets, cells are frames (60 per second). A round is four slots of
+          15 frames, one flash each, in an order shuffled every round.</p></div>
+      <div class="fig"><h3><b>b</b> Evoked response of the fixated target, 2 s</h3>
+        <canvas id="time-resp" role="img" aria-label="Simulated EEG: a flash VEP after each of the fixated target's flashes"></canvas>
+        <p>Each flash evokes one short VEP; the response has died out well before the target's
+          next flash.</p></div>
+      <div class="fig"><h3><b>c</b> One flash response (Fig. 2b)</h3>
+        <canvas id="time-fig" role="img" aria-label="The flash VEP kernel: a positive peak near 100 ms, a trough near 190 ms"></canvas>
+        <p>The model's flash VEP: nothing for 60 ms, then a damped 6 Hz sine. The dashed line is
+          the average of the response after the fixated target's onsets.</p></div>
+    </div>
+    <p class="decoder" id="time-dec"></p>
+    <div class="live">
+      <div class="bar">
+        <button class="btn primary" data-start="time">Start flicker preview</button>
+        <p class="note">Each flash is 33 ms; a flash rate of 1 Hz per target, 4 Hz over the row.</p>
+      </div>
+      <canvas id="time-live" hidden></canvas>
+    </div>
+  </section>
+
+  <!-- f-VEP -->
+  <section class="paradigm" data-p="freq" id="p-freq">
+    <header>
+      <h2><span class="tag"></span>f-VEP <small>six targets at 15, 12, 10, 8.6, 7.5 and 6 Hz, on/off (<code>fvep_6</code>)</small></h2>
+      <div class="controls">
+        <label>Fixated target <select id="freq-fix"></select></label>
+      </div>
+    </header>
+    <div class="figs">
+      <div class="fig"><h3><b>a</b> Stimulus, one second (Fig. 3a)</h3>
+        <canvas id="freq-seq" role="img" aria-label="Six rows of frames, each an on/off square wave at its own frequency"></canvas>
+        <p>The paper's six frequencies are 4, 5, 6, 7, 8 and 10 frames per cycle at 60 Hz
+          (8.6 Hz is 60/7).</p></div>
+      <div class="fig"><h3><b>b</b> Evoked response of the fixated target, 2 s</h3>
+        <canvas id="freq-resp" role="img" aria-label="Simulated EEG: a periodic steady-state response"></canvas>
+        <p>The flash responses overlap into a periodic wave: a steady-state VEP.</p></div>
+      <div class="fig"><h3><b>c</b> Power spectrum of the response (Fig. 3b)</h3>
+        <canvas id="freq-fig" role="img" aria-label="Power spectrum with peaks at the fixated frequency and its harmonics"></canvas>
+        <p>Narrow peaks at the fundamental and its harmonics; the other targets' frequencies
+          (ticks) carry nothing in this model.</p></div>
+    </div>
+    <p class="decoder" id="freq-dec"></p>
+    <div class="live">
+      <div class="bar">
+        <button class="btn primary" data-start="freq">Start flicker preview</button>
+        <p class="note">15 Hz is inside the 15–25 Hz photosensitive band.</p>
+      </div>
+      <canvas id="freq-live" hidden></canvas>
+    </div>
+  </section>
+
+  <!-- c-VEP -->
+  <section class="paradigm" data-p="code" id="p-code">
+    <header>
+      <h2><span class="tag"></span>c-VEP <small>one 63-bit m-sequence from x<sup>6</sup> + x + 1, every target a shifted copy</small></h2>
+      <div class="controls">
+        <div class="seg" role="radiogroup" aria-label="Layout">
+          <label><input type="radio" name="code-layout" value="4" checked>4 targets, 16-frame lags (<code>cvep_4</code>)</label>
+          <label><input type="radio" name="code-layout" value="16">the paper's 16 targets, 4-frame lags (<code>cvep_16</code>)</label>
+        </div>
+        <label>Fixated target <select id="code-fix"></select></label>
+      </div>
+    </header>
+    <div class="figs">
+      <div class="fig"><h3><b>a</b> Stimulus, one second (Fig. 4a)</h3>
+        <canvas id="code-seq" role="img" aria-label="Rows of frames: the same m-sequence, each row delayed by its lag"></canvas>
+        <p>One cycle is 63 frames (1.05 s). Every row is the row above delayed by the lag.</p></div>
+      <div class="fig"><h3><b>b</b> Evoked response of the fixated target, 2 s (Fig. 4b)</h3>
+        <canvas id="code-resp" role="img" aria-label="Simulated EEG: an irregular waveform that repeats every cycle"></canvas>
+        <p>Irregular but periodic with the cycle; every target's response is this waveform at
+          its own delay.</p></div>
+      <div class="fig"><h3><b>c</b> Autocorrelation of the m-sequence (Fig. 4d)</h3>
+        <canvas id="code-ac" role="img" aria-label="Circular autocorrelation: 63 at lag 0 and minus 1 at every other lag"></canvas>
+        <p>N = 63 at lag 0 and −1 at every other lag: the shifts are as close to orthogonal as a
+          binary sequence gets.</p></div>
+      <div class="fig"><h3><b>d</b> Power spectrum of the response (Fig. 4c)</h3>
+        <canvas id="code-fig" role="img" aria-label="Broadband power spectrum over 5 to 25 Hz, shaped by the kernel"></canvas>
+        <p>Broadband, spread over the kernel's passband instead of a few sharp lines.</p></div>
+    </div>
+    <p class="decoder" id="code-dec"></p>
+    <div class="live">
+      <div class="bar">
+        <button class="btn primary" data-start="code">Start flicker preview</button>
+        <p class="note">An m-sequence has energy up to the frame rate, including 15–25 Hz.</p>
+      </div>
+      <canvas id="code-live" hidden></canvas>
+    </div>
+  </section>
+
+  <footer class="end">
+    <p>G. Bin, X. Gao, Y. Wang, B. Hong and S. Gao, "VEP-based brain-computer interfaces:
+      time, frequency, and code modulations", <em>IEEE Computational Intelligence
+      Magazine</em>, vol. 4, no. 4, pp. 22–26, Nov. 2009,
+      <a href="https://doi.org/10.1109/MCI.2009.934562">doi:10.1109/MCI.2009.934562</a>.</p>
+    <table>
+      <thead><tr><th>Paradigm</th><th>Online accuracy</th><th>Information transfer rate</th><th>Paper's targets</th></tr></thead>
+      <tbody>
+        <tr><td>t-VEP</td><td class="num">—</td><td class="num">under 30 bits/min</td><td>no online run in the paper</td></tr>
+        <tr><td>f-VEP</td><td class="num">85 %</td><td class="num">39.7 ± 7.8 bits/min</td><td>6, at 15 to 6 Hz</td></tr>
+        <tr><td>c-VEP</td><td class="num">91 %</td><td class="num">92.8 ± 14.1 bits/min</td><td>16, a 4 × 4 grid, 4-frame lags</td></tr>
+      </tbody>
+    </table>
+    <p>Honest note: every response on this page is a <strong>linear toy model</strong>, the
+      stimulus bits convolved with one made-up flash VEP (<code>brainsync.synthetic.vep_kernel</code>),
+      with no noise, no non-linearity and no peripheral response. Real EEG is none of those
+      things; the page explains the codings, it does not predict how well any of them works on
+      a headset.</p>
+  </footer>
+</div>
+
+<dialog id="gate" aria-labelledby="gate-title">
+  <h2 id="gate-title">Flickering light</h2>
+  <p>The live previews flash squares between dark and light. Flicker at 15–25 Hz is the band
+    most likely to trigger a seizure in people with photosensitive epilepsy, and the m-sequence
+    and the flashes contain that band. Don't continue if you or anyone watching has epilepsy
+    or has had a seizure.</p>
+  <p>Press <kbd>Esc</kbd> at any time to stop the flicker. Nothing flickers until you press
+    a start button.</p>
+  <div class="actions">
+    <button class="btn" id="gate-no">Cancel</button>
+    <button class="btn primary" id="gate-yes">I understand, enable flicker</button>
+  </div>
+</dialog>
+
+<script src="vep_core.js"></script>
+<script>
+(function () {
+  "use strict";
+  const V = window.VepCore;
+  const $ = (id) => document.getElementById(id);
+  const css = getComputedStyle(document.documentElement);
+  const token = (name) => css.getPropertyValue(name).trim();
+
+  const FS = V.FS, REFRESH = V.REFRESH;
+  const CYCLE = 63;                       // c-VEP frames per cycle
+  const SIM_FRAMES = 8 * CYCLE;           // 8.4 s simulated: 2100 samples at 250 Hz
+  const STEADY_FROM = 4 * CYCLE;          // frame 252: the last 4 cycles are the steady state
+  const SIM_SAMPLES = Math.round(SIM_FRAMES * FS / REFRESH);
+  const STEADY_SAMPLE = Math.round(STEADY_FROM * FS / REFRESH);
+  const KERNEL = V.vepKernel(FS);
+  const PREVIEW_ROUNDS = 600;             // t-VEP preview: 10 minutes of shuffled rounds
+
+  // -- the three paradigms: frame bits per target over the simulation ----------------------
+  const SCHEDULE = V.timeSchedule(4, 2, 13, PREVIEW_ROUNDS, "random", 7);
+  const SCHEDULE_BITS = V.scheduleMatrix(SCHEDULE);
+
+  const P = {
+    time: {
+      color: "--time", names: () => ["T1", "T2", "T3", "T4"],
+      bits: (k, nFrames) => SCHEDULE_BITS[k].slice(0, nFrames),
+      frameBit: (k, n) => SCHEDULE_BITS[k][n % SCHEDULE.nFrames],
+      n: () => 4, fix: 0,
+    },
+    freq: {
+      color: "--freq",
+      names: () => V.FVEP_FREQS.map((f) => (Math.round(f * 10) / 10) + " Hz"),
+      bits: (k, nFrames) => V.onOffFrames(V.FVEP_FREQS[k], nFrames),
+      frameBit: (k, n) => V.onOffBit(V.FVEP_FREQS[k], n),
+      n: () => 6, fix: 0,
+    },
+    code: {
+      color: "--code", targets: 4, lag: 16, codes: null,
+      names: () => { const a = []; for (let k = 0; k < P.code.targets; k++) a.push("T" + (k + 1)); return a; },
+      bits: (k, nFrames) => { const c = P.code.codes[k], o = []; for (let i = 0; i < nFrames; i++) o.push(c[i % CYCLE]); return o; },
+      frameBit: (k, n) => P.code.codes[k][n % CYCLE],
+      n: () => P.code.targets, fix: 0,
+    },
+  };
+  const SEQ = V.mSequence(CYCLE);
+  const AUTOCORR = V.autocorrelation(SEQ);
+  function setCodeLayout(targets) {
+    P.code.targets = targets;
+    P.code.lag = targets === 16 ? 4 : 16;
+    P.code.codes = V.laggedCodes(SEQ, targets, P.code.lag);
+    if (P.code.fix >= targets) P.code.fix = 0;
+  }
+  setCodeLayout(4);
+
+  /** The toy EEG of looking at target k: its frame bits as a signal, convolved with the kernel. */
+  function simulate(p, k) {
+    const signal = V.framesToSignal(p.bits(k, SIM_FRAMES), SIM_SAMPLES, FS, REFRESH);
+    return V.sequenceResponse(signal, KERNEL);
+  }
+  function steady(x) { return x.slice(STEADY_SAMPLE, SIM_SAMPLES); }
+
+  // -- canvas helpers -------------------------------------------------------------------------
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = 11 * dpr + "px " + token("--mono");
+    return { ctx, w, h, dpr };
+  }
+
+  /** Axes box with x ticks; returns the mapping functions. */
+  function axes(c, xmin, xmax, ymin, ymax, xticks, xlabel) {
+    const { ctx, w, h, dpr } = c;
+    const padL = 30 * dpr, padR = 8 * dpr, padT = 8 * dpr, padB = 22 * dpr;
+    const x = (v) => padL + (v - xmin) / (xmax - xmin) * (w - padL - padR);
+    const y = (v) => padT + (1 - (v - ymin) / (ymax - ymin)) * (h - padT - padB);
+    ctx.strokeStyle = token("--rule");
+    ctx.lineWidth = dpr;
+    ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+    if (ymin < 0 && ymax > 0) { ctx.beginPath(); ctx.moveTo(padL, y(0)); ctx.lineTo(w - padR, y(0)); ctx.stroke(); }
+    ctx.fillStyle = token("--ink-2");
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const t of xticks) {
+      ctx.beginPath(); ctx.moveTo(x(t), h - padB); ctx.lineTo(x(t), h - padB + 3 * dpr); ctx.stroke();
+      ctx.fillText(String(t), x(t), h - padB + 5 * dpr);
+    }
+    ctx.textAlign = "right";
+    ctx.fillText(xlabel, w - padR, h - padB + 5 * dpr);
+    ctx.textAlign = "left";
+    return { x, y, padL, padR, padT, padB };
+  }
+
+  function line(c, pts, color, width, dash) {
+    const { ctx, dpr } = c;
+    ctx.save();
+    ctx.strokeStyle = color; ctx.lineWidth = (width || 1.5) * dpr;
+    if (dash) ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => { if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** (a): one row of cells per target, the first `nFrames` frames; the fixated row brighter. */
+  function drawSequence(canvas, p, nFrames) {
+    const c = fit(canvas), { ctx, w, h, dpr } = c;
+    const n = p.n(), names = p.names();
+    const padL = 44 * dpr, padR = 6 * dpr, padT = 6 * dpr, padB = 20 * dpr;
+    const rowH = (h - padT - padB) / n, cellW = (w - padL - padR) / nFrames;
+    const accent = token(p.color);
+    ctx.textBaseline = "middle"; ctx.textAlign = "right";
+    for (let k = 0; k < n; k++) {
+      const row = p.bits(k, nFrames);
+      const y = padT + k * rowH;
+      const on = k === p.fix;
+      ctx.fillStyle = on ? token("--ink") : token("--ink-2");
+      if (n <= 8 || k === p.fix || k === 0 || k === n - 1) ctx.fillText(names[k], padL - 6 * dpr, y + rowH / 2);
+      for (let i = 0; i < nFrames; i++) {
+        ctx.fillStyle = row[i] ? (on ? accent : "#7A7F83") : token("--surface-2");
+        ctx.fillRect(padL + i * cellW, y + dpr, Math.max(1, cellW - 0.5 * dpr), Math.max(1, rowH - 2 * dpr));
+      }
+    }
+    ctx.fillStyle = token("--ink-2"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const f of [0, 15, 30, 45, 60]) {
+      if (f > nFrames) continue;
+      ctx.fillText(f === 60 ? "60 frames" : String(f), padL + f * cellW, h - padB + 5 * dpr);
+    }
+  }
+
+  /** (b): the first `seconds` of a response, with the stimulus bits as a strip underneath. */
+  function drawResponse(canvas, p, resp, seconds) {
+    const c = fit(canvas);
+    const n = Math.round(seconds * FS);
+    let peak = 0.1;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(resp[i]));
+    const a = axes(c, 0, seconds, -peak * 1.15, peak * 1.15, [0, 0.5, 1, 1.5, 2], "s");
+    const bits = p.bits(p.fix, Math.round(seconds * REFRESH));
+    const { ctx, dpr } = c;
+    ctx.fillStyle = "rgba(255,255,255,0.09)";
+    bits.forEach((b, i) => { if (b) ctx.fillRect(a.x(i / REFRESH), a.padT, Math.max(1, a.x(1 / REFRESH) - a.x(0)), c.h - a.padT - a.padB); });
+    const pts = [];
+    for (let i = 0; i < n; i++) pts.push([a.x(i / FS), a.y(resp[i])]);
+    line(c, pts, token(p.color), 1.6);
+  }
+
+  function drawSpectrum(canvas, p, spec, marks, fmax) {
+    const c = fit(canvas);
+    let top = 0;
+    for (let i = 0; i < spec.freqs.length && spec.freqs[i] <= fmax; i++) top = Math.max(top, spec.power[i]);
+    const a = axes(c, 0, fmax, 0, top * 1.1 || 1, [0, 10, 20, 30, 40, 50], "Hz");
+    const { ctx, dpr } = c;
+    ctx.strokeStyle = token("--rule"); ctx.lineWidth = dpr;
+    for (const m of marks) {
+      ctx.setLineDash([2 * dpr, 3 * dpr]);
+      ctx.beginPath(); ctx.moveTo(a.x(m.f), a.padT); ctx.lineTo(a.x(m.f), c.h - a.padB); ctx.stroke();
+      ctx.setLineDash([]);
+      if (m.label) { ctx.fillStyle = m.strong ? token("--ink") : token("--ink-2"); ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(m.label, a.x(m.f), a.padT); }
+    }
+    const pts = [];
+    for (let i = 0; i < spec.freqs.length && spec.freqs[i] <= fmax; i++) pts.push([a.x(spec.freqs[i]), a.y(spec.power[i])]);
+    line(c, pts, token(p.color), 1.6);
+  }
+
+  function fmt(v, d) { return Number(v).toFixed(d === undefined ? 2 : d); }
+  function argmax(a) { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[b]) b = i; return b; }
+
+  // -- t-VEP panel ------------------------------------------------------------------------------
+  function renderTime() {
+    const p = P.time;
+    const resp = simulate(p, p.fix);
+    drawSequence($("time-seq"), p, 60);
+    drawResponse($("time-resp"), p, resp, 2);
+    // (c) the kernel, with the flash-locked average of the fixated target's own onsets
+    const c = fit($("time-fig"));
+    const a = axes(c, 0, 500, -1.15, 1.15, [0, 100, 200, 300, 400, 500], "ms");
+    const kpts = KERNEL.map((v, i) => [a.x(i / FS * 1000), a.y(v)]);
+    line(c, kpts, token(p.color), 1.8);
+    const epoch = KERNEL.length;
+    const amps = [];
+    let avgFix = null;
+    for (let k = 0; k < 4; k++) {
+      const onsets = V.onsetsOf(SCHEDULE, k).filter((f) => f < SIM_FRAMES).map((f) => Math.round(f * FS / REFRESH));
+      const avg = V.epochAverage(resp, onsets, epoch);
+      amps.push(V.peakToValley(avg));
+      if (k === p.fix) avgFix = avg;
+    }
+    line(c, avgFix.map((v, i) => [a.x(i / FS * 1000), a.y(v)]), token("--ink"), 1, true);
+    const { ctx, dpr } = c;
+    ctx.fillStyle = token("--ink-2"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText("peak " + Math.round(argmax(KERNEL) / FS * 1000) + " ms", a.x(130), a.padT);
+    const best = argmax(amps);
+    $("time-dec").innerHTML = "<b>How the decoder tells the target:</b> cut a 0.5 s epoch after " +
+      "every flash onset, average the epochs of each target's own onsets, and pick the largest " +
+      "peak-to-valley amplitude (<code>vep.tvep.FlashAverager</code>). The fixated target's flashes " +
+      "line up and add; the others' epochs catch only the tails of foreign flashes." +
+      "<span class=num>peak-to-valley: " + amps.map((v, k) => "T" + (k + 1) + " " + fmt(v)).join(" · ") +
+      " → T" + (best + 1) + (best === p.fix ? " (right)" : " (wrong)") + "</span>";
+  }
+
+  // -- f-VEP panel ------------------------------------------------------------------------------
+  function renderFreq() {
+    const p = P.freq;
+    const resp = simulate(p, p.fix);
+    drawSequence($("freq-seq"), p, 60);
+    drawResponse($("freq-resp"), p, resp, 2);
+    const spec = V.dft(steady(resp), FS);
+    const f0 = V.FVEP_FREQS[p.fix];
+    const marks = V.FVEP_FREQS.map((f, k) => ({ f, label: k === p.fix ? "f" : "", strong: true }));
+    marks.push({ f: 2 * f0, label: "2f" }, { f: 3 * f0, label: "3f" });
+    drawSpectrum($("freq-fig"), p, spec, marks, 50);
+    const snrs = V.FVEP_FREQS.map((f) => V.peakSnr(spec, f, 1.0));
+    const best = argmax(snrs);
+    $("freq-dec").innerHTML = "<b>How the decoder tells the target:</b> take the power spectrum of " +
+      "a few seconds of EEG and, at each target's frequency, divide the power in that bin by the " +
+      "mean of its neighbours within 1 Hz (<code>vep.fvep.SNR</code>, the paper's rule); the largest " +
+      "SNR wins. BrainSync's live decoder does the same job with CCA / FBCCA against sine templates." +
+      "<span class=num>SNR: " + V.FVEP_FREQS.map((f, k) => p.names()[k] + " " + fmt(snrs[k], 1)).join(" · ") +
+      " → " + p.names()[best] + (best === p.fix ? " (right)" : " (wrong)") + "</span>";
+  }
+
+  // -- c-VEP panel ------------------------------------------------------------------------------
+  function renderCode() {
+    const p = P.code;
+    const resp = simulate(p, p.fix);
+    drawSequence($("code-seq"), p, 60);
+    drawResponse($("code-resp"), p, resp, 2);
+    // (c) the autocorrelation as stems
+    const c = fit($("code-ac"));
+    const a = axes(c, -1, CYCLE, -8, CYCLE * 1.08, [0, 16, 32, 48, 62], "lag (frames)");
+    const { ctx, dpr } = c;
+    ctx.strokeStyle = token(p.color); ctx.lineWidth = 1.5 * dpr;
+    AUTOCORR.forEach((v, lag) => { ctx.beginPath(); ctx.moveTo(a.x(lag), a.y(0)); ctx.lineTo(a.x(lag), a.y(v)); ctx.stroke(); });
+    ctx.fillStyle = token("--ink-2"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText("N = " + CYCLE, a.x(2), a.padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText("−1", a.x(40), a.y(-1) - 2 * dpr);
+    // (d) the spectrum of the steady-state response
+    const spec = V.dft(steady(resp), FS);
+    drawSpectrum($("code-fig"), p, spec, [{ f: 5, label: "5" }, { f: 25, label: "25" }], 50);
+    // the decoder: the template is target 0's steady response; shift it by each lag, correlate
+    const template = steady(simulate(p, 0));
+    const test = steady(resp);
+    const rs = [];
+    for (let k = 0; k < p.targets; k++) rs.push(V.pearson(test, V.roll(template, Math.round(k * p.lag * FS / REFRESH))));
+    const best = argmax(rs);
+    const shown = rs.length <= 6 ? rs.map((r, k) => "T" + (k + 1) + " " + fmt(r)).join(" · ")
+      : "T" + (best + 1) + " " + fmt(rs[best]) + ", the others between " + fmt(Math.min(...rs.filter((_, k) => k !== best))) +
+        " and " + fmt(Math.max(...rs.filter((_, k) => k !== best)));
+    $("code-dec").innerHTML = "<b>How the decoder tells the target:</b> learn one template, the " +
+      "average response over a cycle while the user looks at the first target; for each target " +
+      "shift that template by its lag (" + p.lag + " frames = " + fmt(p.lag * FS / REFRESH, 1) +
+      " samples) and correlate it with the EEG of the current cycle; the largest correlation wins " +
+      "(<code>vep.cvep.Template</code>). A sync marker on each cycle's first frame tells where the cycle starts." +
+      "<span class=num>correlation: " + shown + " → T" + (best + 1) + (best === p.fix ? " (right)" : " (wrong)") + "</span>";
+  }
+
+  const RENDER = { time: renderTime, freq: renderFreq, code: renderCode };
+
+  function fillFix(id, p, name) {
+    const sel = $(id);
+    sel.textContent = "";
+    p.names().forEach((label, k) => {
+      const o = document.createElement("option");
+      o.value = String(k);
+      o.textContent = "T" + (k + 1) + (name === "freq" ? " · " + label : "");
+      sel.appendChild(o);
+    });
+    sel.value = String(p.fix);
+  }
+  for (const name of ["time", "freq", "code"]) {
+    fillFix(name + "-fix", P[name], name);
+    $(name + "-fix").addEventListener("change", (e) => { P[name].fix = Number(e.target.value); RENDER[name](); });
+  }
+  document.querySelectorAll("input[name=code-layout]").forEach((r) => r.addEventListener("change", () => {
+    setCodeLayout(Number(r.value));
+    fillFix("code-fix", P.code, "code");
+    if (live.name === "code") stopLive();
+    renderCode();
+  }));
+
+  // -- photosensitivity warning: asked once per page load, before the first flicker --------------
+  let acknowledged = false;
+  let pendingStart = null;
+  function withAck(fn) {
+    if (acknowledged) { fn(); return; }
+    pendingStart = fn;
+    $("gate").showModal();
+  }
+  $("gate-yes").addEventListener("click", () => {
+    acknowledged = true;
+    $("gate").close();
+    const fn = pendingStart; pendingStart = null;
+    if (fn) fn();
+  });
+  $("gate-no").addEventListener("click", () => { pendingStart = null; $("gate").close(); });
+  $("gate").addEventListener("cancel", () => { pendingStart = null; });
+
+  // -- live preview: one paradigm at a time, frame n = elapsed wall time in 60 Hz frames ----------
+  const live = { name: null, t0: null, raf: null };
+  function startLive(name) {
+    withAck(() => {
+      stopLive();
+      live.name = name; live.t0 = null;
+      $(name + "-live").hidden = false;
+      $(name + "-live").classList.toggle("grid", name === "code" && P.code.targets === 16);
+      document.querySelectorAll("[data-start]").forEach((b) => { b.textContent = b.dataset.start === name ? "Stop flicker preview" : "Start flicker preview"; });
+      $("stop-all").hidden = false;
+      $("live-what").textContent = { time: "t-VEP", freq: "f-VEP", code: "c-VEP" }[name];
+      live.raf = requestAnimationFrame(tick);
+    });
+  }
+  function stopLive() {
+    if (live.raf) cancelAnimationFrame(live.raf);
+    live.raf = null;
+    if (live.name) {
+      drawSquares(live.name, null);   // still, mid-grey
+      document.querySelectorAll("[data-start]").forEach((b) => { b.textContent = "Start flicker preview"; });
+    }
+    live.name = null;
+    $("stop-all").hidden = true;
+    $("live-what").textContent = "off";
+  }
+  function tick(t) {
+    if (!live.name) return;
+    if (live.t0 === null) live.t0 = t;
+    const n = Math.round((t - live.t0) / (1000 / REFRESH));
+    drawSquares(live.name, n);
+    live.raf = requestAnimationFrame(tick);
+  }
+  /** The paradigm's squares on black: bit 1 white, bit 0 black, mid-grey when still (n null). */
+  function drawSquares(name, n) {
+    const p = P[name];
+    const canvas = $(name + "-live");
+    const c = fit(canvas), { ctx, w, h, dpr } = c;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
+    const count = p.n(), names = p.names();
+    const cols = count > 8 ? 4 : count, rows = Math.ceil(count / cols);
+    const cellW = w / cols, cellH = (h - 10 * dpr) / rows;
+    const side = Math.round(Math.min(cellW, cellH) * 0.62);
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (let k = 0; k < count; k++) {
+      const cx = (k % cols + 0.5) * cellW, cy = Math.floor(k / cols) * cellH + cellH * 0.45;
+      const lum = n === null ? 0.5 : p.frameBit(k, n);
+      const g = Math.round(lum * 255);
+      ctx.fillStyle = "rgb(" + g + "," + g + "," + g + ")";
+      ctx.fillRect(Math.round(cx - side / 2), Math.round(cy - side / 2), side, side);
+      ctx.strokeStyle = "#3A3F42"; ctx.lineWidth = dpr;
+      ctx.strokeRect(Math.round(cx - side / 2) - 5 * dpr, Math.round(cy - side / 2) - 5 * dpr, side + 10 * dpr, side + 10 * dpr);
+      ctx.fillStyle = "#8E989C";
+      ctx.fillText(names[k], cx, cy + side / 2 + 8 * dpr);
+    }
+  }
+  document.querySelectorAll("[data-start]").forEach((b) => b.addEventListener("click", () => {
+    if (live.name === b.dataset.start) stopLive(); else startLive(b.dataset.start);
+  }));
+  $("stop-all").addEventListener("click", stopLive);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") stopLive(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopLive(); });
+
+  function renderAll() { renderTime(); renderFreq(); renderCode(); }
+  let resizeTimer = null;
+  window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAll, 120); });
+  renderAll();
+})();
+</script>
+</body>
+</html>

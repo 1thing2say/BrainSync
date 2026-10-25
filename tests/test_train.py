@@ -96,7 +96,7 @@ def test_main_reports_every_cell_and_a_verdict(trained) -> None:
 def test_saved_model_matches_the_recording(trained) -> None:
     _, out, model, _ = trained
     assert f"model saved: {model}" in out
-    assert "python -m brainsync.demo -c four_targets --classifier trca --model" in out
+    assert "python -m brainsync.demo -c four_targets --classifier trca-phase --model" in out
     clf = load_model(model)
     np.testing.assert_allclose(clf.freqs, FREQS4)
     assert clf.info is not None
@@ -154,7 +154,7 @@ def test_lock_replays_trca_at_the_onset_phase(small, tmp_path, capsys) -> None:
     counts = [int(tok.split("/")[1].rstrip(",;")) for tok in line.split() if "/" in tok]
     assert counts == [10] * 6
     run_it = next(ln for ln in out.splitlines() if ln.startswith("run it: "))
-    assert run_it.endswith(" --lock") and "--classifier trca" in run_it
+    assert run_it.endswith(" --lock") and "--classifier trca-phase" in run_it
     data = json.loads(report.read_text())
     assert data["settings"]["lock"] is True
     assert set(data["replay"][0]) == {"file", "fbcca", "trca", "locked"}
@@ -531,7 +531,8 @@ def test_run_it_repeats_every_non_default_setting(small, tmp_path, capsys) -> No
     assert argv[:3] == ["python", "-m", "brainsync.demo"]
     from brainsync import demo
     args = demo.build_parser().parse_args(argv[3:])
-    assert args.config == "two_targets" and args.classifier == "trca" and args.model == str(out)
+    assert args.config == "two_targets" and args.classifier == "trca-phase"
+    assert args.model == str(out)
     assert args.channels == ["O1", "O2"] and args.harmonics == 2 and args.names == list(MONTAGE)
     assert (args.window, args.step, args.votes, args.margin, args.threshold) == \
         (1.0, 0.5, 3, 0.3, None)
@@ -539,8 +540,8 @@ def test_run_it_repeats_every_non_default_setting(small, tmp_path, capsys) -> No
 
 def test_run_it_with_defaults_adds_nothing(trained) -> None:
     _, out, model, _ = trained
-    assert f"run it: python -m brainsync.demo -c four_targets --classifier trca --model {model}\n" \
-        in out
+    assert ("run it: python -m brainsync.demo -c four_targets --classifier trca-phase "
+            f"--model {model}\n") in out
 
 
 def test_run_it_names_another_montage(tmp_path, capsys) -> None:

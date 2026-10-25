@@ -132,7 +132,9 @@ class TRCA(FBCCA):
     ``band_weights``.
     """
 
-    name = "trca"
+    # "trca" is brainsync.templates' TRCA (classify.make, brainsync.calibrate); this one is
+    # loaded from a brainsync.train model (demo --classifier trca-phase)
+    name = "trca-phase"
 
     def __init__(self, freqs: Sequence[float], fs: float, harmonics: int = 3,
                  phases: Sequence[float] | None = None, margin: float = 0.0,
@@ -327,9 +329,11 @@ class TRCA(FBCCA):
         starts = np.asarray(t, dtype=float) - self.latency
         return 2.0 * np.pi * np.multiply.outer(starts, self.freqs)
 
-    def raw_scores(self, X: np.ndarray, psi: object = None) -> np.ndarray:
+    def raw_scores(self, X: np.ndarray, offset: float = 0.0, psi: object = None) -> np.ndarray:
         """a_trca * eTRCA + a_cca * FBCCA (n_trials, n_targets); a part weighted 0 is
-        skipped. ``psi`` ((K,) or (n_trials, K) radians) locks the templates' phase."""
+        skipped. ``psi`` ((K,) or (n_trials, K) radians) locks the templates' phase.
+        ``offset`` (classify.CCA's API) changes nothing: phase-free scores are
+        shift-invariant, and a lock comes only from ``psi`` (phase_offsets)."""
         if not self.fitted:
             raise ValueError("TRCA model is not trained: call fit() or load_model()")
         X = self._windows(X)
@@ -346,15 +350,17 @@ class TRCA(FBCCA):
             total += a_c * c_sum
         return total
 
-    def fit_baseline(self, X_rest: np.ndarray, locked: bool = False) -> TRCA:
+    def fit_baseline(self, X_rest: np.ndarray, offset: float = 0.0,
+                     locked: bool = False) -> TRCA:
         """Learn the rest scores' mean and spread; ``locked`` scores every rest window at
-        its own seeded random phase, as the lock does on a screen that does not flicker."""
+        its own seeded random phase, as the lock does on a screen that does not flicker.
+        ``offset`` changes nothing (see raw_scores)."""
         if not locked:
             return super().fit_baseline(X_rest)
         X = self._windows(X_rest)
         psi = np.random.default_rng(CV_SEED).uniform(0.0, 2.0 * np.pi,
                                                      size=(X.shape[0], self.n_targets))
-        rest = self.raw_scores(X, psi)
+        rest = self.raw_scores(X, psi=psi)
         if rest.shape[0] < 2:
             raise ValueError(f"baseline needs at least 2 rest windows, got {rest.shape[0]}")
         spread = float(np.sqrt(np.mean(np.var(rest, axis=0, ddof=1))))
@@ -365,13 +371,13 @@ class TRCA(FBCCA):
         self.has_baseline = True
         return self
 
-    def scores(self, X: np.ndarray, psi: object = None) -> np.ndarray:
-        raw = self.raw_scores(X) if psi is None else self.raw_scores(X, psi)
-        return raw - self.baseline_mean
+    def scores(self, X: np.ndarray, offset: float = 0.0, psi: object = None) -> np.ndarray:
+        return self.raw_scores(X, offset, psi=psi) - self.baseline_mean
 
-    def decide(self, X: np.ndarray, psi: object = None) -> tuple[np.ndarray, np.ndarray]:
+    def decide(self, X: np.ndarray, offset: float = 0.0,
+               psi: object = None) -> tuple[np.ndarray, np.ndarray]:
         """Predictions and baseline-corrected scores, phase-locked when ``psi`` is given."""
-        s = self.scores(X, psi)
+        s = self.scores(X, offset, psi=psi)
         return self.predict_scores(s), s
 
     # -- the CV gate -----------------------------------------------------------------

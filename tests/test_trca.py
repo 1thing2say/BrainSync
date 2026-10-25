@@ -350,8 +350,8 @@ def test_margin_and_threshold_rules_in_spread_units(model, split, rest) -> None:
 
 def test_abstain_decisions_invariant_to_score_scale(model, split, rest) -> None:
     class Scaled(TRCA):
-        def raw_scores(self, X):
-            return 10.0 * super().raw_scores(X)
+        def raw_scores(self, X, offset=0.0, psi=None):
+            return 10.0 * super().raw_scores(X, offset, psi=psi)
 
     _, _, Xte, _ = split
     held = np.concatenate([Xte[..., :375], rest[1]])

@@ -1,12 +1,13 @@
-// Partner page: renders what the server says and reports events back. All state is server-side.
+// The session page: renders what the server says and reports events back. All state is server-side.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const RECONNECT_MS = 1000;
-const REPLACED = 4000;  // close code: another partner page took over (app/server.py)
+const REPLACED = 4000;  // close code: another page took over (app/server.py)
 
 let ws = null;
 let shown = null;        // last show_page
+let stateName = "";      // last state name
 let phase = "";          // last trial phase
 let accepted = false;    // flicker warning accepted
 let keyboardMode = false;
@@ -27,9 +28,13 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws/ui`);
   // No resume on (re)connect: the server re-sends its state, and a reconnect after STOP must
   // never restart the flicker. Only the warning's start button and Resume send "resume".
-  ws.onopen = () => setConnected(true);
+  ws.onopen = () => {
+    setConnected(true);
+    $("state").textContent = "";  // the server sends its state now
+  };
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = (ev) => {
+    stopFlicker();  // no server, no trial: never flicker on (INTERFACE rule 3)
     setConnected(false);
     Listener.stop("disconnected");  // the server re-sends the mic state when we are back
     if (ev.code === REPLACED) {
@@ -65,18 +70,18 @@ function handle(msg) {
 
 // Diamond positions by slot (s1 top, s2 left, s3 right, s4 bottom, as on the user's screen).
 const POSITIONS = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
-const HEADINGS = { page: "Pick a reply", confirm: "Say this?", list: "Highlighted reply" };
 
 function renderPage(msg) {
   shown = msg;
-  $("option-count").textContent = msg.mode === "list"
-    ? `Page ${msg.page} · option ${msg.highlight_index + 1} of ${msg.options.length}`
-    : `Page ${msg.page} · ${HEADINGS[msg.mode]}`;
-  $("option-text").textContent = msg.mode === "page" ? "" : msg.text;
+  // The confirm screen's sentence sits in the empty centre of the diamond, between Say it (top)
+  // and Back (bottom), as on the flicker display; list mode keeps it above the targets.
+  $("option-text").textContent = msg.mode === "list" ? msg.text : "";
   renderList(msg);
   const targets = $("targets");
   targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
-  targets.replaceChildren(...msg.slots.map((s) => {
+  $("centre-text").textContent = msg.mode === "confirm" ? msg.text : "";
+  $("centre-text").hidden = stateName === "SPEAKING";  // the Speaking box shows it then
+  targets.replaceChildren($("centre"), ...msg.slots.map((s) => {
     // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
     const key = s.slot.replace("s", "");
@@ -84,7 +89,9 @@ function renderPage(msg) {
     el.dataset.slot = s.slot;
     // The sentence is what gets spoken, so it is the big text; the short label is its tag.
     // Targets without a sentence (More options, Say it, Back) show the label big instead.
-    el.innerHTML = `<span class="target-tag"></span><span class="target-text"></span><span class="target-key"></span>`;
+    // .flicker is the white layer whose opacity the flicker loop drives (display.flicker: browser).
+    el.innerHTML = `<span class="flicker" aria-hidden="true"></span><span class="target-tag"></span>`
+      + `<span class="target-text"></span><span class="target-key"></span>`;
     const sentence = s.utterance && s.utterance.trim();
     el.querySelector(".target-tag").textContent = sentence ? s.label : "";
     el.querySelector(".target-text").textContent = sentence || s.label;
@@ -114,9 +121,8 @@ function renderPhase(next) {
   if (next === "flicker" && phase !== "flicker") startTimer();
   if (next !== "flicker") stopTimer();
   phase = next;
-  const el = $("phase");
-  el.textContent = phase === "flicker" ? "flickering" : phase;
-  el.className = `phase ${phase}`;
+  if (phase === "flicker") startFlicker();
+  else stopFlicker();
   document.querySelectorAll(".target").forEach((t) => {
     t.classList.toggle("active", phase === "flicker");
     if (phase === "cue") t.classList.remove("picked");
@@ -124,8 +130,61 @@ function renderPhase(next) {
   });
 }
 
+// --- the flicker (display.flicker: browser) ---------------------------------------------------
+// Every target on screen flickers at its slot's frequency from the server's flicker phase until
+// any other phase. Only the server starts it; Stop, Esc, a lost connection or a hidden tab stop it
+// here at once, without waiting for the server.
+
+let flickerOn = false;     // from /api/config: this page draws the flicker
+let waveform = "sine";
+let slotFreqs = {};        // slot -> {freq_hz, phase_deg}
+let expectedHz = 60;
+let refreshHz = 60;        // measured at load; frame counts use it
+let flickerFrame = null;   // the requestAnimationFrame id while flickering
+let onsetMs = 0;
+
+function startFlicker() {
+  if (!flickerOn || !accepted || document.hidden || flickerFrame !== null) return;
+  onsetMs = 0;
+  flickerFrame = requestAnimationFrame(drawFlicker);
+}
+
+function drawFlicker(ms) {
+  if (onsetMs === 0) onsetMs = ms;
+  const n = FlickerCore.frameIndex(ms - onsetMs, 1000 / refreshHz);
+  document.querySelectorAll(".target").forEach((t) => {
+    const slot = slotFreqs[t.dataset.slot];
+    const layer = t.querySelector(".flicker");
+    if (slot && layer) {
+      layer.style.opacity = FlickerCore.luminance(slot.freq_hz, slot.phase_deg, n, refreshHz, waveform);
+    }
+  });
+  flickerFrame = requestAnimationFrame(drawFlicker);
+}
+
+function stopFlicker() {
+  if (flickerFrame !== null) cancelAnimationFrame(flickerFrame);
+  flickerFrame = null;
+  document.querySelectorAll(".target .flicker").forEach((l) => { l.style.opacity = 0; });
+}
+
+// The screen's real refresh, from a second of frames at load (the warning is still up then).
+function measureRefresh() {
+  const stamps = [];
+  const step = (ms) => {
+    stamps.push(ms);
+    if (stamps.length < 90) { requestAnimationFrame(step); return; }
+    const m = FlickerCore.measure(stamps);
+    if (m) refreshHz = m.hz;
+    const problem = flickerOn ? FlickerCore.refreshProblem(m, expectedHz) : "";
+    $("refresh-note").textContent = problem;
+    $("refresh-note").hidden = !problem;
+  };
+  requestAnimationFrame(step);
+}
+
 // The selection timer: how long the user has been looking, out of stim.max_trial_s. A steady
-// fill, updated a few times a second; nothing on this page flashes.
+// fill, updated a few times a second.
 let maxTrialS = 10;  // from /api/config
 let timer = null;
 let trialStarted = 0;
@@ -155,13 +214,16 @@ function markPicked(slot) {
 }
 
 function renderState(msg) {
-  const b = ViewCore.banner(msg.name, msg.detail, shown && shown.mode);
-  $("state").textContent = b.text;
-  $("banner").className = `banner tone-${b.tone}`;
+  stateName = msg.name;
+  const st = ViewCore.status(msg.name, msg.detail, shown && shown.mode);
+  $("state").textContent = st.text;
+  $("state").className = `state tone-${st.tone}`;
   const box = $("speaking");
   box.hidden = msg.name !== "SPEAKING";
   if (msg.name === "SPEAKING") $("speaking-text").textContent = `“${msg.detail}”`;
-  $("option").hidden = msg.name === "SPEAKING";  // the sentence is in the Speaking box then
+  // The sentence is in the Speaking box then.
+  $("option").hidden = msg.name === "SPEAKING";
+  $("centre-text").hidden = msg.name === "SPEAKING";
   if (msg.name === "PAUSED" || msg.name === "IDLE") {
     Speech.cancel();
     speaking = false;  // a cancelled clip never reports its end: without this the mic stayed off
@@ -170,7 +232,6 @@ function renderState(msg) {
 
 function speakOut(msg) {
   lastSpoken = msg.utterance_id;
-  setJudgment("");
   speaking = true;
   Listener.stop("speaking");  // never listen while the laptop talks
   Listener.heardSpoken(msg.text);
@@ -246,64 +307,24 @@ function addLine(who, text) {
   list.append(li);
   // Only the latest lines: the partner needs what was just said, not the whole log.
   while (list.children.length > CONVERSATION_LINES) list.firstElementChild.remove();
-  li.scrollIntoView({ block: "nearest" });
+  // Scroll the list only: scrollIntoView also scrolled the page, carrying the targets off screen.
+  list.scrollTop = list.scrollHeight;
 }
 
 function renderStatus(s) {
   const modeChanged = keyboardMode !== s.keyboard_mode;
   keyboardMode = s.keyboard_mode;
-  const badges = [
-    [s.decoder_connected ? (s.decoder_ok ? "ok" : "bad") : "bad",
-      s.decoder_connected ? (s.decoder_ok ? "DECODER OK" : "DECODER NOT OK") : "NO DECODER"],
-    [s.display_ok ? "ok" : "bad", s.display_ok ? "DISPLAY OK" : "DISPLAY OFF"],
-    [s.board_ok ? "ok" : "bad", s.board_ok ? "BOARD OK" : "BOARD ?"],
-    { ok: ["ok", "LLM OK"], waiting: ["", "LLM READY"], failed: ["bad", "LLM FAILED"] }[s.llm]
-      || ["", "LLM OFF"],
-  ];
-  if (s.mic_muted) badges.push(["flag", "MIC MUTED"]);
-  else if (s.mic === "listening") badges.push(["ok", "MIC ON"]);
-  else if (["denied", "nomic", "offline", "unsupported", "error", "needs_tap"].includes(s.mic)) {
-    badges.push(["bad", `MIC: ${s.mic.toUpperCase()}`]);
-  }
-  const pill = ([cls, text]) => {
-    const b = document.createElement("span");
-    b.className = `badge ${cls}`;
-    b.textContent = text;
-    return b;
-  };
-  $("badges").replaceChildren(...badges.map(pill));
-  // One line for the operator; the details open on a click. A fake decoder or keyboard mode is
-  // always shown on the mirror too, so nobody mistakes the demo for live EEG.
-  const h = ViewCore.health(s);
-  $("health").className = `health level-${h.level}`;
-  $("health-text").textContent = h.text;
-  $("flags").replaceChildren(...h.flags.map((f) => pill(["flag", f])));
-  if (s.decoder_name) {
-    const name = document.createElement("span");
-    name.className = "decoder-name";
-    name.textContent = `Decoder: ${s.decoder_name}`;
-    $("decoder-message").replaceChildren(name, s.decoder_message ? ` · ${s.decoder_message}` : "");
-  } else {
-    $("decoder-message").textContent = s.decoder_message || "";
-  }
+  // A fake decoder or keyboard mode shows in the server's terminal, /api/health,
+  // tools/preflight.py and the log, not on the user's screen.
   const resume = $("resume");
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
-  $("hint").textContent = s.keyboard_mode
-    ? "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply."
-    : "";
   if (shown && modeChanged) renderPage(shown);
 }
 
-// Correct / Wrong: the partner's mark for the last spoken reply (logged for the summary).
+// Keys C / W: the operator's mark for the last spoken reply (logged for the summary).
 function judge(key) {
-  if (!lastSpoken) return;
-  if (send({ type: "key", key })) setJudgment(key === "c" ? "Marked correct" : "Marked wrong");
-}
-
-function setJudgment(text) {
-  $("judged").textContent = text;
-  $("correct").disabled = $("wrong").disabled = !lastSpoken;
+  if (lastSpoken) send({ type: "key", key });
 }
 
 // --- controls -------------------------------------------------------------
@@ -322,9 +343,12 @@ $("accept").addEventListener("click", () => {
   $("warning").hidden = true;
   Speech.unlock();  // this tap lets iOS play the replies later
   keepAwake();
-  send({ type: "resume" });
+  // A newly opened page starts a fresh session: the home page and an empty conversation.
+  $("conversation").replaceChildren();
+  send({ type: "resume", start: true });
 });
 $("stop").addEventListener("click", () => {
+  stopFlicker();
   if (!send({ type: "stop" })) $("state").textContent = "Not connected: press Esc on the display";
 });
 $("resume").addEventListener("click", () => {
@@ -357,6 +381,9 @@ $("mute").addEventListener("click", () => send({ type: "mic_set", muted: !mic.mu
 document.addEventListener("pointerdown", () => { if (Listener.state === "needs_tap") Listener.kick(); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    // A hidden tab draws nothing: stop the trial, so the decoder never picks from a still screen.
+    if (flickerFrame !== null) send({ type: "stop" });
+    stopFlicker();
     micState = "hidden";
     micText = "";
     renderMic();
@@ -369,25 +396,9 @@ document.addEventListener("visibilitychange", () => {
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", () => Listener.kick());  // lapel plugged in
 }
-$("health").addEventListener("click", () => {
-  const details = $("health-details");
-  details.hidden = !details.hidden;
-  $("health").setAttribute("aria-expanded", String(!details.hidden));
-});
-$("correct").addEventListener("click", () => judge("c"));
-$("wrong").addEventListener("click", () => judge("w"));
-
-$("say-form").addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  const input = $("partner-input");
-  const text = input.value.trim();
-  if (text) send({ type: "partner_text", text, source: "typed" });
-  input.value = "";
-});
-
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") { send({ type: "stop" }); return; }
-  if (ev.target.closest("input, textarea") || ev.repeat || !accepted) return;
+  if (ev.key === "Escape") { stopFlicker(); send({ type: "stop" }); return; }
+  if (ev.repeat || !accepted) return;
   const key = ev.key.toLowerCase();
   if (key === "c" || key === "w") judge(key);
   else if (["1", "2", "3", "4"].includes(key)) send({ type: "key", key });
@@ -400,6 +411,11 @@ fetch("/api/config")
     if (c.listen_window_s) listenWindow = c.listen_window_s;
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
+    flickerOn = Boolean(c.flicker);
+    if (c.waveform) waveform = c.waveform;
+    if (c.slots) slotFreqs = c.slots;
+    if (c.refresh_hz) expectedHz = refreshHz = c.refresh_hz;
+    measureRefresh();
     if (c.user_name) userName = c.user_name;
     if (c.app_link) {
       $("app-url").textContent = c.app_link;
@@ -410,6 +426,5 @@ fetch("/api/config")
                          echoMs: (c.stt_echo_s || 4) * 1000 });
   })
   .catch(() => {});
-setJudgment("");
 setConnected(false);
 connect();

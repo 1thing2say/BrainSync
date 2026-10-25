@@ -38,7 +38,7 @@ time with its templates locked to each trial's onset phase ("locked"), as the de
 does with the onset the stimulus reports.
 
 Finally a model is fitted on all kept trials and saved to data/models (or --out) for
-``python -m brainsync.demo --classifier trca --model <path>``. It is saved whatever the
+``python -m brainsync.demo --classifier trca-phase --model <path>``. It is saved whatever the
 verdict says; the verdict line says whether to use it, and the "run it" line repeats every
 setting the demo must share with the model (--names, --channels, --harmonics) or that the
 replay used (--window, --step, --votes, --margin, --threshold) when it is not the default.
@@ -467,7 +467,7 @@ def replay(ts: TrialSet, cv: CVResult, window_s: float = TUNED.window_s,
             fit_rest(dec, rest)
 
             def predict(X: np.ndarray, t: np.ndarray) -> np.ndarray:
-                return clf.decide(X, clf.phase_offsets(t))[0] if locked else clf.predict(X)
+                return clf.decide(X, psi=clf.phase_offsets(t))[0] if locked else clf.predict(X)
 
             for i in fold.held_out:
                 got = _first_commit(predict(flick[i], flick_t[i]), votes) \
@@ -749,7 +749,7 @@ def demo_command(args: argparse.Namespace, ts: TrialSet, cfg: str, path: Path) -
     (board channel names, analysis channels, harmonics) and those the replay used, each
     only when it differs from the demo's default."""
     rec = ts.first
-    out = ["python", "-m", "brainsync.demo", "-c", cfg, "--classifier", "trca",
+    out = ["python", "-m", "brainsync.demo", "-c", cfg, "--classifier", "trca-phase",
            "--model", str(path)]
     if tuple(rec.ch_names) != tuple(MONTAGE):
         out += ["--names", ",".join(rec.ch_names)]

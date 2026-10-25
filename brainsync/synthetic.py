@@ -68,6 +68,39 @@ def ssvep_trials(freqs: Sequence[float], fs: float = 250.0, n_per_target: int = 
     return X, y
 
 
+def vep_kernel(fs: float = 250.0, seconds: float = 0.5, latency: float = 0.06,
+               freq: float = 6.0, decay: float = 0.1) -> np.ndarray:
+    """A made-up flash VEP (impulse response), peak amplitude 1, ``seconds`` long.
+
+    Nothing for ``latency`` seconds, then a damped sine (``freq`` Hz, time constant
+    ``decay`` s): a positive peak near 100 ms, a trough near 190 ms, a small second peak
+    and silence by 400 ms, the shape of Fig. 2(b) in Bin et al. (2009). A linear model:
+    the EEG that a stimulus sequence evokes is the sequence convolved with this kernel
+    (``sequence_response``), which is what the t-VEP and c-VEP decoders assume.
+    """
+    if fs <= 0 or seconds <= 0 or decay <= 0 or freq <= 0:
+        raise ValueError(f"fs, seconds, decay and freq must be positive, got {fs}, {seconds}, "
+                         f"{decay}, {freq}")
+    if latency < 0 or latency >= seconds:
+        raise ValueError(f"latency must lie in [0, seconds), got {latency} with {seconds} s")
+    t = np.arange(int(round(seconds * fs))) / fs - latency
+    k = np.where(t >= 0, np.exp(-np.maximum(t, 0) / decay) * np.sin(2 * np.pi * freq * t), 0.0)
+    peak = np.max(np.abs(k))
+    if peak <= 0:
+        raise ValueError(f"kernel of {seconds} s at {fs} Hz has no samples after the latency")
+    return k / peak
+
+
+def sequence_response(stim: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """Causal convolution of a stimulus signal (same sample rate as the kernel) with the
+    VEP kernel, trimmed to the stimulus length: the evoked EEG of the linear model."""
+    s = np.asarray(stim, dtype=float).reshape(-1)
+    k = np.asarray(kernel, dtype=float).reshape(-1)
+    if s.size == 0 or k.size == 0:
+        raise ValueError("stimulus and kernel must not be empty")
+    return np.convolve(s, k)[:s.size]
+
+
 def rest_trials(n: int, fs: float = 250.0, n_channels: int = 4, seconds: float = 4.0,
                 seed: int = 0) -> np.ndarray:
     """Background-only trials (n, n_channels, samples) matching ssvep_trials' noise."""

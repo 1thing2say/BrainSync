@@ -344,6 +344,7 @@ def test_second_controller_is_busy_and_takeover_replaces(transport, capsys):
         transport.send({"type": "status", "board": "unknown", "ok": True, "text": "c"})
         assert (await recv(c))["text"] == "c"
         await c.close()
+        await until(lambda: transport.controller is None)   # the server saw the close too
 
     asyncio.run(main())
     events = transport.events()
@@ -373,6 +374,9 @@ def test_same_client_instance_reconnecting_replaces_its_dead_socket(transport, c
         assert (await closed(a)) == (P.CLOSE_REPLACED, "replaced")
         await until(lambda: transport.controller == 4)
         await c.close()
+        # The client's close can return before the server's handler has run its cleanup;
+        # the disconnect Event is queued with the controller change, so wait for that.
+        await until(lambda: transport.controller is None)
 
     asyncio.run(main())
     kinds = [(e.kind, e.conn_id) for e in transport.events()]
@@ -487,6 +491,7 @@ def test_controller_bye_frees_the_controller_slot(transport):
         await until(lambda: transport.controller is None)
         again = await join(transport)                   # no busy
         await again.close()
+        await until(lambda: transport.controller is None)   # the server saw the close too
 
     asyncio.run(main())
     events = transport.events()

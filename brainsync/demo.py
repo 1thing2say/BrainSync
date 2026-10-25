@@ -2,11 +2,13 @@
 
     python -m brainsync.demo                                  # Cerelog X8 + full-screen stimulus
     python -m brainsync.demo --fake --fast --no-stimulus      # synthetic board, faster than real time
-    python -m brainsync.demo -c four_targets --classifier trca --model latest
+    python -m brainsync.demo -c four_targets --classifier trca-phase --model latest
 
-The trained classifier (--classifier trca) needs a model fitted on the user's own cued
-trials with the same targets, channels and preprocessing: record them with
-``python -m brainsync.record -c four_targets --trials 32``, train with
+--model FILE alone loads a classifier trained by brainsync.calibrate (brainsync.templates),
+which replaces --classifier. The phase-locked TRCA (--classifier trca-phase, brainsync.trca)
+needs a model fitted on the user's own cued trials with the same targets, channels and
+preprocessing: record them with ``python -m brainsync.record -c four_targets --trials 32``,
+train with
 ``python -m brainsync.train <file>_cued.npz`` (it says whether TRCA beats FBCCA on held-out
 trials and saves the model to data/models), then pass --model PATH or --model latest. The
 model's rest baseline is not saved: it is fitted on this session's still screen like
@@ -48,13 +50,17 @@ import numpy as np
 
 from . import trca
 from .board import Board, CerelogBoard, FakeBoard
-from .classify import ABSTAIN, make
+from .classify import ABSTAIN, TRAINING_FREE, make
 from .launch import Stimulus, launch_stimulus, speak
 from .online import TUNED, Decision, Decoder, calibrate, threshold_arg
 from .recordings import MONTAGE, POSTERIOR, channel_indices
 from .stimulus import StimulusConfig, load_config
 from .stimulus.display import free_onset
+from .templates import load_model
 
+# brainsync.trca's phase-locked TRCA, trained by brainsync.train. Not "trca": that name is
+# brainsync.templates' TRCA, which a --model from brainsync.calibrate brings.
+PHASE_TRCA = "trca-phase"
 STALL_S = 5.0
 POLL_S = 0.1
 ONSET_WAIT_S = 1.0     # the free_on marker follows the first feedback line within a frame
@@ -86,14 +92,18 @@ def add_live_arguments(p: argparse.ArgumentParser, config: str = "two_targets",
     """
     p.add_argument("-c", "--config", default=config,
                    help=f"stimulus config name or .toml path (default {config})")
-    p.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca", "trca"),
-                   help=f"default {TUNED.classifier}; trca needs --model")
-    p.add_argument("--model", default=None,
-                   help="trained model .npz from brainsync.train, or 'latest' (the newest in "
-                        "data/models)")
+    p.add_argument("--classifier", default=TUNED.classifier,
+                   choices=(*TRAINING_FREE, PHASE_TRCA),
+                   help=f"training-free classifier (default {TUNED.classifier}); a trained one "
+                        f"comes from --model, and {PHASE_TRCA} (brainsync.trca) needs one")
+    p.add_argument("--model", default=None, metavar="FILE",
+                   help="trained model saved by brainsync.calibrate (its targets must match "
+                        "the config; replaces --classifier and --harmonics), or with "
+                        f"--classifier {PHASE_TRCA} a .npz from brainsync.train or 'latest' "
+                        "(the newest in data/models)")
     p.add_argument("--lock", action="store_true",
-                   help="with --classifier trca: lock the templates to the flicker's phase, "
-                        "from the onset the stimulus reports")
+                   help=f"with --classifier {PHASE_TRCA}: lock the templates to the flicker's "
+                        "phase, from the onset the stimulus reports")
     p.add_argument("--window", type=float, default=TUNED.window_s,
                    help=f"window seconds (default {TUNED.window_s:g})")
     p.add_argument("--step", type=float, default=TUNED.step_s,
@@ -157,14 +167,12 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         p.error(f"--margin and --pad must be >= 0, got {args.margin}, {args.pad}")
     if len(args.names) != len(MONTAGE):
         p.error(f"--names needs {len(MONTAGE)} names, got {len(args.names)}: {args.names}")
-    if args.classifier == "trca" and args.model is None:
-        p.error("--classifier trca needs --model PATH or --model latest "
+    if args.classifier == PHASE_TRCA and args.model is None:
+        p.error(f"--classifier {PHASE_TRCA} needs --model PATH or --model latest "
                 "(train one with python -m brainsync.train)")
-    if args.model is not None and args.classifier != "trca":
-        p.error(f"--model is for --classifier trca, got --classifier {args.classifier}")
-    if args.lock and args.classifier != "trca":
-        p.error(f"--lock needs --classifier trca (only trained templates have a phase to "
-                f"lock), got --classifier {args.classifier}")
+    if args.lock and args.classifier != PHASE_TRCA:
+        p.error(f"--lock needs --classifier {PHASE_TRCA} (only its trained templates have a "
+                f"phase to lock), got --classifier {args.classifier}")
 
 
 def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
@@ -178,8 +186,15 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
                                clock=None if args.fast else time.time, ch_names=args.names)
     else:
         board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
-    if args.classifier == "trca":
+    if args.classifier == PHASE_TRCA:
         clf: Any = _trained(args, cfg, board.fs)
+    elif args.model:
+        clf = load_model(args.model)
+        if (clf.freqs.size != cfg.n_targets or np.any(np.abs(clf.freqs - cfg.freqs) > 0.01)
+                or abs(clf.fs - board.fs) > 1e-6):
+            raise ValueError(f"model {args.model} was trained for {clf.freqs.tolist()} Hz at "
+                             f"{clf.fs:g} Hz, not {cfg.freqs.tolist()} Hz at {board.fs:g} Hz")
+        clf.margin, clf.threshold = args.margin, args.threshold
     else:
         clf = make(args.classifier, freqs=cfg.freqs, fs=board.fs, harmonics=args.harmonics,
                    phases=cfg.phases, margin=args.margin, threshold=args.threshold)
@@ -355,7 +370,7 @@ def find_onset(stim: Stimulus | None, decoder: Decoder) -> bool:
     """Give a locking decoder the free run's onset from the stimulus log, once it is
     there; True when the decoder has one."""
     if decoder.lock and decoder.onset is None and stim is not None:
-        decoder.onset = free_onset(stim.text())
+        decoder.set_onset(free_onset(stim.text()))
     return decoder.onset is not None
 
 
@@ -450,7 +465,12 @@ def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: 
                 speak(prompts[1], voice)
                 if decoder.lock:
                     _await_onset(stim, decoder)
-                board.read()  # drop what arrived during the prompt
+                _, t_read = board.read()  # drop what arrived during the prompt
+                if not decoder.lock:
+                    # the flicker began with that line; trained templates are locked to the
+                    # board's clock at this moment (estimated: the newest sample, a prompt's
+                    # length late; a locking decoder takes the stimulus's free_on marker)
+                    decoder.set_onset(float(t_read[-1]) if len(t_read) else None)
                 began = decoder.n_seen
                 ended = "started"
 

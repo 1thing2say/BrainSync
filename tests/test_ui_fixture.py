@@ -44,7 +44,9 @@ def test_every_ui_to_server_message_type_appears_and_parses():
     assert {m["type"] for m in msgs} == set(models)
     for raw in msgs:
         msg = parse_ui_to_server(raw)
-        assert isinstance(msg, models[raw["type"]]) and msg.model_dump(mode="json") == raw
+        # Clients leave unset optional fields out (resume's start), as tools/ui_fixture.py does.
+        assert isinstance(msg, models[raw["type"]])
+        assert msg.model_dump(mode="json", exclude_none=True) == raw
 
 
 def test_every_variant_the_app_handles_is_there():

@@ -127,7 +127,8 @@ def ui_to_server() -> list:
 
 def build() -> dict:
     return {"server_to_ui": [m.model_dump(mode="json") for m in server_to_ui()],
-            "ui_to_server": [m.model_dump(mode="json") for m in ui_to_server()]}
+            # Clients leave unset optional fields out (resume's start), so the fixture does too.
+            "ui_to_server": [m.model_dump(mode="json", exclude_none=True) for m in ui_to_server()]}
 
 
 def render() -> str:

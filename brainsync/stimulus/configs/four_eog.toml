@@ -1,0 +1,39 @@
+# Four targets in a 2 x 2 grid for the EOG gate recording (brainsync.eog): record it with
+#   python -m brainsync.record -c four_eog --names Fp1,Fp2,LO,RO,P7,P8,O1,O2
+# with the C3/C4 leads on gel pads at the left and right outer canthus. Every corner has
+# both a horizontal and a vertical gaze component, so one recording scores both EOG axes
+# and the 4-class FBCCA at once (python -m brainsync.eog <file>). The frequencies are the
+# page-mode set (PLAN.md section 14); row by row from the top left: 13 top-left, 15
+# top-right, 17 bottom-left, 11 bottom-right. Squares stay inside the screen height:
+# centres 0.6 apart, side 0.32, so a cue box (1.2 x the square) reaches 0.49 screen
+# heights from the middle.
+name = "four_eog"
+
+[targets]
+freqs = [13.0, 15.0, 17.0, 11.0]   # Hz
+phases_pi = [0.0, 0.0, 0.0, 0.0]
+labels = ["13", "15", "17", "11"]
+
+[layout]
+rows = 2
+cols = 2
+size = 0.32     # side length, screen heights
+spacing = 0.6   # centre to centre, screen heights
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 7      # 7 x 4 = 28 trials, about 4 minutes
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true

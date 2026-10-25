@@ -6,9 +6,15 @@ that flicker, an 8-channel Cerelog X8 EEG board picks it up, and a training-free
 (CCA or filter-bank CCA) works out which square you are looking at. The cue box then moves
 onto it and the label is spoken.
 
+On top of it sits **BCI Voice** ([below](#bci-voice-reply-with-your-eyes)): a partner speaks,
+Claude writes three ranked replies, each beside its own flickering square (four squares in all,
+the fourth for more options), and the reply the user looks at and confirms is spoken aloud. One
+command starts it: `python -m app.server --bridge cerelog`.
+
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
 > trigger a seizure in people with photosensitive epilepsy. Both demo targets (15 and
-> 17 Hz) lie inside it. Ask about epilepsy before every session. Stop at once if anyone
+> 17 Hz) lie inside it; BCI Voice adds 11 and 13 Hz, also in the photosensitive range, on four
+> squares. Ask about epilepsy before every session. Stop at once if anyone
 > feels unwell. The stimulus prints this warning to stderr each time it starts.
 
 ## Setup
@@ -94,6 +100,111 @@ instead, so synthetic files never mix with real ones.
   EEG.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
+- **C3 and C4 never reach the scalp** on the dry headset (they float at over 200 µV). Their
+  leads can go to gel pads at the left and right outer canthus instead, channels `LO` and
+  `RO`, which record the horizontal electro-oculogram (EOG); Fp1 and Fp2 against the mastoid
+  reference give the vertical one. Keep REF on the mastoid and DRL where it is: DRL is not a
+  recorded channel, and a temple reference would put jaw muscle and blinks into every
+  channel. `brainsync.eog` turns the EOG into a gaze prior for the decoder (below).
+
+## BCI Voice: reply with your eyes
+
+BCI Voice turns the decoder into a way to talk. A conversation partner speaks (or types); Claude
+writes three short replies in the user's own voice, ranked most likely first; each reply sits
+beside its own flickering square on the full-screen display, with a fourth square, NEXT, for a
+new page of three. The user looks at a reply, confirms it on a second screen ("Say it" or
+"Back"), and the laptop speaks it in a Cartesia voice. Only the decoder (or keyboard mode)
+decides what was picked: Claude only writes the options, and nothing is spoken without a
+confirmation. `PLAN.md` is the design, `INTERFACE-v2-draft.md` the contract between the server
+and the bridge, `docs/DEMO.md` the operator's runbook.
+
+| Part | What it does |
+|---|---|
+| `app/` (`python -m app.server`) | The server: owns all state (pages, trials, what is shown and spoken), asks Claude for each page (`app/menus.py`), pre-generates the Cartesia clips (`app/tts.py`), logs every event to `logs/*.jsonl` |
+| `brainsync/voice_bridge.py` | The bridge: the Cerelog X8, the decoder (FBCCA, 1.5 s windows, `brainsync.online`) and the PsychoPy display, driven by the server over `/ws/decoder` (protocol 2) |
+| `brainsync/stimulus` with `four_diamond.toml` | The display: four squares in a diamond at 13 (top), 15 (left), 17 (right) and 11 Hz (bottom, NEXT), sine, a fixation mark in each, each option's sentence beside its square |
+| `ui/` | The partner page in Chrome: a mirror of the user's screen (no flicker), Stop, the mic and transcript, typing, the conversation, Correct / Wrong marks |
+| `ios/` | The native iPhone partner app, the same page with on-device speech recognition (`ios/README.md`) |
+
+### Run it
+
+Setup as above (one `.venv` with `.[dev,display]` and the Cerelog BrainFlow fork), then
+`ANTHROPIC_API_KEY` (Claude) and `CARTESIA_API_KEY` (the voice) in a gitignored `.env` at the repo
+root. Without them the app still runs, on fixed reply lists and the browser's voice.
+
+```bash
+.venv/bin/python -m app.server --bridge cerelog                  # server + bridge (headset + display)
+.venv/bin/python -m app.server --bridge fake                     # fake EEG, the real display
+.venv/bin/python -m app.server --bridge fake --bridge-headless   # fake EEG, no window
+.venv/bin/python -m app.server --keyboard                        # keys 1-4 select, no headset
+.venv/bin/python -m app.server --bridge cerelog --tunnel         # also a phone link and an iPhone app link
+.venv/bin/python tools/preflight.py                              # go / no-go, with the server running
+.venv/bin/python tools/log_summary.py                            # the numbers from the newest session
+```
+
+1. The server prints the partner page address; open `http://127.0.0.1:8000` in Chrome (the Web
+   Speech API needs it), on a second screen, or pair the iPhone app with the app link the
+   server prints (`--tunnel`, or `server.host: 0.0.0.0` on the same Wi-Fi).
+2. The bridge connects the board (about 16 s), opens the display full screen and checks its
+   refresh (60 Hz, ProMotion off). The partner page shows the bridge as connected while the
+   display still waits on its start screen: press Space on the display first.
+3. On the partner page, read the flicker warning and press **I understand, start**: a 10 s still
+   baseline, then the first page. That is shorter than the 30 s that phase 3 below recommends
+   for the tuned 1.5 s window (a 10 s rest offset is off by about 0.58 spreads, more than the
+   0.5 margin), so live accuracy may suffer until `baseline.seconds` in `config/default.yaml`
+   is raised; it is a value agreed in the protocol (`INTERFACE-v2-draft.md` section 6), so
+   change it with the teammate.
+
+`--bridge fake` and `--fake-decoder` show a FAKE DECODER badge and `--keyboard` a KEYBOARD badge;
+their picks are not the user's. The bridge can also run on its own,
+`python -m brainsync.voice_bridge [--fake] [--no-stimulus]`, against a server started without
+`--bridge`; `tools/contract_check.py` is a stand-in server that checks any bridge against
+protocol 2.
+
+### Safety
+
+- **Photosensitivity.** 11, 13, 15 and 17 Hz are all in the photosensitive range (15 and 17 Hz in
+  the 15-25 Hz band most likely to trigger seizures), and four squares cover more of the screen
+  than two. Nobody with photosensitive epilepsy or flicker sensitivity uses it or faces it. The
+  partner page and the iPhone app show a flicker warning, and nothing flickers until it is
+  accepted.
+- **`Esc` on the display** stops the flicker at once, locally, whatever the server says (it closes
+  the display; the bridge relaunches it held still and the session waits for **Resume**).
+- **Stop** on the partner page or the app turns the flicker off through the server and the bridge.
+  After Stop or `Esc` the flicker never comes back by itself: **Resume** runs a new baseline
+  first.
+- The flicker is on only during a trial and only on that trial's squares, and it goes off at once
+  when the bridge loses the server, on a pause, and on any error. A trial the server has not
+  stopped after 20 s (`--max-flicker-s`, twice `stim.max_trial_s`) turns it off at the bridge.
+
+### Honest claim
+
+"An LLM that writes context-aware replies turns a few-target SSVEP BCI on a dry-electrode headset
+into a conversation, with every option visible and nothing spoken without a confirmation." The
+numbers behind it, to fill in from the tools named before the claim is made. A cell that still
+reads **TBD** has not been measured: say so rather than quote another number.
+
+| Number | Value | Where it comes from |
+|---|---|---|
+| Targets and mode used | **TBD**: 4 targets, page mode / 2 targets, list mode | the 4-target gate decision (`docs/DEMO.md` section 2) |
+| 4-target accuracy, cued, offline (chance 25 %) | **TBD**: \_\_ % over \_\_ trials, FBCCA / CCA at \_\_ s | `python -m brainsync.score_cued <gate>_cued.npz --windows 2` |
+| Live correct rate | **TBD**: \_\_ % of \_\_ replies marked C | `python tools/log_summary.py` (C / W marks) |
+| Seconds per spoken reply | **TBD**: median \_\_ s | `tools/log_summary.py` |
+| Selections per spoken reply | **TBD** | `tools/log_summary.py` |
+| Spoken reply was option 1 | **TBD**: \_\_ % | `tools/log_summary.py` |
+| Claude page latency | **TBD**: median \_\_ ms, p95 \_\_ ms, \_\_ % fell back to a fixed list | `tools/log_summary.py` |
+
+What is measured today is two-target and offline: 15 vs 17 Hz at 78 % over 50 single-target
+trials, and 64-93 % in three cued recordings with both squares flickering (phase 0 and phase 2
+above). Never quote those for four targets. Not yet done or not yet true:
+
+- The bridge has run only on the fake board and with a stand-in display; never with the headset
+  or the real PsychoPy window. The 4-target layout has never been recorded on EEG.
+- The fake board's picks (`--bridge fake`, `--fake-decoder`) are random, and keyboard mode is a
+  person pressing keys: neither is the user's eyes, and each is labelled on screen.
+- The iPhone app has not been built or run on a device yet.
+- "Dry-electrode" holds only if O1 and O2 had no gel or paste (the reference and bias are gel
+  pads either way).
 
 ## Flicker depth and the Flicker Lab
 
@@ -212,6 +323,79 @@ Per subject (CCA, FBCCA at 1/2/4 s) the results go to stderr. Subject 1 is the h
 (CCA 24/44/64%), subject 8 the easiest (CCA 91/100/100%). Starting the window at sample 0
 instead drops subject 8's 1 s CCA accuracy from 90.6% to 48.9%.
 
+## Phase 1b: trained classifiers
+
+`brainsync/templates.py` adds the classifiers that learn from the user's own cued trials,
+behind the same API as CCA and FBCCA (baseline, margin, threshold, `make()`): `itcca` and
+`ecca` (Nakanishi 2015), `trca` / `etrca` (Nakanishi 2018), `etrcar` (TRCA with a sine/cosine
+projection, Wong 2020) and `sfcca` (a learned spatial filter scored like CCA, so it ignores
+the phase). Each target's template is its trial average projected onto its own harmonics,
+which makes it defined at any time after the stimulus onset: the online decoder scores every
+sliding window at its offset from `Decoder.set_onset(t)` (the display's first flickering
+frame). `--template raw` uses the plain averages instead, for windows inside the calibration
+epochs. Trained methods are always scored leave-one-block-out (`*` in the tables).
+
+```bash
+.venv/bin/python -m brainsync.nakanishi --methods cca itcca ecca etrca etrcar --windows 0.5 1
+.venv/bin/python -m brainsync.nakanishi --methods itcca ecca etrca --windows 1 --template raw
+.venv/bin/python -m brainsync.score_cued --methods fbcca ecca etrcar sfcca --windows 1 1.5 2
+.venv/bin/python -m brainsync.online <file>_cued.npz --classifier etrcar --train-blocks 4
+.venv/bin/python -m brainsync.calibrate -c four_diamond        # record, score, gate, save model
+```
+
+Nakanishi 2015 (12 targets, 10 subjects, 14 training blocks, mean accuracy):
+
+| Method | 0.5 s | 1 s | Paper, 1 s |
+|---|---|---|---|
+| CCA | 23 % | 57 % | 55 % |
+| ITCCA, raw templates | 60 % | 81 % | 81 % |
+| eCCA, raw templates | 81 % | 94 % | 93 % |
+| eTRCA, raw templates | 91 % | 98 % | - |
+| eCCA, harmonic templates | 64 % | 83 % | - |
+| eTRCA-R, harmonic templates | 79 % | 92 % | - |
+| eTRCA-R, harmonic, 2 training blocks | - | 86 % | - |
+
+On the three dry-electrode 15/17 Hz recordings (4 posterior channels, 10 trials per target,
+50 trials pooled after artifact rejection) the trained methods, scored leave-one-block-out,
+do not beat FBCCA, which is scored on every trial with abstain rules that were tuned on these
+same files (`brainsync/online.py` `TUNED`):
+
+| Window | FBCCA | eCCA | eTRCA | eTRCA-R | SFCCA |
+|---|---|---|---|---|---|
+| 1 s | 66 % | 70 % | 62 % | 58 % | 56 % |
+| 1.5 s | 80 % | 70 % | 62 % | 60 % | 58 % |
+| 2 s | 80 % | 78 % | 58 % | 58 % | 60 % |
+| 3 s | 70 % | 72 % | 72 % | 60 % | 58 % |
+
+With 50 trials, gaps under about 15 points are noise; eCCA ties FBCCA, the TRCA family is
+near chance. Replayed through the online decoder after a fit on the first 4 blocks (36
+held-out trials, FBCCA's window, votes, margin and threshold for every classifier), FBCCA
+commits 19 with 0 wrong, eCCA 6 with 6 wrong, eTRCA-R 8 with 4 wrong.
+
+Why: a leave-one-out phase-locking value of the SSVEP to the `stim_on` marker (common CCA
+filter from the other trials, phase of the filtered 2 s window at the flicker frequency) is
+0.49 and 0.62 on 162029, 0.34 and 0.24 on 172130, 0.11 and 0.43 on 161131, against a
+no-signal floor of 0.27 (10th-90th percentile 0.11-0.53) and 0.75-0.91 for a perfectly
+onset-locked response at the same CCA correlation. So only 162029 at 17 Hz shows locking at
+all, and even it matches a response-phase scatter of about 10 ms (SD) rather than a locked
+one. (A phase-locking value computed with a filter fitted on the same trials, as an earlier
+draft of this section did, has a floor of 0.47 and says nothing.) Per-trial best-lag
+estimates spread over the whole flicker period, like the still-screen windows do. Meanwhile
+the timing bookkeeping is clean on the display side (60.000 Hz, 0 dropped frames, markers
+within 0.1 ms of the flip) but not on the board side: the Cerelog/BrainFlow sample stamps
+are the board's millisecond counter plus the whole seconds of the host clock at the
+handshake, so they lag the host markers by a constant 0-1 s that differs per connection
+(0.45-0.9 s on these files). Within one recording the offset is constant and a template
+absorbs it, so it does not explain the weak locking there; but it made every live onset (the
+server's gate, a template's phase) wrong by a random fraction of a second after each
+reconnect. `CerelogBoard` now rebases its stamps onto the host clock (`stamp_offset`).
+
+What would change the answer: a cleaner response (posterior electrodes on Oz/POz, gel on
+O1/O2) and the four-target session itself, recorded with `brainsync.calibrate`, which scores
+FBCCA and the saved classifier on held-out blocks and prints the gate verdict. FBCCA stays
+the live default; `demo --model` and the server's `--decoder-model` take a saved model once
+one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
+
 ## Phase 2: two-target cued trials
 
 Each cued session has 20 trials: a 1 s cue, 4 s of 15 and 17 Hz flicker with the cue box
@@ -328,8 +512,11 @@ crashes or refuses the display makes the demo exit with code 1.
 
 The 4-square demo (`four_targets`: 11 Hz top left, 15 top right, 17 bottom left, 13
 bottom right) can run calibration-free with FBCCA, or with a TRCA model trained on your
-own cued trials and locked to the flicker's phase. The whole loop, with the headset on
-for 20 minutes first:
+own cued trials and locked to the flicker's phase. This TRCA is `--classifier trca-phase`
+(`brainsync/trca.py`, trained by `brainsync.train`); Phase 1b's `trca` and the other
+classifiers in `brainsync/templates.py` (saved by `brainsync.calibrate`, loaded with
+`--model FILE` alone) are a separate option, and both stay selectable. The whole loop,
+with the headset on for 20 minutes first:
 
 ```bash
 # 1. Electrode check: a 15 Hz square in terminal 1, the per-channel report in terminal 2.
@@ -344,7 +531,7 @@ for 20 minutes first:
 .venv/bin/python -m brainsync.train data/spectrum_checks/<stamp>_cued.npz --channels P8,O1,O2 --lock
 
 # 4. Run the demo on the saved model (train prints this "run it" line with the real path)
-.venv/bin/python -m brainsync.demo -c four_targets --classifier trca --model latest --channels P8,O1,O2 --window 2 --lock
+.venv/bin/python -m brainsync.demo -c four_targets --classifier trca-phase --model latest --channels P8,O1,O2 --window 2 --lock
 
 # Without training: FBCCA on the same four squares
 .venv/bin/python -m brainsync.demo -c four_targets
@@ -795,9 +982,32 @@ With the board attached, run the stimulus and the check in two terminals, then r
 ```
 
 Stimulus configs: `two_targets` (the demo pair), `swipe` (the same pair labelled Pass and
-Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`,
-`one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
-quits.
+Like, with a `[card]` table for BrainSwipe), `one_target_12`, `one_target_15`,
+`one_target_17` (single-target sessions for phase 0) and `four_eog` (a 2 x 2 grid at
+13/15/17/11 Hz for the EOG gate). Space starts a session, Escape quits.
+
+### EOG gaze prior
+
+With the C3/C4 leads on gel pads at the outer canthi (Hardware rules), record the gate
+and score it:
+
+```bash
+.venv/bin/python -m brainsync.record -c four_eog --names Fp1,Fp2,LO,RO,P7,P8,O1,O2
+.venv/bin/python -m brainsync.eog "$BRAINSYNC_DATA_DIR"/spectrum_checks/<date>_cued.npz
+```
+
+The scorer prints, per window length, the held-out accuracy of the gaze alone (each
+trial scored by target directions fitted on the other trials, or by the layout with
+`--positions 'x,y;x,y;...'`), of FBCCA alone and of the two fused. A window's gaze is the
+mean of the 10 Hz low-passed EOG minus the centre level from the still screens, a
+vector (h, v) in µV; each target scores the cosine to its direction times how far the
+gaze is from the centre, and the gaze abstains on blinks, a centred gaze or a small
+margin. The server adds `weight` (1.5) baseline spreads of those scores to the SSVEP
+scores before the abstain rules, so a clear gaze resolves an abstention and a strong
+SSVEP lead still wins: `python -m brainsync.server --eog` (the prior runs for layouts
+whose target rects are known, i.e. point mode). Open on the hardware: whether the board
+keeps the near-DC gaze level (the ADS1299 is DC coupled; only our 1 Hz high-pass removes
+it, and the EOG path skips that), and pad drift over minutes. Synthetic tests only so far.
 
 ## Client/server (v3) and BrainPoint
 
@@ -1018,6 +1228,134 @@ HUD, does no per-frame work, and keeps its backdrop up for reels without a predi
 scene does not change after calibration. Still to measure on the headset: decoder
 accuracy and dropped frames with the panel on versus off.
 
+## VEP paradigms: time, frequency and code modulation (Bin et al. 2009)
+
+Everything above is an f-VEP (SSVEP) system: each target flickers at its own frequency.
+Bin, Gao, Wang, Hong and Gao, "VEP-based brain-computer interfaces: time, frequency, and
+code modulations" (IEEE Computational Intelligence Magazine, 2009) sort VEP BCIs into three
+codings, like TDMA, FDMA and CDMA in radio, and `python -m brainsync.vep` runs a demo of
+each on the same board and PsychoPy display:
+
+| Paradigm | Stimulus | Decoder | Config | Paper |
+|---|---|---|---|---|
+| t-VEP | Brief flashes that never overlap; targets flash in rounds of one slot each, so each flashes once a second | Average the 0.5 s after each target's own flashes; the largest peak-to-valley response wins (`vep.tvep`) | `tvep_4` | under 30 bits/min; no online run |
+| f-VEP | Each target at its own frequency; the paper's six: 15, 12, 10, 8.6, 7.5, 6 Hz (4 to 10 frames per cycle) | FFT, SNR of the peak against its neighbouring bins, argmax (`vep.fvep.SNR`, the paper's rule; `--classifier cca` / `fbcca` also work) | `fvep_6` | 85 %, 39.7 bits/min |
+| c-VEP | One 63-bit m-sequence; every target shows it delayed by k lags (the paper: 16 targets, 4-frame lags) | One template trained while looking at square 0, shifted per target, Pearson correlation, argmax (`vep.cvep`) | `cvep_4` (diamond, 16-frame lags), `cvep_2` (two squares), `cvep_16` (the paper's grid) | 91 %, 92.8 bits/min |
+
+```bash
+# plans and synthetic runs (no headset)
+.venv/bin/python -m brainsync.stimulus -c cvep_4 --plan          # the sequences, no display
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --plan          # the two-square pair (YES / NO)
+.venv/bin/python -m brainsync.vep --compare --fake               # all three on the synthetic board
+.venv/bin/python -m brainsync.vep --paradigm code --fake --fast --no-stimulus   # instant dry run
+.venv/bin/python -m brainsync.vep --paradigm code --fake --seconds 120          # 4-square display + fake user
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --fake --seconds 20 --train-cycles 10 --no-voice
+
+# live: Cerelog X8 + the PsychoPy display (train on the first square, then decode)
+.venv/bin/python -m brainsync.vep --paradigm code                # 4 squares in a diamond, cvep_4 (YES / NO / HELP / WATER)
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_3      # 3 white squares in a row (YES / NO / HELP), 350 ms lags
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2      # 2 squares, labels + confidence line
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --cycles 3 --votes 2 --margin 0.1 --train-cycles 40 --seconds 120
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --template data/spectrum_checks/<stamp>_cvep_template.npz
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --no-scores        # bare squares
+.venv/bin/python -m brainsync.vep --paradigm time                # t-VEP, tvep_4
+.venv/bin/python -m brainsync.vep --paradigm freq                # f-VEP, brainsync.demo with the SNR rule
+
+# the display alone, driven by hand: {"flicker": true} to start, then a cue index or
+# {"text": "..."} / {"labels": [...]} lines on stdin
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --free --feedback stdin --labels --hold-still --no-wait
+```
+
+Live-run knobs: `--cycles` (c-VEP cycles averaged per decision, 1.05 s each), `--votes`
+(agreeing decisions before a commit), `--margin` (abstain unless the best target's
+correlation leads by this much; 0 commits on any lead), `--train-cycles` (cycles on the
+first square for the template; its held-out accuracy prints and shows on screen),
+`--template FILE` (skip training), `--seconds`, `--port` (the board's serial port, else
+auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The display
+needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
+venv with PsychoPy is the one described in "Install"; run the commands with its python.
+
+`web/vep-lab/index.html` is a static explainer for an audience: the three codings' stimulus
+sequences, the toy model's responses (the same kernel as `synthetic.vep_kernel`, ported to
+`vep_core.js` and checked against the Python), the paper's Figures 2 to 4 as a flash
+response, a response spectrum and the m-sequence autocorrelation, and a live preview of
+each paradigm's squares behind a photosensitivity warning and a start button. No network,
+no libraries; `node --test web/vep-lab/test/vep_core.test.mjs` runs its tests.
+
+How it fits the code base. A stimulus config may carry a `[code]` table (m-sequence length,
+lag in frames, frames per bit) or a `[time]` table (flash and gap frames, round order)
+instead of frequencies; `brainsync.stimulus.coded` turns either into per-frame luminances
+and the display draws them with the same `play` loop, stamping a `cycle:<n>` marker on
+every m-sequence cycle's first frame and a `flash:<k>` marker on every flash onset,
+because both decoders are onset-locked. `vep.sync.SyncDecoder` buffers samples and
+markers, filters the stretch around each epoch (1 to 30 Hz, the 60 Hz notch) and decides
+at cycle and flash boundaries with the same `Decision` and votes as the sliding f-VEP
+decoder; a marker whose epoch is not in the buffer gives no decision. The c-VEP cycle is
+63 frames, 1.05 s at 60 Hz, 262 samples at 250 Hz; each cycle is cut from its own marker,
+so the half sample per cycle never accumulates, and the lag of 16 frames is 66.7 samples.
+
+The live run starts the display in free-run mode with Unix markers and reads them from
+its log. c-VEP trains first: `--train-cycles` cycles (default 30, about 32 s) with the cue
+box on square 0, the leave-one-cycle-out accuracy printed (the paper's "training
+accuracy", 95 % for c-VEP against 88 % for f-VEP), the template saved as
+`<stamp>_cvep_template.npz` in the recordings folder and reusable with `--template`. Then
+every committed change moves the cue box and speaks the label. The display carries each
+square's label as signage (`cvep_2`, the two-square live pair: YES left, NO right) with a
+confidence bar from the decoder's scores, and a centre line with the lead and the committed
+choice, all redrawn after every decision (`--no-scores` for a bare display). It runs the
+stimulus as `--free --feedback stdin --hold-still --labels` and speaks the display's JSON
+control lines (the same ones the BCI Voice bridge uses): `{"flicker": true}` once to start
+the sequence, then `{"labels": [...]}` and `{"text": ...}` next to the cue index;
+redrawing the text on every flicker frame dropped 1 frame in 7592 on the demo Mac.
+The 4-square demo (`cvep_4`) uses the diamond of the four-target SSVEP studies (top,
+left, right, bottom, `[layout] shape = "diamond"`, `spacing` up and down and a wider
+`spacing_x` to the sides, white squares on black; `[stimulus] fill = [1, 0, 0]` gives the
+figure's red) with the signage YES / NO / HELP /
+WATER: each square's label line carries its bar and score, placed beside its square
+clockwise as in `four_diamond`, and the lead / choice line sits in the free centre. `--fake` swaps the board
+for `vep.fake.SequenceFakeBoard`: a made-up flash VEP (`synthetic.vep_kernel`, a damped
+sine after a 60 ms latency) convolved with the fixated target's sequence, on the posterior
+channels over Gaussian noise, with the markers coming from the fake board itself. It
+checks the pipeline, not anyone's visual cortex, and only the fixated target evokes
+anything (the paper's peripheral targets evoke smaller responses too). `--compare --fake` runs cued trials of
+each paradigm and prints accuracy, abstain rate, seconds per selection and Wolpaw's ITR
+beside the paper's figures; `--amp` and `--noise` set how easy the data are.
+
+What to expect on the headset, and why the defaults differ from the paper:
+
+- The paper had 47 channels, Oz with a tuned bipolar reference, and a CRT; this is four
+  dry posterior electrodes. c-VEP leans on timing, so `cvep_4` spreads four targets 16
+  frames (267 ms) apart, the widest four lags allow in a 63-frame cycle, where a one-frame
+  slip costs nothing; the 16-target grid with 4-frame lags (67 ms) is `cvep_16` for the
+  brave. The paper's wrap-around border is not drawn.
+- First headset runs (2026-10-25, `cvep_2`, one wearer, no alpha check first): the
+  template's held-out accuracy was 63 % and then 52 % (chance 50 %). The first run's mean
+  cycle was 140-420 uV RMS per channel, 20-40 times EEG, so the occipital electrodes were
+  not in contact; the second was 7-12 uV but held no stimulus-locked response after 40
+  cycles. With a chance template the live correlations are noise against noise, and the
+  decoder alternates YES / NO every few seconds whatever the margin. Settle the headset
+  (20 min, gel on O1 / O2), pass the eyes-closed alpha check, and fixate the square's
+  centre during training before reading anything into a live c-VEP run.
+- Marker-to-sample alignment has not been measured on the demo Mac (PLAN.md V5). A constant
+  offset is absorbed by training; jitter between cycles is not. Run a live or fake run with
+  `--save` (every sample plus the marker text go to `<stamp>_vep.npz`, and the demo prints
+  the stimulus log's path), then `python -m brainsync.vep.timing <that file> [-c cvep_2]`:
+  PASS / WARN / FAIL lines for the cycle (or flash) spacing against the config's grid
+  (1.0500 s a cycle; a single dropped frame is a WARN, a two-frame slip a FAIL), the marker
+  clock's drift in ppm, every marker's gap to the nearest sample (under one sample period),
+  the markers inside the recording, the board's sample rate against 250 Hz, and the log's
+  measured refresh and dropped-frame summary. Exit 0 means nothing failed. It cannot see
+  the flip-to-photons latency of the panel; that is a constant and a photodiode's job.
+- `tvep_4` flashes each target once a second (`config_warnings` flags a `[time]` table
+  above 4 Hz per target). The paper's 4 Hz bound keeps one target's consecutive responses
+  apart; here the screen as a whole flashes four times a second, so a 0.5 s epoch also
+  holds the start of another target's response, which the per-target average cancels. A
+  decision needs at least `--min-flashes` rounds: slow, as in the paper.
+- `fvep_6` is on/off flicker as on the paper's CRT, so its 5- and 7-frame cycles have an
+  uneven duty cycle (warned), and 10 Hz sits on the user's alpha (PLAN.md section 14).
+- Safety: an m-sequence is broadband and includes 15 to 25 Hz, and t-VEP is bright brief
+  flashes. The photosensitivity warning and Escape apply unchanged.
+
 ## Module map
 
 | Module | Role |
@@ -1035,9 +1373,10 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/board.py` | Cerelog X8 over BrainFlow, and a fake board |
 | `brainsync/record.py` | Record a cued session while the stimulus runs |
 | `brainsync/check.py` | Per-channel electrode check |
-| `brainsync/online.py` | Ring buffer, sliding-window decoder (optionally phase-locked to the flicker onset), calibration, replay and tuning grid |
-| `brainsync/trca.py` | Filter-bank ensemble TRCA trained on the user's trials, phase-free or locked, fused with FBCCA; model files |
-| `brainsync/train.py` | `python -m brainsync.train`: cross-validate TRCA against FBCCA on cued recordings, replay, save the model |
+| `brainsync/online.py` | Ring buffer, sliding-window decoder (with an optional per-target prior, optionally phase-locked to the flicker onset), calibration, replay and tuning grid |
+| `brainsync/eog.py` | EOG gaze prior: LO/RO and Fp1/Fp2 to a gaze vector, layout or fitted target directions, blink and margin abstains, held-out scoring CLI |
+| `brainsync/trca.py` | `trca-phase`: filter-bank ensemble TRCA trained on the user's trials, phase-free or locked, fused with FBCCA; model files |
+| `brainsync/train.py` | `python -m brainsync.train`: cross-validate `trca-phase` against FBCCA on cued recordings, replay, save the model |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
 | `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |
@@ -1069,6 +1408,24 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 | `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
 | `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
+| `brainsync/vep/codes.py` | m-sequences (LFSR), lagged code matrices, non-overlapping flash schedules (Bin et al. 2009) |
+| `brainsync/stimulus/coded.py` | c-VEP and t-VEP frames from `[code]` / `[time]` configs, `cycle:<n>` and `flash:<k>` markers |
+| `brainsync/vep/fvep.py` | `SNR`: the paper's FFT peak-SNR f-VEP rule in the CCA interface |
+| `brainsync/vep/cvep.py` | c-VEP `Template`: fit from cued cycles, shift per target, correlate, leave-one-out, save / load |
+| `brainsync/vep/tvep.py` | `FlashAverager`: flash-locked averages, peak-to-valley amplitude, abstain until enough flashes |
+| `brainsync/vep/sync.py` | `cut_epochs` at marker times; `SyncDecoder`, the live c-VEP / t-VEP decoder over samples and markers |
+| `brainsync/vep/fake.py` | `SequenceFakeBoard`: synthetic board that follows a coded stimulus and emits its markers |
+| `brainsync/vep/__main__.py` | `python -m brainsync.vep`: live t-VEP / f-VEP / c-VEP demos, c-VEP training, `--save`, `--compare` table |
+| `brainsync/vep/timing.py` | `python -m brainsync.vep.timing`: marker spacing, drift and marker-to-sample alignment of a run, PASS / WARN / FAIL |
+| `web/vep-lab/` | The three codings explained: sequences, toy responses, the paper's figures, a live preview (`vep_core.js` tested with node) |
+| `app/` | BCI Voice server: FastAPI, the orchestrator (pages, trials, confirm step), Claude pages, Cartesia clips, the session log, `--bridge` |
+| `brainsync/voice_bridge.py` | BCI Voice bridge: board, decoder and display over protocol 2 (`INTERFACE-v2-draft.md`) |
+| `brainsync/stimulus/configs/four_diamond.toml` | BCI Voice page mode: 13/15/17/11 Hz in a diamond, fixation marks, the 4-target gate session |
+| `ui/` | BCI Voice partner page (plain HTML/JS, served by `app.server`) |
+| `ios/` | BCI Voice iPhone partner app (SwiftUI) and `BrainSyncKit` |
+| `tools/fake_decoder.py`, `tools/contract_check.py` | A stand-in bridge, and a stand-in server that checks a bridge against protocol 2 |
+| `tools/preflight.py`, `tools/log_summary.py` | Demo go / no-go checks, and the numbers from the session logs |
+| `docs/DEMO.md` | The BCI Voice operator's runbook |
 
 ## Tests
 
@@ -1098,6 +1455,20 @@ run the whole swipe loop on the fake board. They check that stale windows never 
 voice line names the profile on screen, and that a card or flash command never changes a
 square's luminance.
 
+The VEP paradigms add 96: `test_vep_codes.py` 33 (every listed m-sequence has full period
+and the N / -1 autocorrelation, lagged codes are mutually orthogonal, flashes never
+overlap, the `[code]` / `[time]` tables validate), `test_vep_frames.py` 12 (frame
+luminances equal the code matrix, cycle and flash markers land on the flip times, the CLI
+plans, labels and refuses flicker-only flags), `test_vep_fake.py` 6 (the kernel's shape, a
+stream free of chunking artifacts, the response tells the fixated target apart),
+`test_vep_decoders.py` 10 (SNR, Template, FlashAverager and SyncDecoder each above 90 %
+on synthetic data, the SNR ring clear of the Hann lobe, abstention without enough flashes
+or without a marker), `test_vep_cli.py` 12 (fake live runs of all three paradigms that
+follow the fake user's gaze, the confidence text, `--save`, the comparison table, the
+argument checks), `test_vep_timing.py` 14 (slips, drift, markers against samples, the
+CLI's exit codes) and `test_vep_lab.py` 9 (the explainer page has no external URL, its JS
+m-sequence and kernel match the Python bit for bit, its node tests pass).
+
 The client/server split and BrainPoint add 929 Python tests and 153 node tests
 (`node --test 'clients/js/test/*.test.mjs' 'clients/chrome/test/*.test.mjs'`):
 `test_server_protocol.py` 270, `test_server_transport.py` 118 (a real server on port 0),
@@ -1111,6 +1482,15 @@ takeover 4000), HTTP, the CLI's exit codes and SIGTERM, and the real JavaScript 
 page and extension agent against the server through Node's WebSocket
 (`tests/server_e2e_client.mjs`). Point mode uses the real Detector with a stub `create`, so
 no test calls the Anthropic API.
+
+The BCI Voice bridge and the display commands add 76: `test_voice_bridge.py` 24 (the bridge
+against a scripted server and a stub display), `test_bridge_display_contract.py` 4 (the bridge's
+exact stdin lines through the real stimulus command line, frame by frame, and the real display
+process with a stand-in window), `test_server_bridge.py` 5 (`app.server --bridge fake
+--bridge-headless` end to end) and `test_stimulus_commands.py` 43 (the JSON commands, markers,
+text layout and the renderer against a fake psychopy). The voice server's own tests are the
+`test_server.py`, `test_orchestrator.py`, `test_menus.py`, `test_tts.py`, `test_contract_check.py`
+and other `app/` and `tools/` files.
 
 The filter tests check passband gain within 2% at 12, 15, 17 and 30 Hz, stopband gain
 under 0.05 at 1, 2, 90 and 110 Hz, zero lag, and a 60 Hz notch deeper than -40 dB. The

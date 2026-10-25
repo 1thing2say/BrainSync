@@ -326,7 +326,7 @@ def test_status_line_shows_the_level(capsys):
     assert status and all(" level " in ln for ln in status)
 
 
-# -- the trained classifier (--classifier trca --model) -----------------------------------
+# -- the trained classifier (--classifier trca-phase --model) -----------------------------
 
 def _trca_model(path: Path, freqs, ch_names) -> Path:
     """A small TRCA model fitted directly on synthetic trials (no CV), saved to ``path``."""
@@ -357,22 +357,28 @@ def two_target_model(tmp_path_factory) -> Path:
 
 
 def test_parser_accepts_trca_with_a_model(tmp_path: Path) -> None:
-    args = demo.build_parser().parse_args(["--classifier", "trca", "--model", str(tmp_path)])
-    assert args.classifier == "trca" and args.model == str(tmp_path)
+    args = demo.build_parser().parse_args(["--classifier", "trca-phase", "--model", str(tmp_path)])
+    assert args.classifier == "trca-phase" and args.model == str(tmp_path)
     assert demo.build_parser().parse_args([]).model is None
 
 
-@pytest.mark.parametrize("argv", [["--classifier", "trca"],
-                                  ["--classifier", "fbcca", "--model", "m.npz"],
-                                  ["--model", "latest"]])
-def test_trca_and_model_go_together(argv) -> None:
+def test_trca_phase_needs_a_model() -> None:
     with pytest.raises(SystemExit) as exc:
-        demo.main([*HEADLESS, *argv])
+        demo.main([*HEADLESS, "--classifier", "trca-phase"])
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("argv", [["--classifier", "fbcca", "--model", "m.npz"],
+                                  ["--model", "latest"]])
+def test_model_without_trca_phase_is_a_calibrate_model(argv, capsys) -> None:
+    """Without --classifier trca-phase, --model is brainsync.calibrate's (templates)
+    model file, so a missing one is a build error (exit 2), not a usage error."""
+    assert demo.main([*HEADLESS, *argv]) == 2
+    assert "error: " in capsys.readouterr().err
+
+
 def test_headless_run_with_a_trained_model(two_target_model, capsys) -> None:
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", str(two_target_model),
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(two_target_model),
                       "--seconds", "20"]) == 0
     cap = capsys.readouterr()
     assert "TRCA(" in cap.err and "model=['2026-01-01_000000_cued.npz']" in cap.err
@@ -391,7 +397,7 @@ def test_lock_takes_the_onset_from_the_stimulus_log(two_target_model, fake_stimu
                                                      capsys) -> None:
     _, _, mode = fake_stimulus
     mode["value"] = "onset"
-    assert demo.main(["--fake", "--fast", "--no-voice", "--classifier", "trca", "--model",
+    assert demo.main(["--fake", "--fast", "--no-voice", "--classifier", "trca-phase", "--model",
                       str(two_target_model), "--lock", "--seconds", "6"]) == 0
     cap = capsys.readouterr()
     assert "flicker onset at 17" in cap.err and "warning: " not in cap.err
@@ -400,7 +406,7 @@ def test_lock_takes_the_onset_from_the_stimulus_log(two_target_model, fake_stimu
 
 
 def test_lock_without_an_onset_decodes_phase_free(two_target_model, capsys) -> None:
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", str(two_target_model),
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(two_target_model),
                       "--lock", "--seconds", "6"]) == 0
     cap = capsys.readouterr()
     assert "warning: no stimulus; decoding phase-free" in cap.err
@@ -411,20 +417,20 @@ def test_lock_without_an_onset_decodes_phase_free(two_target_model, capsys) -> N
 def test_model_with_other_targets_exits_2(tmp_path: Path, capsys) -> None:
     model = _trca_model(tmp_path / "four_trca.npz", [11.0, 15.0, 17.0, 13.0],
                         ("P7", "P8", "O1", "O2"))
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", str(model)]) == 2
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(model)]) == 2
     assert "freq" in capsys.readouterr().err
 
 
 def test_model_on_other_channels_exits_2(tmp_path: Path, capsys) -> None:
     model = _trca_model(tmp_path / "all8_trca.npz", [15.0, 17.0],
                         ("Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"))
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", str(model)]) == 2
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(model)]) == 2
     assert "channels" in capsys.readouterr().err
 
 
 def test_latest_model_without_any_exits_2(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", "latest"]) == 2
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest"]) == 2
     assert "no trained model" in capsys.readouterr().err
 
 
@@ -434,7 +440,7 @@ def test_latest_model_is_found_in_the_models_dir(two_target_model, tmp_path: Pat
     models.mkdir()
     (models / "2026-01-01_000000_trca.npz").write_bytes(two_target_model.read_bytes())
     monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", "latest",
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest",
                       "--seconds", "5"]) == 0
     assert "TRCA(" in capsys.readouterr().err
 
@@ -471,8 +477,8 @@ def test_unreadable_model_exits_2(two_target_model, tmp_path: Path, monkeypatch,
     bad = models / "2026-01-02_000000_trca.npz"          # newer than any good model
     bad.write_bytes(payload)
     (models / "2026-01-01_000000_trca.npz").write_bytes(two_target_model.read_bytes())
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", str(bad)]) == 2
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(bad)]) == 2
     assert "not a readable TRCA model file" in capsys.readouterr().err
     monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
-    assert demo.main([*HEADLESS, "--classifier", "trca", "--model", "latest"]) == 2
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest"]) == 2
     assert f"{bad.name}: not a readable TRCA model file" in capsys.readouterr().err

@@ -78,12 +78,24 @@ def preprocess(x: np.ndarray, fs: float, band: Band | None = (1.0, 100.0),
     return y
 
 
-def default_bands(fs: float) -> list[Band]:
-    """Filter-bank sub-bands: three to 45 Hz below 500 Hz sampling, else Chen et al.'s five to 88 Hz."""
+def default_bands(fs: float, upper: float | None = None, n: int | None = None) -> list[Band]:
+    """Filter-bank sub-bands (8 m, upper) Hz for m = 1..n (Chen et al. 2015, method M3).
+
+    Defaults: three bands to 45 Hz below 500 Hz sampling, else five to 88 Hz. ``upper`` must
+    stay below the Nyquist frequency and above the highest band's lower edge.
+    """
     fs = _check_fs(fs)
-    if fs < 500.0:
-        return [(8.0, 45.0), (16.0, 45.0), (24.0, 45.0)]
-    return [(8.0 * m, 88.0) for m in range(1, 6)]
+    if upper is None:
+        upper = 45.0 if fs < 500.0 else 88.0
+    if n is None:
+        n = 3 if fs < 500.0 else 5
+    upper = float(upper)
+    if int(n) != n or n < 1:
+        raise ValueError(f"number of sub-bands must be a positive integer, got {n}")
+    if not np.isfinite(upper) or upper >= fs / 2.0 or upper <= 8.0 * n:
+        raise ValueError(f"filter-bank upper edge must lie in ({8.0 * n:g}, {fs / 2.0:g}) Hz "
+                         f"for {n} sub-bands at {fs:g} Hz, got {upper}")
+    return [(8.0 * m, upper) for m in range(1, int(n) + 1)]
 
 
 def filterbank(x: np.ndarray, fs: float, bands: Sequence[Band]) -> np.ndarray:
