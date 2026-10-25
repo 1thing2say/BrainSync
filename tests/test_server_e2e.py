@@ -480,9 +480,8 @@ def test_python_client_cli_prints_selections(server):
 CODE_TRAIN = 4      # training cycles here (the standard's 30 take 32 s)
 
 
-@pytest.fixture(scope="module")
-def code_server(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("server_e2e_code")
+def _code_server(tmp: Path):
+    """A code-mode server (fake board, no auth, CODE_TRAIN training cycles) on a thread."""
     p = app.build_parser()
     args = p.parse_args(["--board", "fake", "--port", "0", "--no-auth", "--no-detect",
                          "--train-cycles", str(CODE_TRAIN), "--log", str(tmp / "log.jsonl")])
@@ -495,10 +494,23 @@ def code_server(tmp_path_factory):
                               name="e2e-code-server", daemon=True)
     thread.start()
     transport = ready.get(timeout=30)
-    yield SimpleNamespace(url=transport.url, port=transport.port, tmp=tmp)
-    stop.set()
-    thread.join(15)
+    try:
+        yield SimpleNamespace(url=transport.url, port=transport.port, tmp=tmp)
+    finally:
+        stop.set()
+        thread.join(15)
     assert not thread.is_alive() and result == [0]
+
+
+@pytest.fixture(scope="module")
+def code_server(tmp_path_factory):
+    yield from _code_server(tmp_path_factory.mktemp("server_e2e_code"))
+
+
+@pytest.fixture
+def fresh_code_server(tmp_path):
+    """One without a template yet, so its first controller trains."""
+    yield from _code_server(tmp_path)
 
 
 @pytest.mark.slow
@@ -526,6 +538,72 @@ def test_code_mode_trains_then_selects_the_slot_the_fake_user_looks_at(code_serv
     kinds = [r["kind"] for r in records]
     assert "train_start" in kinds and "trained" in kinds and "selection" in kinds
     assert "calibrate_start" not in kinds
+
+
+CODE_NODE = r"""
+// The reference page's hello and the SDK (FlickerState with cycles, ConfidenceState) against
+// a code-mode server: train on yes, then gaze help until a selection of help.
+import { createRequire } from "node:module";
+import path from "node:path";
+const [root, url] = process.argv.slice(2);
+const require = createRequire(path.join(root, "clients/js/x.js"));
+const C = require(path.join(root, "clients/js/brainsync-client.js"));
+const W = require(path.join(root, "clients/web/app.js"));
+const say = (event, f) => process.stdout.write(JSON.stringify({ event, ...(f || {}) }) + "\n");
+setTimeout(() => { say("fail", { why: "timed out" }); process.exit(1); }, 40000).unref();
+const conn = new C.Connection({ url, token: null, WebSocket: globalThis.WebSocket,
+  hello: () => W.helloFields(60, { w: 1000, h: 600, dpr: 1 }, true) });
+const flicker = new C.FlickerState({});
+const conf = new C.ConfidenceState();
+flicker.accept();
+conn.on("state", (s) => flicker.setOpen(s === "open"));
+let gazed = false;
+conn.on("message", (m) => {
+  flicker.handle(m); conf.handle(m);
+  if (m.type === "error") say("server_error", { code: m.code, message: m.message });
+  if (m.type === "welcome") say("welcome", { paradigm: m.paradigm, max_slots: m.max_slots });
+  if (m.type === "phase") say("phase", { phase: m.phase, cue: m.cue || null });
+  if (m.type === "trained") say("trained", { text: conf.trainedText() });
+  if (m.type === "phase" && m.phase === "run" && !gazed) {
+    gazed = true; conn.send({ type: "gaze", slot: "help" }); say("gaze", { slot: "help" });
+  }
+  if (m.type === "decision") say("decision", { status: conf.status() });
+  if (m.type === "selection") {
+    say("selection", { slot: m.slot });
+    if (m.slot === "help") { conn.close(); process.exit(0); }
+  }
+});
+let cycles = 0;
+setInterval(() => {
+  const t = performance.now();
+  const onset = flicker.onsetDue(t);
+  if (onset) conn.send(onset);
+  for (const c of flicker.cycleDue(t)) { conn.send(c); cycles++; if (cycles <= 3) say("cycle", { n: c.n }); }
+  for (const tg of flicker.targets()) flicker.luminance(tg, t);
+}, 1000 / 60);
+conn.open();
+"""
+
+
+@pytest.mark.slow
+@needs_node
+def test_reference_page_sdk_trains_and_selects_in_code_mode(fresh_code_server, tmp_path):
+    code_server = fresh_code_server
+    script = tmp_path / "code_client.mjs"
+    script.write_text(CODE_NODE)
+    proc = subprocess.run([NODE, str(script), str(ROOT), code_server.url],
+                          capture_output=True, text=True, timeout=60)
+    events = [json.loads(x) for x in proc.stdout.splitlines() if x.startswith("{")]
+    assert proc.returncode == 0, (events, proc.stderr[-2000:])
+    assert not [e for e in events if e["event"] == "server_error"], events
+    assert next(e for e in events if e["event"] == "welcome") == \
+        {"event": "welcome", "paradigm": "code", "max_slots": 3}
+    assert {"event": "phase", "phase": "train", "cue": "yes"} in events
+    assert [e["n"] for e in events if e["event"] == "cycle"][:2] == [0, 1]
+    assert re.match(r"template ready: \d+ % on held-out cycles \(chance 33 %\)",
+                    next(e for e in events if e["event"] == "trained")["text"])
+    assert any(e["event"] == "decision" and e["status"].startswith("lead ") for e in events)
+    assert [e["slot"] for e in events if e["event"] == "selection"][-1] == "help"
 
 
 def test_code_mode_viewer_sees_the_template_and_freq_slots_are_refused(code_server):
