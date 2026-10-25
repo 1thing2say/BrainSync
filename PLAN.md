@@ -220,6 +220,19 @@ pull requests.
   confirm screen for 1.5 s (`Orchestrator._cue_seconds`).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
+- **Look to Speak on the iPhone with c-VEP (2026-10-25, branch `feat/ios-cvep`):** the iPhone app
+  is the user's screen: two cards, left (s1) and right (s2), each with half of the phrases still in
+  play; each look keeps one half, then Say it (left) / Back (right). The phone draws one 63-bit
+  m-sequence on both cards, the right one 31 frames behind (`cvep_2`), from a `CADisplayLink`
+  locked to 60 Hz (never ProMotion); it refuses to flicker off 60 Hz (`display_report`), sends each
+  cycle's first frame on the server's clock (`clock_ping` / `clock_pong`, `cycle_markers`), and the
+  server relays them to the bridge (`stim_markers`). The bridge decodes with
+  `brainsync.vep.live.CodeVepDecoder` (from the other session's c-VEP standard, cherry-picked);
+  a 20-cycle calibration looking at the left card trains the template after each baseline
+  (`train` / `train_done`). Contract: `INTERFACE-v2-draft.md` section 9. Run:
+  `python -m app.server --config config/phone_cvep.yaml --bridge cerelog --tunnel`; `default.yaml`
+  (SSVEP on the laptop page) is unchanged. Tested on fake EEG only (training >= 90 %, 18/20
+  trials); not yet on the headset or a phone.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
   move. The demo Mac stays the main machine and the macOS / Linux setup (README, vendored
   BrainFlow, `deploy/jetson`) is unchanged. `deploy/windows/` runs `brainsync/` (board, decoder,
