@@ -458,9 +458,14 @@ brainsyncos/
   config/packages.env        package repository: suite, component, key lifetime, maintainer
   config/repo-signing-key{,.pub}.asc   the repository signing key (gitignored; scripts/build.sh key)
   docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub/apt-repo tooling
+  docker/Dockerfile.runtime-test  test only: the same base + Xvfb and GL, for tests/runtime-checks.sh
   docs/base-iso-inventory.md tracked copy of the inventory report (deterministic)
   packages/NAME/             one folder per BrainSyncOS package: package.env + build.sh
     brainsyncos-archive-keyring/   the repository's public key, for apt
+    brainsync-runtime/       the apps' Python venv, /opt/brainsyncos/venv (scripts/venv.sh)
+    brainsync/               the apps: their wheel in that venv, /usr/bin links, /etc/brainsync, /usr/share/brainsync
+  python/                    the venv's inputs: brainsync.in, brainsync.lock.txt (hash-locked wheels),
+                             psychopy-excludes.txt, pip.env (pinned pip), local-wheels.txt, check-lock.py
   payload/                   copied to /brainsyncos on the ISO
     hook.sh                  late-command: installs the payload, mounts the package
                              repository, runs install.d in-target
@@ -469,6 +474,7 @@ brainsyncos/
   vm/autoinstall.yaml        VM edition: subiquity autoinstall (-> /brainsyncos/autoinstall.yaml)
   scripts/
     lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO and package helpers
+    venv.sh                  the BrainSync venv: wheelhouse, pinned pip, build at /opt/brainsyncos/venv
     build.sh                 one entry point: doctor | key | packages | repo | iso | all | test | clean
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
     make-repo-key.sh         the repository signing key (Ed25519, sign-only, expiring)
@@ -498,7 +504,9 @@ brainsyncos/
     test_vm.sh               end-to-end VM edition test (host side)
     vm-checks.sh             its in-container checks
     test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository (host side)
-    phase3-checks.sh         its in-container checks: apt helper, md5 maps, hook + 60-apt-repo.sh
+    phase3-checks.sh         its in-container checks: apt helper, BrainSync debs, md5 maps, hook + 60/70
+    runtime-checks.sh        the BrainSync packages installed and run (runtime test container)
+    runtime/*.py             its Xvfb smoke scripts and the import-everything check
     boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
     shims/curtin             `curtin in-target` as chroot, for the hook simulation
   build/                     gitignored cache and output
@@ -511,6 +519,8 @@ brainsyncos/
     stage/                   files build-iso.sh maps over the base ISO
     stage-vm/                files build-vm-iso.sh maps over the Ubuntu ISO
     debs/{jetson,vm}/        built packages (scripts/build-packages.sh)
+    wheelhouse/, pip/        the downloaded wheels and pip (scripts/venv.sh), for offline rebuilds
+    wheels/local/            locally built wheels named in python/local-wheels.txt
     repo/{jetson,vm}/        signed apt repositories (scripts/build-repo.sh), mapped onto the ISOs
     downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg)
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
@@ -637,15 +647,43 @@ packages.
   - `Check-Date: no`, because a Jetson without an RTC battery can start the installer with a wrong clock;
   - no dpkg pty and no `needrestart`, because the installer's chroot has neither a terminal nor services.
 - `60-apt-repo.sh` is the first such step, on both editions. It installs `brainsyncos-archive-keyring` and requires the installed keyring (`/usr/share/keyrings/brainsyncos-archive-keyring.gpg`) to verify the repository by itself. The device keeps that keyring for later updates. No apt source is left behind.
+- `70-brainsync.sh` installs `brainsync-runtime` and `brainsync` the same way, on both editions. It then checks that the venv imports the apps and that `brainsync-voice --help` runs, and lists any display libraries the system lacks.
 
-**Verified by `tests/test_phase3.sh`** (10 checks):
+**The BrainSync apps (Phase 3b).** Two packages, the same on both editions:
+- **`brainsync-runtime`** (79 MB, 434 MB installed) is a Python 3.12 venv at `/opt/brainsyncos/venv` with the third-party packages the apps need. A venv works only at the path it was made at, so `scripts/venv.sh` builds it in the builder at that exact path:
+  - from the 57 hash-locked cp312 aarch64 wheels of `python/brainsync.lock.txt` (no sdists), installed with `--no-deps --require-hashes` by the pip pinned in `python/pip.env`, which runs from its own wheel;
+  - PsychoPy goes in without the dependencies the apps do not use (`python/psychopy-excludes.txt`). `pip check` would list those as missing, so it is never run;
+  - folders named `tests` and `psychopy/demos` are removed (never `numpy/testing`: scipy imports it);
+  - every module is byte-compiled to unchecked-hash `.pyc` files, so nothing is written under `/opt` at runtime and two builds give the same bytes.
+  - It depends on `python3.12`, `libc6`, `libgcc-s1`, `libstdc++6` and `zlib1g`. The GL and X libraries PsychoPy loads are Recommends: NVIDIA's install puts them on the Jetson, and a VM without a desktop lacks them.
+  - `/usr/share/doc/brainsync-runtime/wheels.txt` names every installed wheel with its sha256.
+- **`brainsync`** (1.1 MB) is the app's wheel (`brainsync`, `app`, `tools`) installed into that venv, plus:
+  - a `/usr/bin` link to each of the 9 console scripts (`brainsync-voice`, `brainsync-demo`, `brainchess`, `brainsync-server`, ...);
+  - `config/{default,intents,profile}.yaml` as conffiles in `/etc/brainsync`;
+  - `ui/` in `/usr/share/brainsync/ui`, and `clients/` without its tests in `/usr/share/brainsync/clients`, where `brainsync/paths.py` looks when installed.
+  - It depends on exactly its own version of `brainsync-runtime`. An app change does not re-ship the runtime.
+  - It never holds API keys, and the build refuses any `.env` file. Keys go on the device in `/etc/brainsync/secrets.env`.
+- `scripts/builder.sh` mounts the BrainSync repository around `brainsyncos/` read-only at `/src`. `packages/brainsync` builds the wheel from a copy of it. `python/check-lock.py` fails that build when `pyproject.toml` asks for something the lock does not pin.
+- **Offline rebuilds.** The first build downloads the wheels into `build/wheelhouse/` and pip into `build/pip/`. Later builds use only those. `scripts/build.sh clean --all` deletes them.
+- **Build time.** Under qemu on an x86-64 laptop, one edition's packages took about 14 minutes with 3 CPUs and about 25 at the default 2. The venv takes about 5 minutes; most of the rest is xz compressing the 430 MB runtime (15 minutes alone on 2 busy CPUs). A native arm64 builder is much faster.
+- **Re-locking**, after a dependency change in `pyproject.toml`: mirror the change in `python/brainsync.in`, then in `python/` run, with uv 0.13.5:
+  `uv pip compile brainsync.in --excludes psychopy-excludes.txt --python-version 3.12 --python-platform aarch64-manylinux_2_39 --only-binary :all: --generate-hashes -o brainsync.lock.txt`.
+  A PsychoPy update must pass the `runtime` check: a missing undeclared dependency can show up only as a vague error when a window opens.
+- **Locally built wheels**, such as the Cerelog BrainFlow fork (Phase 3c), go into the same venv:
+  - name the distribution in `python/local-wheels.txt`;
+  - put its wheel in `build/wheels/local/` before `scripts/build.sh packages`.
+  - The build fails when a listed wheel is missing and refuses unlisted ones. Their own dependencies must already be in the lock.
+
+**Verified by `tests/test_phase3.sh`** (12 checks):
 - the container really runs at the configured CPU and memory caps;
-- the key, packages and repositories for both editions;
-- in NVIDIA's real target layer, the hook mounts the repository, `60-apt-repo.sh` installs the keyring, the target's apt state is unchanged, and the mount is gone afterwards (also when a later step fails or the repository is missing);
+- the key, packages and repositories for both editions; every package, the venv included, is byte-identical between the two editions' separate builds;
+- `debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
+- `runtime`: both packages installed with `dpkg -i` in a stock Ubuntu 24.04 arm64 container with Xvfb (`docker/Dockerfile.runtime-test`, test only, no network): every module imports, PsychoPy and the apps' own renderers draw, the nine commands answer `--help`, `brainsync-voice` serves its page and `/api/health` with its log in the user's state folder, and nothing is written under `/opt` while they run;
+- in NVIDIA's real target layer, the hook mounts the repository, `60-apt-repo.sh` installs the keyring, `70-brainsync.sh` installs the apps and `brainsync-voice` runs there, the target's apt state is unchanged, and the mount is gone afterwards (also when a later step fails or the repository is missing);
 - the apt helper accepts a clock set to 2001;
 - the apt helper refuses: a tampered index, a tampered `.deb`, an unsigned repository, the wrong key, a missing repository.
 
-`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all seven steps in each edition's target.
+`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all eight steps in each edition's target.
 
 ## Appliance identity (Phase 2.5)
 
