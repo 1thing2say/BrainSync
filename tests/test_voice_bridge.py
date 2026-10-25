@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 from websockets.asyncio.server import serve
 
-from app.config import load_config
+from app.config import FVEP_PAGE_CONFIG_PATH, load_config
 from app.schemas import DecoderHello, hello_problems, parse_decoder_to_server
 from brainsync import voice_bridge as vb
 from brainsync.stimulus import load_config as load_stimulus
@@ -106,15 +106,17 @@ def test_hello_matches_the_server_config(four):
     parsed = DecoderHello.model_validate(hello)
     assert parsed.protocol == 2 and [s.slot for s in parsed.slots] == SLOTS
     assert [s.freq_hz for s in parsed.slots] == [13.0, 15.0, 17.0, 11.0]
-    app_cfg = load_config()
+    app_cfg = load_config(FVEP_PAGE_CONFIG_PATH)
     assert hello_problems(parsed, app_cfg.stim.slots, app_cfg.stim.waveform,
                           app_cfg.display.expected_refresh_hz) == []
 
 
 def test_bridge_names_say_fake_with_the_fake_board():
     p = vb.build_parser()
-    assert vb.bridge_name(p.parse_args(["--fake"])) == "fake-brainsync-fbcca"
-    assert vb.bridge_name(p.parse_args(["--classifier", "cca"])) == "brainsync-cca"
+    assert vb.bridge_name(p.parse_args(["--fake", "--paradigm", "freq"])) == "fake-brainsync-fbcca"
+    assert vb.bridge_name(p.parse_args(["--classifier", "cca", "-c", "four_diamond"])) == "brainsync-cca"
+    # Code mode (the default) names the c-VEP decoder.
+    assert vb.bridge_name(p.parse_args(["--fake"])) == "fake-brainsync-cvep"
 
 
 @pytest.mark.parametrize("argv", [["--fast"], ["--window", "0"], ["--votes", "0"],
@@ -136,7 +138,7 @@ def test_missing_config_exits_2(capsys):
 # ---------------------------------------------------------------------------
 
 
-BASE = load_config()
+BASE = load_config(FVEP_PAGE_CONFIG_PATH)  # f-VEP page mode; code mode: *_code.py
 CHECK_CFG = BASE.model_copy(update={
     "stim": BASE.stim.model_copy(update={"cue_s": 0.02, "rest_s": 0.02, "max_trial_s": 6.0}),
 })
@@ -161,7 +163,7 @@ async def test_fake_bridge_passes_contract_check(four):
     text = out.getvalue()
     assert report.ok, text
     assert code == 0
-    assert "PASS  hello matches config/default.yaml" in text
+    assert "PASS  hello matches config/fvep_page.yaml" in text
     assert "PASS  baseline 1 recorded" in text and "PASS  baseline 2 recorded" in text
     assert "INFO  trial 2: confirm trial: only s1, s4 flicker" in text
     # The fake board carries an active target's tone, so the decoder commits in every trial.

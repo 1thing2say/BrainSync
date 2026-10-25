@@ -60,8 +60,15 @@ function handle(msg) {
     case "state": renderState(msg); break;
     case "transcript": addLine(msg.who, msg.text); break;
     case "status": renderStatus(msg); break;
+    case "training": renderTraining(msg); break;
+    case "confidence": renderConfidence(msg); break;
   }
 }
+
+// The user's screen, from /api/config: "cvep" (c-VEP's squares in a row, in slot order),
+// "diamond" (f-VEP page mode) or "row" (list mode).
+let layout = "diamond";
+let layoutSlots = ["s1", "s2", "s3", "s4"];
 
 // Diamond positions by slot (s1 top, s2 left, s3 right, s4 bottom, as on the user's screen).
 const POSITIONS = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
@@ -75,16 +82,32 @@ function renderPage(msg) {
   $("option-text").textContent = msg.mode === "page" ? "" : msg.text;
   renderList(msg);
   const targets = $("targets");
-  targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
-  targets.replaceChildren(...msg.slots.map((s) => {
+  const cvep = layout === "cvep" && msg.mode !== "list";
+  targets.className = `targets ${msg.mode === "list" ? "row" : cvep ? "cvep" : "diamond"}`;
+  targets.style.setProperty("--cols", String(layoutSlots.length));
+  const bySlot = Object.fromEntries(msg.slots.map((s) => [s.slot, s]));
+  // c-VEP keeps every square in its place; one that stays still this trial is an empty card.
+  const slots = cvep ? layoutSlots.map((slot) => bySlot[slot] || { slot, role: "still", label: "" }) : msg.slots;
+  targets.replaceChildren(...slots.map((s, i) => {
+    if (s.role === "still") {
+      const el = document.createElement("div");
+      el.className = "target still";
+      el.dataset.slot = s.slot;
+      el.style.gridColumn = String(i + 1);
+      return el;
+    }
     // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
     const key = s.slot.replace("s", "");
     el.className = `target ${s.role} pos-${POSITIONS[s.slot] || "top"}`;
     el.dataset.slot = s.slot;
+    if (cvep) el.style.gridColumn = String(i + 1);
     // The sentence is what gets spoken, so it is the big text; the short label is its tag.
     // Targets without a sentence (More options, Say it, Back) show the label big instead.
-    el.innerHTML = `<span class="target-tag"></span><span class="target-text"></span><span class="target-key"></span>`;
+    // Under it, c-VEP's confidence bar (filled by "confidence" messages during the trial).
+    el.innerHTML = `<span class="target-tag"></span><span class="target-text"></span><span class="target-key"></span>`
+      + `<span class="target-bar" hidden><span class="bar-track"><span class="bar-fill"></span></span>`
+      + `<span class="bar-score"></span></span>`;
     const sentence = s.utterance && s.utterance.trim();
     el.querySelector(".target-tag").textContent = sentence ? s.label : "";
     el.querySelector(".target-text").textContent = sentence || s.label;
@@ -113,12 +136,16 @@ function renderList(msg) {
 function renderPhase(next) {
   if (next === "flicker" && phase !== "flicker") startTimer();
   if (next !== "flicker") stopTimer();
+  if (next === "cue") clearBars();
+  if (next === "flicker" || next === "cue") $("training").hidden = true;
+  if (next === "train") $("training").hidden = false;
   phase = next;
   const el = $("phase");
-  el.textContent = phase === "flicker" ? "flickering" : phase;
-  el.className = `phase ${phase}`;
+  el.textContent = phase === "flicker" ? "flickering" : phase === "train" ? "training" : phase;
+  el.className = `phase ${phase === "train" ? "flicker" : phase}`;
   document.querySelectorAll(".target").forEach((t) => {
-    t.classList.toggle("active", phase === "flicker");
+    t.classList.toggle("active", (phase === "flicker" || phase === "train") && !t.classList.contains("still"));
+    if (phase !== "train") t.classList.remove("cue");
     if (phase === "cue") t.classList.remove("picked");
     if (t.tagName === "BUTTON") t.disabled = phase !== "flicker";
   });
@@ -148,6 +175,42 @@ function stopTimer() {
   if (timer !== null) clearInterval(timer);
   timer = null;
   $("progress").hidden = true;
+}
+
+// c-VEP: the decoder's latest decision as a bar under each square (no flicker, steady fills).
+function renderConfidence(msg) {
+  const bars = ViewCore.confidence(msg);
+  document.querySelectorAll(".target").forEach((t) => {
+    const b = bars[t.dataset.slot];
+    const bar = t.querySelector(".target-bar");
+    if (!bar) return;
+    bar.hidden = !b;
+    t.classList.toggle("best", Boolean(b && b.best));
+    t.classList.toggle("committed", Boolean(b && b.committed));
+    if (!b) return;
+    bar.querySelector(".bar-fill").style.width = `${(b.fraction * 100).toFixed(1)}%`;
+    bar.querySelector(".bar-score").textContent = b.text;
+  });
+}
+
+function clearBars() {
+  document.querySelectorAll(".target").forEach((t) => {
+    t.classList.remove("best", "committed");
+    const bar = t.querySelector(".target-bar");
+    if (bar) bar.hidden = true;
+  });
+}
+
+// c-VEP: the training card, and the cue on the square to look at.
+function renderTraining(msg) {
+  const v = ViewCore.training(msg);
+  const card = $("training");
+  card.hidden = false;
+  card.className = `training tone-${v.tone}`;
+  $("training-title").textContent = v.title;
+  $("training-detail").textContent = v.detail;
+  $("training-fill").style.width = `${(v.fraction * 100).toFixed(1)}%`;
+  document.querySelectorAll(".target").forEach((t) => t.classList.toggle("cue", !v.done && t.dataset.slot === msg.slot));
 }
 
 function markPicked(slot) {
@@ -290,7 +353,9 @@ function renderStatus(s) {
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
   $("hint").textContent = s.keyboard_mode
-    ? "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply."
+    ? (layout === "cvep"
+      ? "Keyboard mode: tap a box (or its key, 1 = left … 3 = right) while it flickers. C / W mark the last reply."
+      : "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply.")
     : "";
   if (shown && modeChanged) renderPage(shown);
 }
@@ -401,6 +466,9 @@ fetch("/api/config")
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
     if (c.user_name) userName = c.user_name;
+    if (c.layout) layout = c.layout;
+    if (Array.isArray(c.slots) && c.slots.length) layoutSlots = c.slots;
+    if (shown) renderPage(shown);
     if (c.app_link) {
       $("app-url").textContent = c.app_link;
       $("phone").hidden = false;

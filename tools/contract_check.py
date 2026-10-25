@@ -19,6 +19,16 @@ scores are sent, a status about once a second. Each check prints PASS or FAIL; t
 
 A trial the decoder does not answer within max_trial_s is not a failure (the server would end it
 as not caught); it is reported as INFO.
+
+Code mode (a hello with ``paradigm: "code"``, INTERFACE-v2-draft.md section 9, proposed): the
+baselines become trainings (``train`` 1 with retrain, ``train`` 2 without), each checked for
+``train_progress`` (its id, cycles counting up to ``of``) and ``trained`` (its id, ok, the
+accuracy); every ``decision`` must be for the trial in progress, after its onset, with scores
+for the active slots and raw / committed among them, and a selection must follow at least one
+decision. The config follows the hello: a code hello is checked against config/default.yaml, a
+freq hello against config/fvep_page.yaml (``--config`` picks one for both).
+
+    python tools/contract_check.py --config config/fvep_list.yaml   # a 2-target list-mode bridge
 """
 
 from __future__ import annotations
@@ -40,10 +50,11 @@ from pydantic import ValidationError
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from app.config import AppConfig, load_config
+from app.config import DEFAULT_CONFIG_PATH, FVEP_PAGE_CONFIG_PATH, AppConfig, load_config
 from app.schemas import (
     PROTOCOL,
     Baseline,
+    Decision,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -56,6 +67,9 @@ from app.schemas import (
     StimOnset,
     StimStart,
     StimStop,
+    Train,
+    Trained,
+    TrainProgress,
     hello_problems,
     parse_decoder_to_server,
     to_json,
@@ -64,6 +78,7 @@ from app.schemas import (
 ROLE_LABELS = {"say": "SAY", "next": "NEXT"}  # list mode
 NEXT_PAGE_LABEL, SAY_IT, BACK = "More options", "Say it", "Back"  # page mode, as app/orchestrator.py
 REPLACED = 4000  # close code for a second bridge while a check is running
+LATE_DECISION_S = 0.5  # a decision this soon after its trial's stim_stop crossed it in flight
 
 
 @dataclass
@@ -113,6 +128,9 @@ class Inbox:
         self.answered: set[int] = set()
         self.hello: DecoderHello | None = None
         self.closed = False
+        self.decisions: dict[int, int] = {}  # code mode: decisions per trial
+        self.active_slots: list[str] = []  # the current trial's
+        self.stopped: tuple[int, float] | None = None  # the last trial stopped, and when
 
     async def read(self) -> None:
         try:
@@ -136,11 +154,43 @@ class Inbox:
         if isinstance(msg, DecoderStatus):
             self.statuses.append((time.monotonic(), msg))
             return
+        if isinstance(msg, Decision):
+            self._decision_ok(msg)
+            return  # checked here; nothing waits for decisions
         if isinstance(msg, DecoderHello):
             self.hello = msg
         elif isinstance(msg, (StimOnset, Selection, NoSelection)) and not self._answer_ok(msg):
             return
         self.queue.put_nowait(msg)
+
+    def _decision_ok(self, msg: Decision) -> None:
+        """Code mode: a decision belongs to the trial in progress, after its onset."""
+        if msg.trial_id != self.active:
+            late = (self.stopped is not None and self.stopped[0] == msg.trial_id
+                    and time.monotonic() - self.stopped[1] < LATE_DECISION_S)
+            if late:
+                self.report.info(f"trial {msg.trial_id}: a decision crossed its stim_stop")
+            else:
+                self.report.fail("decision only for the current trial",
+                                 f"got trial {msg.trial_id} while "
+                                 + ("no trial runs" if self.active is None else f"trial {self.active} runs"))
+            return
+        if msg.trial_id not in self.onsets:
+            self.report.fail(f"trial {msg.trial_id}: decision after stim_onset", "it came first")
+            return
+        active = set(self.active_slots)
+        first = msg.trial_id not in self.decisions
+        self.decisions[msg.trial_id] = self.decisions.get(msg.trial_id, 0) + 1
+        problems = []
+        if not active <= set(msg.scores):
+            problems.append(f"scores {sorted(msg.scores)} miss active {sorted(active - set(msg.scores))}")
+        for name in ("raw", "committed"):
+            value = getattr(msg, name)
+            if value is not None and value not in active:
+                problems.append(f"{name} {value} is not active")
+        if problems or first:  # one PASS per trial, every FAIL
+            self.report.check(not problems, f"trial {msg.trial_id}: decision scores the active slots",
+                              "; ".join(problems) or ", ".join(f"{s} {v:+.2f}" for s, v in sorted(msg.scores.items())))
 
     def _answer_ok(self, msg: StimOnset | Selection | NoSelection) -> bool:
         if msg.trial_id != self.active:
@@ -193,6 +243,12 @@ class ContractCheck:
         self.cfg = cfg
         self.args = args
         self.report = report
+        self._setup(cfg)
+
+    def _setup(self, cfg: AppConfig) -> None:
+        """The slots, roles and labels of ``cfg``, the config the hello is checked against."""
+        self.cfg = cfg
+        self.code = cfg.stim.paradigm == "code"
         self.slots = [s.slot for s in cfg.stim.slots]
         self.roles = dict(cfg.stim.roles)
         self.page_mode = cfg.menus.mode == "page"
@@ -203,9 +259,14 @@ class ContractCheck:
         else:
             self.labels = {slot: ROLE_LABELS[role] for slot, role in self.roles.items()}
         self.scores_seen = False
+        self.inbox: Inbox | None = None
+        given = getattr(self.args, "config", None)
+        self.config_name = (str(given) if given else "config/default.yaml" if self.code
+                            else "config/fvep_page.yaml")
 
     async def run(self, ws: ServerConnection) -> None:
         inbox = Inbox(ws, self.report)
+        self.inbox = inbox
         reader = asyncio.create_task(inbox.read())
         try:
             if await self._handshake(ws, inbox):
@@ -226,31 +287,82 @@ class ContractCheck:
             self.report.fail("bridge sends hello after connecting",
                              f"none within {self.args.hello_timeout:g} s")
             return False
-        self.report.check(True, "hello is valid v2",
-                          f"{hello.name}, {hello.refresh_hz:g} Hz {hello.waveform}, "
-                          + ", ".join(f"{s.slot}={s.freq_hz:g} Hz" for s in hello.slots))
+        if hello.paradigm == "code":
+            what = (f"{hello.name}, {hello.refresh_hz:g} Hz c-VEP "
+                    f"({hello.code.length} bits, {hello.code.cycle_frames}-frame cycle), "
+                    + ", ".join(f"{s.slot} lag {s.lag_frames}" for s in hello.slots))
+        else:
+            what = (f"{hello.name}, {hello.refresh_hz:g} Hz {hello.waveform}, "
+                    + ", ".join(f"{s.slot}={s.freq_hz:g} Hz" for s in hello.slots))
+        self.report.check(True, "hello is valid v2", what)
         if hello.decoder is not None:
             d = hello.decoder
             self.report.info("decoder", f"window {d.window_s:g} s, step {d.step_s:g} s, {d.votes} votes")
+        if hello.paradigm != self.cfg.stim.paradigm and getattr(self.args, "config", None) is None:
+            path = DEFAULT_CONFIG_PATH if hello.paradigm == "code" else FVEP_PAGE_CONFIG_PATH
+            other = load_config(path)
+            if other.stim.paradigm == hello.paradigm:
+                self.report.info(f"a {hello.paradigm} hello", f"checking against config/{path.name}")
+                self._setup(other)
+                self.config_name = f"config/{path.name}"
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
-                                  self.cfg.display.expected_refresh_hz)
-        if not self.report.check(not problems, "hello matches config/default.yaml", "; ".join(problems)):
+                                  self.cfg.display.expected_refresh_hz,
+                                  paradigm=self.cfg.stim.paradigm, code=self.cfg.stim.code)
+        if not self.report.check(not problems, f"hello matches {self.config_name}", "; ".join(problems)):
             await self._send(ws, ProtocolError(message="; ".join(problems)))
             return False
         await self._send(ws, HelloAck(protocol=PROTOCOL, roles=self.roles, labels=self.labels))
         return True
 
     async def _session(self, ws: ServerConnection, inbox: Inbox) -> None:
-        if not await self._baseline(ws, inbox, 1):
+        start = self._train if self.code else self._baseline
+        if not await start(ws, inbox, 1):
             return
         for trial_id in range(1, self.args.trials + 1):
             if inbox.closed:
                 break
             await self._trial(ws, inbox, trial_id)
         await self._paused_trial(ws, inbox, self.args.trials + 1)
-        await self._baseline(ws, inbox, 2)
+        await start(ws, inbox, 2)
         if inbox.closed:
             self.report.fail("bridge stays connected for the whole check")
+
+    async def _train(self, ws: ServerConnection, inbox: Inbox, train_id: int) -> bool:
+        """Code mode: train ``train_id`` (the first with retrain, so it records), then trained."""
+        retrain = train_id == 1
+        cycles = self.args.train_cycles
+        slot = self.slots[0]
+        await self._send(ws, Train(train_id=train_id, slot=slot, label="left", cycles=cycles,
+                                   retrain=retrain))
+        last, progress, started = -1, 0, time.monotonic()
+        while True:
+            msg = await inbox.expect({"train_progress", "trained"}, self.args.train_timeout)
+            if msg is None:
+                self.report.fail(f"trained for train {train_id}",
+                                 f"none within {self.args.train_timeout:g} s")
+                return False
+            if msg.train_id != train_id:
+                self.report.fail(f"{msg.type} echoes the train_id", f"sent {train_id}, got {msg.train_id}")
+                continue
+            if isinstance(msg, TrainProgress):
+                progress += 1
+                if msg.cycle < last or msg.cycle > msg.of or msg.of != cycles:
+                    self.report.fail(f"train {train_id}: progress counts up to {cycles} cycles",
+                                     f"cycle {msg.cycle} of {msg.of} after {last}")
+                last = msg.cycle
+                continue
+            break
+        elapsed = time.monotonic() - started
+        detail = (f"{elapsed:.1f} s, {progress} train_progress"
+                  + ("" if msg.accuracy is None else f", accuracy {100 * msg.accuracy:.0f} %")
+                  + ("" if msg.chance is None else f" (chance {100 * msg.chance:.0f} %)"))
+        self.report.check(msg.ok, f"train {train_id} trained", msg.message or detail)
+        if msg.ok:
+            self.report.check(msg.accuracy is not None, f"train {train_id}: trained carries the accuracy")
+            if retrain:
+                self.report.check(progress > 0, f"train {train_id}: train_progress while recording",
+                                  f"{progress} messages")
+        return msg.ok
 
     async def _baseline(self, ws: ServerConnection, inbox: Inbox, baseline_id: int) -> bool:
         seconds = self.args.baseline_s
@@ -288,12 +400,14 @@ class ContractCheck:
         await self._send(ws, display)
         await asyncio.sleep(self.cfg.stim.cue_s)
         inbox.active = trial_id
+        inbox.active_slots = list(active)
         await self._send(ws, StimStart(trial_id=trial_id, active_slots=active))
         return time.time()
 
     async def _stop(self, ws: ServerConnection, inbox: Inbox, trial_id: int, reason: str) -> list[Message]:
         """End the trial; returns answers that arrived during it but were never waited for."""
         inbox.active = None
+        inbox.stopped = (trial_id, time.monotonic())
         await self._send(ws, StimStop(trial_id=trial_id, reason=reason))
         return inbox.drop_answers(trial_id)
 
@@ -336,6 +450,9 @@ class ContractCheck:
         self.report.check(sel.slot in active, f"trial {trial_id}: selection is an active slot",
                           f"{sel.slot} of {', '.join(active)}, {sel.t_unix - onset.t_unix:.2f} s after the onset")
         self.report.check(sel.t_unix >= onset.t_unix, f"trial {trial_id}: selection time after the onset")
+        if self.code:
+            self.report.check(self.inbox_decisions(trial_id) > 0,
+                              f"trial {trial_id}: a decision before the selection (code mode)")
         if sel.scores is not None:
             self.report.check(set(active) <= set(sel.scores) <= set(self.slots),
                               f"trial {trial_id}: scores cover the active slots", str(sorted(sel.scores)))
@@ -355,6 +472,9 @@ class ContractCheck:
         await asyncio.sleep(self.args.quiet_s)
         self.report.check(len(self.report.failures) == failures,
                           f"nothing answers the paused trial within {self.args.quiet_s:g} s")
+
+    def inbox_decisions(self, trial_id: int) -> int:
+        return self.inbox.decisions.get(trial_id, 0) if self.inbox is not None else 0
 
     def _final_checks(self, inbox: Inbox) -> None:
         if self.scores_seen:
@@ -381,6 +501,14 @@ class ContractCheck:
 def build_parser(cfg: AppConfig) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="contract_check", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--config", type=Path, default=None,
+                   help="the config to check the hello against (default: config/default.yaml for "
+                        "a code hello, config/fvep_page.yaml for a freq hello)")
+    cycles = cfg.stim.code.train_cycles if cfg.stim.code is not None else 30
+    p.add_argument("--train-cycles", type=int, default=cycles,
+                   help=f"code mode: cycles asked for in train (default {cycles})")
+    p.add_argument("--train-timeout", type=float, default=cfg.train.timeout_s,
+                   help=f"code mode: wait for trained (default {cfg.train.timeout_s:g})")
     p.add_argument("--host", default=cfg.server.host)
     p.add_argument("--port", type=int, default=cfg.server.port)
     p.add_argument("--trials", type=int, default=3, help="normal trials before the paused one")
@@ -435,8 +563,8 @@ async def serve_once(cfg: AppConfig, args: argparse.Namespace, report: Report,
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg = load_config()
-    args = build_parser(cfg).parse_args(argv)
+    args = build_parser(load_config()).parse_args(argv)
+    cfg = load_config(args.config)
     report = Report()
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(serve_once(cfg, args, report))

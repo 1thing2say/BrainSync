@@ -8,14 +8,14 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import REPO_ROOT, load_config
+from app.config import FVEP_PAGE_CONFIG_PATH, REPO_ROOT, load_config
 from app.log import read_events
 from app.server import create_app
 from app.schemas import PROTOCOL, BaselineDone, DecoderHello, Selection, SlotSpec, to_json
 from tests.test_menus import GOOD, FakeClaude, reply
 from tests.test_tts import CLIP, KEY, MP3, FakeCartesia
 
-BASE = load_config()
+BASE = load_config(FVEP_PAGE_CONFIG_PATH)  # f-VEP page mode; code mode: *_code.py
 HELLO = DecoderHello(protocol=PROTOCOL, name="test", refresh_hz=60.0, waveform="sine",
                      slots=[SlotSpec(slot=s.slot, freq_hz=s.freq_hz) for s in BASE.stim.slots])
 
@@ -72,6 +72,7 @@ def test_partner_page_is_served(client):
         "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
         "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
         "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
+        "paradigm": "freq", "layout": "diamond", "slots": ["s1", "s2", "s3", "s4"],
         "app_link": ""}
 
 

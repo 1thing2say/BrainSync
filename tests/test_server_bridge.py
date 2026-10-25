@@ -2,8 +2,8 @@
 
 The argument checks run main() in-process (they exit before anything starts). The end-to-end
 test starts the real server with ``--bridge fake --bridge-headless`` on a free port and waits
-until /api/health shows the bridge connected under its fake name; it needs the shipped
-four_diamond stimulus config (the bridge's default) and is skipped without it.
+until /api/health shows the bridge connected and acked under its fake name, once with the
+default config (c-VEP: voice_cvep3) and once with config/fvep_page.yaml (f-VEP: four_diamond).
 """
 
 from __future__ import annotations
@@ -42,8 +42,11 @@ def test_bridge_command():
     url = "ws://127.0.0.1:8000/ws/decoder"
     assert BRIDGE_KINDS == ("cerelog", "fake")
     assert bridge_command("cerelog", url, 42) == [
-        sys.executable, "-m", "brainsync.voice_bridge", "--url", url, "--parent-pid", "42"]
+        sys.executable, "-m", "brainsync.voice_bridge", "--url", url, "--parent-pid", "42",
+        "--paradigm", "code"]
     assert bridge_command("fake", url, 42, headless=True)[-2:] == ["--fake", "--no-stimulus"]
+    assert bridge_command("cerelog", url, 42, paradigm="freq", stimulus="two_targets")[-4:] == [
+        "--paradigm", "freq", "-c", "two_targets"]
     with pytest.raises(ValueError):
         bridge_command("openbci", url, 42)
 
@@ -75,9 +78,11 @@ def _has_four_diamond() -> bool:
 @pytest.mark.slow
 @pytest.mark.skipif(not _has_four_diamond(), reason="brainsync/stimulus/configs/four_diamond.toml "
                                                     "is not there yet")
-def test_server_starts_a_headless_fake_bridge(tmp_path):
+@pytest.mark.parametrize("config_name, bridge_name", [
+    ("default.yaml", "fake-brainsync-cvep"), ("fvep_page.yaml", "fake-brainsync-fbcca")])
+def test_server_starts_a_headless_fake_bridge(tmp_path, config_name, bridge_name):
     port = _free_port()
-    cfg = yaml.safe_load((ROOT / "config" / "default.yaml").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((ROOT / "config" / config_name).read_text(encoding="utf-8"))
     cfg["server"]["port"] = port
     config = tmp_path / "server.yaml"
     config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -93,12 +98,12 @@ def test_server_starts_a_headless_fake_bridge(tmp_path):
         while time.monotonic() < deadline:
             health = _health(port)
             decoder = (health or {}).get("decoder", {})
-            if decoder.get("connected") and decoder.get("name"):
+            if decoder.get("connected") and decoder.get("name") and decoder.get("ok"):
                 break
             assert server.poll() is None, server.stderr.read()
             time.sleep(0.5)
         assert decoder.get("connected"), decoder
-        assert decoder["name"] == "fake-brainsync-fbcca"
+        assert decoder["name"] == bridge_name and decoder["ok"], decoder  # the hello was acked
         assert decoder["fake_decoder"] is True  # FAKE DECODER badge
     finally:
         server.send_signal(signal.SIGINT)

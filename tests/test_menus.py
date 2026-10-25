@@ -8,14 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import load_config, load_intents, load_profile
+from app.config import FVEP_PAGE_CONFIG_PATH, load_config, load_intents, load_profile
 from app.context import Conversation, PageRequest, Turn, time_of_day
 from app.log import EventLog, read_events
 from app.menus import (TOOL_NAME, MenuMaker, normalized, rank_keys, reply_tool, shorten_label,
                        user_message)
 
-CFG = load_config()
+CFG = load_config(FVEP_PAGE_CONFIG_PATH)  # 3 options a page; c-VEP's 2: test_two_options_*
 INTENTS = load_intents()
+CODE_MENUS = load_config().menus  # the default config, c-VEP: 2 options + NEXT
 PROFILE = load_profile()
 
 GOOD = {
@@ -743,3 +744,26 @@ async def test_preview_uses_the_given_profile_without_keeping_it():
     assert "for Ana," in fake.calls[0]["system"]
     assert "<partner>How was your weekend?</partner>" in fake.calls[0]["messages"][0]["content"]
     assert m.profile is PROFILE and "for Sam," in m.system  # the active profile is unchanged
+
+
+# ---------------------------------------------------------------------------
+# c-VEP (the default config): 2 options a page, NEXT on the third target
+# ---------------------------------------------------------------------------
+
+
+def test_two_options_ask_for_three_candidates_with_one_spare():
+    assert CODE_MENUS.option_count == 2 and CODE_MENUS.spare_options == 1
+    schema = reply_tool(INTENTS, CODE_MENUS)["input_schema"]
+    assert schema["required"] == ["option_1", "option_2", "option_3"]
+
+
+async def test_two_options_page_takes_the_first_two_usable(event_log):
+    fake = FakeClaude(reply(GOOD))
+    options = await maker(fake, event_log, option_count=2).make_page(request())
+    assert [o.utterance for o in options] == [GOOD["option_1"]["utterance"],
+                                              GOOD["option_2"]["utterance"]]
+    # A bad first candidate costs the spare, not the page.
+    bad = {**GOOD, "option_1": {**GOOD["option_1"], "intent_id": "ponder"}}
+    options = await maker(FakeClaude(reply(bad)), event_log, option_count=2).make_page(request())
+    assert [o.utterance for o in options] == [GOOD["option_2"]["utterance"],
+                                              GOOD["option_3"]["utterance"]]

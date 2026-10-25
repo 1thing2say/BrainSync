@@ -1,7 +1,8 @@
 """Orchestrator transitions with a fake clock: no timers, sockets or threads (PLAN.md section 9).
 
-Page mode (the default config): 3 options on s1-s3 and NEXT on s4, a confirm screen with "Say it"
-on s1 and "Back" on s4. List mode (the 2-target fallback): SAY on s1, NEXT on s2.
+f-VEP page mode (config/fvep_page.yaml): 3 options on s1-s3 and NEXT on s4, a confirm screen with
+"Say it" on s1 and "Back" on s4. List mode (the 2-target fallback): SAY on s1, NEXT on s2. Code
+mode (the default config, c-VEP) is in test_orchestrator_code.py.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import random
 
 import pytest
 
-from app.config import load_config, load_intents
+from app.config import FVEP_PAGE_CONFIG_PATH, load_config, load_intents
 from app.context import PageRequest, Turn
 from app.orchestrator import DIDNT_CATCH, NOT_CONFIRMED, Orchestrator, St
 from app.schemas import (
@@ -44,8 +45,10 @@ from app.schemas import (
     UIStatus,
 )
 
-CFG = load_config()
-INTENTS = load_intents()
+CFG = load_config(FVEP_PAGE_CONFIG_PATH)
+INTENTS = load_intents(option_count=CFG.menus.option_count, label_max_chars=CFG.menus.label_max_chars,
+                       utterance_max_words=CFG.menus.utterance_max_words,
+                       label_max_words=CFG.menus.label_max_words)
 HOME = INTENTS.fallback_lists["home"]
 YES_NO = INTENTS.fallback_lists["yes_no"]
 MORE = INTENTS.fallback_lists["more"]

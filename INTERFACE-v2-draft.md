@@ -14,6 +14,12 @@ teammate. The teammate's own bridge, if they build one, must pass the same
 `tools/contract_check.py`. Background: `PLAN.md` sections 12–14 and System design. Elijah's decisions of 2026-10-23
 (`PLAN.md` section 13) are already written in.
 
+**Added 2026-10-25, proposed: section 9, c-VEP (code) mode.** Additions only: a `hello` with
+`paradigm: "code"` (slots with `lag_frames`), `train` / `train_progress` / `trained` in place of
+`baseline` / `baseline_done`, and a `decision` message per decoder decision for the confidence
+bars. Everything above stays valid for a frequency-coded bridge; our server runs it with
+`--config config/fvep_page.yaml`, while its default config and our bridge now use code mode.
+
 ## Open questions for the teammate (SYNC 1)
 
 > **Claude session on the decoder side:** if you are working for the teammate (the `ssvep` repo or
@@ -424,3 +430,160 @@ Proposed additions, one JSON object per line, alongside the integers:
   second one a confirm trial with only s1 and s4 active), checks
   every message the bridge sends against the v2 schemas and the rules above, and prints pass or
   fail per message. Passing it is the SYNC 2 gate.
+
+## 9. Proposed: c-VEP (code) mode
+
+**Status: proposed (2026-10-25), additive.** Nothing in sections 1–8 changes: a bridge that
+speaks them as written (frequency-coded, the teammate's) still works against a server started
+with `--config config/fvep_page.yaml` (4 targets) or `config/fvep_list.yaml` (2 targets). Code
+mode is what our own server (`config/default.yaml`) and bridge (`python -m
+brainsync.voice_bridge`, default `--paradigm code`) now use by default: the BrainSync c-VEP
+standard (`docs/CVEP-STANDARD.md`), three white squares on black, one 63-bit m-sequence, square
+k delayed by k × 21 frames, trained on the first square, with the decoder's confidence shown
+under every square.
+
+**Targets.** 3 in a row: s1 left (option 1, and the training square), s2 middle (option 2), s3
+right (NEXT, "More options"). The confirm screen flickers only s1 ("Say it") and s3 ("Back");
+s2 stays still. Roles in `hello_ack`: `{"s1": "option", "s2": "option", "s3": "next"}`; the
+labels are the two sentences and "More options". Stimulus config: `voice_cvep3`.
+
+**What is added** (a server or bridge that does not speak code mode never sees any of it):
+
+| Message | Direction | Instead of / beside |
+| --- | --- | --- |
+| `hello` with `paradigm: "code"`, slots with `lag_frames`, `code` {length, cycle_frames, train_cycles} | bridge → server | the frequency `hello` (no `paradigm` means `"freq"`) |
+| `train` {train_id, slot, label, cycles, retrain} | server → bridge | instead of `baseline` |
+| `train_progress` {train_id, cycle, of} | bridge → server | new |
+| `trained` {train_id, ok, accuracy, chance, cycles, message} | bridge → server | instead of `baseline_done` |
+| `decision` {trial_id, scores, raw, committed, lead, changed} | bridge → server | new, beside `selection` |
+
+### 9.1 Handshake
+
+```json
+{"type": "hello", "protocol": 2, "name": "brainsync-cvep", "paradigm": "code",
+ "refresh_hz": 59.94,
+ "slots": [
+   {"slot": "s1", "lag_frames": 0},
+   {"slot": "s2", "lag_frames": 21},
+   {"slot": "s3", "lag_frames": 42}],
+ "code": {"length": 63, "cycle_frames": 63, "train_cycles": 30},
+ "decoder": {"window_s": 2.1, "step_s": 1.05, "votes": 2},
+ "score_kind": "correlation"}
+```
+
+- `waveform` is left out (it does not apply); `decoder` says a decision comes every cycle
+  (`step_s` 1.05 s) from the mean of the last 2 cycles (`window_s` 2.1 s), committed after 2
+  agreeing decisions.
+- The server checks: `protocol` 2; `paradigm` equals its config's `stim.paradigm` (a freq hello to
+  a code server, or the other way round, gets `error` naming the config to start it with); the
+  slot ids; each slot's `lag_frames` exactly; `code.length` and `code.cycle_frames` against
+  `stim.code`; `refresh_hz` within 1 Hz of 60. `train_cycles` is the bridge's default and is
+  not checked.
+
+### 9.2 Training (instead of the baseline)
+
+Server → bridge, where a frequency-coded session sends `baseline` (after `hello_ack`, and after
+every pause, before the first trial):
+
+```json
+{"type": "train", "train_id": 3, "slot": "s1", "label": "left", "cycles": 30, "retrain": true}
+```
+
+- The bridge flickers every square, puts the cue box on `slot`'s square and shows "Look at the
+  left square", and records `cycles` complete m-sequence cycles (about 32 s for 30) while the
+  user looks at it. They become the template (shifted by each slot's lag for the other
+  squares).
+- `retrain: false` (every training after the session's first): a bridge that already has a
+  template may answer `trained` at once. `retrain: true` (the session's first start, from the
+  warning screen) always records anew.
+- After every complete cycle:
+
+```json
+{"type": "train_progress", "train_id": 3, "cycle": 12, "of": 30}
+```
+
+- Then, with the leave-one-cycle-out accuracy of the template (0..1) against chance (1/3):
+
+```json
+{"type": "trained", "train_id": 3, "ok": true, "accuracy": 0.83, "chance": 0.333, "cycles": 30, "message": ""}
+```
+
+- `ok: false` means no template: `message` `interrupted` (a `pause` or a newer `train` cut it
+  short), `not_ready` (before `hello_ack`), `display_down`, `unknown_slot`, or the decoder's
+  reason (too few cycles could be cut, so the cycle markers are not arriving). The server
+  pauses and shows it; Resume sends `train` again.
+- The server waits up to `train.timeout_s` (60 s) for `trained`, then pauses. The bridge turns
+  the training's flicker off by itself after its cycles × 1.5 + 15 s.
+- A `baseline` sent to a code bridge is answered `baseline_done` `ok: false`, message
+  `code mode: send train`, after its `seconds` (rule 12 as before).
+- Until a `trained` with `ok: true` since the last `hello_ack` or `pause`, `stim_start` gets
+  `no_selection` `not_ready` (question 10).
+
+### 9.3 Trials
+
+`display`, `stim_start` (with `active_slots`), `stim_stop`, `pause`, `stim_onset`, `selection`
+and `no_selection` are unchanged. In addition, after every decision of the decoder during a
+trial (one per complete cycle, about 1.05 s, the first about 2.6 s after the onset), and only
+after the trial's `stim_onset`:
+
+```json
+{"type": "decision", "trial_id": 42,
+ "scores": {"s1": 0.42, "s2": 0.11, "s3": -0.03},
+ "raw": "s1", "committed": null, "lead": 0.31, "changed": false}
+```
+
+- `scores`: the Pearson correlation of each slot's shifted template with the mean of the last 2
+  cycles: the confidence the bars show (clipped to 0..1). Not probabilities.
+- `raw`: this decision's best **active** slot (null: it led the runner-up by less than the
+  margin); `committed`: the slot committed so far (null before the first commit); `lead`: the
+  best active slot's lead over the runner-up; `changed`: this decision moved `committed`.
+- The decision that commits is followed at once by the `selection` (its `scores` the same
+  correlations, `score_kind` `correlation`), and decoding stops, as before.
+- The server relays each one to the partner page (`confidence`), whose mirror draws a bar under
+  each option; the bridge draws the same bars on the user's display (below).
+
+### 9.4 Bridge ↔ display in code mode (informational)
+
+The display stdin protocol of section 7 is unchanged (`docs/CVEP-STANDARD.md` section 4.1). Our
+bridge launches `python -m brainsync.stimulus -c voice_cvep3 --free --feedback stdin
+--hold-still --markers unix` and:
+
+- reads `[marker <unix seconds>] cycle:<n>` on stderr (every cycle's first flip) besides
+  `flicker_on` / `flicker_off`; the cycle times, on the board's clock, are what the decoder
+  epochs on;
+- training: `{"active": [0, 1, 2]}`, `{"text": "Look at the left square"}`, `0` (the cue box on
+  the training square), `{"flicker": true}`; `{"text": "training: keep looking at the left square
+  cycle 12/30"}` per cycle; then `{"flicker": false}`, the cue box back where the server had it,
+  and `{"text": "template ready: 83 % on held-out cycles (chance 33 %)"}`;
+- trials: after every decision, `{"labels": [...]}` with each active square's sentence and a
+  second line `███░░░░░ +0.42 <` (an 8-cell bar of the score clipped to 0..1, the signed score,
+  `<` on the best), and, when the server's `text` is empty (a page, not the confirm screen),
+  `{"text": "lead 0.31   choice: <sentence>"}`. The sentences themselves never change during a
+  trial (rule 5); only the bar lines do. `--no-scores` turns the bars off (the `decision`
+  messages still go out). Whether redrawing them once a cycle drops frames is not measured yet
+  (SYNC 1.5).
+
+### 9.5 Values (proposed)
+
+| Question | Proposed |
+| --- | --- |
+| Targets | 3: s1 option 1 (left), s2 option 2 (middle), s3 NEXT (right); confirm: s1 Say it, s3 Back |
+| Code | 63-bit m-sequence (LFSR x^6 + x + 1, seed 1), lags 0 / 21 / 42 frames, 1 bit per frame, 60 Hz |
+| Training | 30 cycles on s1 at the session's first start (about 32 s); reused after a pause |
+| Decision | every cycle, mean of the last 2 cycles, 2 agreeing decisions to commit, margin 0 |
+| Max trial length | 10 s (a commit takes about 2.6 s at best) |
+| Cue / rest | 1.0 s / 1.0 s, as before |
+| `score_kind` | `correlation` |
+
+### 9.6 Testing code mode
+
+- `python tools/fake_decoder.py` speaks code mode with the default config (`--paradigm code`):
+  `train_progress` per cycle over `--train-s` seconds (default the cycles × 1.05 s), `trained`
+  with a fake accuracy, a `decision` about every cycle before each selection.
+- `python tools/contract_check.py` follows the bridge's `hello`: a code hello is checked against
+  `config/default.yaml` with two trainings (the first `retrain: true`) in place of the baselines,
+  and every `decision` is checked (for the trial in progress, after its onset, scoring the
+  active slots, `raw` / `committed` among them; at least one before each selection). A freq
+  hello is checked against `config/fvep_page.yaml` as in section 8; `--config` picks one for
+  both. Our bridge: `python -m brainsync.voice_bridge --fake --fast --no-stimulus` (code) or
+  `--paradigm freq` (sections 1–8).

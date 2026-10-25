@@ -102,9 +102,10 @@ public struct ShowPage: Codable, Equatable {
     }
 }
 
-/// `paused`: STOP (or a lost decoder or display) ended the trial; the flicker is off.
+/// `paused`: STOP (or a lost decoder or display) ended the trial; the flicker is off. `train`
+/// (c-VEP): every square flickers while the user looks at the training square.
 public enum TrialPhase: String, Codable, Equatable {
-    case cue, flicker, rest, baseline, paused
+    case cue, flicker, rest, baseline, paused, train
 }
 
 public struct Trial: Codable, Equatable {
@@ -291,6 +292,67 @@ public struct UIStatus: Codable, Equatable {
     }
 }
 
+/// c-VEP: the training step (schemas.Training). While it runs `cycle` of `of` cycles are recorded
+/// with the user looking at `slot`; once done `accuracy` (0...1) and `chance` are set, or
+/// `message` says why not.
+public struct Training: Codable, Equatable {
+    public var slot: String
+    public var label: String
+    public var cycle: Int
+    public var of: Int
+    public var accuracy: Double?
+    public var chance: Double?
+    public var message: String
+
+    public init(slot: String, label: String = "", cycle: Int = 0, of: Int, accuracy: Double? = nil,
+                chance: Double? = nil, message: String = "") {
+        self.slot = slot
+        self.label = label
+        self.cycle = cycle
+        self.of = of
+        self.accuracy = accuracy
+        self.chance = chance
+        self.message = message
+    }
+
+    enum CodingKeys: String, CodingKey { case slot, label, cycle, of, accuracy, chance, message }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slot = try c.decode(String.self, forKey: .slot)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        cycle = try c.decodeIfPresent(Int.self, forKey: .cycle) ?? 0
+        of = try c.decode(Int.self, forKey: .of)
+        accuracy = try c.decodeIfPresent(Double.self, forKey: .accuracy)
+        chance = try c.decodeIfPresent(Double.self, forKey: .chance)
+        message = try c.decodeIfPresent(String.self, forKey: .message) ?? ""
+    }
+}
+
+/// c-VEP: the decoder's latest decision in a trial (schemas.Confidence): a correlation per slot
+/// (not a probability), the best slot this decision and the committed one so far.
+public struct Confidence: Codable, Equatable {
+    public var trialId: Int
+    public var scores: [String: Double]
+    public var raw: String?
+    public var committed: String?
+    public var lead: Double?
+
+    public init(trialId: Int, scores: [String: Double], raw: String? = nil, committed: String? = nil,
+                lead: Double? = nil) {
+        self.trialId = trialId
+        self.scores = scores
+        self.raw = raw
+        self.committed = committed
+        self.lead = lead
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case trialId = "trial_id"
+        case scores, raw, committed, lead
+    }
+}
+
 public enum ServerMessage: Equatable {
     case showPage(ShowPage)
     case trial(Trial)
@@ -300,6 +362,8 @@ public enum ServerMessage: Equatable {
     case state(StateMessage)
     case transcript(Transcript)
     case status(UIStatus)
+    case training(Training)
+    case confidence(Confidence)
     /// A message type this app does not know (its `type`), from a newer server.
     case unknown(String)
 
@@ -318,6 +382,8 @@ public enum ServerMessage: Equatable {
         case "state": return .state(try d.decode(StateMessage.self, from: data))
         case "transcript": return .transcript(try d.decode(Transcript.self, from: data))
         case "status": return .status(try d.decode(UIStatus.self, from: data))
+        case "training": return .training(try d.decode(Training.self, from: data))
+        case "confidence": return .confidence(try d.decode(Confidence.self, from: data))
         default: return .unknown(type)
         }
     }

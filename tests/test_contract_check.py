@@ -10,7 +10,7 @@ import time
 import pytest
 from websockets.asyncio.client import connect
 
-from app.config import load_config
+from app.config import FVEP_PAGE_CONFIG_PATH, load_config
 from app.schemas import (
     PROTOCOL,
     BaselineDone,
@@ -24,7 +24,7 @@ from app.schemas import (
 from tools.contract_check import Report, build_parser, serve_once
 from tools.fake_decoder import FakeDecoder, parse_args
 
-BASE = load_config()
+BASE = load_config(FVEP_PAGE_CONFIG_PATH)  # f-VEP page mode; code mode: *_code.py
 CFG = BASE.model_copy(update={
     "stim": BASE.stim.model_copy(update={"cue_s": 0.02, "rest_s": 0.02, "max_trial_s": 1.0}),
 })
@@ -58,7 +58,7 @@ async def run_check(bridge, *extra: str) -> tuple[Report, str]:
 def fake(*argv: str):
     async def run(url: str) -> None:
         args = parse_args(["--url", url, "--latency", "0.05", "--seed", "1", "--no-reconnect",
-                           "--status-interval", "0.2", *argv])
+                           "--status-interval", "0.2", *argv], cfg=BASE)
         await FakeDecoder(args, stdin=None).run()
 
     return run
@@ -67,7 +67,7 @@ def fake(*argv: str):
 async def test_fake_decoder_passes():
     report, out = await run_check(fake())
     assert report.ok, out
-    assert "PASS  hello matches config/default.yaml" in out
+    assert "PASS  hello matches config/fvep_page.yaml" in out
     assert "PASS  baseline 1 recorded" in out and "PASS  baseline 2 recorded" in out
     assert "INFO  trial 2: confirm trial: only s1, s4 flicker" in out
     assert "PASS  trial 2: selection is an active slot" in out

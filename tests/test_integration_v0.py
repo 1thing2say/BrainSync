@@ -10,9 +10,10 @@ from pathlib import Path
 from websockets.asyncio.server import ServerConnection, serve
 
 import tools.fake_decoder as fake_decoder
-from app.config import REPO_ROOT, load_config, load_intents
+from app.config import FVEP_PAGE_CONFIG_PATH, REPO_ROOT, load_config, load_intents
 from app.schemas import (
     PROTOCOL,
+    Decision,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -35,16 +36,25 @@ def test_fake_decoder_hello_passes_the_server_check() -> None:
     cfg = load_config()
     hello = FakeDecoder(parse_args([]), stdin=None).hello()
     assert hello.protocol == PROTOCOL
+    assert hello.paradigm == cfg.stim.paradigm == "code"
     assert hello_problems(hello, cfg.stim.slots, cfg.stim.waveform,
-                          cfg.display.expected_refresh_hz) == []
+                          cfg.display.expected_refresh_hz, paradigm=cfg.stim.paradigm,
+                          code=cfg.stim.code) == []
     assert [s.slot for s in hello.slots] == list(cfg.stim.roles)
+    # The f-VEP fallback config gets a matching f-VEP hello.
+    fvep = load_config(FVEP_PAGE_CONFIG_PATH)
+    hello = FakeDecoder(parse_args([], cfg=fvep), stdin=None).hello()
+    assert hello.paradigm == "freq" and hello_problems(
+        hello, fvep.stim.slots, fvep.stim.waveform, fvep.display.expected_refresh_hz) == []
 
 
 def test_every_fallback_option_is_valid_with_configured_limits() -> None:
     menus = load_config().menus
     intents = load_intents()
     for name, options in intents.fallback_lists.items():
-        assert len(options) == menus.option_count, name
+        # Ranked: c-VEP shows the first 2, f-VEP page mode all 3.
+        assert len(options) >= load_config(FVEP_PAGE_CONFIG_PATH).menus.option_count, name
+        assert len(options) >= menus.option_count, name
         for opt in options:
             plain = Option.model_validate(opt.model_dump())
             problems = validate_option(
@@ -55,7 +65,7 @@ def test_every_fallback_option_is_valid_with_configured_limits() -> None:
 
 
 def test_demo_script_only_uses_configured_slots() -> None:
-    slots = set(load_config().stim.roles)
+    slots = set(load_config(FVEP_PAGE_CONFIG_PATH).stim.roles)  # the script names s1-s4
     steps = load_script(REPO_ROOT / "tools" / "scripts" / "demo.yaml")
     assert {s.slot for s in steps if s.slot is not None} <= slots
 
@@ -64,8 +74,11 @@ def test_fake_decoder_defaults_match_plan_and_config() -> None:
     cfg = load_config()
     args = parse_args([])
     assert args.mode == "random"
-    assert args.latency == 5.0  # PLAN.md V0 item 4: mimics the real decoder's commit time
+    assert args.paradigm == "code"
+    assert args.latency == 2.6  # c-VEP: two cycles, then two agreeing decisions
     assert args.latency < cfg.stim.max_trial_s  # otherwise every trial times out
+    fvep = parse_args([], cfg=load_config(FVEP_PAGE_CONFIG_PATH))
+    assert fvep.latency == 5.0  # PLAN.md V0 item 4: mimics the f-VEP decoder's commit time
     assert args.url == f"ws://{cfg.server.host}:{cfg.server.port}/ws/decoder"
 
 
@@ -89,7 +102,7 @@ async def test_fake_decoder_against_a_v2_stub(tmp_path: Path) -> None:
                 await ws.send(to_json(ack))
                 await ws.send(to_json(Display(text="Yes, let's go outside", labels={"s1": "SAY", "s2": "NEXT"})))
                 await ws.send(to_json(StimStart(trial_id=1, active_slots=slots)))
-            elif not isinstance(msg, DecoderStatus):
+            elif not isinstance(msg, (DecoderStatus, Decision)):
                 await received.put(msg)
 
     async with serve(handler, "127.0.0.1", 0) as server:

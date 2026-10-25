@@ -2,10 +2,17 @@
 real decoder.
 
 It connects as a websocket client to the server's ``/ws/decoder`` and sends a v2 ``hello`` built
-from ``config/default.yaml`` (slots, waveform, refresh rate), so it passes the server's check unless
-``--refresh-hz`` or ``--slots`` say otherwise. After ``hello_ack`` it answers ``baseline`` with
-``baseline_done``, and each ``stim_start`` with ``stim_onset`` (one frame later) and then a
-``selection`` (or ``no_selection``) after ``--latency`` seconds. A ``stim_stop``, ``pause`` or newer
+from ``config/default.yaml`` (paradigm, slots, waveform or code, refresh rate), so it passes the
+server's check unless ``--refresh-hz`` or ``--slots`` say otherwise. After ``hello_ack`` it answers
+``baseline`` with ``baseline_done``, and each ``stim_start`` with ``stim_onset`` (one frame later)
+and then a ``selection`` (or ``no_selection``) after ``--latency`` seconds.
+
+Code mode (``--paradigm code``, the default config's; INTERFACE-v2-draft.md section 9): the hello
+carries ``paradigm: "code"``, each slot's ``lag_frames`` (``--slots s1=0,s2=21,s3=42``) and the
+code; ``train`` is answered with one ``train_progress`` per cycle over ``--train-s`` seconds
+(default: the cycles at 1.05 s each) and then ``trained`` (a fake accuracy); a later ``train``
+without ``retrain`` is answered at once. During a trial a ``decision`` goes out about every cycle,
+the chosen slot's correlation rising, the last one committing it right before the selection. A ``stim_stop``, ``pause`` or newer
 ``stim_start`` cancels the pending answer, so a stopped or stale trial is never answered. Before
 ``hello_ack`` (or after ``error``) it refuses ``stim_start``, as the real bridge keeps its flicker
 off then (draft rule 3).
@@ -51,6 +58,8 @@ from app.schemas import (
     PROTOCOL,
     Baseline,
     BaselineDone,
+    CodeParams,
+    Decision,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -65,6 +74,9 @@ from app.schemas import (
     StimOnset,
     StimStart,
     StimStop,
+    Train,
+    Trained,
+    TrainProgress,
     parse_server_to_decoder,
     to_json,
 )
@@ -74,6 +86,7 @@ REPLACED = 4000  # close code from app/server.py: a newer decoder connection rep
 PARENT_CHECK_S = 1.0  # how often --parent-pid is checked
 
 FALLBACK_SLOTS = "s1=15,s2=17,s3=20,s4=12"  # only if config/default.yaml cannot be loaded
+CODE_REFRESH_HZ = 60.0  # code mode: a cycle is cycle_frames frames at this rate
 
 
 def _load_config(path: str | None = None) -> AppConfig | None:
@@ -100,6 +113,22 @@ def parse_slots(text: str) -> list[SlotSpec]:
                 for slot, freq in (item.split("=") for item in text.split(","))]
     except (ValueError, ValidationError) as exc:
         raise argparse.ArgumentTypeError(f"expected s1=15,s2=17, got {text!r}") from exc
+
+
+def parse_lags(text: str) -> list[SlotSpec]:
+    """Code mode: ``"s1=0,s2=21,s3=42"`` -> slot specs with lag_frames."""
+    try:
+        return [SlotSpec(slot=slot.strip(), lag_frames=int(lag))
+                for slot, lag in (item.split("=") for item in text.split(","))]
+    except (ValueError, ValidationError) as exc:
+        raise argparse.ArgumentTypeError(f"expected s1=0,s2=21,s3=42, got {text!r}") from exc
+
+
+def slots_text(cfg: AppConfig) -> str:
+    """The config's slots as --slots takes them: frequencies, or lags in code mode."""
+    if cfg.stim.paradigm == "code":
+        return ",".join(f"{s.slot}={s.lag_frames}" for s in cfg.stim.slots)
+    return ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
 
 
 # ---------------------------------------------------------------------------
@@ -159,13 +188,24 @@ def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
         prog="fake_decoder", description="Fake bridge speaking protocol 2 (INTERFACE-v2-draft.md)."
     )
     url = default_url(cfg)
-    slots = (",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots) if cfg else FALLBACK_SLOTS)
+    slots = slots_text(cfg) if cfg else FALLBACK_SLOTS
     refresh = cfg.display.expected_refresh_hz if cfg else 60.0
     waveform = cfg.stim.waveform if cfg else "sine"
+    paradigm = cfg.stim.paradigm if cfg else "freq"
+    code = cfg.stim.code if cfg else None
     parser.add_argument("--url", default=url, help=f"server websocket (default {url}, from config)")
     parser.add_argument("--name", default="fake-decoder", help="name sent in hello")
-    parser.add_argument("--slots", type=parse_slots, default=parse_slots(slots),
-                        help=f"slots in hello, e.g. s1=15,s2=17 (default {slots}, from config)")
+    parser.add_argument("--paradigm", choices=["freq", "code"], default=paradigm,
+                        help=f"hello paradigm (default {paradigm}, from config); code: c-VEP")
+    parser.add_argument("--slots", default=slots,
+                        help=f"slots in hello: s1=15,s2=17 (Hz), or s1=0,s2=21,s3=42 (lag frames) "
+                             f"in code mode (default {slots}, from config)")
+    parser.add_argument("--code-length", type=int, default=code.length if code else 63,
+                        help="code mode: m-sequence bits in hello (default from config)")
+    parser.add_argument("--cycle-frames", type=int, default=code.cycle_frames if code else 63,
+                        help="code mode: frames per cycle in hello (default from config)")
+    parser.add_argument("--train-s", type=float, default=None,
+                        help="code mode: seconds a training takes (default: its cycles x 1.05 s)")
     parser.add_argument("--refresh-hz", type=float, default=refresh,
                         help=f"refresh rate in hello (default {refresh:g}); 120 simulates ProMotion")
     parser.add_argument("--waveform", choices=["sine", "square"], default=waveform,
@@ -178,8 +218,9 @@ def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
     mode.add_argument("--keyboard", dest="mode", action="store_const", const="keyboard",
                       help="type 1, 2, ... + Enter during a trial; n = no_selection")
     mode.add_argument("--script", metavar="FILE", help="YAML list of steps; loops at the end")
-    parser.add_argument("--latency", type=float, default=5.0,
-                        help="seconds from stim_start to the answer (default 5.0)")
+    parser.add_argument("--latency", type=float, default=None,
+                        help="seconds from stim_start to the answer (default 5.0, 2.6 in code "
+                             "mode: two cycles and two agreeing decisions)")
     parser.add_argument("--fail-rate", type=_fraction, default=0.0,
                         help="random mode: probability of no_selection (default 0)")
     parser.add_argument("--scores", action="store_true", help="attach fake score/scores")
@@ -209,6 +250,14 @@ def parse_args(argv: list[str] | None = None, cfg: AppConfig | None = None) -> a
         args.mode = "random"
     if args.once:
         args.max_trials = 1
+    if isinstance(args.slots, str):
+        convert = parse_lags if args.paradigm == "code" else parse_slots
+        try:
+            args.slots = convert(args.slots)
+        except argparse.ArgumentTypeError as exc:
+            raise SystemExit(f"fake_decoder: --slots: {exc}") from exc
+    if args.latency is None:
+        args.latency = 2.6 if args.paradigm == "code" else 5.0
     return args
 
 
@@ -236,6 +285,8 @@ class FakeDecoder:
         self.current_trial: int | None = None
         self.pending: asyncio.Task[None] | None = None
         self.baseline_task: asyncio.Task[None] | None = None
+        self.train_task: asyncio.Task[None] | None = None
+        self.trained_accuracy: float | None = None  # code mode: the "template" it has
         self.answered = 0
         self.finished = False
         self.replaced = False  # the server closed with code 4000: a newer decoder took over
@@ -280,7 +331,17 @@ class FakeDecoder:
         if self.ws is not None:
             await self.ws.close()
 
+    @property
+    def code(self) -> bool:
+        return getattr(self.args, "paradigm", "freq") == "code"
+
     def hello(self) -> DecoderHello:
+        if self.code:
+            return DecoderHello(protocol=PROTOCOL, name=self.args.name, paradigm="code",
+                                refresh_hz=self.args.refresh_hz, slots=self.args.slots,
+                                code=CodeParams(length=self.args.code_length,
+                                                cycle_frames=self.args.cycle_frames),
+                                score_kind="correlation")
         return DecoderHello(protocol=PROTOCOL, name=self.args.name, refresh_hz=self.args.refresh_hz,
                             waveform=self.args.waveform, slots=self.args.slots,
                             score_kind="fake" if self.args.scores else None)
@@ -299,6 +360,7 @@ class FakeDecoder:
             status_task.cancel()
             self._cancel_pending()
             self._cancel_baseline()
+            self._cancel_train()
 
     async def _send_status(self, ws: ClientConnection) -> None:
         status = to_json(DecoderStatus(ok=True, board_ok=True, display_ok=True, message="fake decoder"))
@@ -327,6 +389,8 @@ class FakeDecoder:
             log.warning("server rejected hello: %s", msg.message)
         elif isinstance(msg, Baseline):
             self._on_baseline(ws, msg)
+        elif isinstance(msg, Train):
+            self._on_train(ws, msg)
         elif isinstance(msg, Display):
             log.info("display: %s", to_json(msg))  # what the PsychoPy display would draw
         elif isinstance(msg, StimStart):
@@ -337,7 +401,56 @@ class FakeDecoder:
             log.info("pause (%s): flicker and decoding off", msg.reason)
             self._cancel_pending()
             self._cancel_baseline()
+            self._cancel_train(ws)
             self.current_trial = None
+
+    def _on_train(self, ws: ClientConnection, msg: Train) -> None:
+        """Code mode: one train_progress per cycle, then trained (at once with a template)."""
+        self._cancel_train(ws)
+        if not self.acked:
+            self._send_soon(ws, Trained(train_id=msg.train_id, ok=False, message="not_ready"))
+            return
+        chance = round(1.0 / max(len(self.args.slots), 1), 4)
+        if self.trained_accuracy is not None and not msg.retrain:
+            log.info("train %d: template kept (accuracy %.2f)", msg.train_id, self.trained_accuracy)
+            self._send_soon(ws, Trained(train_id=msg.train_id, ok=True, cycles=msg.cycles,
+                                        accuracy=self.trained_accuracy, chance=chance))
+            return
+        cycle_s = self.args.cycle_frames / CODE_REFRESH_HZ
+        seconds = self.args.train_s if self.args.train_s is not None else msg.cycles * cycle_s
+        log.info("train %d: %d cycles on %s in %.1f s", msg.train_id, msg.cycles, msg.slot, seconds)
+
+        async def record() -> None:
+            try:
+                for k in range(1, msg.cycles + 1):
+                    await asyncio.sleep(seconds / msg.cycles)
+                    await ws.send(to_json(TrainProgress(train_id=msg.train_id, cycle=k,
+                                                        of=msg.cycles)))
+                accuracy = round(self.rng.uniform(0.8, 0.97), 3)
+                self.trained_accuracy = accuracy
+                await ws.send(to_json(Trained(train_id=msg.train_id, ok=True, cycles=msg.cycles,
+                                              accuracy=accuracy, chance=chance)))
+            except ConnectionClosed:
+                pass
+
+        self.train_task = asyncio.create_task(record())
+        self.train_task.train_id = msg.train_id  # type: ignore[attr-defined]
+
+    def _send_soon(self, ws: ClientConnection, msg: Message) -> None:
+        async def send() -> None:
+            with contextlib.suppress(ConnectionClosed):
+                await ws.send(to_json(msg))
+
+        asyncio.create_task(send())
+
+    def _cancel_train(self, ws: ClientConnection | None = None) -> None:
+        """Stop a training; with ``ws``, answer it "interrupted" (a pause or a newer train)."""
+        task, self.train_task = self.train_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            if ws is not None:
+                self._send_soon(ws, Trained(train_id=task.train_id, ok=False,  # type: ignore[attr-defined]
+                                            message="interrupted"))
 
     def _on_baseline(self, ws: ClientConnection, msg: Baseline) -> None:
         self._cancel_baseline()
@@ -391,6 +504,11 @@ class FakeDecoder:
         except ConnectionClosed:
             return
         answer = await self._decide(start)
+        if self.code and isinstance(answer, Selection) and self.current_trial == start.trial_id:
+            try:
+                await ws.send(to_json(self._decision(start, answer.slot, committed=True)))
+            except ConnectionClosed:
+                return
         if answer is None:
             log.info("trial %d: sending nothing (timeout step)", start.trial_id)
             return
@@ -428,10 +546,44 @@ class FakeDecoder:
                 return NoSelection(trial_id=start.trial_id, reason="slot_not_active")
             return self._selection(start, step.slot)
 
-        await asyncio.sleep(self.args.latency)
+        if not self.code:
+            await asyncio.sleep(self.args.latency)
+            if self.rng.random() < self.args.fail_rate:
+                return NoSelection(trial_id=start.trial_id, reason="low_signal")
+            return self._selection(start, self.rng.choice(active))
+        slot = self.rng.choice(active)
+        await self._decisions(start, slot, self.args.latency)
         if self.rng.random() < self.args.fail_rate:
             return NoSelection(trial_id=start.trial_id, reason="low_signal")
-        return self._selection(start, self.rng.choice(active))
+        return self._selection(start, slot)
+
+    async def _decisions(self, start: StimStart, slot: str, seconds: float) -> None:
+        """Wait ``seconds``; in code mode send a decision about every cycle meanwhile (the
+        last one, committing ``slot``, goes out with the selection)."""
+        if self.ws is None:
+            await asyncio.sleep(seconds)
+            return
+        cycle_s = self.args.cycle_frames / CODE_REFRESH_HZ
+        n = max(1, int(seconds // cycle_s))
+        for _ in range(n):
+            await asyncio.sleep(seconds / n)
+            if self.current_trial != start.trial_id:
+                return
+            with contextlib.suppress(ConnectionClosed):
+                await self.ws.send(to_json(self._decision(start, slot, committed=False)))
+
+    def _decision(self, start: StimStart, slot: str, committed: bool) -> Decision:
+        scores = self._fake_scores(start, slot)
+        others = sorted((v for s, v in scores.items() if s != slot), reverse=True)
+        lead = round(scores[slot] - others[0], 4) if others else round(scores[slot], 4)
+        return Decision(trial_id=start.trial_id, scores=scores, raw=slot,
+                        committed=slot if committed else None, lead=lead, changed=committed)
+
+    def _fake_scores(self, start: StimStart, slot: str) -> dict[str, float]:
+        """Fake correlations: the chosen slot clearly highest."""
+        scores = {s: round(self.rng.uniform(0.1, 0.4), 3) for s in start.active_slots}
+        scores[slot] = round(self.rng.uniform(0.5, 0.9), 3)
+        return scores
 
     async def _decide_keyboard(self, start: StimStart) -> Message:
         active = start.active_slots
@@ -449,10 +601,9 @@ class FakeDecoder:
 
     def _selection(self, start: StimStart, slot: str) -> Selection:
         extra: dict[str, Any] = {}
-        if self.args.scores:
-            # Fake CCA-like correlations: the chosen slot clearly highest.
-            scores = {s: round(self.rng.uniform(0.1, 0.4), 3) for s in start.active_slots}
-            scores[slot] = round(self.rng.uniform(0.5, 0.9), 3)
+        if self.args.scores or self.code:
+            # Fake CCA-like (or c-VEP) correlations: the chosen slot clearly highest.
+            scores = self._fake_scores(start, slot)
             extra = {"score": scores[slot], "scores": scores}
         return Selection(trial_id=start.trial_id, slot=slot, t_unix=time.time(), **extra)
 

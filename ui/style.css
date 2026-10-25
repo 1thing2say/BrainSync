@@ -134,6 +134,33 @@ a { color: var(--text); }
 /* The one shadow on the page: a ring round the picked box. */
 .target.picked { border-color: var(--pick); box-shadow: 0 0 0 1px var(--pick), 0 0 0 5px rgba(255, 211, 77, 0.16); }
 
+/* c-VEP: three squares in a row, in the user's order (s1 left, s2 middle, s3 right). A slot that
+   does not flicker in this trial (the middle one on the confirm screen) stays as an empty card. */
+.targets.cvep { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
+  align-items: center; justify-items: center; align-content: center; }
+.target.still { min-height: 7.5rem; border-style: dashed; background: transparent; }
+.target.cue { border-color: var(--look); box-shadow: 0 0 0 1px var(--look); }
+/* The decoder's confidence under each square: a steady bar of the correlation (0..1) and its score. */
+.target-bar { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
+.target-bar[hidden] { display: none; }
+.bar-track { flex: 1; height: 0.375rem; border-radius: 999px; background: var(--panel);
+  border: 1px solid var(--line); overflow: hidden; }
+.bar-fill { display: block; height: 100%; width: 0; background: var(--muted); border-radius: 999px;
+  transition: width 0.2s linear; }
+.target.best .bar-fill { background: var(--look); }
+.target.committed .bar-fill { background: var(--pick); }
+.bar-score { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted);
+  font-variant-numeric: tabular-nums; min-width: 3rem; text-align: right; }
+.training { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.85rem 1rem; border-radius: 12px;
+  border: 1px solid var(--line-strong); background: var(--surface); }
+.training[hidden] { display: none; }
+.training-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+  flex-wrap: wrap; }
+.training-title { font-size: 1.1rem; font-weight: 600; letter-spacing: -0.01em; }
+.training-detail { font-family: var(--font-mono); font-size: 0.85rem; color: var(--muted); }
+.training.tone-ok .progress-fill { background: var(--say); }
+.training.tone-bad { border-color: var(--danger); }
+
 .option-list { margin: 0 auto; padding-left: 1.5rem; max-width: 40rem; font-size: 1.2rem; }
 .option-list li { padding: 0.35rem 0.6rem; color: var(--muted); }
 .option-list li.current { color: var(--text); font-weight: 600; background: var(--surface);
