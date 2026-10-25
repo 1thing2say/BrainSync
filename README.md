@@ -324,6 +324,73 @@ margin. 30 s brings that to about 0.33. Ctrl-C or Escape ends the run. Ctrl-C du
 calibration ends the program before any decoding (exit code 130). A stimulus that
 crashes or refuses the display makes the demo exit with code 1.
 
+### Four squares, trained on your own trials, locked to the flicker
+
+The 4-square demo (`four_targets`: 11 Hz top left, 15 top right, 17 bottom left, 13
+bottom right) can run calibration-free with FBCCA, or with a TRCA model trained on your
+own cued trials and locked to the flicker's phase. The whole loop, with the headset on
+for 20 minutes first:
+
+```bash
+# 1. Electrode check: a 15 Hz square in terminal 1, the per-channel report in terminal 2.
+#    Good contacts read about 7-20 uV RMS; over 6 dB at 15 Hz is a clear response, 3-6 dB weak.
+.venv/bin/python -m brainsync.stimulus -c one_target_15 --free --seconds 75 --no-wait
+.venv/bin/python -m brainsync.check --target 15 --no-show
+
+# 2. Record 32 cued trials (8 blocks of 4, about 4.5 minutes) into data/spectrum_checks/
+.venv/bin/python -m brainsync.record -c four_targets
+
+# 3. Train, and replay the held-out trials phase-free and phase-locked
+.venv/bin/python -m brainsync.train data/spectrum_checks/<stamp>_cued.npz --channels P8,O1,O2 --lock
+
+# 4. Run the demo on the saved model (train prints this "run it" line with the real path)
+.venv/bin/python -m brainsync.demo -c four_targets --classifier trca --model latest --channels P8,O1,O2 --window 2 --lock
+
+# Without training: FBCCA on the same four squares
+.venv/bin/python -m brainsync.demo -c four_targets
+```
+
+`brainsync.train` cross-validates every kept trial (held out of the fit and of the rest
+baseline) and prints, per window length, the accuracy of FBCCA and TRCA on onset-aligned
+and sliding windows, how many windows the margin and threshold let through, a McNemar
+test, and a verdict that says whether TRCA beats FBCCA by more than the noise. The
+`replay window` line feeds each held-out trial through the live decoder (votes, margin,
+threshold) and counts correct, wrong and still-screen commits; with `--lock` it adds a
+`locked` column. The model goes to `data/models/<stamp>_trca.npz`; `--model latest`
+picks the newest. Its rest baseline is never saved: the demo fits it on the still screen
+every session, like FBCCA's. `--channels P8,O1,O2` leaves out P7 when that contact is
+noisy; the model remembers its channels, and the demo refuses a model whose targets,
+channels or filters differ.
+
+`--lock` is what the Jia et al. (2011) phase-coding paper gets its gain from, used the
+other way round: instead of coding targets by phase, the decoder knows the flicker's
+phase. The free-run stimulus prints `[marker <unix seconds>] free_on` on its first
+flickering frame, the demo reads it from the stimulus log, and every window is scored
+against the TRCA templates rotated to the phase the flicker has reached (one phase per
+target, from the time since onset and the training latency). The rest baseline is then
+fitted at random phases, which is what noise scores under a lock. Status lines end in
+`locked` once the onset is known; before that windows are scored phase-free. Held-out
+replay of the 2026-10-24_235732 recording (P8,O1,O2, 2 s windows, 4 votes):
+
+| method | correct / 29 | wrong | still-screen commits / 29 |
+|---|---|---|---|
+| FBCCA | 9 | 5 | 6 |
+| TRCA, phase-free | 12 | 3 | 6 |
+| TRCA, `--lock` | 18 | 2 | 9 |
+
+On a noisy recording (contacts off) the lock gains nothing, and it commits a little more
+often on a still screen, so raise `--threshold` if it picks squares nobody looks at.
+
+The demo also shows a **lean meter** during the flicker: a thin amber box on the square
+the scores favour, "leaning <label>", a confidence bar (a softmax of the baseline-corrected
+scores in rest spreads: about 49 % at rest and 60 % on a correctly led window, so a lean,
+not a probability) and one pip per agreeing window until the commit. `--no-lean` hides
+it. The stimulus takes it as `lean <k> <percent> <n> <m>` lines on stdin (`lean -1` hides).
+
+If 15 and 17 Hz decode poorly for you (they did for one of us: 3/8 and 2/8 trials against
+6/8 at 13 Hz), `four_low` is the same layout at 11/13/14/12 Hz, 13 and 12 Hz flickering in
+antiphase: `brainsync.record -c four_low`, then train and run with `-c four_low`.
+
 ## Phase 4: Instagram Reels
 
 `brainsync.reels` scrolls Instagram Reels in Chrome with the same decoder. The BrainScroll
@@ -968,7 +1035,9 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/board.py` | Cerelog X8 over BrainFlow, and a fake board |
 | `brainsync/record.py` | Record a cued session while the stimulus runs |
 | `brainsync/check.py` | Per-channel electrode check |
-| `brainsync/online.py` | Ring buffer, sliding-window decoder, calibration, replay and tuning grid |
+| `brainsync/online.py` | Ring buffer, sliding-window decoder (optionally phase-locked to the flicker onset), calibration, replay and tuning grid |
+| `brainsync/trca.py` | Filter-bank ensemble TRCA trained on the user's trials, phase-free or locked, fused with FBCCA; model files |
+| `brainsync/train.py` | `python -m brainsync.train`: cross-validate TRCA against FBCCA on cued recordings, replay, save the model |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
 | `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |

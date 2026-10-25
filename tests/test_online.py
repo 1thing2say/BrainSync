@@ -363,6 +363,51 @@ def test_idle_resets_and_counts():
     assert "abstained on 100%" in res.summary()
 
 
+def _trca_for_lock() -> tuple:
+    """A TRCA on synthetic 15 / 17 Hz trials, and a decoder locking to it."""
+    from brainsync.synthetic import ssvep_trials
+    from brainsync.trca import TRCA, ModelInfo
+
+    X, y = ssvep_trials(FREQS, FS, n_per_target=6, n_channels=4, seconds=3.0, seed=3)
+    info = ModelInfo(ch_names=("P7", "P8", "O1", "O2"), band=(1.0, 100.0), notch=60.0,
+                     latency=0.14, trial_s=3.0, sources=("synthetic",), created=0.0)
+    clf = TRCA(FREQS, FS, fusion=(1.0, 0.0)).fit(preprocess(X, FS), y, info=info)
+    dec = Decoder(clf, FS, window_s=2.0, step_s=0.5, votes=3, pad_s=1.0, lock=True)
+    return clf, dec
+
+
+def test_lock_needs_a_trca_model():
+    with pytest.raises(ValueError, match="lock needs a trained TRCA"):
+        make_decoder(lock=True)
+    clf, dec = _trca_for_lock()
+    assert dec.lock and dec.onset is None
+
+
+def test_locked_decoder_scores_at_the_onset_phase():
+    clf, dec = _trca_for_lock()
+    rest = dec.windows(board_data(10.0, seed=9, target=ABSTAIN)[0])
+    fit_rest(dec, rest)
+    locked_mean = clf.baseline_mean.copy()
+    plain = Decoder(clf, FS, window_s=2.0, step_s=0.5, votes=3, pad_s=1.0)
+    fit_rest(plain, rest)
+    # a locked baseline scores rest at random phases: below the phase-free maximum
+    assert np.all(locked_mean < clf.baseline_mean)
+    fit_rest(dec, rest)
+    X, t = board_data(6.0, seed=2, target=0, amp=4.0)
+    free = dec.feed(X[:, :1000], t[:1000])              # before the onset is known
+    assert free and all(not d.locked for d in free)
+    dec.onset = float(t[0]) + 0.5
+    locked = dec.feed(X[:, 1000:], t[1000:])
+    assert locked and all(d.locked for d in locked)
+    d = locked[-1]
+    seg = X[dec.rows, d.end - dec.needed:d.end]
+    window = preprocess(seg, FS, band=(1.0, 100.0), notch_hz=60.0)[:, dec.n_pad:]
+    start = t[d.end - dec.n_window]
+    psi = clf.phase_offsets(start - dec.onset)
+    np.testing.assert_allclose(d.scores, clf.decide(window, psi)[1][0])
+    assert not np.allclose(d.scores, clf.decide(window)[1][0])   # the lock changed them
+
+
 def test_decision_level_matches_classifier():
     dec = make_decoder()
     X, t = board_data(8.0, seed=2, target=0, amp=4.0)

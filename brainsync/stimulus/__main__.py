@@ -8,7 +8,8 @@
     python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
     python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
-Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
+Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>" (a free run:
+one "free_on" on its first flicker frame, the onset a phase-locked decoder needs), printed and
 flushed right after the flip that shows the event. Once the window is up and its measured
 refresh has passed the check against [display] refresh_hz (or --refresh auto adopted it),
 "measured refresh: <x> Hz" goes to stderr; a refused rate exits with code 2 before that
@@ -16,7 +17,8 @@ line. Space starts, Escape quits.
 
 With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card between
 the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
-lights target k's box (see brainsync.stimulus.feedback).
+lights target k's box (see brainsync.stimulus.feedback). Any free run with --feedback stdin
+also takes "lean <k> <percent> <n> <m>" lines: the decoder's lean meter.
 
 --conditions mixes flicker conditions in one cued session (see brainsync.ab, which runs
 it with the headset): each block cues every (condition, target) pair once, the still
@@ -226,7 +228,8 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                                  hold=None if reader is None or not args.hold_still
                                  else (lambda: not reader.heard),
                                  card=card,
-                                 flash=None if reader is None else (lambda: reader.flash))
+                                 flash=None if reader is None else (lambda: reader.flash),
+                                 lean=None if reader is None else (lambda: reader.lean))
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0

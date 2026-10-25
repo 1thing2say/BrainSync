@@ -56,7 +56,9 @@ def parse(argv: list[str]) -> argparse.Namespace:
 def test_live_arguments_match_the_demo_parser():
     p = argparse.ArgumentParser(prog="other")
     demo.add_live_arguments(p)
-    assert vars(p.parse_args([])) == vars(demo.build_parser().parse_args([]))
+    mine = vars(demo.build_parser().parse_args([]))
+    mine.pop("no_lean")                          # the lean meter is the demo's own flag
+    assert vars(p.parse_args([])) == mine
 
 
 def test_live_arguments_take_other_defaults():
