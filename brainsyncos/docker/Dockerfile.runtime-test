@@ -1,0 +1,19 @@
+# BrainSyncOS runtime test image: where tests/runtime-checks.sh installs the
+# brainsync-runtime and brainsync packages and runs them (tests/test_phase3.sh,
+# check `runtime`). Never used to build anything; nothing in it ships.
+# The same pinned Ubuntu 24.04 base as the builder, plus python3.12 and the GL
+# and X libraries the packages depend on or recommend, and Xvfb with xauth
+# (not in the Jetson ISO pool, not needed on a device) so the PsychoPy
+# renderers can open a window without a screen. apt packages come from the
+# live noble pockets, like the builder's.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3.12 xvfb xauth \
+      libgl1 libglu1-mesa libgl1-mesa-dri libx11-6 libxext6 libxinerama1 \
+      libxxf86vm1 libxi6 libfontconfig1 libfreetype6 \
+ && rm -rf /var/lib/apt/lists/*

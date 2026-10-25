@@ -8,10 +8,15 @@
 # scripts/build.sh and the Makefile, and the Phase 3 chain with a throwaway
 # signing key (never config/repo-signing-key.asc): make-repo-key.sh, then
 # build-packages.sh and build-repo.sh for both editions, the signed result,
-# and refusals of bad input. In the builder (tests/phase3-checks.sh): the
-# install-side apt helper against good and tampered repositories, the md5sum
+# and refusals of bad input; each edition's packages (the Python venv
+# included) must be byte-identical. In the builder (tests/phase3-checks.sh):
+# the install-side apt helper against good and tampered repositories, the
+# contents and dependencies of brainsync-runtime and brainsync, the md5sum
 # merge of mapped trees, and hook.sh mounting the repository for
-# 60-apt-repo.sh in NVIDIA's real target base layer. Last, shellcheck over
+# 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer. In
+# a test-only Ubuntu container with Xvfb (tests/runtime-checks.sh): the two
+# BrainSync packages installed, imported, PsychoPy drawing, every command,
+# and brainsync-voice serving its page offline. Last, shellcheck over
 # every BrainSyncOS shell script (koalaman/shellcheck:v0.10.0, used offline).
 # Builds no ISO: tests/test_phase2.sh and test_vm.sh build test ISOs that
 # carry a repository and run the full hook. Everything goes to
@@ -168,12 +173,23 @@ t_packages() {
         grep -qx "$fpr" "$TMP_DIR/deb.$e" || die "$e: the keyring does not hold key $fpr"
         grep -qx "Maintainer: BrainSyncOS <$PACKAGE_MAINTAINER_EMAIL>" "$TMP_DIR/deb.$e" || die "$e: Maintainer"
     done
-    cmp "$BRAINSYNCOS_ROOT/$TD/debs/jetson/"*.deb "$BRAINSYNCOS_ROOT/$TD/debs/vm/"*.deb \
-        || die "the keyring .deb differs between editions (not reproducible)"
+    # Each edition's packages come from a separate builder run: the same bytes
+    # in both, the venv included, means the build is reproducible.
+    local n=0
+    for deb in "$BRAINSYNCOS_ROOT/$TD/debs/jetson/"*.deb; do
+        cmp "$deb" "$BRAINSYNCOS_ROOT/$TD/debs/vm/$(basename "$deb")" \
+            || die "$(basename "$deb") differs between editions (not reproducible)"
+        echo "$(basename "$deb"): $(file_size "$deb") bytes, the same in both editions"
+        n=$((n + 1))
+    done
+    [ "$n" = "$(find "$BRAINSYNCOS_ROOT/$TD/debs/vm" -name '*.deb' | wc -l | tr -d ' ')" ] || die "the editions have different packages"
+    for deb in brainsync brainsync-runtime; do
+        [ -f "$BRAINSYNCOS_ROOT/$TD/debs/jetson/${deb}_${BRAINSYNCOS_VERSION}_arm64.deb" ] || die "no $deb package"
+    done
     expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
     expect_fail 'no repository signing key' "$B" run scripts/build-packages.sh --edition vm --key "$TD/none.asc" --out "$TD/x"
     expect_fail 'no package named nope' "$B" run scripts/build-packages.sh --edition vm --only nope --key "$KEY" --out "$TD/x"
-    echo "keyring package for both editions: root-owned, md5sums OK, holds $fpr, byte-identical (SOURCE_DATE_EPOCH)"
+    echo "$n packages for both editions, byte-identical (SOURCE_DATE_EPOCH); keyring root-owned, md5sums OK, holds $fpr"
 }
 
 t_repo() {
@@ -201,6 +217,18 @@ t_repo() {
     echo "repositories for both editions signed and validated; bad input refused; rebuild replaces"
 }
 
+# The BrainSync packages installed in a stock Ubuntu arm64 container with
+# Xvfb (docker/Dockerfile.runtime-test, test only) and run there
+# (tests/runtime-checks.sh). Its image is built on first use (needs the network).
+t_runtime() {
+    local df="$BRAINSYNCOS_ROOT/docker/Dockerfile.runtime-test" img
+    img="brainsyncos-runtime-test:$(sha256_of "$df" | cut -c1-12)"
+    docker image inspect "$img" > /dev/null 2>&1 \
+        || docker build --platform "$BUILDER_PLATFORM" -t "$img" -f "$df" "$BRAINSYNCOS_ROOT/docker"
+    docker run --rm --init --platform "$BUILDER_PLATFORM" --network none --cpus "$BUILD_CPUS" --memory "$BUILD_MEMORY" \
+        -v "$BRAINSYNCOS_ROOT:/work:ro" -w /work "$img" bash tests/runtime-checks.sh "$TD/debs/jetson"
+}
+
 t_shellcheck() {
     docker image inspect "$SHELLCHECK_IMAGE" > /dev/null 2>&1 \
         || die "$SHELLCHECK_IMAGE is not available locally (docker pull $SHELLCHECK_IMAGE)"
@@ -223,6 +251,8 @@ check packages             t_packages
 check repo                 t_repo
 if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check apt-helper       in_builder apt
+    check debs             in_builder debs
+    check runtime          t_runtime
     check md5-map          in_builder md5map
     check install-hook     in_builder hook
 fi

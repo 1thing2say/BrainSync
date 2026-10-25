@@ -9,16 +9,25 @@
 #             Jetson without an RTC battery) and leaves no private state;
 #             refuses a tampered index, a tampered .deb, an unsigned
 #             repository, the wrong key and a missing repository
+#   debs      brainsync-runtime and brainsync (the jetson test packages):
+#             control fields and dependencies (brainsync needs exactly this
+#             brainsync-runtime), who ships what (the runtime: the venv without
+#             the app; brainsync: the app in the venv, the /usr/bin links into
+#             it, the /etc/brainsync conffiles, /usr/share/brainsync), no file
+#             in both, nothing named *.env, no tests folders but numpy/testing,
+#             a .pyc beside every module, root-owned, md5sums OK
 #   md5map    merge-md5sums.py --map: a mapped tree's files are listed at their
 #             ISO paths with correct sums; bad --map arguments are refused
-#   hook      payload/hook.sh (00-release.sh + 60-apt-repo.sh only) against
-#             NVIDIA's real target base layer (ubuntu-server-minimal.squashfs),
-#             curtin via the chroot shim: the repository is mounted read-only
-#             for the steps and unmounted afterwards, brainsyncos-archive-keyring
-#             is installed (no apt error or warning in the log) and verifies the
-#             repository, the target's apt
-#             sources and lists are unchanged; a re-run works; a failing later
-#             step and a missing repository fail the hook and leave no mount
+#   hook      payload/hook.sh (00-release.sh, 60-apt-repo.sh and
+#             70-brainsync.sh only) against NVIDIA's real target base layer
+#             (ubuntu-server-minimal.squashfs), curtin via the chroot shim: the
+#             repository is mounted read-only for the steps and unmounted
+#             afterwards, brainsyncos-archive-keyring is installed (no apt error
+#             or warning in the log) and verifies the repository, brainsync and
+#             brainsync-runtime are installed and brainsync-voice runs in the
+#             target, the target's apt sources and lists are unchanged; a re-run
+#             works; a failing later step and a missing repository fail the
+#             hook and leave no mount
 # Work happens in /scratch (tmpfs).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
@@ -94,6 +103,96 @@ c_apt() {
     expect_apt_fail "a missing repository" 'no BrainSyncOS package repository' "$p" "$W/no-such-repo"
 }
 
+# deb_paths DEB: the paths in DEB without "./", symlinks as "path -> target".
+deb_paths() {
+    dpkg-deb -c "$1" | awk '{p = $6; for (i = 7; i <= NF; i++) p = p " " $i; sub(/^\.\//, "", p); if (p != "") print p}' \
+        | LC_ALL=C sort
+}
+
+# no_pyc_missing DIR: every .py under DIR has its cpython-312 .pyc, and every
+# .pyc is unchecked-hash (flags 1): the same bytes on every build, never
+# rewritten at runtime when dpkg sets the file times.
+no_pyc_missing() {
+    python3 - "$1" <<'PY'
+import os, struct, sys
+missing = total = other = 0
+for root, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        path = os.path.join(root, name)
+        if name.endswith(".py"):
+            total += 1
+            if not os.path.exists(os.path.join(root, "__pycache__", name[:-3] + ".cpython-312.pyc")):
+                missing += 1
+                if missing <= 5:
+                    print("no .pyc:", path)
+        elif name.endswith(".pyc"):
+            with open(path, "rb") as f:
+                flags = struct.unpack("<I", f.read(8)[4:8])[0]
+            if flags != 1:
+                other += 1
+                if other <= 5:
+                    print(f"not unchecked-hash (flags {flags}):", path)
+print(f"{total} modules, {missing} without .pyc, {other} .pyc not unchecked-hash")
+sys.exit(1 if missing or other else 0)
+PY
+}
+
+c_debs() {
+    local d="$T/debs/jetson" rt app f x="$W/x" bad c n site=opt/brainsyncos/venv/lib/python3.12/site-packages
+    rt="$(ls "$d/brainsync-runtime_${BRAINSYNCOS_VERSION}_arm64.deb")"
+    app="$(ls "$d/brainsync_${BRAINSYNCOS_VERSION}_arm64.deb")"
+    mkdir -p "$x"
+    for f in "$rt" "$app"; do
+        echo "$(basename "$f"): $(file_size "$f") bytes, Installed-Size $(dpkg-deb -f "$f" Installed-Size) KiB"
+        dpkg-deb -f "$f" Depends Recommends | sed 's/^/  /'
+        [ "$(dpkg-deb -c "$f" | awk '{print $2}' | sort -u)" = root/root ] || die "$(basename "$f"): files not all root/root"
+        dpkg-deb -R "$f" "$x/$(basename "$f")"
+        (cd "$x/$(basename "$f")" && md5sum -c --quiet DEBIAN/md5sums) || die "$(basename "$f"): md5sums"
+        no_pyc_missing "$x/$(basename "$f")/$site" || die "$(basename "$f"): modules without an unchecked-hash .pyc"
+    done
+    [ "$(dpkg-deb -f "$app" Depends)" = "brainsync-runtime (= $BRAINSYNCOS_VERSION)" ] \
+        || die "brainsync must depend on exactly brainsync-runtime $BRAINSYNCOS_VERSION, has: $(dpkg-deb -f "$app" Depends)"
+    [ "$(dpkg-deb -f "$rt" Depends)" = 'python3.12 (>= 3.12.3), python3.12 (<< 3.13), libc6, libgcc-s1, libstdc++6, zlib1g' ] \
+        || die "brainsync-runtime Depends: $(dpkg-deb -f "$rt" Depends)"
+    deb_paths "$rt" > "$W/rt.paths"
+    deb_paths "$app" > "$W/app.paths"
+
+    bad="$(grep -Ev '^(opt/|opt/brainsyncos/|opt/brainsyncos/venv/.*|usr/|usr/share/|usr/share/doc/|usr/share/doc/brainsync-runtime/.*)$' "$W/rt.paths" | head -3 || true)"
+    [ -z "$bad" ] || die "brainsync-runtime ships files outside the venv: $bad"
+    bad="$(grep -E "^$site/(brainsync|app|tools)/|^$site/brainsync-[0-9].*\.dist-info/" "$W/rt.paths" | head -3 || true)"
+    [ -z "$bad" ] || die "brainsync-runtime ships app files: $bad"
+    bad="$(grep -E '(^|/)tests/$' "$W/rt.paths" | head -3 || true)"
+    [ -z "$bad" ] || die "brainsync-runtime ships tests folders: $bad"
+    grep -qx "$site/numpy/testing/__init__.py" "$W/rt.paths" || die "numpy/testing is missing (scipy imports it)"
+    ! grep -q "^$site/psychopy/demos/" "$W/rt.paths" || die "psychopy/demos is shipped"
+    [ "$(grep -c . "$x/$(basename "$rt")/usr/share/doc/brainsync-runtime/wheels.txt")" -ge \
+        "$(grep -cE '^[A-Za-z0-9]' "$BRAINSYNCOS_ROOT/python/brainsync.lock.txt")" ] || die "wheels.txt lists fewer wheels than the lock"
+
+    bad="$(grep -Ev "^(etc/|etc/brainsync/|etc/brainsync/(default|intents|profile)\.yaml|usr/|usr/bin/|usr/bin/[a-z0-9-]+ -> /opt/brainsyncos/venv/bin/[a-z0-9-]+|usr/share/|usr/share/brainsync/|usr/share/brainsync/(ui|clients)/.*|usr/share/doc/|usr/share/doc/brainsync/.*|opt/|opt/brainsyncos/|opt/brainsyncos/venv/|opt/brainsyncos/venv/bin/|opt/brainsyncos/venv/bin/[a-z0-9-]+|opt/brainsyncos/venv/lib/|opt/brainsyncos/venv/lib/python3.12/|$site/|$site/(brainsync|app|tools|brainsync-[0-9.]+\.dist-info)/.*)$" "$W/app.paths" | head -3 || true)"
+    [ -z "$bad" ] || die "brainsync ships unexpected paths: $bad"
+    grep -v '/$' "$W/rt.paths" > "$W/rt.files"
+    grep -v '/$' "$W/app.paths" > "$W/app.files"
+    comm -12 "$W/rt.files" "$W/app.files" > "$W/both"
+    [ ! -s "$W/both" ] || die "files in both packages: $(head -3 "$W/both")"
+    ! grep -Eq '(^|/)(\.env[^/]*|[^/]*\.env)$' "$W/rt.files" "$W/app.files" || die "an .env file is packaged"
+    [ "$(cat "$x/$(basename "$app")/DEBIAN/conffiles")" = "$(printf '/etc/brainsync/%s\n' default.yaml intents.yaml profile.yaml)" ] \
+        || die "conffiles: $(cat "$x/$(basename "$app")/DEBIAN/conffiles")"
+    for f in usr/share/brainsync/ui/index.html usr/share/brainsync/clients/web/index.html "$site/brainsync/paths.py"; do
+        grep -qx "$f" "$W/app.paths" || die "brainsync lacks $f"
+    done
+    ! grep -Eq '^usr/share/brainsync/clients/(.*/)?(test/|[^/]*\.test\.mjs$)' "$W/app.paths" || die "the clients' tests are shipped"
+    n=0
+    for c in $(sed -n 's|^usr/bin/\([a-z0-9-]*\) -> .*|\1|p' "$W/app.paths"); do
+        grep -qx "usr/bin/$c -> /opt/brainsyncos/venv/bin/$c" "$W/app.paths" && grep -qx "opt/brainsyncos/venv/bin/$c" "$W/app.paths" \
+            || die "/usr/bin/$c is not a link to the app's script in the venv"
+        n=$((n + 1))
+    done
+    for c in brainsync-voice brainsync-demo brainsync-server brainchess; do
+        grep -qx "usr/bin/$c -> /opt/brainsyncos/venv/bin/$c" "$W/app.paths" || die "no /usr/bin/$c"
+    done
+    echo "brainsync-runtime: $(wc -l < "$W/rt.files" | tr -d ' ') files, all in the venv or its docs; brainsync: $(wc -l < "$W/app.files" | tr -d ' ') files, $n commands; none in both, no .env, conffiles OK"
+}
+
 c_md5map() {
     local m="$W/m"
     mkdir -p "$m/stage/brainsyncos" "$m/tree/pool/main" "$m/tree/dists"
@@ -120,15 +219,16 @@ c_md5map() {
     echo "merge-md5sums.py --map: mapped files at their ISO paths; bad --map arguments refused"
 }
 
-# hook_payload DIR [EXTRA_STEP]: a payload with only 00-release.sh and
-# 60-apt-repo.sh (the identity steps need NVIDIA's late-command state; the
+# hook_payload DIR: a payload with only 00-release.sh, 60-apt-repo.sh and
+# 70-brainsync.sh (the identity steps need NVIDIA's late-command state; the
 # phase 2 and VM hook checks run the full set).
 hook_payload() {
     local d="$1"
     mkdir -p "$d/install.d"
     cp "$BRAINSYNCOS_ROOT/payload/hook.sh" "$d/"
     cp -R "$BRAINSYNCOS_ROOT/payload/lib" "$d/"
-    cp "$BRAINSYNCOS_ROOT/payload/install.d/00-release.sh" "$BRAINSYNCOS_ROOT/payload/install.d/60-apt-repo.sh" "$d/install.d/"
+    cp "$BRAINSYNCOS_ROOT/payload/install.d/00-release.sh" "$BRAINSYNCOS_ROOT/payload/install.d/60-apt-repo.sh" \
+        "$BRAINSYNCOS_ROOT/payload/install.d/70-brainsync.sh" "$d/install.d/"
     cp "$REPO/repo-key.gpg" "$d/"
     printf 'NAME=BrainSyncOS\nVERSION=%s\nBUILD_ID=phase3\nEDITION=orin-nano\nREPO_KEY=%s\n' \
         "$BRAINSYNCOS_VERSION" "$(key_fingerprint "$REPO/repo-key.gpg")" > "$d/release"
@@ -170,18 +270,24 @@ c_hook() {
     run_hook "$p" "$t" "$REPO" || { tail -20 "$W/live.log"; die "hook failed"; }
     grep -q 'package repository .* mounted at /tmp/brainsyncos-repo (read-only)' "$log" || die "hook did not mount the repository"
     grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$log" || die "60-apt-repo.sh did not finish"
-    grep -q 'BrainSyncOS layer installed (2 steps)' "$log" || die "log lacks the summary"
+    grep -q '70-brainsync.sh: brainsync .*, brainsync-runtime .* installed; [0-9]* commands in /usr/bin' "$log" \
+        || die "70-brainsync.sh did not finish"
+    grep -q 'BrainSyncOS layer installed (3 steps)' "$log" || die "log lacks the summary"
     ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
     "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg -s brainsyncos-archive-keyring | grep -qx 'Status: install ok installed' \
         || die "brainsyncos-archive-keyring is not installed in the target"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg-query -W -f '${Status}\n' brainsync brainsync-runtime \
+        | grep -cx 'install ok installed' | grep -qx 2 || die "brainsync and brainsync-runtime are not installed in the target"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- /usr/bin/brainsync-voice --help | grep -q 'usage:' \
+        || die "brainsync-voice does not run in the target"
     gpgv --keyring "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$REPO/dists/$REPO_SUITE/InRelease" > /dev/null 2>&1 \
         || die "the installed keyring does not verify the repository"
     apt_state "$t" > "$W/apt-after"
     diff "$W/apt-before" "$W/apt-after" || die "the target's apt sources or lists changed"
     ! ls -d "$t"/tmp/bsos-apt.* > /dev/null 2>&1 || die "private apt state left in the target"
     no_mount_left "$t"
-    grep -q '60-apt-repo.sh' "$log" && sed -n '/== 60-apt-repo.sh/,$p' "$log" | head -12
-    echo "hook: repository mounted read-only, keyring installed and verifying, target apt state unchanged, unmounted"
+    grep -q '60-apt-repo.sh' "$log" && sed -n '/== 60-apt-repo.sh/,$p' "$log" | grep -v '^Unpacking\|^Selecting\|^Preparing\|^Setting up' | head -24
+    echo "hook: repository mounted read-only, keyring and BrainSync installed, target apt state unchanged, unmounted"
 
     run_hook "$p" "$t" "$REPO" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
     no_mount_left "$t"
@@ -203,6 +309,7 @@ c_hook() {
 
 case "$1" in
     apt) c_apt ;;
+    debs) c_debs ;;
     md5map) c_md5map ;;
     hook) c_hook ;;
     *) die "unknown check: $1 (see --help)" ;;
