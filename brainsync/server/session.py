@@ -715,8 +715,13 @@ class Session:
         if not self._targets:
             self._bank.deactivate()
             return
-        self._bank.activate([float(t["freq"]) for t in self._targets],
-                            [float(t["phase"]) for t in self._targets], now)
+        try:
+            self._bank.activate([float(t["freq"]) for t in self._targets],
+                                [float(t["phase"]) for t in self._targets], now)
+        except ValueError as exc:   # a saved decoder model that was not trained for this layout
+            self._bank.deactivate()
+            self._refuse("layout", f"This layout cannot be decoded: {exc}")
+            return
         self._activated_at = now
 
     # -- selections ---------------------------------------------------------------------

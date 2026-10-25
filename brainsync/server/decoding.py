@@ -76,10 +76,15 @@ def build_decoder(freqs: Sequence[float], phases: Sequence[float], fs: float = F
                              f"{clf.phases.tolist()}, not {f.tolist()} Hz, {ph.tolist()}")
         if abs(clf.fs - fs) > 1e-6:
             raise ValueError(f"model {model} was trained at {clf.fs} Hz, the board runs at {fs}")
-        n_sel = len(channel_indices(tuple(str(c) for c in ch_names), channels))
-        if clf.n_ch != n_sel:
+        names = tuple(str(c) for c in ch_names)
+        selected = [names[i] for i in channel_indices(names, channels)]
+        if clf.n_ch != len(selected):
             raise ValueError(f"model {model} was trained on {clf.n_ch} channels, the decoder "
-                             f"selects {n_sel}")
+                             f"selects {len(selected)}")
+        trained_on = clf.meta.get("channels") if isinstance(clf.meta, dict) else None
+        if trained_on and list(trained_on) != selected:
+            raise ValueError(f"model {model} was trained on channels {list(trained_on)}, the "
+                             f"decoder selects {selected}")
         clf.margin, clf.threshold = TUNED.margin, TUNED.threshold
     return Decoder(clf, fs, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,
                    channels=channels, pad_s=PAD_S, ch_names=ch_names)

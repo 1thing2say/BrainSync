@@ -298,10 +298,27 @@ def still_timing(rec: Recording, w: Windows) -> StillTiming:
                        sample_s=1.0 / rec.fs)
 
 
-def trial_blocks(kept: np.ndarray, n_targets: int) -> np.ndarray:
-    """Block of each kept trial: the record tool cues every target once per block, so
-    complete trial ``i`` belongs to block ``i // n_targets``."""
-    return np.asarray(kept, dtype=int) // int(n_targets)
+_BLOCK_RE = re.compile(r"^\s*\[marker\s+([-+0-9.eE]+)\]\s+block_start:(\d+)\s*$", re.MULTILINE)
+
+
+def trial_blocks(kept: np.ndarray, n_targets: int, on_times: np.ndarray | None = None,
+                 marker_text: str = "") -> np.ndarray:
+    """Block of each kept trial, for the leave-one-block-out folds.
+
+    From the display's ``block_start`` markers when the recording has them (each trial
+    belongs to the last block that started at or before its flicker), else by position: the
+    record tool cues every target once per block, so complete trial ``i`` is in block
+    ``i // n_targets`` (which shifts if an early trial was dropped).
+    """
+    kept = np.asarray(kept, dtype=int)
+    starts = sorted((float(m.group(1)), int(m.group(2))) for m in _BLOCK_RE.finditer(marker_text))
+    if starts and on_times is not None and len(on_times) == kept.size:
+        stamps = np.array([t for t, _ in starts])
+        ids = np.array([b for _, b in starts])
+        idx = np.searchsorted(stamps, np.asarray(on_times, dtype=float), side="right") - 1
+        if np.all(idx >= 0):
+            return ids[idx]
+    return kept // int(n_targets)
 
 
 def score_recording(rec: Recording, methods: Sequence[str] = METHODS,
@@ -319,8 +336,8 @@ def score_recording(rec: Recording, methods: Sequence[str] = METHODS,
     lengths, too_long = split_windows(windows, w.on.shape[-1] / rec.fs)
     rows = score_windows(w.on, w.off, w.labels, rec.freqs, rec.fs, lengths, methods,
                          phases=rec.phases, margin=margin, harmonics=harmonics,
-                         blocks=trial_blocks(kept, rec.n_targets), latency=rec.latency,
-                         bands=bands)
+                         blocks=trial_blocks(kept, rec.n_targets, rec.t[w.on_start], rec.marker_text),
+                         latency=rec.latency, bands=bands)
     return Report(path=rec.path, freqs=rec.freqs.copy(), channels=tuple(w.ch_names),
                   n_total=n_total, kept=kept, labels=w.labels.copy(), margin=float(margin),
                   rows=rows, skipped_windows=tuple(too_long), still=still_timing(rec, w))

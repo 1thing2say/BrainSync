@@ -45,7 +45,8 @@ def test_calibrate_fake_session_scores_and_saves(tmp_path: Path) -> None:
     assert clf.name == "etrcar" and clf.n_train == 16 and clf.has_baseline
     assert clf.freqs.tolist() == [13.0, 15.0, 17.0, 11.0] and clf.n_ch == 4
     assert clf.meta["config"] == "four_diamond"
-    assert clf.meta["gate"].startswith("gate at 1 s")   # the nearest scored window
+    assert clf.meta["gate"][0].startswith("gate at 1 s")   # the nearest scored window
+    assert clf.meta["held_out"]["n"] == 16 and clf.meta["held_out"]["folds"] == 4
     recs = list(tmp_path.glob("*_cued.npz"))
     assert len(recs) == 1 and clf.meta["recording"] == str(recs[0])
 
@@ -61,6 +62,22 @@ def test_calibrate_from_file_no_save(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert code == 0 and (tmp_path / "m.npz").is_file()
     text = capsys.readouterr().out
     assert "gate at" in text and "ecca*" in text and "keep page mode" in text
+    assert "label-permutation p=" in text and "use it with: python -m brainsync.demo -c four_diamond" in text
+
+
+def test_calibrate_from_a_two_target_file_says_the_gate_needs_four(tmp_path: Path,
+                                                                 capsys: pytest.CaptureFixture) -> None:
+    code = calibrate.main(["-c", "two_targets", "--fake", "--seed", "4", "--trials", "8",
+                           "--save-dir", str(tmp_path), "--no-save", "--methods", "fbcca", "--windows", "1"])
+    assert code == 0
+    rec = next(tmp_path.glob("*_cued.npz"))
+    out = tmp_path / "two.npz"
+    assert calibrate.main(["--from", str(rec), "--methods", "fbcca", "etrcar", "--windows", "1",
+                           "--out", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "needs the four_diamond session" in text and "keep page mode" not in text
+    assert "python -m brainsync.demo -c two_targets --model" in text    # config derived from the file
+    assert load_model(out).meta["config"] == "two_targets"
 
 
 def test_calibrate_rejects_bad_options_and_missing_file(tmp_path: Path) -> None:

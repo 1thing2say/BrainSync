@@ -8,9 +8,11 @@ One session serves two purposes (PLAN.md section 14): it is the 4-target gate (d
 headset separate the four flickers?) and the calibration data the trained classifiers in
 ``brainsync.templates`` need. The tool records with ``brainsync.record`` (or takes a file),
 then prints ``score_cued``'s table: FBCCA scored on every trial, the trained methods scored
-leave-one-block-out, at the requested window lengths. The gate line reads the best accuracy at
-``--gate-window`` against the thresholds of PLAN.md section 14 (keep page mode at 70 % or
-more; 55-70 % means train and re-check; below that fall back to list mode). Finally the chosen
+leave-one-block-out, at the requested window lengths. The gate lines read two pre-registered
+cells at ``--gate-window``, FBCCA and the classifier being saved, against the thresholds of
+PLAN.md section 14 (keep page mode at 70 % or more; 55-70 % means re-check live; below that
+fall back to list mode), and print the label-permutation p of the table's best cell so a
+lucky maximum is not mistaken for a result. Finally the chosen
 classifier is fitted on all trials, its rest baseline on the still windows, and saved as
 ``cache/templates/<recording>_<classifier>.npz`` for ``brainsync.demo --model`` and
 ``brainsync.server --decoder-model``. The saved model keeps the window length it was scored at only
@@ -44,22 +46,73 @@ GATE_TRAIN = 0.55     # train on the recording and re-check; below: list mode
 MODELS_DIR = REPO_ROOT / "cache" / "templates"
 
 
-def gate_line(rep: Report, window_s: float) -> str:
-    """The 4-target gate verdict from the best cell at ``window_s`` (nearest scored window)."""
-    rows = [r for r in rep.rows]
-    nearest = min({r.window_s for r in rows}, key=lambda w: abs(w - window_s))
-    cells = [r for r in rows if r.window_s == nearest]
-    best = max(cells, key=lambda r: r.accuracy)
+def gate_lines(rep: Report, window_s: float, classifier: str) -> list[str]:
+    """The 4-target gate verdict, read from two pre-registered cells at the scored window
+    nearest ``window_s``: FBCCA (the live default, scored on every trial) and the classifier
+    being saved (held out, leave-one-block-out). The verdict follows the better of the two;
+    a max over every method would flatter the table (``Report.best_max_p`` says by how much).
+    """
+    nearest = min({r.window_s for r in rep.rows}, key=lambda w: abs(w - window_s))
+    cells = {r.method: r for r in rep.rows if r.window_s == nearest}
+    lines = []
+    picked = []
+    for name in ("fbcca", classifier):
+        r = cells.get(name)
+        if r is None:
+            lines.append(f"gate at {nearest:g} s: {name} was not scored (add it to --methods)")
+            continue
+        kind = f"held out, {r.folds} folds" if r.folds else "every trial, not held out"
+        lines.append(f"gate at {nearest:g} s: {name} {r.hits}/{r.n} ({100 * r.accuracy:.0f} %, {kind}, "
+                     f"p={r.p:.3f}; chance {100 * rep.chance:.0f} %)")
+        picked.append(r)
+    if len(rep.freqs) != 4:
+        lines.append("gate: this recording has %d targets; the page-mode gate needs the four_diamond "
+                     "session (13/15/17/11 Hz)" % len(rep.freqs))
+        return lines
+    if not picked:
+        return lines
+    best = max(picked, key=lambda r: r.accuracy)
     acc = best.accuracy
     if acc >= GATE_KEEP:
-        verdict = "keep page mode (4 targets)"
+        verdict = f"keep page mode (4 targets), decode with {best.method}"
     elif acc >= GATE_TRAIN:
-        verdict = "borderline: use the trained model and re-check live before trusting it"
+        verdict = "borderline: re-check live before trusting it; list mode is the safe fallback"
     else:
         verdict = "fall back to list mode (SAY / NEXT on 2 targets)"
-    kind = "trained, held out" if best.folds else "training-free"
-    return (f"gate at {nearest:g} s: best {best.method} {best.hits}/{best.n} "
-            f"({100 * acc:.0f} %, {kind}; chance {100 * rep.chance:.0f} %) -> {verdict}")
+    lines.append(f"gate: {verdict}; best cell over all {len(rep.rows)} cells has label-permutation "
+                 f"p={rep.best_max_p():.3f}")
+    return lines
+
+
+def own_row(rep: Report, classifier: str, window_s: float) -> dict[str, object]:
+    """The saved classifier's held-out cell nearest ``window_s``, for the model's metadata."""
+    nearest = min({r.window_s for r in rep.rows}, key=lambda w: abs(w - window_s))
+    for r in rep.rows:
+        if r.method == classifier and r.window_s == nearest:
+            return {"window_s": r.window_s, "hits": r.hits, "n": r.n, "accuracy": r.accuracy,
+                    "folds": r.folds}
+    return {}
+
+
+def config_for(rec: Recording, requested: str, from_file: bool) -> str | None:
+    """The config name to record in the model: the requested one when this tool recorded the
+    session, else the stimulus config whose frequencies match the file, else None."""
+    if not from_file:
+        return requested
+    from .stimulus import available_configs, load_config
+
+    matching = []
+    for name in available_configs():
+        try:
+            cfg = load_config(name)
+        except (ValueError, FileNotFoundError):
+            continue
+        if cfg.n_targets == rec.n_targets and np.allclose(cfg.freqs, rec.freqs, atol=0.01):
+            matching.append(name)
+    for name in (requested, "four_diamond", "two_targets", *matching):   # several share a set
+        if name in matching:
+            return name
+    return None
 
 
 def fit_all(rec: Recording, classifier: str, channels: Sequence[str | int], reject: float,
@@ -171,23 +224,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {path}: {exc}", file=sys.stderr)
         return 1
     print(format_report(rep))
-    print(gate_line(rep, args.gate_window))
+    gate = gate_lines(rep, args.gate_window, args.classifier)
+    print("\n".join(gate))
     if args.no_save:
         return 0
+    config = config_for(rec, args.config, args.source is not None)
     try:
         clf = fit_all(rec, args.classifier, channels, args.reject, args.harmonics, bands)
         out = args.out or model_path(rec.path, args.classifier)
-        save_model(clf, out, recording=str(rec.path), config=args.config,
+        save_model(clf, out, recording=str(rec.path), config=config,
                    channels=[str(c) for c in channels],
                    created=dt.datetime.now().isoformat(timespec="seconds"),
                    n_trials=int(clf.n_train),
-                   gate=gate_line(rep, args.gate_window))
+                   held_out=own_row(rep, args.classifier, args.gate_window),
+                   gate=gate)
     except (ValueError, OSError) as exc:
         print(f"error: could not save the model: {exc}", file=sys.stderr)
         return 1
+    row = own_row(rep, args.classifier, args.gate_window)
+    held = (f"; held out at {row['window_s']:g} s: {row['hits']}/{row['n']} ({100 * row['accuracy']:.0f} %)"
+            if row else "")
     print(f"saved {clf.name} fitted on {clf.n_train} trials "
-          f"({', '.join(f'{f:g}' for f in rec.freqs)} Hz, {clf.n_ch} channels) to {out}")
-    print(f"use it with: python -m brainsync.demo -c {args.config} --model {out}")
+          f"({', '.join(f'{f:g}' for f in rec.freqs)} Hz, {clf.n_ch} channels) to {out}{held}")
+    cfg_flag = f" -c {config}" if config else ""
+    print(f"use it with: python -m brainsync.demo{cfg_flag} --model {out}")
     return 0
 
 

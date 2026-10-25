@@ -197,6 +197,10 @@ class Decoder:
         self.n_window = int(round(window_s * self.fs))
         self.n_pad = int(round(pad_s * self.fs))
         self.n_step = max(1, int(round(step_s * self.fs)))
+        n_fit = getattr(classifier, "n_ch", 0) if getattr(classifier, "fitted", False) else 0
+        if n_fit and n_fit != len(self.rows):
+            raise ValueError(f"the classifier was fitted on {n_fit} channels but the decoder "
+                             f"selects {len(self.rows)} ({list(self.channel_names_for(self.rows, ch_names))})")
         need = min_samples(len(self.rows), classifier.harmonics)
         if self.n_window < need:
             raise ValueError(f"window of {window_s} s ({self.n_window} samples) is too short for "
@@ -209,6 +213,10 @@ class Decoder:
         self.onset: float | None = None   # unix time of the flicker's first frame, if known
         self.train_trials = 0             # replay: trials used to fit the classifier
         self.reset()
+
+    @staticmethod
+    def channel_names_for(rows: Sequence[int], ch_names: Sequence[str]) -> list[str]:
+        return [str(ch_names[i]) for i in rows]
 
     @property
     def needed(self) -> int:
@@ -334,10 +342,20 @@ class Decoder:
         offset = math.nan
         if self.onset is not None:
             offset = float(self._times.last(self.n_window)[0, 0]) - self.onset
-        pred, scores = self.classifier.decide(window, 0.0 if math.isnan(offset) else offset)
-        gap = float(self.classifier.gaps(scores)[0])
-        level = float(self.classifier.levels(scores)[0])
-        raw = int(pred[0])
+        clf = self.classifier
+        covers = getattr(clf, "covers", None)
+        if self.needs_onset and (math.isnan(offset)
+                                 or (covers is not None and not covers(self.n_window, offset))):
+            # templates cannot be placed: no onset yet, or a raw template that does not
+            # reach this window. Abstain rather than score a misaligned template.
+            raw = ABSTAIN
+            scores = np.zeros((1, clf.n_targets))
+            gap = level = 0.0
+        else:
+            pred, scores = clf.decide(window, 0.0 if math.isnan(offset) else offset)
+            gap = float(clf.gaps(scores)[0])
+            level = float(clf.levels(scores)[0])
+            raw = int(pred[0])
         changed = self.voter.push(raw)
         return Decision(time=float(self._times.last(1)[0, 0]), scores=scores[0], raw=raw,
                         committed=self.committed, changed=changed, end=self.n_seen, gap=gap,

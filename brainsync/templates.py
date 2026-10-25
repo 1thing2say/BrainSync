@@ -71,18 +71,29 @@ def _corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b / den) if den > 0 else 0.0
 
 
+def _basis(A: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rank-truncated orthonormal basis Q (n, k) of the centred columns of A (n, p), and the
+    map M (p, k) with A_c M = Q, so weights on A are M @ (weights on Q)."""
+    A = A - A.mean(axis=0, keepdims=True)
+    u, sv, vt = np.linalg.svd(A, full_matrices=False)
+    keep = sv > (sv[0] * max(A.shape) * np.finfo(float).eps if sv.size else 0.0)
+    if not keep.any():
+        return np.zeros((A.shape[0], 1)), np.zeros((A.shape[1], 1))
+    return u[:, keep], vt[keep].T / sv[keep]
+
+
 def cca_weights(X: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     """CCA between X (p, n) and Y (q, n): x-weights (p,), y-weights (q,), first correlation.
 
-    Rank-deficient rows (a flat channel) get minimum-norm weights instead of failing.
+    Both sides are reduced to their rank-truncated bases first, so a flat or duplicated
+    channel, or a template of lower rank than its channel count (the harmonic templates
+    with n_ch > 2H), neither fails nor inflates the correlation with numerically arbitrary
+    null-space directions; the weights are the minimum-norm ones.
     """
-    Xc, Yc = _center(np.asarray(X, float)).T, _center(np.asarray(Y, float)).T   # (n, p), (n, q)
-    qx, rx = np.linalg.qr(Xc)
-    qy, ry = np.linalg.qr(Yc)
+    qx, mx = _basis(np.asarray(X, float).T)
+    qy, my = _basis(np.asarray(Y, float).T)
     u, s, vt = np.linalg.svd(qx.T @ qy)
-    wx = np.linalg.lstsq(rx, u[:, 0], rcond=None)[0]
-    wy = np.linalg.lstsq(ry, vt[0], rcond=None)[0]
-    return wx, wy, float(np.clip(s[0], 0.0, 1.0))
+    return mx @ u[:, 0], my @ vt[0], float(np.clip(s[0], 0.0, 1.0))
 
 
 def _first_cc(qx: np.ndarray, qy: np.ndarray) -> np.ndarray:
@@ -92,12 +103,16 @@ def _first_cc(qx: np.ndarray, qy: np.ndarray) -> np.ndarray:
 
 
 def _top_eigvec(S: np.ndarray, Q: np.ndarray) -> np.ndarray:
-    """Eigenvector of the largest generalised eigenvalue of S w = lambda Q w (unit norm)."""
-    reg = _EIG_REG * np.trace(Q) / Q.shape[0]
+    """Eigenvector of the largest generalised eigenvalue of S w = lambda Q w, scaled so that
+    w^T Q w = 1 (Nakanishi 2018 eq. 10): every filter in an ensemble then has unit output
+    variance, so no single filter dominates the 2-D correlation."""
+    tr = float(np.trace(Q))
+    if not np.isfinite(tr) or tr <= 0:
+        raise ValueError("the training trials have no variance; check the channels and the board")
+    reg = _EIG_REG * tr / Q.shape[0]
     Qr = Q + reg * np.eye(Q.shape[0])
     vals, vecs = eigh((S + S.T) / 2.0, Qr)
-    w = vecs[:, -1]
-    return w / (np.linalg.norm(w) or 1.0)
+    return vecs[:, -1]
 
 
 def _filters(trials: np.ndarray, proj: np.ndarray | None) -> np.ndarray:
@@ -219,6 +234,9 @@ class TemplateClassifier(CCA):
             Xb = _center(Xb)
             for k in range(K):
                 Xk = Xb[y == k]                                             # (Nt, n_ch, n)
+                if not np.any(Xk):
+                    raise ValueError(f"target {k}'s training trials are flat (zero variance); "
+                                     "check the channels and the board")
                 mean = Xk.mean(axis=0)                                      # (n_ch, n)
                 means[m, k] = mean
                 coef[m, k] = np.linalg.lstsq(refs[k].T, mean.T, rcond=None)[0].T
@@ -249,6 +267,20 @@ class TemplateClassifier(CCA):
     def _require_fit(self) -> None:
         if not self.fitted:
             raise ValueError(f"{self.name} has no templates yet: call fit(trials, labels, t0) first")
+
+    def fit_baseline(self, X_rest: np.ndarray, offset: float | None = None) -> TemplateClassifier:
+        """As for CCA; still windows carry no flicker, so their offset is a convention: the
+        epoch start ``t0`` by default, which raw templates always cover."""
+        super().fit_baseline(X_rest, self.t0 if offset is None else float(offset))
+        return self
+
+    def covers(self, n: int, offset: float) -> bool:
+        """Can a window of ``n`` samples starting ``offset`` s after the onset be scored?
+        Always with harmonic templates; raw templates only inside the calibration epoch."""
+        if self.template != "raw":
+            return True
+        start = int(round((offset - self.t0) * self.fs))
+        return 0 <= start and start + n <= self.n_fit_samples
 
     def _windows(self, X: np.ndarray) -> np.ndarray:
         X = super()._windows(X)
@@ -295,6 +327,11 @@ class ECCA(TemplateClassifier):
     references; test window vs template through the filter CCA(test, template); through the
     filter CCA(test, references); and through the filter CCA(template, references) learned
     at fit time from the raw trial average.
+
+    With harmonic templates the template lies inside the sine/cosine span, so when the window
+    has at least 2H channels the second and third correlations coincide (the score becomes
+    r1^2 + 2 r3^2 + r4^2) and ITCCA equals standard CCA; the published four-term behaviour
+    needs ``template="raw"``, which the Nakanishi 2015 reproduction uses.
     """
 
     name = "ecca"
@@ -459,7 +496,7 @@ def cross_val_predict(factory: Callable[[], CCA], X: np.ndarray, y: Sequence[int
         pred[test] = p
         scores[test] = s
         if rest is not None and rest_scores is not None:
-            rest_scores[test] = clf.scores(rest[test], 0.0)
+            rest_scores[test] = clf.scores(rest[test], getattr(clf, "t0", 0.0))
         means.append(clf.baseline_mean.copy())
         spreads.append(clf.baseline_spread)
     assert scores is not None
@@ -531,9 +568,22 @@ def load_model(path: str | Path, name: str | None = None) -> TemplateClassifier:
         clf.trcar = None if np.isnan(trcar).all() else trcar
         clf.t0, clf.n_ch = float(d["t0"]), int(d["n_ch"])
         clf.n_train, clf.n_fit_samples = int(d["n_train"]), int(d["n_fit_samples"])
-        if clf.coef.shape[:2] != (clf.n_bands, clf.n_targets) or clf.coef.shape[2] != clf.n_ch:
+        want = (clf.n_bands, clf.n_targets, clf.n_ch)
+        if clf.coef.shape != (*want, 2 * clf.harmonics):
             raise ValueError(f"{path}: coef shape {clf.coef.shape} does not match {clf.n_bands} "
-                             f"band(s), {clf.n_targets} targets and {clf.n_ch} channels")
+                             f"band(s), {clf.n_targets} targets, {clf.n_ch} channels and "
+                             f"{clf.harmonics} harmonics")
+        if clf.w_tmpl.shape != want:
+            raise ValueError(f"{path}: w_tmpl shape {clf.w_tmpl.shape}, expected {want}")
+        for label, arr in (("trca", clf.trca), ("trcar", clf.trcar)):
+            if arr is not None and arr.shape != want:
+                raise ValueError(f"{path}: {label} shape {arr.shape}, expected {want}")
+        if clf.template == "raw" and clf.means.shape != (*want, clf.n_fit_samples):
+            raise ValueError(f"{path}: raw templates need means shaped {(*want, clf.n_fit_samples)}, "
+                             f"got {clf.means.shape}")
+        if isinstance(clf, TRCA) and (clf.trcar if clf.regularised else clf.trca) is None:
+            raise ValueError(f"{path}: {clf.name} needs TRCA filters, which this model lacks "
+                             "(it was fitted with a single trial per target)")
         clf.fitted = True
         if bool(d["has_baseline"]):
             clf.baseline_mean = d["baseline_mean"]

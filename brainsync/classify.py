@@ -182,9 +182,13 @@ class CCA:
 
     # -- resting baseline ------------------------------------------------------------
 
-    def fit_baseline(self, X_rest: np.ndarray) -> CCA:
-        """Learn each template's mean rest score and the pooled within-template rest std."""
-        rest = self.raw_scores(X_rest)
+    def fit_baseline(self, X_rest: np.ndarray, offset: float = 0.0) -> CCA:
+        """Learn each template's mean rest score and the pooled within-template rest std.
+
+        ``offset`` is passed to ``raw_scores``; a trained classifier with raw templates
+        needs one inside its calibration epoch (its override supplies it).
+        """
+        rest = self.raw_scores(X_rest, offset)
         if rest.shape[0] < 2:
             raise ValueError(f"baseline needs at least 2 rest windows, got {rest.shape[0]}")
         spread = float(np.sqrt(np.mean(np.var(rest, axis=0, ddof=1))))

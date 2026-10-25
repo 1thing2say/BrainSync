@@ -240,3 +240,53 @@ def test_template_classifier_is_a_cca(task) -> None:
     clf = make("etrca", freqs=FREQS, fs=FS).fit(Xa, ya, T0)
     assert isinstance(clf, TemplateClassifier) and isinstance(clf, CCA)
     assert "fitted on 20 trials" in repr(clf)
+
+
+def test_cca_weights_are_rank_aware() -> None:
+    """A template inside the sine/cosine span (rank 2H < n_ch) must not score above the span."""
+    from brainsync.templates import _first_cc, _span
+    rng = np.random.default_rng(3)
+    refs = references([12.0], FS, 256, 3)[0]                       # (6, 256)
+    T = rng.standard_normal((8, 6)) @ refs                          # 8 channels, rank 6
+    x = rng.standard_normal((8, 256))
+    _, _, rho_t = cca_weights(x, T)
+    _, _, rho_r = cca_weights(x, refs)
+    exact = float(_first_cc(_span(x.T), _span(refs.T)))
+    assert rho_t <= rho_r + 1e-9 and rho_r == pytest.approx(exact, abs=1e-9)
+    flat = x.copy()
+    flat[2] = 0.0                                                   # a dead channel
+    wx, _, rho_f = cca_weights(flat, refs)
+    assert np.isfinite(wx).all() and abs(wx[2]) < 1e-12 and 0.0 <= rho_f <= 1.0
+
+
+def test_trca_filters_have_unit_output_variance(task) -> None:
+    from brainsync.templates import _filters
+    X, y, _ = task
+    trials = X[y == 1] - X[y == 1].mean(axis=-1, keepdims=True)
+    w = _filters(trials, None)
+    Q = np.einsum("tcn,tdn->cd", trials, trials)
+    assert w @ Q @ w == pytest.approx(1.0, rel=1e-4)
+
+
+def test_flat_training_data_is_refused(task) -> None:
+    X, y, _ = task
+    dead = X.copy()
+    dead[y == 2] = 0.0
+    with pytest.raises(ValueError, match="target 2"):
+        ETRCA(FREQS, FS).fit(dead, y, T0)
+
+
+def test_covers_and_load_model_shape_checks(task, tmp_path) -> None:
+    (Xa, ya), _ = _split(task)
+    raw = ETRCA(FREQS, FS, template="raw").fit(Xa, ya, T0)
+    assert raw.covers(100, T0 + 1.0) and not raw.covers(500, T0 + 1.0) and not raw.covers(10, T0 - 0.1)
+    assert ETRCA(FREQS, FS).fit(Xa, ya, T0).covers(5000, 99.0)
+    single = ITCCA(FREQS, FS).fit(Xa[::5], ya[::5], T0)             # one trial per target
+    path = save_model(single, tmp_path / "s.npz")
+    with pytest.raises(ValueError, match="TRCA filters"):
+        load_model(path, name="etrca")
+    d = dict(np.load(path, allow_pickle=False))
+    d["w_tmpl"] = d["w_tmpl"][:, :2]
+    np.savez(tmp_path / "bad.npz", **d)
+    with pytest.raises(ValueError, match="w_tmpl shape"):
+        load_model(tmp_path / "bad.npz")

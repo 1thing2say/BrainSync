@@ -487,3 +487,15 @@ def test_reference_recording_decodes() -> None:
     assert rep.best_max_p() < 0.05
     for method in ("cca", "fbcca"):
         assert rep.row(method, max(r.window_s for r in rep.rows)).control_p > 0.01
+
+
+def test_trial_blocks_prefer_block_markers() -> None:
+    from brainsync.score_cued import trial_blocks
+    text = ("[marker 100.0] block_start:0\n[marker 108.0] block_end:0\n"
+            "[marker 108.1] block_start:1\n[marker 116.0] block_end:1\n")
+    kept = np.array([1, 2, 3])                       # trial 0 dropped: by position blocks would shift
+    on = np.array([105.0, 109.0, 113.0])
+    np.testing.assert_array_equal(trial_blocks(kept, 2, on, text), [0, 1, 1])
+    np.testing.assert_array_equal(trial_blocks(kept, 2), [0, 1, 1])      # positional fallback
+    np.testing.assert_array_equal(trial_blocks(np.array([0, 1, 2, 3]), 2, np.array([101., 105., 109., 113.]), text), [0, 0, 1, 1])
+    np.testing.assert_array_equal(trial_blocks(kept, 2, np.array([99.0, 109.0, 113.0]), text), [0, 1, 1])  # before any block: fallback

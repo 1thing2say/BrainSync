@@ -142,8 +142,8 @@ def test_fit_baseline_stats(rest) -> None:
 def test_baseline_spread_is_pooled_within_template(rest) -> None:
     """Spread = sqrt of the mean per-template rest variance; offsets between templates don't count."""
     class Offset(CCA):
-        def raw_scores(self, X):
-            return super().raw_scores(X) + np.array([0.6, 0.0, -0.3])
+        def raw_scores(self, X, offset=0.0):
+            return super().raw_scores(X, offset) + np.array([0.6, 0.0, -0.3])
 
     R, _ = rest
     plain = CCA(FREQS, FS).fit_baseline(R)

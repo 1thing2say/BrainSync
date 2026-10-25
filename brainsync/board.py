@@ -113,22 +113,39 @@ def _brainflow() -> Any:
     return board_shim
 
 
+REBASE_READS = 25   # data reads over which the stamp-to-host offset is estimated, then frozen
+
+
 class CerelogBoard:
     """A BrainFlow streaming session on the Cerelog X8 (8 channels, 250 Hz).
 
     ``serial_port`` None auto-detects a USB serial device ("" leaves the search to
     BrainFlow). BrainFlow logs only warnings unless ``verbose``. ``shim`` replaces the
     BoardShim, for tests.
+
+    Sample stamps. The driver stamps each sample with the board's millisecond counter plus
+    the WHOLE seconds of the host clock at the handshake, so raw stamps lag the host's
+    ``time.time()`` by a constant, unknown 0-1 s that differs for every connection (measured
+    0.45-0.9 s on the 2026-10-22 recordings). Display markers and the decoder's onsets are
+    host times, so with ``rebase`` (default) ``read`` adds a per-connection offset: the
+    smallest host-minus-stamp lag seen over the first ``REBASE_READS`` reads with data (then
+    frozen), which puts the newest sample within the link's latency of the host clock. The
+    offset is ``stamp_offset``; ``rebase=False`` returns the driver's stamps.
     """
 
     def __init__(self, serial_port: str | None = None, ch_names: Sequence[str] | None = None,
                  timeout: int = 15, buffer_s: float = 600.0, verbose: bool = False,
-                 shim: Any | None = None) -> None:
+                 shim: Any | None = None, rebase: bool = True,
+                 clock: Callable[[], float] = time.time) -> None:
         if buffer_s <= 0:
             raise ValueError(f"buffer_s must be positive, got {buffer_s}")
         self.serial_port = detect_serial_port() if serial_port is None else serial_port
         self.buffer_s = float(buffer_s)
         self._streaming = False
+        self.rebase = bool(rebase)
+        self._clock = clock
+        self.stamp_offset: float = 0.0   # seconds added to the driver's stamps
+        self._rebase_reads = 0           # data reads used for the estimate so far
         if shim is not None:
             self._shim = shim
             self.fs = FS
@@ -168,7 +185,15 @@ class CerelogBoard:
         data = np.asarray(self._shim.get_board_data(), dtype=float)
         if data.ndim != 2 or data.shape[1] == 0:
             return np.empty((len(self.ch_names), 0)), np.empty(0)
-        return data[self._eeg_rows] * 1e6, data[self._ts_row].copy()
+        t = data[self._ts_row].copy()
+        if self.rebase:
+            if self._rebase_reads < REBASE_READS:
+                lag = float(self._clock()) - float(t[-1])
+                if self._rebase_reads == 0 or lag < self.stamp_offset:
+                    self.stamp_offset = lag
+                self._rebase_reads += 1
+            t = t + self.stamp_offset
+        return data[self._eeg_rows] * 1e6, t
 
     def close(self) -> None:
         try:

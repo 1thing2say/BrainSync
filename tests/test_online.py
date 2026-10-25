@@ -506,3 +506,35 @@ def test_trained_replay_needs_train_blocks(synthetic_recording):
         replay(synthetic_recording, classifier="etrca")
     with pytest.raises(ValueError, match="nothing would be left"):
         replay(synthetic_recording, classifier="etrca", train_blocks=6)
+
+
+def test_trained_decoder_abstains_without_an_onset_or_outside_raw_templates(synthetic_recording):
+    from brainsync.recordings import POSTERIOR, cut_windows
+    rec = load_recording(synthetic_recording)
+    w = cut_windows(rec, band=rec.band, notch_hz=rec.notch).pick(POSTERIOR)
+    clf = make("etrca", freqs=rec.freqs, fs=rec.fs).fit(w.on[:6], w.labels[:6], rec.latency)
+    dec = Decoder(clf, rec.fs, window_s=2.0, step_s=0.5, votes=2, pad_s=1.0, ch_names=rec.ch_names)
+    X, t = rec.X[:, :2000], rec.t[:2000]
+    out = dec.feed(X, t)                     # no onset known: every decision abstains
+    assert out and all(d.raw == ABSTAIN and np.isnan(d.offset_s) for d in out)
+    dec.set_onset(float(t[0]))
+    out = dec.feed(rec.X[:, 2000:4000], rec.t[2000:4000])
+    assert out and any(d.raw != ABSTAIN for d in out) and all(np.isfinite(d.offset_s) for d in out)
+    # raw templates reach only 3.86 s after the onset: later windows abstain instead of raising
+    raw = make("etrca", freqs=rec.freqs, fs=rec.fs, template="raw").fit(w.on[:6], w.labels[:6], rec.latency)
+    dec2 = Decoder(raw, rec.fs, window_s=2.0, step_s=0.5, votes=2, pad_s=1.0, ch_names=rec.ch_names)
+    dec2.set_onset(float(rec.t[0]))
+    late = dec2.feed(rec.X[:, :3000], rec.t[:3000])
+    assert late and all(d.raw == ABSTAIN for d in late if d.offset_s > 2.0)   # 0.14 + 3.86 - 2 s
+    res = replay(synthetic_recording, classifier="etrcar", train_blocks=3, template="raw",
+                 window_s=2.0, step_s=0.25, votes=3, margin=0.5)
+    assert res.n_trials == 6                 # runs to the end instead of raising
+
+
+def test_decoder_rejects_a_classifier_fitted_on_other_channels(synthetic_recording):
+    from brainsync.recordings import cut_windows
+    rec = load_recording(synthetic_recording)
+    w = cut_windows(rec, band=rec.band, notch_hz=rec.notch).pick(("O1", "O2"))
+    clf = make("etrca", freqs=rec.freqs, fs=rec.fs).fit(w.on[:6], w.labels[:6], rec.latency)
+    with pytest.raises(ValueError, match="fitted on 2 channels"):
+        Decoder(clf, rec.fs, window_s=2.0, step_s=0.5, pad_s=1.0, ch_names=rec.ch_names)

@@ -244,17 +244,46 @@ Nakanishi 2015 (12 targets, 10 subjects, 14 training blocks, mean accuracy):
 | eTRCA-R, harmonic templates | 79 % | 92 % | - |
 | eTRCA-R, harmonic, 2 training blocks | - | 86 % | - |
 
-On the three dry-electrode 15/17 Hz recordings (4 posterior channels, 10 trials per target),
-no trained method beats FBCCA: pooled at 1.5 s, FBCCA 80 %, eCCA 70 %, eTRCA 66 %, eTRCA-R
-54 %, SFCCA 58 %; replayed through the online decoder after a fit on the first 4 blocks, FBCCA
-commits 19 of 36 held-out trials with 0 wrong, the trained ones 5-9 with 1-6 wrong. The
-SSVEP phase relative to the `stim_on` marker is only weakly consistent across trials there
-(phase-locking value 0.4-0.6 on 162029 and 172130, 0.1-0.5 on 161131, chance about 0.3), so
-either the display-to-board onset timing jitters or the response is too weak for templates.
-Both have the same cure: measure the onset with the stimulus's photodiode patch, add posterior
-electrodes, then record the four-target gate session with `brainsync.calibrate`. FBCCA stays
-the live default; `demo --model` and the server's `--decoder-model` take a saved model
-once one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
+On the three dry-electrode 15/17 Hz recordings (4 posterior channels, 10 trials per target,
+50 trials pooled after artifact rejection) the trained methods, scored leave-one-block-out,
+do not beat FBCCA, which is scored on every trial with abstain rules that were tuned on these
+same files (`brainsync/online.py` `TUNED`):
+
+| Window | FBCCA | eCCA | eTRCA | eTRCA-R | SFCCA |
+|---|---|---|---|---|---|
+| 1 s | 66 % | 70 % | 62 % | 58 % | 56 % |
+| 1.5 s | 80 % | 70 % | 62 % | 60 % | 58 % |
+| 2 s | 80 % | 78 % | 58 % | 58 % | 60 % |
+| 3 s | 70 % | 72 % | 72 % | 60 % | 58 % |
+
+With 50 trials, gaps under about 15 points are noise; eCCA ties FBCCA, the TRCA family is
+near chance. Replayed through the online decoder after a fit on the first 4 blocks (36
+held-out trials, FBCCA's window, votes, margin and threshold for every classifier), FBCCA
+commits 19 with 0 wrong, eCCA 6 with 6 wrong, eTRCA-R 8 with 4 wrong.
+
+Why: a leave-one-out phase-locking value of the SSVEP to the `stim_on` marker (common CCA
+filter from the other trials, phase of the filtered 2 s window at the flicker frequency) is
+0.49 and 0.62 on 162029, 0.34 and 0.24 on 172130, 0.11 and 0.43 on 161131, against a
+no-signal floor of 0.27 (10th-90th percentile 0.11-0.53) and 0.75-0.91 for a perfectly
+onset-locked response at the same CCA correlation. So only 162029 at 17 Hz shows locking at
+all, and even it matches a response-phase scatter of about 10 ms (SD) rather than a locked
+one. (A phase-locking value computed with a filter fitted on the same trials, as an earlier
+draft of this section did, has a floor of 0.47 and says nothing.) Per-trial best-lag
+estimates spread over the whole flicker period, like the still-screen windows do. Meanwhile
+the timing bookkeeping is clean on the display side (60.000 Hz, 0 dropped frames, markers
+within 0.1 ms of the flip) but not on the board side: the Cerelog/BrainFlow sample stamps
+are the board's millisecond counter plus the whole seconds of the host clock at the
+handshake, so they lag the host markers by a constant 0-1 s that differs per connection
+(0.45-0.9 s on these files). Within one recording the offset is constant and a template
+absorbs it, so it does not explain the weak locking there; but it made every live onset (the
+server's gate, a template's phase) wrong by a random fraction of a second after each
+reconnect. `CerelogBoard` now rebases its stamps onto the host clock (`stamp_offset`).
+
+What would change the answer: a cleaner response (posterior electrodes on Oz/POz, gel on
+O1/O2) and the four-target session itself, recorded with `brainsync.calibrate`, which scores
+FBCCA and the saved classifier on held-out blocks and prints the gate verdict. FBCCA stays
+the live default; `demo --model` and the server's `--decoder-model` take a saved model once
+one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
 
 ## Phase 2: two-target cued trials
 
