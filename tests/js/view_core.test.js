@@ -78,3 +78,78 @@ test("the selection timer fills to the trial limit and never past it", () => {
   assert.deepEqual(VC.progress(-1, 10), { fraction: 0, label: "0 s" });
   assert.equal(VC.progress(3, 0).fraction, 0);
 });
+
+// The phone's Look to Speak screen (INTERFACE-v2-draft.md section 9): halves, confirm, calibrate.
+const OPTIONS = [
+  { label: "Tea", utterance: "Could I have some tea, please?" },
+  { label: "Outside", utterance: "Let's go outside." },
+  { label: "Rest", utterance: "I'd like to rest now." },
+  { label: "Thanks", utterance: "Thank you." },
+  { label: "More options", utterance: "" },
+];
+const SIDE_SLOTS = [{ slot: "s1", role: "left", label: "", utterance: "" },
+                    { slot: "s2", role: "right", label: "", utterance: "" }];
+const HALVES = { mode: "halves", options: OPTIONS, split: 3, slots: SIDE_SLOTS };
+
+test("halves, calibrate and their confirm screen use the two side cards", () => {
+  assert.equal(VC.layout(HALVES), "sides");
+  assert.equal(VC.layout({ mode: "calibrate", cue: "s1", slots: SIDE_SLOTS }), "sides");
+  assert.equal(VC.layout({ mode: "confirm", slots: [{ slot: "s1", role: "say" }, { slot: "s2", role: "back" }] }), "sides");
+  // Page mode and its confirm screen (Back on s4) keep the diamond; list mode the row.
+  assert.equal(VC.layout({ mode: "confirm", slots: [{ slot: "s1", role: "say" }, { slot: "s4", role: "back" }] }), "diamond");
+  assert.equal(VC.layout({ mode: "page", slots: [{ slot: "s1" }, { slot: "s2" }, { slot: "s3" }, { slot: "s4" }] }), "diamond");
+  assert.equal(VC.layout({ mode: "list", slots: SIDE_SLOTS }), "row");
+  assert.equal(VC.layout(null), "diamond");
+  assert.equal(VC.position("sides", "s1"), "left");
+  assert.equal(VC.position("sides", "s2"), "right");
+  assert.equal(VC.position("diamond", "s2"), "left");
+  assert.equal(VC.position("diamond", "s4"), "bottom");
+});
+
+test("the first split phrases go on the left card, the rest on the right", () => {
+  const h = VC.halves(HALVES);
+  assert.deepEqual(h.s1.map((i) => i.text), ["Could I have some tea, please?", "Let's go outside.", "I'd like to rest now."]);
+  assert.deepEqual(h.s2, [{ text: "Thank you.", more: false }, { text: "More options", more: true }]);
+  // No split: ceil(n / 2) on the left.
+  assert.equal(VC.halves({ ...HALVES, split: null }).s1.length, 3);
+  // The roles say which slot is which side.
+  const swapped = VC.halves({ ...HALVES, slots: [{ slot: "s2", role: "left" }, { slot: "s1", role: "right" }] });
+  assert.equal(swapped.s2.length, 3);
+  assert.equal(swapped.s1.length, 2);
+});
+
+test("More options has no utterance and shows muted, with its label or a default", () => {
+  const h = VC.halves({ mode: "halves", split: 1, slots: SIDE_SLOTS,
+    options: [{ label: "Yes", utterance: "Yes, please." }, { label: "", utterance: "  " }] });
+  assert.deepEqual(h.s2, [{ text: "More options", more: true }]);
+});
+
+test("each card shows its phrases, the confirm words, or the calibration cue", () => {
+  assert.equal(VC.card(HALVES, SIDE_SLOTS[0]).items.length, 3);
+  assert.equal(VC.card(HALVES, SIDE_SLOTS[0]).text, "");
+  const say = VC.card({ mode: "confirm" }, { slot: "s1", role: "say", label: "Say it", utterance: "" });
+  assert.deepEqual(say, { tag: "", text: "Say it", items: [], cue: false });
+  const cal = { mode: "calibrate", cue: "s1", text: "Look at the left card", slots: SIDE_SLOTS };
+  assert.deepEqual(VC.card(cal, SIDE_SLOTS[0]), { tag: "", text: "Look here", items: [], cue: true });
+  assert.deepEqual(VC.card(cal, SIDE_SLOTS[1]), { tag: "", text: "", items: [], cue: false });
+  // Page mode: the sentence big, the label as its tag.
+  assert.deepEqual(VC.card({ mode: "page" }, { slot: "s1", role: "option", label: "Tea", utterance: "Tea, please." }),
+    { tag: "Tea", text: "Tea, please.", items: [], cue: false });
+});
+
+test("the calibration line shows the score, and warns below 70 % or on a failure", () => {
+  assert.deepEqual(VC.calibration({ trained: true, calibration_accuracy: 0.85 }), { text: "Calibrated 85 %", tone: "ok" });
+  assert.deepEqual(VC.calibration({ trained: true, calibration_accuracy: 0.62 }),
+    { text: "Calibrated 62 % · low: picks may be wrong", tone: "warn" });
+  assert.deepEqual(VC.calibration({ trained: false, calibration_accuracy: 0.4 }), { text: "Calibration failed · 40 %", tone: "warn" });
+  assert.equal(VC.calibration({ trained: true, calibration_accuracy: null }).text, "Template loaded");
+  // SSVEP, or before the first calibration: nothing.
+  assert.equal(VC.calibration({ trained: false, calibration_accuracy: null }).text, "");
+  assert.equal(VC.calibration({}).text, "");
+});
+
+test("halves mode and calibration have their own words, quiet while the user looks", () => {
+  assert.equal(VC.banner("STIMULATING", "", "halves").text, "Look at the side with your phrase");
+  assert.equal(VC.status("STIMULATING", "", "halves").text, "");
+  assert.equal(VC.status("CALIBRATING", "", "calibrate").text, "");
+});

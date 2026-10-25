@@ -8,12 +8,12 @@ import socket
 import httpx
 import pytest
 
-from app.config import load_config, load_intents
+from app.config import REPO_ROOT, load_config, load_intents
 from app.tts import CartesiaTTS
 from tools import preflight
 from tools.preflight import (
     FAIL, PASS, SKIP, WARN, Result, Timing, check_cartesia, check_claude, check_clips,
-    check_health, check_keys, check_network, fetch_server, probe_host, redact, report, run_checks,
+    check_config, check_health, check_keys, check_network, fetch_server, probe_host, redact, report, run_checks,
 )
 
 CFG = load_config()
@@ -394,3 +394,84 @@ def test_secrets_are_redacted_from_any_output():
     text = f"key {ANT_KEY} and {CAR_KEY} and sk-ant-api03-abcDEF_12-x"
     assert redact(text) == "key [redacted] and [redacted] and [redacted]"
     assert redact("my-own-secret here", ["my-own-secret"]) == "[redacted] here"
+
+
+# -- c-VEP on the iPhone app (config/phone_cvep.yaml) ------------------------------------------
+
+
+PHONE_PATH = REPO_ROOT / "config" / "phone_cvep.yaml"
+
+
+def phone_health(display: dict | None = None, trained: bool = True, accuracy: float | None = 0.85,
+                 **over) -> dict:
+    """A healthy /api/health answer from a c-VEP server whose phone draws the flicker."""
+    h = health(**over)
+    h.update(paradigm="code", display="phone",
+             phone={"display": display if display is not None else
+                    {"refresh_hz": 59.98, "ok": True, "message": ""},
+                    "trained": trained, "calibration_accuracy": accuracy})
+    return h
+
+
+def test_config_line_for_c_vep_has_lags_not_frequencies():
+    result, cfg = check_config(PHONE_PATH)
+    assert result.level == PASS and cfg is not None
+    assert result.reason == "halves mode, c-VEP s1 lag 0, s2 lag 31 frames, square"
+
+
+def test_a_healthy_phone_server_passes_everything():
+    results = check_health(phone_health(), {"refresh_hz": 60})
+    assert set(levels(results).values()) == {PASS}
+    names = [r.name for r in results]
+    # The phone's refresh report replaces the bridge's display line.
+    assert "display" not in names and names[1:3] == ["phone display", "c-VEP template"]
+
+
+@pytest.mark.parametrize("kw, name, want, text", [
+    ({"display": {"refresh_hz": 59.98, "ok": True, "message": ""}}, "phone display", PASS,
+     "iPhone at 59.98 Hz"),
+    ({"display": {"refresh_hz": 0, "ok": False, "message": "uneven frames"}}, "phone display",
+     FAIL, "uneven frames"),
+    ({"display": {"refresh_hz": 120.0, "ok": True, "message": ""}}, "phone display", FAIL,
+     "120.00 Hz"),
+    ({"display": {}}, "phone display", WARN, "no refresh report"),
+    ({"trained": True, "accuracy": 0.7}, "c-VEP template", PASS, "accuracy 70%"),
+    ({"trained": True, "accuracy": 0.55}, "c-VEP template", WARN, "below 70%"),
+    ({"trained": True, "accuracy": None}, "c-VEP template", WARN, "not scored"),
+    ({"trained": False, "accuracy": None}, "c-VEP template", WARN, "calibration trial"),
+])
+def test_phone_problems(kw, name, want, text):
+    result = {r.name: r for r in check_health(phone_health(**kw), {})}[name]
+    assert result.level == want and text in result.reason
+    assert want == PASS or result.fix
+
+
+def test_phone_fixes_name_the_c_vep_bridge_and_the_app():
+    h = phone_health(decoder={"connected": False, "ok": False},
+                     partner_page={"connected": False, "mic": ""})
+    found = {r.name: r for r in check_health(h, {})}
+    assert "cvep_2" in found["decoder"].fix and "iPhone app" in found["partner page"].fix
+    rejected = phone_health(decoder={"ok": False, "message": "Rejected: lags"})
+    assert "lags" in check_health(rejected, {})[0].fix
+
+
+def test_clips_count_the_lists_in_menus_intents(tmp_path):
+    words = ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+    lists = {name: [{"label": f"{w} {name}", "utterance": f"{w} for the {name} list.",
+                     "intent_id": "need"} for w in words]
+             for name in ("home", "yes_no", "more")}
+    path = tmp_path / "halves.yaml"
+    path.write_text(json.dumps({"intents": [{"id": "need", "description": "Ask"}],
+                                "fallback_lists": lists}), encoding="utf-8")
+    cfg = CFG.model_copy(update={"menus": CFG.menus.model_copy(
+        update={"intents": str(path), "option_count": 6})})
+    result = check_clips(cfg, tmp_path / "clips")
+    assert result.level == WARN and result.data == {"cached": 0, "total": 18}
+
+
+def test_run_with_the_phone_config_does_not_crash():
+    results = run_checks("http://127.0.0.1:8013", skip_network=True, env=ENV,
+                         config_path=PHONE_PATH, transport=FakeNet(phone_health()).transport)
+    found = levels(results)
+    assert found["config"] == PASS and found["phone display"] == PASS
+    assert found["c-VEP template"] == PASS

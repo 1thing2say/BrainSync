@@ -58,6 +58,26 @@ LIST = {"type": "show_page", "list_id": "m4", "page": 1, "mode": "list", "highli
                     {"label": "After lunch", "utterance": "Maybe after lunch."}],
         "slots": [{"slot": "s1", "role": "say", "label": "SAY", "utterance": ""},
                   {"slot": "s2", "role": "next", "label": "NEXT", "utterance": ""}]}
+# The iPhone draws c-VEP (config/phone_cvep.yaml): this page is a still mirror of its two cards,
+# left (s1) and right (s2), each with its half of the phrases (INTERFACE-v2-draft.md section 9).
+SIDES = [{"slot": "s1", "role": "left", "label": "Left", "utterance": ""},
+         {"slot": "s2", "role": "right", "label": "Right", "utterance": ""}]
+HALVES = {"type": "show_page", "list_id": "h1", "page": 1, "mode": "halves", "text": "", "split": 4,
+          "options": [{"label": "Let's go", "utterance": "Yes, let's go outside.", "intent_id": "yes"},
+                      {"label": "Not now", "utterance": "Not right now, thanks.", "intent_id": "no"},
+                      {"label": "After lunch", "utterance": "Maybe after lunch.", "intent_id": "maybe"},
+                      {"label": "Coat", "utterance": "Could you get my coat?", "intent_id": "request"},
+                      {"label": "Tired", "utterance": "I'm a bit tired today.", "intent_id": "feeling"},
+                      {"label": "Who's coming", "utterance": "Who else is coming?", "intent_id": "question"},
+                      {"label": "More options", "utterance": "", "intent_id": "more"}],
+          "slots": SIDES}
+HALVES_CONFIRM = {"type": "show_page", "list_id": "h1", "page": 1, "mode": "confirm",
+                  "text": "Yes, let's go outside.",
+                  "slots": [{"slot": "s1", "role": "say", "label": "Say it", "utterance": ""},
+                            {"slot": "s2", "role": "back", "label": "Back", "utterance": ""}]}
+CALIBRATE = {"type": "show_page", "list_id": "cal", "page": 1, "mode": "calibrate", "cue": "s1",
+             "text": "Look at the left card", "slots": SIDES}
+TRAINED = {**READY, "trained": True, "calibration_accuracy": 0.85}
 
 
 def state(name: str, detail: str = "") -> dict:
@@ -111,9 +131,25 @@ STATES: dict[str, tuple[int, int, list[dict], tuple[str, str]]] = {
                       ("listening", "")),
     # The flicker warning, as it opens before the first trial.
     "warning": (1440, 900, [READY, *TALK, PAGE, state("IDLE")], ("idle", "")),
+    # The iPhone's Look to Speak screen, mirrored still (display.flicker: phone).
+    "halves": (1440, 900, [TRAINED, *TALK, HALVES, state("STIMULATING"), trial("flicker")],
+               ("listening", "")),
+    "halves-picked": (1440, 900, [TRAINED, *TALK, HALVES, state("SELECTED"), trial("rest"),
+                                  {"type": "highlight", "slot": "s2"}], ("listening", "")),
+    "halves-confirm": (1440, 900, [TRAINED, *TALK, HALVES_CONFIRM, state("CONFIRMING"),
+                                   trial("flicker")], ("listening", "")),
+    "calibrate": (1440, 900, [READY, CALIBRATE, state("CALIBRATING"), trial("flicker")], ("idle", "")),
+    "calibrated-low": (1440, 900, [{**READY, "trained": True, "calibration_accuracy": 0.62}, *TALK,
+                                   HALVES, state("MENU_CUE"), trial("cue")], ("listening", "")),
+    "phone-halves": (520, 1300, [TRAINED, *TALK, HALVES, state("STIMULATING"), trial("flicker")],
+                     ("listening", "")),
+    "phone-warning": (1440, 900, [READY, HALVES, state("IDLE")], ("idle", "")),
 }
 # States that keep the flicker warning open (the others close it, as after the start tap).
-WARNING_STATES = {"warning"}
+WARNING_STATES = {"warning", "phone-warning"}
+# The states of config/phone_cvep.yaml: the iPhone draws the flicker, this page never does.
+PHONE_STATES = {"halves", "halves-picked", "halves-confirm", "calibrate", "calibrated-low",
+                "phone-halves", "phone-warning"}
 
 CONFIG = {"tts_rate": 1.0, "keyboard_mode": False, "stt_mode": "always", "listen_window_s": 10,
           "stt_gap_s": 1.2, "stt_max_line_s": 15, "stt_echo_s": 4, "cue_s": 1.0, "max_trial_s": 10.0,
@@ -123,6 +159,8 @@ STATE_CONFIG: dict[str, dict] = {
     "laptop-busy": {"phone_url": "https://example-words-here.trycloudflare.com/?key=0123456789abcdef0123",
                     "app_link": "brainsync://pair?url=https%3A%2F%2Fexample-words-here.trycloudflare.com"
                                 "&key=0123456789abcdef0123"},
+    **{name: {"flicker": False, "display": "phone", "paradigm": "code", "waveform": "square",
+              "slots": {"s1": {"lag_frames": 0}, "s2": {"lag_frames": 31}}} for name in PHONE_STATES},
 }
 
 

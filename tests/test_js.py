@@ -41,5 +41,7 @@ def test_the_page_loads_its_scripts_in_order():
     import re
 
     page = (REPO_ROOT / "ui" / "index.html").read_text(encoding="utf-8")
-    scripts = re.findall(r'<script src="([^"]+)"', page)
-    assert scripts == ["listen_core.js", "voice_core.js", "view_core.js", "speech.js", "app.js"]
+    # the ?v= cache buster is stripped: only the files and their order matter
+    scripts = [src.split("?")[0] for src in re.findall(r'<script src="([^"]+)"', page)]
+    assert scripts == ["listen_core.js", "voice_core.js", "view_core.js", "flicker_core.js",
+                       "speech.js", "app.js"]

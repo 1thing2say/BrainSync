@@ -20,10 +20,14 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>The Camera app takes a photo when you look at the Shutter square.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connects to the BrainSync server on the laptop over your Wi-Fi.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Listens to the conversation partner so the user's reply options fit what was said.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Adds the photos you take in the Camera app to your Photos library, when you turn that on.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Turns the conversation partner's speech into text for the BrainSync server (on the iPhone when it supports that).</string>
 </dict>

@@ -717,3 +717,171 @@ test("Connection: the state events are connecting, open, closed", () => {
   assert.deepEqual(states, ["connecting", "open", "closed"]);
   for (const s of states) assert.ok(C.CONN_STATES.includes(s));
 });
+
+// ------------------------------------------------------------------ code mode (c-VEP)
+
+const K = require("../cvep.js");
+const CODE = { bits: [...K.BITS], lag_frames: 21, cycle_frames: 63, train_cycles: 30,
+               fill: "#ffffff" };
+const CODE_WELCOME = { ...WELCOME, paradigm: "code", freqs: [], max_slots: 3, code: CODE };
+const PHASE_TRAIN = { type: "phase", phase: "train", flicker: true, seconds: null,
+                      text: "Look at the YES square", cue: "yes", cycles: 30 };
+const codeLayout = (id) => ({
+  type: "layout", layout_id: id, stage: "slots",
+  targets: ["yes", "no", "help"].map((s, i) => (
+    { slot: s, freq: null, lag: 21 * i, phase: 0.0, label: s, kind: "slot", rects: [] })),
+});
+const PERIOD = 1000 / 60;
+
+function codeState(phase) {
+  const s = new C.FlickerState({ wall: (t) => 1_700_000_000 + t / 1000 });
+  s.accept();
+  s.setOpen(true);
+  s.handle(CODE_WELCOME);
+  s.handle(phase || PHASE_RUN);
+  s.handle(codeLayout(7));
+  return s;
+}
+
+test("code: the SDK exposes cvep.js and the code helpers", () => {
+  assert.equal(C.code, K);
+  assert.equal(C.CODE_STILL_LUM, 1);
+  assert.equal(typeof C.ConfidenceState, "function");
+  for (let n = -70; n < 200; n++) {
+    for (const lag of [0, 21, 42]) assert.equal(C.codeBit(K.BITS, n, lag), K.bit(lag / 21, n));
+  }
+});
+
+test("code: luminance is the m-sequence bit of each lag, white still, frame by frame", () => {
+  const s = codeState();
+  assert.ok(s.isCode() && s.shouldFlicker());
+  const ts = s.layout.targets;
+  for (let n = 0; n < 200; n++) {
+    const t = 1000 + n * PERIOD;
+    for (let k = 0; k < 3; k++) assert.equal(s.luminance(ts[k], t), K.bit(k, n), `n=${n} k=${k}`);
+  }
+  s.pause();
+  assert.equal(s.luminance(ts[1], 5000), 1);            // still: white
+  const off = codeState({ ...PHASE_CAL });
+  assert.equal(off.luminance(ts[0], 0), 1);
+  assert.equal(codeState().luminance({ slot: "x", lag: -1 }, 0), 1);   // no valid lag: still
+});
+
+test("code: the train phase flickers and names the cue; run does not", () => {
+  const s = codeState(PHASE_TRAIN);
+  assert.ok(s.shouldFlicker());
+  assert.equal(s.cue(), "yes");
+  s.handle(PHASE_RUN);
+  assert.equal(s.cue(), null);
+  assert.equal(liveState().isCode(), false);
+});
+
+test("code: a cycle message on every cycle's first flip, with that flip's time", () => {
+  const s = codeState();
+  const sent = [];
+  for (let n = 0; n <= 3 * 63; n++) sent.push(...s.cycleDue(1000 + n * PERIOD));
+  assert.deepEqual(sent.map((m) => m.n), [0, 1, 2, 3]);
+  for (const m of sent) {
+    assert.deepEqual(Object.keys(m), ["type", "layout_id", "n", "t_client"]);
+    assert.equal(m.type, "cycle");
+    assert.equal(m.layout_id, 7);
+    close(m.t_client, 1_700_000_000 + (1000 + m.n * 63 * PERIOD) / 1000, 1e-6);
+  }
+  assert.deepEqual(s.cycleDue(1000 + 3 * 63 * PERIOD), []);   // the same frame again: nothing
+});
+
+test("code: a dropped first frame still reports its cycle at the due time; a gap does not", () => {
+  const s = codeState();
+  s.cycleDue(1000);                                           // cycle 0 at the onset
+  const late = s.cycleDue(1000 + 64 * PERIOD);                // frame 63 dropped, 64 drawn
+  assert.equal(late.length, 1);
+  close(late[0].t_client, 1_700_000_000 + (1000 + 63 * PERIOD) / 1000, 1e-6);
+  const gap = s.cycleDue(1000 + 200 * PERIOD);                // a stall past cycle 2's start
+  assert.deepEqual(gap, []);
+  assert.equal(s.missedCycles, 2);                           // cycles 2 and 3
+  assert.equal(s.cycleDue(1000 + 252 * PERIOD)[0].n, 4);
+});
+
+test("code: a new layout, a pause or a socket drop restarts the cycle count", () => {
+  const s = codeState();
+  for (let n = 0; n < 70; n++) s.cycleDue(1000 + n * PERIOD);
+  s.handle(codeLayout(8));
+  const after = s.cycleDue(5000);
+  assert.deepEqual(after.map((m) => [m.layout_id, m.n]), [[8, 0]]);
+  s.pause();
+  assert.deepEqual(s.cycleDue(5100), []);
+  s.resume();
+  assert.deepEqual(s.cycleDue(5200).map((m) => m.n), [0]);
+  s.setOpen(false);
+  assert.deepEqual(s.cycleDue(5300), []);
+  assert.deepEqual(liveState().cycleDue(1000), []);          // freq mode: never
+});
+
+test("code: a malformed code object falls back to the standard's", () => {
+  const s = new C.FlickerState({ wall: () => 0 });
+  s.handle({ ...CODE_WELCOME, code: { bits: [0, 2], lag_frames: 21, cycle_frames: 2 } });
+  assert.deepEqual(s.code.bits, [...K.BITS]);
+  assert.equal(s.code.lag_frames, 21);
+  s.handle({ ...CODE_WELCOME, code: { ...CODE, bits: [1, 0, 1], cycle_frames: 3, fill: "" } });
+  assert.deepEqual(s.code, { bits: [1, 0, 1], lag_frames: 21, cycle_frames: 3,
+                             train_cycles: 30, fill: "#ffffff" });
+  s.handle(WELCOME);
+  assert.equal(s.isCode(), false);
+  assert.equal(s.code, null);
+});
+
+test("ConfidenceState: training text, label lines, bars and the status line", () => {
+  const c = new C.ConfidenceState();
+  c.handle(CODE_WELCOME);
+  c.handle(codeLayout(7));
+  c.handle(PHASE_TRAIN);
+  assert.equal(c.status(), "training: keep looking at YES   cycle 0/30");
+  c.handle({ type: "train", cycle: 12, of: 30 });
+  assert.equal(c.status(), "training: keep looking at YES   cycle 12/30");
+  assert.equal(c.trainedText(), "");
+  c.handle({ type: "trained", accuracy: 0.83, chance: 0.333, cycles: 30 });
+  c.handle(PHASE_RUN);
+  assert.equal(c.status(), "template ready: 83 % on held-out cycles (chance 33 %)");
+  assert.deepEqual(c.lines().map((l) => l.line),
+                   ["YES  ░░░░░░░░   -  ", "NO   ░░░░░░░░   -  ", "HELP ░░░░░░░░   -  "]);
+  c.handle({ type: "decision", layout_id: 6, scores: { yes: 0.9 }, raw: "yes",
+             committed: "yes", lead: 0.5, changed: true });           // another layout
+  assert.equal(c.decision, null);
+  c.handle({ type: "decision", layout_id: 7, scores: { yes: 0.42, no: 0.11, help: -0.03 },
+             raw: "yes", committed: "yes", lead: 0.31, changed: false });
+  assert.deepEqual(c.lines().map((l) => l.line),
+                   ["YES  ███░░░░░ +0.42 <", "NO   █░░░░░░░ +0.11", "HELP ░░░░░░░░ -0.03"]);
+  assert.deepEqual(c.lines().map((l) => [l.slot, l.best, l.level]),
+                   [["yes", true, 0.42], ["no", false, 0.11], ["help", false, 0]]);
+  assert.equal(c.status(), "lead 0.31   choice: YES");
+  c.handle({ type: "decision", layout_id: 7, scores: { yes: 0.1, no: 0.2, help: 0.6 },
+             raw: "help", committed: "help", lead: 0.4, changed: true });
+  assert.equal(c.status(), "lead 0.40   choice: HELP *");
+  c.handle({ type: "decision", layout_id: 7, scores: { yes: 0.1, no: 0.2, help: 0.3 },
+             raw: "help", committed: null, lead: null, changed: false });
+  assert.equal(c.status(), "lead  -     no choice yet");
+  c.handle(codeLayout(8));                                     // a new layout clears it
+  assert.equal(c.decision, null);
+  c.handle({ type: "trained", accuracy: null, chance: 0.333, cycles: 30 });
+  assert.equal(c.trainedText(), "template ready: ? % on held-out cycles (chance 33 %)");
+});
+
+test("code: the SDK loads in a browser after flicker.js and cvep.js, and without cvep.js", () => {
+  const load = (names) => {
+    const ctx = { performance: { timeOrigin: 0 }, Date };
+    ctx.globalThis = ctx;
+    for (const n of names) {
+      vm.runInNewContext(readFileSync(new URL(`../${n}`, import.meta.url), "utf8"), ctx);
+    }
+    return ctx.BrainSyncClient;
+  };
+  const full = load(["flicker.js", "cvep.js", "brainsync-client.js"]);
+  assert.ok(full.code && new full.ConfidenceState());
+  const bare = load(["flicker.js", "brainsync-client.js"]);
+  assert.equal(bare.code, null);
+  assert.throws(() => new bare.ConfidenceState(), /cvep\.js/);
+  const s = new bare.FlickerState({ wall: () => 0 });
+  s.accept(); s.setOpen(true);
+  s.handle(CODE_WELCOME); s.handle(PHASE_RUN); s.handle(codeLayout(1));
+  assert.equal(s.luminance({ lag: 21 }, 0), K.bit(1, 0));    // draws from the welcome's bits
+});

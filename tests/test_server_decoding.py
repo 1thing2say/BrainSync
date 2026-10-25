@@ -353,6 +353,83 @@ def test_default_channel_names_are_the_montage():
     assert DecoderBank().ch_names == tuple(MONTAGE)
 
 
+# -- CodeBank (code mode, c-VEP) ------------------------------------------------------------
+
+def coded_board(fixated: int = 0, seed: int = 0):
+    from brainsync.stimulus import load_config
+    from brainsync.stimulus.coded import CodeSequence
+    from brainsync.vep.fake import SequenceFakeBoard
+    return SequenceFakeBoard(CodeSequence(load_config("cvep_3")), t0=T0, amp=3.0, noise=8.0,
+                             fixated=fixated, seed=seed)
+
+
+def run_coded(bank, board, seconds: float, chunk: float = 0.05) -> list:
+    out = []
+    for _ in range(int(round(seconds / chunk))):
+        board.advance(chunk)
+        X, t = board.read()
+        for tt, kind, _ in board.read_events():
+            if kind == "cycle":
+                bank.add_cycle(tt)
+        out += bank.feed(X, t)
+    return out
+
+
+def test_code_bank_trains_then_decides_once_a_cycle():
+    from brainsync.server.coding import CodeBank, lag_index
+    bank = CodeBank(FS, train_cycles=4)
+    assert bank.training and bank.progress == (0, 4) and bank.accuracy is None
+    assert bank.code["lag_frames"] == 21 and len(bank.code["bits"]) == 63
+    board = coded_board(fixated=0)
+    run_coded(bank, board, 1.0)                    # nothing counts while inactive
+    assert bank.progress == (0, 4)
+    bank.activate(board.now)
+    board.start_flicker()
+    assert run_coded(bank, board, 6.0) == []       # training gives no decisions
+    assert bank.trained and bank.accuracy >= 0.8 and bank.chance == pytest.approx(1 / 3)
+    board.set_target(1)
+    ds = run_coded(bank, board, 5.3)
+    assert 4 <= len(ds) <= 6 and ds[-1].committed == 1 == lag_index(21)
+    assert lag_index(42) == 2 and lag_index(20) is None and lag_index(63) is None
+    bank.rearm()
+    assert bank.decoder.committed == ABSTAIN
+
+
+def test_code_bank_counts_cycles_only_while_active_and_after_the_activation():
+    from brainsync.server.coding import CYCLE_SLACK_S, CodeBank
+    bank = CodeBank(FS, train_cycles=4)
+    assert not bank.add_cycle(T0)                  # inactive
+    bank.activate(T0 + 10.0)
+    assert not bank.add_cycle(T0 + 10.0 - CYCLE_SLACK_S - 0.01) and bank.dropped == 1
+    assert bank.add_cycle(T0 + 10.0 - CYCLE_SLACK_S / 2)
+    assert not bank.add_cycle(math.nan)
+    bank.deactivate()
+    assert not bank.active and not bank.add_cycle(T0 + 11.0)
+
+
+def test_code_bank_retrain_and_a_failed_training():
+    from brainsync.server.coding import CodeBank
+    bank = CodeBank(FS, train_cycles=3)
+    board = coded_board()
+    bank.activate(board.now)
+    board.start_flicker()
+    run_coded(bank, board, 5.0)
+    assert bank.trained
+    bank.retrain()
+    assert bank.training and bank.progress == (0, 3)
+    # cycle times before any sample (a clock off by a little): no cycle can be cut, so the
+    # training restarts and says why
+    fresh, board = CodeBank(FS, train_cycles=3), coded_board()
+    fresh.activate(board.now)
+    for k in range(3):
+        assert fresh.add_cycle(board.now - 0.2 + 0.05 * k)
+    for _ in range(40):
+        board.advance(0.05)
+        fresh.feed(*board.read())
+    assert fresh.training and "training cycle" in fresh.train_error
+    assert fresh.progress == (0, 3)
+
+
 # -- trained classifiers --------------------------------------------------------------------
 
 from brainsync.classify import ETRCA  # noqa: E402

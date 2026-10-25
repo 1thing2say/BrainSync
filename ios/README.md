@@ -1,4 +1,61 @@
-# BCI Voice partner app (iOS)
+# BrainSync on the iPhone (iOS)
+
+A suite of small apps driven by c-VEP, plus Voice, the BCI Voice partner app.
+
+- **Home, Camera, Reels** (the suite): the iPhone is the screen the user looks at. It draws
+  three white squares showing the c-VEP code (`docs/CVEP-STANDARD.md`), and `brainsync.server`
+  (`PROTOCOL-v3.md`, code mode) reads the headset and says which square the user looked at.
+  Each app gives the three squares its own meaning. See "The c-VEP suite" below.
+- **Voice**: the partner app below, unchanged; it talks to `app.server` instead.
+
+## The c-VEP suite
+
+| App | Left (t0) | Middle (t1) | Right (t2) |
+| --- | --- | --- | --- |
+| Home | Camera | Reels | Voice |
+| Camera, viewfinder | Shutter | Flip camera | Gallery |
+| Camera, gallery | Next photo | Back to camera | Delete (then Delete / Keep) |
+| Reels | Up | Like / pause (a paused reel: Play) | Down |
+
+In Reels the squares are stacked on the right (Up on top). Home (top left) goes back by touch.
+
+1. Start the headset server on the Mac or the Jetson: `python -m brainsync.server` (Cerelog
+   X8; c-VEP is the default), or `python -m brainsync.server --board fake --no-auth` to try it
+   without a headset (the Simulator reaches it at `http://127.0.0.1:8765/`). It prints a link,
+   `http://…:8765/#token=…`; the Jetson's tunnel link is in `~/brainsync-link.txt`.
+2. In the app, paste that link on Home and press Pair (or open a `brainsync://v3?url=…&token=…`
+   link). A link to another server asks before it replaces the saved one.
+3. Read the flicker warning and press **I understand, start**. The app asks for the camera now,
+   so no permission prompt interrupts the flicker later, checks for 2.5 s that the screen runs
+   at 60 Hz (the code shows one bit a frame; Low Power Mode or a hot phone can lower it), then
+   connects.
+4. Training: the left square has a blue box; look at it for about 32 s (30 code cycles). The
+   status line shows `training: keep looking at …`, then `template ready: 83 % on held-out
+   cycles (chance 33 %)`. The server keeps the template for 10 minutes, across apps.
+5. Look at a square to pick it. Under each square: its confidence bar and score, `<` on the
+   decoder's current best; the status line shows `lead … choice: …`. A pick rings the square
+   yellow.
+
+- **Stop** (top right) turns the flicker off at once and pauses the server; **Resume** brings it
+  back (after a pause of 2 minutes or more the server trains again). Leaving the app, a lost
+  connection, Voice and the Settings sheet also stop the flicker.
+- A look still held on a square right after it opened an app does not count in the new app
+  (2.5 s), so opening Camera never takes a photo by itself.
+- With `--board fake`, tapping a square points the fake EEG at it (a dashed ring), so the whole
+  loop can be tried by touch. With a headset, taps on the squares do nothing.
+- Settings (Home): forget the server, dim the reel while choosing (on: moving pictures next to
+  the squares weaken the response), copy photos to Photos, and the **Flicker lab** (three squares
+  with the measured refresh, late frames and cycle times, to check a phone's timing).
+- Photos stay in the app (Application Support/Photos) unless the Photos copy is on.
+- Simulator smoke run without taps (DEBUG builds; `SuiteDebugLaunch.swift`):
+  `xcrun simctl launch booted org.calhacks.brainsync.partner -debugSuiteLink
+  http://127.0.0.1:8765/ -debugSuiteAccept YES -debugSuiteApp reels -debugSuiteGaze t2`
+  trains on the fake board, then scrolls Reels down every few seconds while the gaze holds.
+
+Not yet done: a run with the headset on the phone (the c-VEP response to a phone-sized square,
+and iOS frame timing on a device, are unmeasured).
+
+## Voice: the BCI Voice partner app
 
 A native iPhone app that replaces the partner page in Safari. It connects to the BrainSync
 server's `/ws/ui` socket like the web page does (`PLAN.md` section 6) and does the same jobs: it
@@ -11,10 +68,15 @@ cancellation while listening, no tab to keep visible, and the screen stays awake
 ```
 ios/
   BrainSyncPartner.xcodeproj   the app project (Xcode 16+)
-  BrainSyncPartner/            app sources (SwiftUI) and Assets.xcassets
-  BrainSyncPartner-Info.plist  mic / speech / local network texts, the brainsync:// scheme
-  BrainSyncKit/                Swift package: links, messages, the socket, ListenCore and the
-                               setup order (tested)
+  BrainSyncPartner/            app sources (SwiftUI) and Assets.xcassets; the suite is
+                               SuiteModel / SuiteViews, CodeFlicker (the 60 Hz squares),
+                               Camera*, PhotoStore, Reel*
+  BrainSyncPartner-Info.plist  camera / photos / mic / speech / local network texts, the
+                               brainsync:// scheme
+  BrainSyncKit/                Swift package: links, messages, the sockets (V3Connection for
+                               brainsync.server, UIConnection for app.server), CodeVep and
+                               FrameClock (the c-VEP code and frame timing), the suite's app
+                               cores, ListenCore and the setup order (tested)
 ```
 
 ## Requirements
@@ -50,6 +112,8 @@ Look to Speak, with a step indicator and a big **Continue**:
 3. **Safety:** the full flicker warning, and "I have read this warning" before Continue.
 4. **Microphone:** asks iOS for microphone and speech recognition access. It only asks: the mic
    opens when the server wants it, after the session starts.
+   - **How the user picks** (only with a c-VEP server, see "Look to Speak on the phone" below):
+     left or right card, Say it / Back, the 20 s calibration first, tap anywhere to stop.
 5. **Practice:** an offline walk-through with sample replies (no server, nothing spoken): a
    question, three reply cards and More options, a pick, the Say it / Back screen, Speaking.
 6. **Done:** "Start the session" accepts the warning for this run and sends resume, like the
@@ -117,6 +181,44 @@ and edits the profile.
   again**. Mute and the session stay on the main screen (the server holds them), and Stop is on
   the Settings sheet too.
 
+## Look to Speak on the phone (c-VEP)
+
+With `config/phone_cvep.yaml` the phone is the **user's** screen, like Google's Look to Speak, and
+it draws the flicker itself (`INTERFACE-v2-draft.md` section 9):
+
+```
+python -m app.server --config config/phone_cvep.yaml --bridge cerelog --tunnel
+```
+
+Pair as above. Once the server sends its `stimulus` (the c-VEP code, on connect), the app shows
+the Look to Speak screen instead of the partner screen; with the default config nothing changes.
+
+- **Two cards**, left (s1) and right (s2), each with half of the phrases still in play ("More
+  options" muted). The user looks at the card with the phrase they want; both cards flash one
+  black/white code, the right one half a cycle behind, and the headset decodes which one the user
+  watched. That half stays and is split again until one phrase is left; then **Say it** (left) /
+  **Back** (right), with the phrase in the centre. Nothing is spoken without Say it. The picked
+  card gets a white ring; the state line in the centre says "Waiting to start", why it is paused,
+  "Didn't catch that" or the calibration score, and is empty while the user reads or looks.
+- **60 Hz, never ProMotion.** The app locks its display link to exactly 60 Hz, measures it and
+  reports it to the server (`display_report`). A phone that cannot hold 60 Hz (Low Power Mode, a
+  hot phone) does not flicker, and the server pauses until it can. Settings shows the measured
+  rate.
+- **Calibration.** After the start and the still baseline, both cards flicker for about 20 s
+  while the user looks at the left card (Look here); the bridge fits this user's template from
+  it. The score shows on the state line (below 70 % it stays, as a warning). **Settings >
+  Recalibrate** runs it again before the next page. Settings also shows the clock the phone uses
+  to time-stamp its frames on the laptop's clock (offset and best round trip).
+- **Stop.** A **tap anywhere** on the flickering screen turns it dark at once and sends Stop; the
+  small red **Stop** at the bottom is always there, and **Resume** appears while paused. The
+  flicker also stops when the connection drops or the app leaves the screen (in the background a
+  running session is paused). Nothing flickers before the warning is accepted.
+- **Partner** (bottom right) opens the partner tools over it: the conversation, typing, the mic,
+  Correct / Wrong and Settings, with a still copy of the two cards. The phone does not flicker
+  while they are open.
+- The setup gains a step, **How the user picks**, and the practice round walks through the two
+  cards (still, never flickering).
+
 ## Troubleshooting
 
 - **Stuck on "Connecting…" on the LAN address:** iOS asks for **Local Network** access the first
@@ -156,4 +258,10 @@ The project is hand-written for Xcode 16 (folder-synchronized groups). If Xcode 
 
 The package builds on macOS and on Linux (`swift test` in `ios/BrainSyncKit`). Its tests decode
 `Tests/BrainSyncKitTests/Fixtures/ui_messages.json`, every message the server sends and accepts,
-written from `app/schemas.py`, so a change on the server side shows up there.
+written from `app/schemas.py`, so a change on the server side shows up there. The same holds for
+the suite: `v3_messages.json` comes from `brainsync/server/protocol.py`
+(`python tools/ios_v3_fixture.py`, checked by `tests/test_ios_v3_fixture.py`) and
+`cvep_frames.json` from `brainsync.vep.live` and `clients/js/cvep.js`
+(`python tools/ios_cvep_fixture.py`, needs `node`). Each tool's `--check` exits 1 when its
+fixture is stale. With a server running, `BRAINSYNC_V3_LINK=http://127.0.0.1:8765/ swift test
+--filter V3LiveServerTests` checks the real socket end to end.

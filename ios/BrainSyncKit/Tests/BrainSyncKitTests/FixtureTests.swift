@@ -38,6 +38,8 @@ final class FixtureTests: XCTestCase {
             case .state(let m): encoded = try JSONEncoder().encode(m)
             case .transcript(let m): encoded = try JSONEncoder().encode(m)
             case .status(let m): encoded = try JSONEncoder().encode(m)
+            case .stimulus(let m): encoded = try JSONEncoder().encode(m)
+            case .clockPong(let m): encoded = try JSONEncoder().encode(m)
             case .unknown(let t):
                 XCTFail("\(t) decoded as unknown")
                 continue
@@ -50,7 +52,8 @@ final class FixtureTests: XCTestCase {
             XCTAssertTrue(jsonEqual(stripNulls(expected), stripNulls(actual)),
                           "\(type): \(expected) != \(actual)")
         }
-        XCTAssertEqual(seen, ["show_page", "trial", "highlight", "speak", "listen", "state", "transcript", "status"])
+        XCTAssertEqual(seen, ["show_page", "trial", "highlight", "speak", "listen", "state", "transcript", "status",
+                              "stimulus", "clock_pong"])
     }
 
     func testServerMessageValues() throws {
@@ -87,7 +90,7 @@ final class FixtureTests: XCTestCase {
             default: break
             }
         }
-        XCTAssertEqual(modes, ["page", "confirm", "list"])
+        XCTAssertEqual(modes, ["page", "confirm", "list", "halves", "calibrate"])
         XCTAssertTrue(speakWithAudio && speakWithout)
         XCTAssertTrue(listenUntil && listenWindow && listenOff)
     }
@@ -103,7 +106,8 @@ final class FixtureTests: XCTestCase {
             let encoded = try JSONSerialization.jsonObject(with: try message.encoded())
             XCTAssertTrue(jsonEqual(msg, encoded), "\(type): \(msg) != \(encoded)")
         }
-        XCTAssertEqual(types, ["tts_done", "partner_text", "key", "stop", "resume", "judgment", "mic_set", "mic_report"])
+        XCTAssertEqual(types, ["tts_done", "partner_text", "key", "stop", "resume", "judgment", "mic_set", "mic_report",
+                               "clock_ping", "cycle_markers", "display_report", "calibrate"])
         XCTAssertEqual(micStates, Set(MicState.allCases))
     }
 }

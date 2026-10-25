@@ -1,5 +1,6 @@
 // What the session page shows, as pure functions of the server's messages: the state line, the
-// one-line health summary, the mic card and the selection progress. Pure, so node can test it
+// one-line health summary, the mic card, the selection progress, where each target sits and what
+// the two cards of halves mode list (Look to Speak), and the calibration line. Pure, so node can test it
 // (tests/js/view_core.test.js); app.js only puts the results on the page. Loaded before app.js.
 "use strict";
 
@@ -17,12 +18,14 @@ const ViewCore = (() => {
     REST: ["Rest", "idle"],
     NOT_CAUGHT: ["Didn't catch that: look again", "warn"],
     PAUSED: ["Paused", "stop"],
+    CALIBRATING: ["Calibrating: look at the marked card", "look"],
   };
 
   // ``mode`` is the shown page's mode: list mode has SAY / NEXT instead of a reply per target.
   function banner(name, detail, mode) {
     let [text, tone] = BANNER[name] || [name, "idle"];
     if (name === "STIMULATING" && mode === "list") text = "Look at SAY or NEXT";
+    if (name === "STIMULATING" && mode === "halves") text = "Look at the side with your phrase";
     // The spoken sentence has its own place on the page; other details follow the state.
     if (detail && name !== "SPEAKING") text += ` — ${detail}`;
     return { text, tone };
@@ -31,7 +34,8 @@ const ViewCore = (() => {
   // On the page the state line sits in the still centre of the diamond and says something only
   // when the user is not picking: while they read, look, confirm or hear the reply it is empty,
   // so nothing new appears between the targets.
-  const QUIET = new Set(["MENU_CUE", "STIMULATING", "CONFIRMING", "SELECTED", "SPEAKING", "REST"]);
+  const QUIET = new Set(["MENU_CUE", "STIMULATING", "CONFIRMING", "SELECTED", "SPEAKING", "REST",
+                         "CALIBRATING"]);
 
   function status(name, detail, mode) {
     const b = banner(name, detail, mode);
@@ -105,7 +109,77 @@ const ViewCore = (() => {
     return { fraction, label: `${Math.floor(t)} s` };
   }
 
-  return { banner, status, micCard, health, progress, MIC_PROBLEMS };
+  // --- where the targets sit -------------------------------------------------------------------
+  // "row": list mode's SAY / NEXT; "diamond": page mode and its confirm screen (s1 top, s2 left,
+  // s3 right, s4 bottom); "sides": the phone's two cards, left (s1) and right (s2), in halves and
+  // calibrate mode and on their confirm screen (Say it on s1, Back on s2: no slot past s2).
+  const DIAMOND = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
+  const SIDES = { s1: "left", s2: "right" };
+
+  function layout(page) {
+    if (!page) return "diamond";
+    if (page.mode === "list") return "row";
+    if (page.mode === "halves" || page.mode === "calibrate") return "sides";
+    const slots = page.slots || [];
+    if (page.mode === "confirm" && slots.length && slots.every((s) => s.slot in SIDES)) return "sides";
+    return "diamond";
+  }
+
+  function position(kind, slot) {
+    if (kind === "sides") return SIDES[slot] || "left";
+    return DIAMOND[slot] || "top";
+  }
+
+  // Halves mode: the phrases still in play, the first ``split`` on the left card (role "left",
+  // else s1), the rest on the right (role "right", else s2). An option without an utterance is
+  // "More options": a muted item, nothing to say. Returns {slot: [{text, more}]}.
+  function halves(page) {
+    const options = page.options || [];
+    let split = Number.isInteger(page.split) ? page.split : Math.ceil(options.length / 2);
+    split = Math.max(0, Math.min(options.length, split));
+    const slots = page.slots || [];
+    const left = (slots.find((s) => s.role === "left") || { slot: "s1" }).slot;
+    const right = (slots.find((s) => s.role === "right") || { slot: "s2" }).slot;
+    const item = (o) => {
+      const sentence = (o.utterance || "").trim();
+      return sentence ? { text: sentence, more: false }
+        : { text: (o.label || "").trim() || "More options", more: true };
+    };
+    return { [left]: options.slice(0, split).map(item), [right]: options.slice(split).map(item) };
+  }
+
+  // What one target card shows: a small tag, the big text, the phrase list (halves mode) and
+  // whether it carries the calibration cue ring.
+  function card(page, s) {
+    if (page.mode === "halves") return { tag: "", text: "", items: halves(page)[s.slot] || [], cue: false };
+    if (page.mode === "calibrate") {
+      const cue = s.slot === page.cue;
+      return { tag: s.label || "", text: cue ? "Look here" : "", items: [], cue };
+    }
+    // The sentence is what gets spoken, so it is the big text; the short label is its tag.
+    // Targets without a sentence (More options, Say it, Back) show the label big instead.
+    const sentence = (s.utterance || "").trim();
+    return { tag: sentence ? s.label : "", text: sentence || s.label, items: [], cue: false };
+  }
+
+  // The c-VEP template's last score (status.calibration_accuracy, 0..1), shown small. Under 70 %
+  // the session still runs, but the line says so. "" before any calibration, and in SSVEP.
+  const LOW_CALIBRATION = 0.7;
+
+  function calibration(s) {
+    const acc = s ? s.calibration_accuracy : null;
+    if (typeof acc !== "number") {
+      // A template from --template FILE has no score of its own.
+      return { text: s && s.trained ? "Template loaded" : "", tone: "ok" };
+    }
+    const pct = `${Math.round(acc * 100)} %`;
+    if (!s.trained) return { text: `Calibration failed · ${pct}`, tone: "warn" };
+    if (acc < LOW_CALIBRATION) return { text: `Calibrated ${pct} · low: picks may be wrong`, tone: "warn" };
+    return { text: `Calibrated ${pct}`, tone: "ok" };
+  }
+
+  return { banner, status, micCard, health, progress, layout, position, halves, card, calibration,
+           MIC_PROBLEMS };
 })();
 
 if (typeof module !== "undefined") module.exports = ViewCore;

@@ -15,6 +15,12 @@ default) a controller still sends the ``onset`` a drawing client would send: onc
 as soon as that layout has targets and the last phase is "run" with flicker on. Without it the
 server waits 2 s and then gates the decoder on the time it sent the layout (rule 2).
 
+Code mode (v3.2, ``welcome.paradigm`` "code"): the onset also goes out in the "train" phase,
+which flickers too, and the client keeps the last ``train`` progress, ``trained`` result and
+``decision`` it received. It sends no ``cycle`` messages, since it draws no frames: on a real
+headset a drawing client must, and the fake board reports its own cycle times.
+``decision_lines`` renders a decision as the standard's confidence bars (``--decisions``).
+
 connect() sends the hello and returns the welcome. An ``error`` or a close before the welcome
 raises ServerError, whose ``code`` is the protocol error code ("bad_token", "busy", ...) and
 whose ``close_code`` is the WebSocket close code (4001, 4002, ...) when the socket closed.
@@ -44,7 +50,8 @@ from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as ws_connect
 from websockets.uri import parse_uri
 
-from .protocol import DEFAULT_PORT, MAX_FRAME, MODES, PROTOCOL, ROLES, SLOT_CHARS, dumps
+from .protocol import (DEFAULT_PORT, FLICKER_PHASES, MAX_FRAME, MODES, PROTOCOL, ROLES,
+                       SLOT_CHARS, dumps)
 
 NAME = "brainsync-python"
 VERSION = "0.1.0"
@@ -185,6 +192,9 @@ class Client:
         self.welcome: dict[str, Any] | None = None
         self.phase: dict[str, Any] | None = None     # the last "phase" message
         self.layout: dict[str, Any] | None = None    # the last "layout" message
+        self.train: dict[str, Any] | None = None     # code mode: the last "train" progress
+        self.trained: dict[str, Any] | None = None   # code mode: the last "trained" result
+        self.decision: dict[str, Any] | None = None  # code mode: the last "decision"
         self.onsets = 0                               # onsets sent by auto_onset
         self._onset_layout: int | None = None         # the layout the last onset was for
         self._conn: ClientConnection | None = None
@@ -209,6 +219,13 @@ class Client:
     def fake(self) -> bool:
         """True when the server runs --board fake, so gaze() moves the simulated tone."""
         return bool(self.welcome and self.welcome.get("fake"))
+
+    @property
+    def paradigm(self) -> str | None:
+        """"code" (c-VEP, v3.2) or "freq"; an older server's welcome has none ("freq")."""
+        if self.welcome is None:
+            return None
+        return "code" if self.welcome.get("paradigm") == "code" else "freq"
 
     def hello(self) -> dict[str, Any]:
         """The hello this client sends (PROTOCOL-v3 section 2), token included."""
@@ -243,6 +260,7 @@ class Client:
             raise ServerError(f"the server refused the WebSocket upgrade at {self.url}: "
                               f"{exc}") from None
         self.welcome = self.phase = self.layout = None
+        self.train = self.trained = self.decision = None
         self._onset_layout = None
         try:
             conn.send(dumps(self.hello()))
@@ -375,8 +393,18 @@ class Client:
                 return msg
 
     def _track(self, msg: dict[str, Any]) -> None:
-        """Remember the phase and layout, and send the onset a drawing client would send."""
+        """Remember the phase, the layout and (code mode) the training and the last decision,
+        and send the onset a drawing client would send."""
         kind = msg["type"]
+        if kind == "train":
+            self.train = msg
+            return
+        if kind == "trained":
+            self.trained = msg
+            return
+        if kind == "decision":
+            self.decision = msg
+            return
         if kind == "phase":
             self.phase = msg
         elif kind == "layout":
@@ -390,7 +418,7 @@ class Client:
         lay, ph = self.layout, self.phase
         if lay is None or ph is None or not lay.get("targets"):
             return
-        if ph.get("phase") != "run" or ph.get("flicker") is not True:
+        if ph.get("phase") not in FLICKER_PHASES or ph.get("flicker") is not True:
             return
         layout_id = lay.get("layout_id")
         if isinstance(layout_id, bool) or not isinstance(layout_id, int) or layout_id < 0:
@@ -436,6 +464,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds to wait for the welcome (default 5)")
     p.add_argument("--json", action="store_true",
                    help="print each selection as a JSON line instead of text")
+    p.add_argument("--decisions", action="store_true",
+                   help="code mode: also print every decision as the confidence bars")
     return p
 
 
@@ -490,6 +520,40 @@ def _show_selection(msg: Mapping[str, Any], as_json: bool) -> str:
     return f"{msg.get('slot')}  score {shown}  layout {msg.get('layout_id')}"
 
 
+def _bar(value: Any, cells: int = 8) -> str:
+    """The standard's confidence bar: ``cells`` characters filled for a score in 0..1."""
+    v = float(value) if isinstance(value, (int, float)) and math.isfinite(value) else 0.0
+    n = int(round(min(1.0, max(0.0, v)) * cells))
+    return "█" * n + "░" * (cells - n)
+
+
+def decision_lines(msg: Mapping[str, Any]) -> list[str]:
+    """A "decision" as the standard shows it (docs/CVEP-STANDARD.md section 3): one line per
+    slot ("YES  ███░░░░░ +0.42 <") and the status line ("lead 0.31   choice: YES")."""
+    scores = msg.get("scores") or {}
+    width = max((len(str(s)) for s in scores), default=0)
+    lines = []
+    for slot, score in scores.items():
+        shown = f"{score:+.2f}" if isinstance(score, (int, float)) else "  -  "
+        best = " <" if slot == msg.get("raw") else ""
+        lines.append(f"{str(slot).upper():<{width}} {_bar(score)} {shown}{best}")
+    lead = msg.get("lead")
+    gap = f"lead {lead:.2f}" if isinstance(lead, (int, float)) else "lead  -  "
+    committed = msg.get("committed")
+    choice = ("no choice yet" if committed is None else
+              f"choice: {str(committed).upper()}" + (" *" if msg.get("changed") else ""))
+    lines.append(f"{gap}   {choice}")
+    return lines
+
+
+def trained_text(msg: Mapping[str, Any]) -> str:
+    """"template ready: 83 % on held-out cycles (chance 33 %)"."""
+    acc, chance = msg.get("accuracy"), msg.get("chance")
+    shown = "?" if not isinstance(acc, (int, float)) else f"{round(100 * acc)}"
+    ch = "?" if not isinstance(chance, (int, float)) else f"{round(100 * chance)}"
+    return f"template ready: {shown} % on held-out cycles (chance {ch} %)"
+
+
 def _loop(client: Client, args: argparse.Namespace) -> int:
     """Print selections until --count, --seconds, Ctrl-C or the server stops."""
     end = None if args.seconds is None else time.monotonic() + args.seconds
@@ -519,6 +583,14 @@ def _loop(client: Client, args: argparse.Namespace) -> int:
             stopping = msg.get("phase") == "stop"
             text = msg.get("text") or ""
             _note(f"phase {msg.get('phase')}{': ' + text if text else ''}")
+        elif kind == "train":
+            cue = (client.phase or {}).get("cue") or "the first"
+            _note(f"training: keep looking at {str(cue).upper()}   cycle "
+                  f"{msg.get('cycle')}/{msg.get('of')}")
+        elif kind == "trained":
+            _note(trained_text(msg))
+        elif kind == "decision" and args.decisions:
+            print("\n".join(decision_lines(msg)), flush=True)
         elif kind == "error":
             fatal = " (fatal)" if msg.get("fatal") is True else ""
             _note(f"error {msg.get('code')}{fatal}: {msg.get('message', '')}")
@@ -549,7 +621,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: cannot connect to {args.url}: {exc}", file=sys.stderr)
             return 1
         board = "fake board" if client.fake else "real board"
-        _note(f"connected to {args.url} as {args.role} ({board}, freqs {welcome.get('freqs')})")
+        stim = ("c-VEP code" if client.paradigm == "code"
+                else f"freqs {welcome.get('freqs')}")
+        _note(f"connected to {args.url} as {args.role} ({board}, {stim})")
         if args.gaze is not None:
             if client.fake:
                 try:

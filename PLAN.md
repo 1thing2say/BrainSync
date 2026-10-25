@@ -228,6 +228,19 @@ pull requests.
   only).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
+- **Look to Speak on the iPhone with c-VEP (2026-10-25, branch `feat/ios-cvep`):** the iPhone app
+  is the user's screen: two cards, left (s1) and right (s2), each with half of the phrases still in
+  play; each look keeps one half, then Say it (left) / Back (right). The phone draws one 63-bit
+  m-sequence on both cards, the right one 31 frames behind (`cvep_2`), from a `CADisplayLink`
+  locked to 60 Hz (never ProMotion); it refuses to flicker off 60 Hz (`display_report`), sends each
+  cycle's first frame on the server's clock (`clock_ping` / `clock_pong`, `cycle_markers`), and the
+  server relays them to the bridge (`stim_markers`). The bridge decodes with
+  `brainsync.vep.live.CodeVepDecoder` (from the other session's c-VEP standard, cherry-picked);
+  a 20-cycle calibration looking at the left card trains the template after each baseline
+  (`train` / `train_done`). Contract: `INTERFACE-v2-draft.md` section 9. Run:
+  `python -m app.server --config config/phone_cvep.yaml --bridge cerelog --tunnel`; `default.yaml`
+  (SSVEP on the laptop page) is unchanged. Tested on fake EEG only (training >= 90 %, 18/20
+  trials); not yet on the headset or a phone.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
   move. The demo Mac stays the main machine and the macOS / Linux setup (README, vendored
   BrainFlow, `deploy/jetson`) is unchanged. `deploy/windows/` runs `brainsync/` (board, decoder,
@@ -293,6 +306,18 @@ pull requests.
     checklist), `INTERFACE-v2-draft.md` (our bridge's answer under each open question), the
     README's BCI Voice section and honest claim, and `docs/DEVPOST.md` (the write-up draft).
 
+- **iPhone c-VEP suite (2026-10-25, branch `feat/ios-cvep-wt`):** the iOS app is now a suite:
+  Home, Camera and Reels driven by c-VEP, plus Voice (the partner app, unchanged). The phone is
+  the screen the user looks at and a PROTOCOL-v3 slots-mode controller of `brainsync.server`
+  (code mode, merged here from `cvep3/server`): three squares `t0`/`t1`/`t2` at lags 0/21/42
+  drawn by one 60 Hz `CADisplayLink` (`CodeFlicker.swift`), `cycle` times sent from each
+  cycle's flip, training once on t0 for all apps. Home: Camera / Reels / Voice; Camera:
+  Shutter / Flip / Gallery (real photos, a generated scene in the Simulator); Reels: Up /
+  Like-pause / Down over a generated feed (ported from the `cvep3/reels` mock). BrainSyncKit
+  holds the v3 client, `CodeVep` / `FrameClock` and the app cores, tested against fixtures from
+  the Python server and `clients/js/cvep.js`. Checked in the iOS Simulator against `--board
+  fake` (pair, train, Home → Reels, Reels down twice, two photos). Not yet run on a device or
+  with the headset; the response to a phone-sized square is unmeasured. `ios/README.md`.
 - **EOG gaze prior (2026-10-25, branch `electrode-downloads`):** the C3/C4 pins never reach
   the scalp, so their leads go to gel pads at the left and right outer canthus (channels `LO`,
   `RO`; montage `EOG_MONTAGE` in `brainsync/recordings.py`). REF stays on the mastoid and DRL

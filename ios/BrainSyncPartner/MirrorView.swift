@@ -1,6 +1,8 @@
 // The mirror of the user's screen (ui/app.js renderPage), phrase first like Look to Speak: each
 // reply is a big full-width card, with a chip saying where its target sits on the user's diamond.
 // Nothing here ever flickers (rule 10): a flickering target is only a steady lighter fill.
+// With a c-VEP server (Look to Speak on this phone) it draws the user's two cards, left and right,
+// with the same LookScreen as the user's screen, but small and still (no engine).
 
 import SwiftUI
 import BrainSyncKit
@@ -45,6 +47,10 @@ struct MirrorView: View {
         let flickering = model.phase == "flicker"
         MonoLabel(heading(page))
         switch page.mode {
+        case .halves, .calibrate:
+            lookScreen(page)
+        case .confirm where model.isCodeParadigm:
+            lookScreen(page)  // Say it left, Back right: not the laptop's diamond
         case .page:
             PhraseStack(slots: page.slots, picked: model.pickedSlot, active: flickering,
                         keyboard: model.keyboardMode) { slot in model.tapSlot(slot) }
@@ -54,6 +60,16 @@ struct MirrorView: View {
         case .list:
             listView(page, flickering: flickering)
         }
+    }
+
+    /// The user's two cards (Look to Speak), still; in keyboard mode a tap is that card's key.
+    private func lookScreen(_ page: ShowPage) -> some View {
+        LookScreen(page: page, picked: model.pickedSlot, speaking: nil, stateLine: .empty,
+                   compact: true,
+                   onTap: model.keyboardMode ? { slot in model.tapSlot(slot) } : nil)
+            .padding(12)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: Palette.cardRadius))
+            .overlay(RoundedRectangle(cornerRadius: Palette.cardRadius).strokeBorder(Palette.line, lineWidth: 1))
     }
 
     /// List mode (the fallback): the options with one highlighted, then SAY and NEXT.
@@ -93,6 +109,11 @@ struct MirrorView: View {
             return "Page \(page.page) · Pick a reply"
         case .confirm:
             return "Page \(page.page) · Say this?"
+        case .halves:
+            let count = page.options.count
+            return "Page \(page.page) · Left or right · \(count) \(count == 1 ? "item" : "items") left"
+        case .calibrate:
+            return "Calibrating"
         }
     }
 }

@@ -33,7 +33,9 @@
       ],
       "text": "",
       "options": [],
-      "highlight_index": null
+      "highlight_index": null,
+      "split": null,
+      "cue": null
     },
     {
       "type": "show_page",
@@ -56,7 +58,9 @@
       ],
       "text": "Yes, let's go outside.",
       "options": [],
-      "highlight_index": null
+      "highlight_index": null,
+      "split": null,
+      "cue": null
     },
     {
       "type": "show_page",
@@ -95,7 +99,141 @@
           "intent_id": "maybe"
         }
       ],
-      "highlight_index": 1
+      "highlight_index": 1,
+      "split": null,
+      "cue": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "m4",
+      "page": 3,
+      "mode": "halves",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "left",
+          "label": "Left",
+          "utterance": ""
+        },
+        {
+          "slot": "s2",
+          "role": "right",
+          "label": "Right",
+          "utterance": ""
+        }
+      ],
+      "text": "",
+      "options": [
+        {
+          "label": "Go outside",
+          "utterance": "Yes, let's go outside.",
+          "intent_id": "yes"
+        },
+        {
+          "label": "Not now",
+          "utterance": "Not right now.",
+          "intent_id": "no"
+        },
+        {
+          "label": "After lunch",
+          "utterance": "Maybe after lunch.",
+          "intent_id": "maybe"
+        },
+        {
+          "label": "More options",
+          "utterance": "",
+          "intent_id": "more"
+        }
+      ],
+      "highlight_index": null,
+      "split": 2,
+      "cue": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "m4",
+      "page": 3,
+      "mode": "confirm",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "say",
+          "label": "Say it",
+          "utterance": ""
+        },
+        {
+          "slot": "s2",
+          "role": "back",
+          "label": "Back",
+          "utterance": ""
+        }
+      ],
+      "text": "Not right now.",
+      "options": [],
+      "highlight_index": null,
+      "split": null,
+      "cue": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "calibrate",
+      "page": 1,
+      "mode": "calibrate",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "left",
+          "label": "Look here",
+          "utterance": ""
+        },
+        {
+          "slot": "s2",
+          "role": "right",
+          "label": "",
+          "utterance": ""
+        }
+      ],
+      "text": "Look at the left card",
+      "options": [],
+      "highlight_index": null,
+      "split": null,
+      "cue": "s1"
+    },
+    {
+      "type": "stimulus",
+      "paradigm": "code",
+      "refresh_hz": 60.0,
+      "frames_per_bit": 1,
+      "bits": "000001111110101011001101110110100100111000101111001010001100001",
+      "lags": {
+        "s1": 0,
+        "s2": 31
+      },
+      "depth": 1.0
+    },
+    {
+      "type": "clock_pong",
+      "id": 12,
+      "t_phone": 1792809201.5,
+      "t_server": 1792809201.538
+    },
+    {
+      "type": "status",
+      "decoder_connected": true,
+      "decoder_ok": true,
+      "display_ok": true,
+      "llm_ok": true,
+      "fake_decoder": false,
+      "keyboard_mode": false,
+      "board_ok": true,
+      "decoder_message": "",
+      "decoder_name": "cvep-template",
+      "llm": "ok",
+      "mic_muted": false,
+      "mic": "",
+      "resume_ready": false,
+      "trained": true,
+      "calibration_accuracy": 0.85
     },
     {
       "type": "trial",
@@ -228,7 +366,9 @@
       "llm": "ok",
       "mic_muted": false,
       "mic": "listening",
-      "resume_ready": true
+      "resume_ready": true,
+      "trained": false,
+      "calibration_accuracy": null
     },
     {
       "type": "status",
@@ -244,7 +384,9 @@
       "llm": "failed",
       "mic_muted": true,
       "mic": "muted",
-      "resume_ready": false
+      "resume_ready": false,
+      "trained": false,
+      "calibration_accuracy": null
     },
     {
       "type": "status",
@@ -260,7 +402,9 @@
       "llm": "waiting",
       "mic_muted": false,
       "mic": "denied",
-      "resume_ready": false
+      "resume_ready": false,
+      "trained": false,
+      "calibration_accuracy": null
     },
     {
       "type": "status",
@@ -276,7 +420,9 @@
       "llm": "off",
       "mic_muted": false,
       "mic": "",
-      "resume_ready": false
+      "resume_ready": false,
+      "trained": false,
+      "calibration_accuracy": null
     }
   ],
   "ui_to_server": [
@@ -385,6 +531,41 @@
       "type": "mic_report",
       "state": "paused",
       "restarts": 11
+    },
+    {
+      "type": "clock_ping",
+      "id": 12,
+      "t_phone": 1792809201.5
+    },
+    {
+      "type": "cycle_markers",
+      "trial_id": 9,
+      "markers": [
+        {
+          "cycle": 0,
+          "t_unix": 1792809201.512
+        },
+        {
+          "cycle": 1,
+          "t_unix": 1792809202.562
+        }
+      ],
+      "dropped_frames": 0
+    },
+    {
+      "type": "display_report",
+      "refresh_hz": 60.0,
+      "ok": true,
+      "message": ""
+    },
+    {
+      "type": "display_report",
+      "refresh_hz": 120.0,
+      "ok": false,
+      "message": "ProMotion: 120 Hz, needs 60 Hz"
+    },
+    {
+      "type": "calibrate"
     }
   ]
 }
