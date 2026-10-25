@@ -31,6 +31,11 @@ def nakanishi_dir() -> Path:
     return data_dir() / "nakanishi2015"
 
 
+def models_dir() -> Path:
+    """Trained classifier models written by brainsync.train."""
+    return data_dir() / "models"
+
+
 def heatmaps_dir() -> Path:
     """TRIBE v2 predictions per demo clip, written by brainsync.heatmap predict."""
     return data_dir() / "heatmaps"

@@ -1,0 +1,38 @@
+# Four targets at 11/12/13/14 Hz for the trained classifier, after 15 and 17 Hz responded weakly
+# for this user (2026-10-24_235732: replay 3/8 and 2/8 against 13 Hz 6/8 and 11 Hz 4/7). 1 Hz
+# apart, so each 1 Hz pair also differs by pi in phase (joint frequency-phase coding, which
+# TRCA learns from the training trials). The two diagonals hold 11/12 and 13/14; the only
+# 1 Hz pair side by side is 13/12 on the right. Harmonics never meet a fundamental below
+# 44 Hz; all four sit clear of 9-10 Hz alpha. Record and train with
+#   python -m brainsync.record -c four_low --trials 32
+#   python -m brainsync.train <file>_cued.npz --channels P8,O1,O2
+name = "four_low"
+
+[targets]
+freqs = [11.0, 13.0, 14.0, 12.0]   # row by row from the top left
+phases_pi = [0.0, 0.0, 1.0, 1.0]
+labels = ["11", "13", "14", "12"]
+
+[layout]
+rows = 2
+cols = 2
+size = 0.2      # as four_targets_low_first: centres at +-0.27, cue boxes reach 0.39
+spacing = 0.54
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 8      # 8 blocks of 4 trials = 32 trials of 8 s, about 4.5 minutes
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true

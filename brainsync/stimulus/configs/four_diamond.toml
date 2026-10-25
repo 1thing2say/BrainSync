@@ -12,6 +12,8 @@
 # on the target, and without a point to rest on gaze drifts after about 2 s.
 # Untested on EEG with four squares: [session] below is the 4-target gate recording
 # (PLAN.md section 14), cued with the box held on the target through the flicker.
+# Record it with `python -m brainsync.calibrate -c four_diamond`: the gate decision and the
+# trained classifiers' calibration data are the same session.
 name = "four_diamond"
 
 [targets]

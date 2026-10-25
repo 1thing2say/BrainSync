@@ -345,6 +345,7 @@ class Session:
         self._layout_seq = 0
         self._layout: dict | None = None
         self._targets: list[dict] = []
+        self._last_pick: tuple[float, float, float, int] | None = None  # (freq, gate, commit, layout)
         self._activated_at = -math.inf
         self._selection_seq = 0
         self._cool_until: float | None = None
@@ -1007,9 +1008,14 @@ class Session:
             if self.fake:
                 self._board.start_flicker()
         else:
-            self._bank.activate([float(t["freq"]) for t in self._targets],
-                                [float(t["phase"]) for t in self._targets], now,
-                                positions=self._positions())
+            try:
+                self._bank.activate([float(t["freq"]) for t in self._targets],
+                                    [float(t["phase"]) for t in self._targets], now,
+                                    positions=self._positions())
+            except ValueError as exc:   # a saved decoder model that was not trained for this layout
+                self._bank.deactivate()
+                self._refuse("layout", f"This layout cannot be decoded: {exc}")
+                return
         self._activated_at = now
 
     def _deactivate(self) -> None:
@@ -1143,7 +1149,37 @@ class Session:
         self._log("selection", {"selection_id": self._selection_seq, "layout_id": layout_id,
                                 "slot": slot, "t_decision": d.time, "score": scores[slot],
                                 "gate": getattr(self._bank, "gate", None)})
+        # before the mode answers: on_selection may replace the layout and the gate at once.
+        # Code mode has no frequencies or trained classifier to teach (its own template).
+        if self.paradigm != "code":
+            self._learn_from(self._targets[d.committed], self._bank.gate, d.time, layout_id)
         self._mode_call("on_selection", slot, now)
+
+    def _learn_from(self, target: Mapping[str, Any], gate: float, t_commit: float,
+                    layout_id: int) -> None:
+        """A confirmed pick is a labelled trial: teach it to the trained classifier.
+
+        A selection of a ``button`` is remembered with its gate (the moment its templates
+        start) and its commit time (the user was certainly looking at it until then); the
+        following ``confirm`` selection says the pick was right, so the bank learns that
+        window (``DecoderBank.learn``). ``back`` forgets it. Does nothing without a trained
+        classifier. Called with the layout the selection was made in, before the mode acts.
+        """
+        kind = target.get("kind")
+        if kind == "button":
+            self._last_pick = (float(target["freq"]), float(gate), float(t_commit), layout_id)
+            return
+        if kind == "confirm" and self._last_pick is not None and self._bank.trained is not None:
+            freq, start, end, _ = self._last_pick
+            try:
+                learned = self._bank.learn(freq, start, end)
+            except ValueError as exc:
+                _note(f"learn from the confirmed pick: {exc}")
+                learned = False
+            self._log("learned", {"freq": freq, "t_start": start, "t_end": end, "ok": learned,
+                                  "n_train": [int(n) for n in self._bank.trained.n_train]})
+        if kind in ("confirm", "back"):
+            self._last_pick = None
 
     # -- fake gaze ----------------------------------------------------------------------
 

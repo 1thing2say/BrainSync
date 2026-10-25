@@ -1,0 +1,42 @@
+# cvep_4 with arrows instead of squares: the same c-VEP code, labels and diamond (top,
+# left, right, bottom), each target an arrow pointing outward, away from the free centre,
+# to try whether a shape that says where it leads helps the user find the target.
+# One 63-bit m-sequence, every arrow shows it delayed by k * 16 frames (267 ms apart);
+# each cycle lasts 63 frames = 1.05 s at 60 Hz. An arrow lights only 45 % of its size
+# box, so the box is 0.24 here instead of cvep_4's 0.18: about 80 % of a cvep_4 square's
+# lit area, as large as the notch above the top arrow allows. Expect a weaker response
+# than cvep_4 all the same; record both before choosing.
+name = "cvep_4_arrows"
+
+[targets]
+labels = ["YES", "NO", "HELP", "WATER"]   # top, left, right, bottom
+shapes = ["arrow-up", "arrow-left", "arrow-right", "arrow-down"]
+
+[code]
+length = 63
+lag_frames = 16
+frames_per_bit = 1
+
+[layout]
+shape = "diamond"
+size = 0.24       # the arrow's box, screen heights (about 4.5 cm on a 14-inch MacBook)
+spacing = 0.32    # top and bottom arrows from the centre, as in cvep_4
+spacing_x = 0.55  # left and right arrows from the centre
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

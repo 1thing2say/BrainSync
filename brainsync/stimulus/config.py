@@ -34,6 +34,13 @@ sentences and the centre text a decoder sends (see brainsync.stimulus.feedback) 
 while the targets flicker; false hides them during the flicker, in case drawing text then
 drops frames.
 
+[targets] shapes (default all "square") gives every target its own outline: "square",
+"circle", "plus", or an arrow ("arrow-up", "arrow-down", "arrow-left", "arrow-right"),
+one name per target (brainsync.stimulus.shapes). Every shape fits the size x size box of
+a square, so the layout checks are the same; a shape lights only part of that box (an
+arrow 45 %), which weakens the visual response, so such configs get a larger size. Not
+to be confused with [layout] shape, which arranges the targets in a grid or a diamond.
+
 [stimulus] depth (default 1.0, in (0, 1]) is the flicker's modulation depth: luminance
 swings around mid-grey 0.5 by depth / 2, so 1.0 is full black-to-white and 0.5 is a
 gentler 0.25-0.75 flicker with the same mean.
@@ -69,6 +76,7 @@ import numpy as np
 
 from ..vep.codes import ORDERS, degree_for_length, flash_rate_hz
 from .flicker import WAVEFORMS, photosensitive, square_duty_even
+from .shapes import DEFAULT_SHAPE, SHAPES, area_fraction
 
 CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 DEFAULT_CONFIG = "two_targets"
@@ -77,7 +85,7 @@ _TWO_PI = 2.0 * math.pi
 _PHASE_TOL = 1e-9
 
 _KEYS: dict[str, frozenset[str]] = {
-    "targets": frozenset({"freqs", "phases_pi", "labels", "count"}),
+    "targets": frozenset({"freqs", "phases_pi", "labels", "count", "shapes"}),
     "code": frozenset({"length", "lag_frames", "frames_per_bit"}),
     "time": frozenset({"flash_frames", "gap_frames", "order"}),
     "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "shape", "spacing_x",
@@ -98,13 +106,15 @@ Color = tuple[float, float, float]
 
 @dataclass(frozen=True)
 class Target:
-    """One flicker target; ``phase`` in radians, ``pos`` (x, y) in screen heights."""
+    """One flicker target; ``phase`` in radians, ``pos`` (x, y) in screen heights,
+    ``shape`` one of ``shapes.SHAPES``."""
 
     index: int
     freq: float
     phase: float
     label: str
     pos: tuple[float, float]
+    shape: str = DEFAULT_SHAPE
 
 
 @dataclass(frozen=True)
@@ -435,6 +445,22 @@ def grid_positions(n: int, rows: int, cols: int, spacing: float) -> list[tuple[f
     return [(float(x) + 0.0, float(y) + 0.0) for x, y in zip(xs, ys)]  # + 0.0 drops -0.0
 
 
+def explicit_positions(value: Any, n: int) -> list[tuple[float, float]]:
+    """[layout] positions: one [x, y] pair per target in screen heights from the centre
+    (y up), for layouts a grid cannot express, such as the four-target diamond."""
+    if not isinstance(value, (list, tuple)) or len(value) != n:
+        raise ValueError(f"[layout] positions must list {n} [x, y] pairs (one per target), "
+                         f"got {value!r}")
+    out = []
+    for k, pair in enumerate(value):
+        ok = (isinstance(pair, (list, tuple)) and len(pair) == 2
+              and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pair))
+        if not ok or not all(math.isfinite(float(v)) for v in pair):
+            raise ValueError(f"[layout] positions[{k}] must be two finite numbers, got {pair!r}")
+        out.append((float(pair[0]) + 0.0, float(pair[1]) + 0.0))
+    return out
+
+
 def parse_config(data: Mapping[str, Any], default_name: str = "config",
                  path: Path | None = None) -> StimulusConfig:
     """Build a StimulusConfig from parsed TOML, raising ValueError on bad values or types."""
@@ -479,7 +505,9 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     phases_pi = tg.numbers("phases_pi", [0.0] * n)
     labels = tg.texts("labels", [str(k) for k in range(n)] if coded
                       else [f"{f:g}" for f in freqs])
-    for what, got in (("phases_pi", len(phases_pi)), ("labels", len(labels))):
+    shapes = tg.texts("shapes", [DEFAULT_SHAPE] * n)
+    for what, got in (("phases_pi", len(phases_pi)), ("labels", len(labels)),
+                      ("shapes", len(shapes))):
         if got != n:
             raise ValueError(f"[targets] has {got} {what} for {n} target(s)")
 
@@ -530,7 +558,8 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     cfg = StimulusConfig(
         name=name,
         targets=tuple(Target(index=k, freq=freqs[k], phase=phases_pi[k] * math.pi,
-                             label=labels[k], pos=positions[k]) for k in range(n)),
+                             label=labels[k], pos=positions[k], shape=shapes[k])
+                      for k in range(n)),
         size=size,
         waveform=stim.text("waveform", "sine"),
         hold_cue=stim.flag("hold_cue", False),
@@ -620,6 +649,10 @@ def _check_coding(cfg: StimulusConfig) -> None:
 def _check_geometry(cfg: StimulusConfig) -> None:
     if cfg.size <= 0:
         raise ValueError(f"[layout] size must be positive, got {cfg.size}")
+    for t in cfg.targets:
+        if t.shape not in SHAPES:
+            raise ValueError(f"[targets] shapes: target {t.index} has unknown shape "
+                             f"{t.shape!r}; expected one of {SHAPES}")
     if cfg.cue_scale < 1.0:
         raise ValueError(f"[stimulus] cue_scale must be >= 1 (box outside the target), "
                          f"got {cfg.cue_scale}")
@@ -746,8 +779,9 @@ def validate(cfg: StimulusConfig) -> None:
 
 
 def config_warnings(cfg: StimulusConfig) -> list[str]:
-    """Human-readable warnings: photosensitive band, uneven square-wave duty cycles, and
-    (with a [card] table) a card that covers a target, assuming CARD_ASPECT."""
+    """Human-readable warnings: photosensitive band, uneven square-wave duty cycles, shapes
+    that light little of their box, and (with a [card] table) a card that covers a target,
+    assuming CARD_ASPECT."""
     notes: list[str] = []
     risky = sorted({t.freq for t in cfg.targets if photosensitive(t.freq)})
     if risky:
@@ -774,6 +808,13 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
                 notes.append(f"target {t.index} ({t.freq:g} Hz): {hz / t.freq:.3g} frames "
                              f"per cycle at {hz:g} Hz cannot split evenly into on and off, "
                              "so the square duty cycle is uneven; prefer waveform = \"sine\"")
+    small = [t for t in cfg.targets if area_fraction(t.shape) < 0.6]
+    if small:
+        listed = ", ".join(f"target {t.index} ({t.shape})" for t in small)
+        lit = "/".join(dict.fromkeys(f"{area_fraction(t.shape):.0%}" for t in small))
+        notes.append(f"shapes: {listed} light {lit} of their size box; expect a weaker visual "
+                     "response than a square of the same size (a larger [layout] size makes "
+                     "up for it)")
     if cfg.card is not None:
         overlap = card_overlap(cfg)
         if overlap:

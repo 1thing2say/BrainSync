@@ -7,6 +7,7 @@ stores them column by column (9.25, 11.25, 13.25, 9.75, ...). ``load`` returns t
 ascending frequency order.
 
     python -m brainsync.nakanishi --windows 1 2 4
+    python -m brainsync.nakanishi --windows 0.5 1 --methods cca etrca etrca-sf mscca   # trained, held out
 """
 from __future__ import annotations
 
@@ -19,9 +20,10 @@ from pathlib import Path
 import numpy as np
 
 from . import paths
-from .classify import make
+from .classify import NAMES, SPATIAL_FILTERS, TRAINED, make
 from .metrics import accuracy
-from .signal import Band, preprocess
+from .signal import Band, default_bands, preprocess
+from .templates import cross_val_predict
 
 FS = 256.0
 N_SUBJECTS = 10
@@ -112,21 +114,62 @@ def epochs(ds: Dataset, window_s: float, band: Band | None = BAND,
     return preprocess(ds.X, ds.fs, band, notch_hz)[..., ds.start:stop]
 
 
-def subject_accuracy(ds: Dataset, method: str, window_s: float, harmonics: int = 3) -> float:
-    """Accuracy of a training-free classifier (default settings) over all of a subject's trials."""
-    clf = make(method, freqs=ds.freqs, fs=ds.fs, harmonics=harmonics, phases=ds.phases)
-    return accuracy(ds.y, clf.predict(epochs(ds, window_s)))
+def subject_accuracy(ds: Dataset, method: str, window_s: float, harmonics: int = 3,
+                     bands: Sequence[Band] | None = None, train_blocks: int | None = None,
+                     template: str = "harmonic") -> float:
+    """Accuracy over all of a subject's trials.
+
+    Training-free classifiers score every trial directly. Trained ones (the template
+    classifiers ``classify.TRAINED`` and the spatial filters ``classify.SPATIAL_FILTERS``)
+    use the paper's leave-one-block-out: each block is scored by a classifier fitted on the
+    other blocks, or on ``train_blocks`` of them chosen in order when that is given (to see
+    how little calibration data is enough). ``bands`` turns on the filter bank for FBCCA
+    and the template classifiers (the spatial filters have none).
+    """
+    X = epochs(ds, window_s)
+    kw = dict(freqs=ds.freqs, fs=ds.fs, harmonics=harmonics, phases=ds.phases)
+    if bands is not None and method != "cca" and method not in SPATIAL_FILTERS:
+        kw["bands"] = list(bands)
+    if method in TRAINED:
+        kw["template"] = template
+    factory = lambda: make(method, **kw)  # noqa: E731
+    clf = factory()
+    if not clf.needs_fit:
+        return accuracy(ds.y, clf.predict(X, ds.latency))
+    blocks = ds.blocks
+    if train_blocks is not None:
+        if not 1 <= train_blocks < ds.n_blocks:
+            raise ValueError(f"train_blocks must be 1..{ds.n_blocks - 1}, got {train_blocks}")
+        # keep the first train_blocks other blocks per fold: relabel the rest as "spare"
+        pred = np.zeros(ds.y.size, dtype=int)
+        for b in np.unique(blocks):
+            others = [c for c in np.unique(blocks) if c != b][:train_blocks]
+            train = np.isin(blocks, others)
+            test = blocks == b
+            fold = factory()
+            fold.fit(X[train], ds.y[train], ds.latency)
+            pred[test] = fold.predict(X[test], ds.latency)
+        return accuracy(ds.y, pred)
+    try:
+        cv = cross_val_predict(factory, X, ds.y, blocks, ds.latency)
+    except ValueError as exc:
+        raise ValueError(f"{method} held out by block ({ds.n_blocks} blocks): {exc}") from None
+    return accuracy(ds.y, cv.pred)
 
 
 def accuracy_table(subjects: Sequence[int], windows: Sequence[float],
                    methods: Sequence[str] = ("cca", "fbcca"), harmonics: int = 3,
-                   directory: str | Path | None = None, log=None) -> dict[str, np.ndarray]:
+                   directory: str | Path | None = None, log=None,
+                   bands: Sequence[Band] | None = None,
+                   train_blocks: int | None = None,
+                   template: str = "harmonic") -> dict[str, np.ndarray]:
     """Accuracy per method as arrays (n_subjects, n_windows)."""
     table = {m: np.zeros((len(subjects), len(windows))) for m in methods}
     for row, subject in enumerate(subjects):
         ds = load(subject, directory)
         for m in methods:
-            table[m][row] = [subject_accuracy(ds, m, w, harmonics) for w in windows]
+            table[m][row] = [subject_accuracy(ds, m, w, harmonics, bands, train_blocks, template)
+                             for w in windows]
         if log is not None:
             parts = [f"{m}=" + "/".join(f"{a:.0%}" for a in table[m][row]) for m in methods]
             print(f"subject {subject}: " + "  ".join(parts), file=log)
@@ -148,14 +191,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--windows", type=float, nargs="+", default=[1.0, 2.0, 4.0],
                     help="window lengths in seconds (default 1 2 4)")
     ap.add_argument("--subjects", type=int, nargs="+", default=list(range(1, N_SUBJECTS + 1)))
-    ap.add_argument("--methods", nargs="+", default=["cca", "fbcca"], choices=["cca", "fbcca"])
+    ap.add_argument("--methods", nargs="+", default=["cca", "fbcca"], choices=list(NAMES),
+                    help="training-free (cca, fbcca) or trained, scored leave-one-block-out: "
+                         "template classifiers (itcca, ecca, trca, etrca, etrcar, sfcca) and "
+                         "spatial filters (trca-sf, trca-r-sf, etrca-sf, etrca-r-sf, mscca)")
     ap.add_argument("--harmonics", type=int, default=3)
+    ap.add_argument("--fb-bands", metavar="N:UPPER",
+                    help="filter bank for fbcca and the template classifiers: N sub-bands (8m Hz "
+                         "to UPPER Hz); default: none for the trained methods")
+    ap.add_argument("--template", choices=("harmonic", "raw"), default="harmonic",
+                    help="trained methods: harmonic-projected templates (usable at any window "
+                         "offset, the online choice) or the raw trial averages (the published "
+                         "offline method)")
+    ap.add_argument("--train-blocks", type=int, default=None,
+                    help="trained methods: fit on this many blocks per fold instead of all "
+                         "the other 14")
     ap.add_argument("--data-dir", type=Path, default=None,
                     help="folder with s1.mat..s10.mat (default $BRAINSYNC_DATA_DIR/nakanishi2015)")
     args = ap.parse_args(argv)
     try:
+        bands = None
+        if args.fb_bands:
+            n, upper = args.fb_bands.split(":")
+            bands = default_bands(FS, float(upper), int(n))
         table = accuracy_table(args.subjects, args.windows, args.methods, args.harmonics,
-                               args.data_dir, log=sys.stderr)
+                               args.data_dir, log=sys.stderr, bands=bands,
+                               train_blocks=args.train_blocks, template=args.template)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
