@@ -52,6 +52,8 @@ from pathlib import Path
 from typing import Any
 
 from ..envfile import load_env_file
+from ..eog import GazeDecoder
+from ..recordings import EOG_MONTAGE
 from . import protocol as P
 from .decoding import DecoderBank
 from .session import Session
@@ -325,9 +327,10 @@ def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
     """The board, not yet opened. ImportError when BrainFlow is missing."""
     from ..board import CerelogBoard, FakeBoard
 
+    names = EOG_MONTAGE if getattr(args, "eog", False) else None
     if args.board == "fake":
-        return FakeBoard(freqs, clock=time.time)
-    return CerelogBoard(serial_port=args.serial_port)
+        return FakeBoard(freqs, clock=time.time, ch_names=names)
+    return CerelogBoard(serial_port=args.serial_port, ch_names=names)
 
 
 # -- command line -------------------------------------------------------------------------
@@ -353,6 +356,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "cerelog: the Cerelog X8 (default)")
     p.add_argument("--serial-port", metavar="DEV", default=None,
                    help="the Cerelog's serial device (default: the first USB serial device)")
+    p.add_argument("--eog", action="store_true",
+                   help="the C3/C4 leads sit on gel pads at the left and right temple (channels "
+                        f"{','.join(EOG_MONTAGE)}): the eye's horizontal and vertical EOG "
+                        "becomes a gaze prior added to the SSVEP scores for layouts whose "
+                        "target positions are known (point mode); brainsync.eog")
     p.add_argument("--freqs", default=",".join(f"{f:g}" for f in DEFAULT_FREQS),
                    help="stimulus frequencies in Hz, best first (default 15,17,12,20); point "
                         "mode shows len-1 buttons plus \"more\"")
@@ -488,7 +496,10 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         return 1
     archive: ScanArchive | None = None
     try:
-        bank = DecoderBank(board.fs, ch_names=board.ch_names)
+        gaze = GazeDecoder(board.fs, board.ch_names) if args.eog else None
+        bank = DecoderBank(board.fs, ch_names=board.ch_names, gaze=gaze)
+        if gaze is not None:
+            _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
         if detector is None:
             detector = make_detector(args)
         elif args.no_detect:

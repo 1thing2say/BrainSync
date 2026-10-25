@@ -18,6 +18,7 @@ from collections.abc import Sequence
 OUTER_RING_DEG = 72.0   # Fp, P7/P8, O: 72 degrees from Cz
 INNER_RING_DEG = 36.0   # C3/C4
 HEAD_DEG = 90.0         # the head circle drawn at radius 1.0
+CANTHUS_DEG = 85.5      # LO/RO, drawn just inside the circle (radius 0.95)
 
 
 def _site(from_cz_deg: float, azimuth_deg: float) -> tuple[float, float]:
@@ -36,6 +37,10 @@ SITES: dict[str, tuple[float, float]] = {
     "P8": _site(OUTER_RING_DEG, 126.0),
     "O1": _site(OUTER_RING_DEG, -162.0),
     "O2": _site(OUTER_RING_DEG, 162.0),
+    # Outer canthi (EOG pads on the temples, brainsync.eog): just inside the head circle,
+    # forward of the ears, roughly where F9/F10 sit on the 10-10 map.
+    "LO": _site(CANTHUS_DEG, -40.0),
+    "RO": _site(CANTHUS_DEG, 40.0),
 }
 
 REGIONS: dict[str, str] = {
@@ -43,6 +48,7 @@ REGIONS: dict[str, str] = {
     "C3": "sensorimotor", "C4": "sensorimotor",
     "P7": "temporal-parietal", "P8": "temporal-parietal",
     "O1": "visual", "O2": "visual",
+    "LO": "eye (EOG)", "RO": "eye (EOG)",
 }
 
 _CANONICAL = {name.lower(): name for name in SITES}

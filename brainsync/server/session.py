@@ -716,8 +716,29 @@ class Session:
             self._bank.deactivate()
             return
         self._bank.activate([float(t["freq"]) for t in self._targets],
-                            [float(t["phase"]) for t in self._targets], now)
+                            [float(t["phase"]) for t in self._targets], now,
+                            positions=self._positions())
         self._activated_at = now
+
+    def _positions(self) -> list[tuple[float, float]] | None:
+        """Each target's centre from its rects, as (x right, y up) CSS pixels from the middle
+        of the viewport, for the EOG gaze prior; None unless every target has a rect
+        (slots mode has none) or the viewport size is unknown."""
+        hello = self._hello
+        if hello is None or not hello.viewport:
+            return None
+        w, h = float(hello.viewport["w"]), float(hello.viewport["h"])
+        out: list[tuple[float, float]] = []
+        for t in self._targets:
+            rects = t.get("rects") or []
+            if not rects:
+                return None
+            cx = float(np.mean([float(r["x"]) + float(r["w"]) / 2 for r in rects]))
+            cy = float(np.mean([float(r["y"]) + float(r["h"]) / 2 for r in rects]))
+            out.append(((cx - 0.5) * w, (0.5 - cy) * h))
+        if any(x == 0 and y == 0 for x, y in out):
+            return None       # a target at the centre has no gaze direction
+        return out
 
     # -- selections ---------------------------------------------------------------------
 

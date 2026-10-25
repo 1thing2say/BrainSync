@@ -94,6 +94,12 @@ instead, so synthetic files never mix with real ones.
   EEG.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
+- **C3 and C4 never reach the scalp** on the dry headset (they float at over 200 µV). Their
+  leads can go to gel pads at the left and right outer canthus instead, channels `LO` and
+  `RO`, which record the horizontal electro-oculogram (EOG); Fp1 and Fp2 against the mastoid
+  reference give the vertical one. Keep REF on the mastoid and DRL where it is: DRL is not a
+  recorded channel, and a temple reference would put jaw muscle and blinks into every
+  channel. `brainsync.eog` turns the EOG into a gaze prior for the decoder (below).
 
 ## Flicker depth and the Flicker Lab
 
@@ -728,9 +734,32 @@ With the board attached, run the stimulus and the check in two terminals, then r
 ```
 
 Stimulus configs: `two_targets` (the demo pair), `swipe` (the same pair labelled Pass and
-Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`,
-`one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
-quits.
+Like, with a `[card]` table for BrainSwipe), `one_target_12`, `one_target_15`,
+`one_target_17` (single-target sessions for phase 0) and `four_eog` (a 2 x 2 grid at
+13/15/17/11 Hz for the EOG gate). Space starts a session, Escape quits.
+
+### EOG gaze prior
+
+With the C3/C4 leads on gel pads at the outer canthi (Hardware rules), record the gate
+and score it:
+
+```bash
+.venv/bin/python -m brainsync.record -c four_eog --names Fp1,Fp2,LO,RO,P7,P8,O1,O2
+.venv/bin/python -m brainsync.eog "$BRAINSYNC_DATA_DIR"/spectrum_checks/<date>_cued.npz
+```
+
+The scorer prints, per window length, the held-out accuracy of the gaze alone (each
+trial scored by target directions fitted on the other trials, or by the layout with
+`--positions 'x,y;x,y;...'`), of FBCCA alone and of the two fused. A window's gaze is the
+mean of the 10 Hz low-passed EOG minus the centre level from the still screens, a
+vector (h, v) in µV; each target scores the cosine to its direction times how far the
+gaze is from the centre, and the gaze abstains on blinks, a centred gaze or a small
+margin. The server adds `weight` (1.5) baseline spreads of those scores to the SSVEP
+scores before the abstain rules, so a clear gaze resolves an abstention and a strong
+SSVEP lead still wins: `python -m brainsync.server --eog` (the prior runs for layouts
+whose target rects are known, i.e. point mode). Open on the hardware: whether the board
+keeps the near-DC gaze level (the ADS1299 is DC coupled; only our 1 Hz high-pass removes
+it, and the EOG path skips that), and pad drift over minutes. Synthetic tests only so far.
 
 ## Client/server (v3) and BrainPoint
 
@@ -968,7 +997,8 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/board.py` | Cerelog X8 over BrainFlow, and a fake board |
 | `brainsync/record.py` | Record a cued session while the stimulus runs |
 | `brainsync/check.py` | Per-channel electrode check |
-| `brainsync/online.py` | Ring buffer, sliding-window decoder, calibration, replay and tuning grid |
+| `brainsync/online.py` | Ring buffer, sliding-window decoder (with an optional per-target prior), calibration, replay and tuning grid |
+| `brainsync/eog.py` | EOG gaze prior: LO/RO and Fp1/Fp2 to a gaze vector, layout or fitted target directions, blink and margin abstains, held-out scoring CLI |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
 | `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |

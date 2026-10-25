@@ -181,6 +181,22 @@ pull requests.
   the COM port, and WSLg windows are not vsynced. BrainFlow checks pass on Windows; the live run
   with the board is still to do. Details and known Windows test gaps: `deploy/windows/INSTALL.md`.
 
+- **EOG gaze prior (2026-10-25, branch `electrode-downloads`):** the C3/C4 pins never reach
+  the scalp, so their leads go to gel pads at the left and right outer canthus (channels `LO`,
+  `RO`; montage `EOG_MONTAGE` in `brainsync/recordings.py`). REF stays on the mastoid and DRL
+  where it is: DRL is not recorded, and a temple reference would put jaw EMG and blinks into
+  O1/O2. `brainsync/eog.py` turns the horizontal (RO − LO) and vertical (Fp1/Fp2) EOG into a
+  gaze vector per window, scores each target by direction (from the layout, or fitted on
+  labelled trials) and abstains on blinks, a centred gaze or a small margin; the decoder adds
+  `weight` (1.5) baseline spreads of it to the SSVEP scores (`Decoder.prior`), so a clear gaze
+  resolves an abstain and a strong SSVEP still wins. `python -m brainsync.server --eog` turns it
+  on (point mode, where target rects are known); `python -m brainsync.record -c four_eog --names
+  Fp1,Fp2,LO,RO,P7,P8,O1,O2` records the gate (2 x 2 grid, 13/15/17/11 Hz, 28 trials) and
+  `python -m brainsync.eog <file>` scores gaze, FBCCA and the fusion held out. Not yet recorded:
+  whether the board keeps the near-DC level (the ADS1299 is DC coupled; the 1 Hz high-pass is
+  ours and the EOG path skips it) and pad drift over minutes (`recentre` after a confirmed
+  pick) are the open questions. Tested on synthetic data only (`tests/test_eog.py`).
+
 ## System design
 
 ```
@@ -872,7 +888,10 @@ questions for the teammate"), with a note asking the teammate's Claude session t
     trained on the user's own trials (TRCA / eTRCA, stubs in his repo, his plan C) usually beats
     CCA clearly with more targets and short windows, which is this case. Plan:
     - Fix the hardware first: gel or paste on O1/O2, C3/C4 tied to CH1+ or moved to Oz/POz. A
-      trained classifier learns noise if the signal is poor.
+      trained classifier learns noise if the signal is poor. Alternative for C3/C4 (2026-10-25):
+      gel pads at the outer canthi as `LO`/`RO`, which gives a horizontal EOG gaze prior
+      (`brainsync/eog.py`, Status above); the gate recording then uses `four_eog` and
+      `--names Fp1,Fp2,LO,RO,P7,P8,O1,O2`.
     - The gate recording (section 14) doubles as TRCA training data.
     - TRCA is about 100 lines of numpy; Elijah can write it as a PR to his repo if the teammate is
       on the bridge. Judge it only on held-out trials, never on its training trials.
