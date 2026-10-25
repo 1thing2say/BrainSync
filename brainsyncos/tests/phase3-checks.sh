@@ -46,9 +46,26 @@
 #             installs it with --require-hashes from requirements.txt into a
 #             fresh venv where the Cerelog X8 reports 250 Hz, and a tampered
 #             copy is refused
-# Work happens in /scratch (tmpfs).
+#   model-deb the model package (brainsyncos-model-MODEL_ID, jetson only):
+#             control fields (all, Provides/Conflicts/Replaces brainsyncos-model),
+#             zstd-compressed, exactly its six files, root-owned 644, md5sums OK,
+#             the model and its licence text match config/model.env, the GGUF
+#             header has the pinned file type, model.conf holds BSOS_LLAMA_MODEL
+#             and BSOS_LLAMA_ARGS in systemd EnvironmentFile syntax and is no conffile
+#   model-step payload/hook.sh with 00, 60 and 86-model.sh against NVIDIA's
+#             target base layer (on disk under TESTDIR, not /scratch): the model
+#             and model.conf installed, its sha256 verified; a re-run works; a
+#             damaged model fails the step; purge removes model.conf; with a
+#             repository that has no model package the step only says so
+#   iso-size  the size limit: iso_tree_bytes on a known tree, iso_size_check,
+#             bad ISO_MAX_BYTES values refused, finalize_iso refusing an image
+#             over the limit, build-iso.sh stopping at its first estimate (before
+#             reading the base ISO) with a low limit, and the test repository's
+#             estimated Jetson ISO fitting the default limit
+# Work happens in /scratch (tmpfs), except where noted.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
+source "$BRAINSYNCOS_ROOT/scripts/model.sh"
 load_config
 load_product_config
 load_packages_config
@@ -578,6 +595,181 @@ print(BoardShim.get_sampling_rate(BoardIds.CERELOG_X8_BOARD), BoardShim.get_eeg_
     echo "pip --require-hashes: installs the wheel, refuses a tampered copy"
 }
 
+c_model_deb() {
+    local pkg deb x="$T/model-x" doc conf m f
+    load_model_config
+    pkg="$(model_package)"
+    deb="$(ls "$T/debs/jetson/${pkg}_${BRAINSYNCOS_VERSION}_all.deb")"
+    ! ls "$T"/debs/vm/brainsyncos-model-* > /dev/null 2>&1 || die "the vm edition got a model package"
+    dpkg-deb -f "$deb" Package Version Architecture Installed-Size Provides Conflicts Replaces
+    echo "$(basename "$deb"): $(file_size "$deb") bytes; members: $(ar t "$deb" | tr '\n' ' ')"
+    [ "$(dpkg-deb -f "$deb" Architecture)" = all ] && [ -z "$(dpkg-deb -f "$deb" Depends)" ] || die "Architecture or Depends"
+    for f in Provides Conflicts Replaces; do
+        [ "$(dpkg-deb -f "$deb" "$f")" = brainsyncos-model ] || die "$f is '$(dpkg-deb -f "$deb" "$f")', want brainsyncos-model"
+    done
+    [ "$(ar t "$deb" | tr '\n' ' ')" = "debian-binary control.tar.zst data.tar.zst " ] || die "the package is not zstd-compressed"
+    [ "$(dpkg-deb -f "$deb" Installed-Size)" -ge $((MODEL_SIZE / 1024)) ] || die "Installed-Size is below the model's size"
+    printf '%s\n' ./etc/brainsyncos/llama.d/model.conf "./opt/brainsyncos/models/$MODEL_FILE" "./opt/brainsyncos/models/$MODEL_FILE.sha256" \
+        "./usr/share/doc/$pkg/LICENSE" "./usr/share/doc/$pkg/README" "./usr/share/doc/$pkg/copyright" | LC_ALL=C sort > "$W/want"
+    deb_files "$deb" | diff "$W/want" - || die "$pkg has other files"
+    [ "$(dpkg-deb -c "$deb" | awk '{print $2}' | sort -u)" = root/root ] || die "files not all root/root"
+    [ "$(dpkg-deb -c "$deb" | awk '$1 ~ /^-/ {print $1}' | sort -u)" = -rw-r--r-- ] || die "files not all mode 644"
+    # On disk: the model does not belong in the /scratch tmpfs.
+    force_rm_tree "$x"
+    dpkg-deb -R "$deb" "$x"
+    (cd "$x" && md5sum -c --quiet DEBIAN/md5sums) || die "md5sums"
+    [ ! -e "$x/DEBIAN/conffiles" ] || die "the package has conffiles: $(cat "$x/DEBIAN/conffiles")"
+    m="$x/opt/brainsyncos/models/$MODEL_FILE"
+    [ "$(file_size "$m")" = "$MODEL_SIZE" ] && [ "$(sha256_of "$m")" = "$MODEL_SHA256" ] || die "the model is not the pinned file"
+    [ "$(cat "$m.sha256")" = "$MODEL_SHA256  $MODEL_FILE" ] || die "$MODEL_FILE.sha256: $(cat "$m.sha256")"
+    gguf_info "$m" | tee "$W/gguf"
+    grep -qx "GGUF_FILE_TYPE=$MODEL_FILE_TYPE" "$W/gguf" || die "GGUF file type is not $MODEL_FILE_TYPE"
+    doc="$x/usr/share/doc/$pkg"
+    [ "$(sha256_of "$doc/LICENSE")" = "$MODEL_LICENSE_SHA256" ] && grep -q 'Apache License' "$doc/LICENSE" \
+        || die "LICENSE is not the pinned text"
+    grep -q "resolve/$MODEL_HF_REVISION/$MODEL_FILE" "$doc/README" && grep -q "License: $MODEL_LICENSE" "$doc/copyright" \
+        || die "README or copyright"
+    conf="$x/etc/brainsyncos/llama.d/model.conf"
+    cat "$conf"
+    grep -v '^#' "$conf" > "$W/conf"
+    printf 'BSOS_LLAMA_MODEL=%s\nBSOS_LLAMA_ARGS="%s"\n' "/opt/brainsyncos/models/$MODEL_FILE" "$(model_llama_args)" \
+        | diff - "$W/conf" || die "model.conf holds other settings"
+    # systemd's EnvironmentFile syntax, kept to what a shell reads the same way.
+    ! grep -Ev '^[A-Z_][A-Z0-9_]*=([A-Za-z0-9./_+:=-]*|"[^"$`\\]*")$' "$W/conf" || die "model.conf lines outside the plain KEY=value form"
+    # shellcheck disable=SC1090  # the packaged model.conf
+    (set -u; . "$conf"; [ "$BSOS_LLAMA_MODEL" = "/opt/brainsyncos/models/$MODEL_FILE" ] && [ "$BSOS_LLAMA_ARGS" = "$(model_llama_args)" ]) \
+        || die "model.conf reads differently in a shell"
+    force_rm_tree "$x"
+    echo "$pkg: zstd, six files, root 644, the pinned model ($MODEL_SIZE bytes) and licence, model.conf for the llama-server unit, no conffiles"
+}
+
+# model_step TARGET REPO: 86-model.sh alone in TARGET (installed by the hook
+# before), with REPO bind-mounted read-only at /tmp/r; output in $W/step.out.
+model_step() {
+    local rc=0
+    mkdir -p "$1/tmp/r"
+    mount --bind "$2" "$1/tmp/r"
+    mount -o remount,bind,ro "$1/tmp/r"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$1" -- env BSOS_INSTALL_DIR=/opt/brainsyncos/installer \
+        BSOS_REPO_DIR=/tmp/r /bin/bash /opt/brainsyncos/installer/install.d/86-model.sh > "$W/step.out" 2>&1 || rc=$?
+    umount "$1/tmp/r"
+    rmdir "$1/tmp/r"
+    return "$rc"
+}
+
+c_model_step() {
+    local t="$T/model-target" p="$W/hp" log pkg m vrepo
+    load_model_config
+    pkg="$(model_package)"
+    log="$t/var/log/brainsyncos/install.log"
+    m="$t/opt/brainsyncos/models/$MODEL_FILE"
+    # NVIDIA's target base layer, as target_layer, but on disk: it gets the 1.3 GB model.
+    force_rm_tree "$t"
+    xorriso -osirrox on -indev "$(resolve_base_iso)" -extract /casper/ubuntu-server-minimal.squashfs "$W/t.squashfs" \
+        > /dev/null 2>&1 || die "cannot read the target base layer from the base ISO"
+    unsquashfs -q -no-progress -no-xattrs -d "$t" "$W/t.squashfs" > /dev/null
+    rm_released "$W/t.squashfs"
+    mkdir -p "$W/dt"
+    printf 'NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\0' > "$W/dt/model"
+    printf '1421224ABC123456\0' > "$W/dt/serial-number"
+    hook_payload "$p" 86-model.sh
+    run_hook "$p" "$t" "$REPO" || { tail -30 "$W/live.log"; die "hook failed"; }
+    grep -q 'BrainSyncOS layer installed (3 steps)' "$log" || die "log lacks the summary"
+    ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
+    grep '86-model.sh' "$log"
+    grep -qF "86-model.sh: $pkg $BRAINSYNCOS_VERSION installed: /opt/brainsyncos/models/$MODEL_FILE ($MODEL_SIZE bytes, sha256 verified), BSOS_LLAMA_ARGS=\"$(model_llama_args)\"" "$log" \
+        || die "86-model.sh did not finish"
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg-query -W -f '${Status} ${Provides}\n' "$pkg" \
+        | grep -qx 'install ok installed brainsyncos-model' || die "$pkg is not installed"
+    [ "$(stat -c '%U:%G %a' "$t/etc/brainsyncos/llama.d/model.conf")" = 'root:root 644' ] || die "model.conf owner or mode"
+    [ "$(file_size "$m")" = "$MODEL_SIZE" ] || die "the installed model has the wrong size"
+    no_mount_left "$t"
+    echo "jetson: $pkg installed, model.conf in /etc/brainsyncos/llama.d, sha256 verified by the step"
+    run_hook "$p" "$t" "$REPO" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
+    echo "re-run: OK"
+
+    # A damaged model fails the step (one byte changed; the package stays installed).
+    printf 'X' | dd of="$m" bs=1 seek=4096 conv=notrunc status=none
+    if model_step "$t" "$REPO"; then die "86-model.sh accepted a damaged model"; fi
+    grep -q 'does not match its sha256' "$W/step.out" || { cat "$W/step.out"; die "failed for another reason"; }
+    echo "damaged model: $(grep -m1 'does not match' "$W/step.out")"
+
+    "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- env DEBIAN_FRONTEND=noninteractive dpkg --purge "$pkg" > /dev/null
+    [ ! -e "$t/etc/brainsyncos/llama.d/model.conf" ] && [ ! -e "$m" ] || die "purge left model.conf or the model"
+    echo "purge: model.conf and the model gone (the llama-server unit's ConditionPathExists turns false)"
+
+    # A repository without a model package (the vm edition's, or the keyring alone).
+    vrepo="$T/repo/vm"
+    if [ ! -f "$vrepo/dists/$REPO_SUITE/InRelease" ]; then
+        vrepo="$W/nomodel-repo"
+        mkdir -p "$W/nomodel-debs"
+        cp "$T/debs/jetson"/brainsyncos-archive-keyring_*.deb "$W/nomodel-debs/"
+        "$BRAINSYNCOS_ROOT/scripts/build-repo.sh" --edition jetson --debs "$W/nomodel-debs" --key "$T/key/repo-signing-key.asc" \
+            --out "$vrepo" > /dev/null 2>&1 || die "could not build a repository without the model"
+    fi
+    sed -i 's/^BSOS_EDITION=.*/BSOS_EDITION=vm-arm64/' "$t/opt/brainsyncos/installer/device.env"
+    cp "$vrepo/repo-key.gpg" "$t/opt/brainsyncos/installer/repo-key.gpg"
+    model_step "$t" "$vrepo" || { cat "$W/step.out"; die "86-model.sh failed without a model package"; }
+    cat "$W/step.out"
+    grep -q '86-model.sh: vm-arm64 edition: the repository has no model package' "$W/step.out" || die "no skip message"
+    [ ! -e "$t/etc/brainsyncos/llama.d/model.conf" ] || die "model.conf appeared without a model package"
+    echo "repository without a model package: the step skips cleanly"
+    force_rm_tree "$t"
+}
+
+c_iso_size() {
+    local d="$W/sz" b est t0
+    mkdir -p "$d/t/a"
+    head -c 1 /dev/zero > "$d/t/one"
+    head -c 2048 /dev/zero > "$d/t/a/two"
+    head -c 2049 /dev/zero > "$d/t/a/three"
+    ln -s one "$d/t/link"
+    # 2 folders x 2048; files in 2048-byte blocks + 256 each; the link 256.
+    [ "$(iso_tree_bytes "$d/t")" = $((2 * 2048 + 2048 + 256 + 2048 + 256 + 4096 + 256 + 256)) ] \
+        || die "iso_tree_bytes gives $(iso_tree_bytes "$d/t")"
+    (iso_size_check test "$ISO_MAX_BYTES") || die "iso_size_check refused exactly ISO_MAX_BYTES"
+    if (iso_size_check test $((ISO_MAX_BYTES + 1))) 2> "$d/err"; then die "iso_size_check accepted ISO_MAX_BYTES + 1"; fi
+    grep -q "is over ISO_MAX_BYTES=$ISO_MAX_BYTES" "$d/err" || die "wrong message: $(cat "$d/err")"
+    echo "iso_tree_bytes and iso_size_check: $(sed 's/^.*ERROR: //' "$d/err")"
+    for b in 7.8e9 780000000 0 7800000000000; do
+        sed "s/^ISO_MAX_BYTES=.*/ISO_MAX_BYTES=$b/" "$BSOS_PRODUCT_CONFIG" > "$d/p.env"
+        if BSOS_PRODUCT_CONFIG="$d/p.env" bash -c 'source scripts/lib.sh; load_config; load_product_config' 2> "$d/err"; then
+            die "accepted ISO_MAX_BYTES=$b"
+        fi
+        grep -q 'ISO_MAX_BYTES must' "$d/err" || die "ISO_MAX_BYTES=$b refused for another reason: $(cat "$d/err")"
+    done
+    echo "refuses ISO_MAX_BYTES=7.8e9, 780000000, 0 and 7800000000000"
+
+    # The check on the finished image: finalize_iso refuses it before the
+    # move. A small image with an MBR, so it has a system area to read.
+    xorriso -outdev "$d/p.iso" -map "$d/t" / -boot_image any partition_offset=16 -commit > /dev/null 2>&1 \
+        || die "xorriso could not write a test image"
+    cp "$d/p.iso" "$d/q.iso"
+    if (finalize_iso "$d/p.iso" "$d/out.iso" 100000) 2> "$d/err"; then die "finalize_iso accepted an image over 100000 bytes"; fi
+    grep -q 'the ISO: [0-9]* bytes .* is over ISO_MAX_BYTES=100000' "$d/err" && [ ! -e "$d/out.iso" ] || die "finalize_iso: $(cat "$d/err")"
+    echo "finalize_iso: $(sed 's/^.*ERROR: //; s/ Leave.*//' "$d/err")"
+    (finalize_iso "$d/q.iso" "$d/out.iso" 200000) 2> "$d/err" && [ -s "$d/out.iso" ] && [ -s "$d/out.iso.sha256" ] \
+        || die "finalize_iso refused an image under 200000 bytes: $(cat "$d/err")"
+    echo "finalize_iso: the same image ($(file_size "$d/out.iso") bytes) passes with ISO_MAX_BYTES=200000"
+
+    # build-iso.sh stops at its first estimate, before it reads the base ISO.
+    ssh-keygen -q -t ed25519 -N '' -C size-test -f "$d/k"
+    sed "s/^ISO_MAX_BYTES=.*/ISO_MAX_BYTES=$((BASE_ISO_SIZE + 1000000))/" "$BSOS_PRODUCT_CONFIG" > "$d/p.env"
+    t0="$(date +%s)"
+    if BSOS_PRODUCT_CONFIG="$d/p.env" "$BRAINSYNCOS_ROOT/scripts/build-iso.sh" --repo "$REPO" --name size-test \
+        --authorized-keys "$d/k.pub" > "$d/build.out" 2>&1; then
+        die "build-iso.sh built an ISO over the limit"
+    fi
+    grep -q 'estimated ISO size: [0-9]* bytes .* is over ISO_MAX_BYTES' "$d/build.out" \
+        || { cat "$d/build.out"; die "build-iso.sh failed for another reason"; }
+    ! grep -q 'verify\|re-squash' "$d/build.out" && [ ! -e "$OUT_DIR/size-test.iso" ] || die "build-iso.sh went on past the estimate"
+    echo "build-iso.sh with ISO_MAX_BYTES=$((BASE_ISO_SIZE + 1000000)) stops after $(( $(date +%s) - t0 )) s: $(grep -o 'estimated ISO size: [0-9]* bytes ([0-9.]* GB)' "$d/build.out")"
+
+    # The test repository (the Jetson packages, the model included) fits the default limit.
+    est=$((BASE_ISO_SIZE + $(iso_tree_bytes "$REPO" "$BRAINSYNCOS_ROOT/payload")))
+    iso_size_check "estimated Jetson ISO with the $(find "$REPO/pool" -name '*.deb' | wc -l | tr -d ' ') test packages" "$est"
+}
+
 case "$1" in
     apt) c_apt ;;
     app-debs) c_app_debs ;;
@@ -586,6 +778,9 @@ case "$1" in
     debs) c_debs ;;
     usbserial) c_usbserial ;;
     wheel) c_wheel ;;
+    model-deb) c_model_deb ;;
+    model-step) c_model_step ;;
+    iso-size) c_iso_size ;;
     *) die "unknown check: $1 (see --help)" ;;
 esac
 force_rm_tree "$W"

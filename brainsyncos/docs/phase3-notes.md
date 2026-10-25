@@ -121,7 +121,26 @@ The pins below are the ones the research found; the README section "The package 
    - `IPAddressDeny=any`, with `IPAddressAllow=localhost`.
    - Sandboxing and low priority (`Nice=10`, `CPUWeight=50`); memory limits measured on the device.
    - Do not enable `--tools`, `--mcp-*` or router mode.
-4. **The model** ships as its own package, pinned by Hugging Face revision and sha256.
+4. **The model** ships as its own package, pinned by Hugging Face revision and sha256. **Done 2026-10-25** (part 3, branch `bsos/3d-model`); the README section "The local LLM's model (Phase 3d)" describes it.
+   - **Pin:** `config/model.env`. Qwen3.5-2B Q4_K_M from `unsloth/Qwen3.5-2B-GGUF` at revision `f6d5376be1edb4d416d56da11e5397a961aca8ae`: `Qwen3.5-2B-Q4_K_M.gguf`, 1,280,835,840 bytes, sha256 `aaf42c8b…9223`, GGUF file type 15. Licence: Apache-2.0, the text from `Qwen/Qwen3.5-2B` at `15852e8c…`, pinned by size and sha256 too.
+   - **Why this repository:** Qwen publishes no GGUF of the 2B, and ggml-org has only the 0.8B and 35B-A3B. unsloth's is converted from Qwen's own `Qwen/Qwen3.5-2B` (its `base_model`), is Apache-2.0 like it, and is by far the most used GGUF of it: about 404,000 downloads a month on 2026-10-25, against 48,000 for bartowski's and 40,000 for lmstudio-community's. It has not changed since 2026-03-02, and it is the file the research pinned.
+   - **Download:** `scripts/model.sh` fetches only `https://huggingface.co/<repo>/resolve/<revision>/<file>`, once, into `build/downloads/models/<sha256>/`. An interrupted download resumes (it did once in the first run). Every build checks size and sha256 again (7 s under qemu).
+   - **Package:** `brainsyncos-model-qwen3.5-2b-q4km` (Architecture `all`, 1,259,668,868 bytes). It installs the model and its `.sha256` in `/opt/brainsyncos/models/`, and `/etc/brainsyncos/llama.d/model.conf`. It Provides, Conflicts with and Replaces `brainsyncos-model`. The build checks the GGUF header (version 3, `qwen35`, file type 15).
+   - **Editions:** `PKG_EDITIONS=jetson` in `packages/brainsyncos-model/package.env` is the switch. The VM gets no model unless it is set to `all`.
+   - **Build cost**, under qemu at 1 CPU with the download cached: 80 s for the package, 80 s for the repository (apt-ftparchive hashes it), 11.5 minutes for a Jetson ISO with it. The first download took 8 minutes.
+   - **Compression:** zstd level 3 saves 21 MB (1.6 %) in 19 s. xz -6 runs at about 0.5 MB/s, some 45 minutes, and gained nothing on a slice of the weights. dpkg-deb's own zstd default level took 90 s for 32 MiB (64 times slower than level 3), so `build_deb` now takes `BSOS_DEB_COMPRESS` and `BSOS_DEB_LEVEL`.
+   - **Memory:** the package is staged on disk under `build/tmp`, with the model hard-linked from the download cache, and dpkg-deb's temporary file goes there too. `build-packages.sh` now builds every package on disk under its output folder, never on the 3 GiB `/scratch` tmpfs.
+   - **Install step `86-model.sh`** (its own step, so it does not touch `85-llama.sh`): it installs the one `brainsyncos-model-*` package the repository has, then checks `model.conf` and the sha256 (`BSOS_MODEL_VERIFY=0` skips the hash). Without a model package it prints `86-model.sh: <edition> edition: the repository has no model package; ...` and exits 0.
+   - **Contract with 3d-llama** (`brainsyncos-llama.service`, `85-llama.sh`):
+     - `/etc/brainsyncos/llama.d/model.conf` is an `EnvironmentFile` with exactly two settings: `BSOS_LLAMA_MODEL=/opt/brainsyncos/models/<file>.gguf` and `BSOS_LLAMA_ARGS="-c 4096"` (model options only, from `MODEL_LLAMA_ARGS`). Values need no shell or systemd escaping; a shell can source the file too.
+     - The unit: `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf`, `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `EnvironmentFile=-/etc/brainsyncos/llama.d/local.conf` for local options, and `ExecStart=... -m ${BSOS_LLAMA_MODEL} $BSOS_LLAMA_ARGS ...`. Unbraced, `$BSOS_LLAMA_ARGS` splits into separate options. Host, port, key, `-ngl` and limits stay in the unit.
+     - `model.conf` is not a conffile: an upgrade replaces it, and removing the package removes it, so the unit stops starting. Nothing in this track writes `local.conf`; that part is a proposal for 3d-llama.
+     - The model file is world-readable (644, root), so the unit's own user can read it under `ProtectSystem=strict`.
+   - **Verified** (x86-64 WSL2, arm64 builder under qemu, 1-CPU cap): `test_phase3.sh` checks `model-pin`, `model-deb`, `model-step` and `iso-size`, run with `BSOS_TEST_ONLY` on a test tree holding only the keyring and the model (the full suite was not run, see below):
+     - `model-pin`: bad values refused; the VM builds no model; the pins match Hugging Face's API.
+     - `model-deb`: fields, six files, root 644, md5sums, model and licence sha256, GGUF type, `model.conf` syntax, no conffiles.
+     - `model-step`: in NVIDIA's real target layer (`ubuntu-server-minimal`, on disk), the hook with 00, 60 and 86 installs the model and verifies its sha256; a re-run works; one changed byte fails the step; a purge removes `model.conf` and the model; a repository without a model is skipped.
+   - **Not verified:** llama-server loading the model (3d-llama, then the Orin); the full `test_phase3.sh` with every package; `test_phase2.sh` and `test_vm.sh` with 86-model.sh (their hook checks now count the steps and expect the skip line, but were not run); a real install.
 5. **BCI Voice** (done 2026-10-24, branch `bsos/3d-llm-backends`): `llm.backends` in `config/default.yaml`, tried in order: local, then Claude, then the fixed lists.
    - `local`: `kind: llama`, `http://127.0.0.1:9931`, key from `BRAINSYNC_LLAMA_API_KEY`, 10 s, `chat_template_kwargs: {enable_thinking: false}`. Without that key the backend is off, so a laptop runs Claude alone as before.
    - Each backend has its own timeout. A refused connection or a bad key hands over at once; a page takes at most the sum (14 s).
@@ -136,7 +155,11 @@ The pins below are the ones the research found; the README section "The package 
 
 - Build both ISOs end to end and run the suites.
 - Do a VM install in UTM, on a Mac.
-- Watch the ISO size: the Jetson ISO goes from about 5.0 GB to about 7 GB with CUDA and the 2B model. The build should fail above about 7.8 GB, the limit for an 8 GB stick.
+- Watch the ISO size: the Jetson ISO goes from about 5.0 GB to about 7 GB with CUDA and the 2B model. The build should fail above about 7.8 GB, the limit for an 8 GB stick. **The limit is done** (2026-10-25, branch `bsos/3d-model`):
+  - `ISO_MAX_BYTES=7800000000` in `config/brainsyncos.env`. An ISO is written raw to the whole stick, so the stick's capacity is all it can take. "8 GB" means 8e9 bytes, and real sticks are often a little smaller (the controller keeps part of the flash). 7.8e9 leaves 200 MB (2.5 %) for that. `write-usb.sh` still compares the ISO with the actual stick.
+  - `build-iso.sh` checks three times: an estimate before it reads the base ISO (base + repository + payload), the staged files before xorriso, and the finished image (`finalize_iso`, before the move). `build-vm-iso.sh` checks the first and the last.
+  - Measured: a Jetson ISO with the keyring and the model only is 6,288,945,152 bytes (6.29 GB). Both estimates were 6.4 MB (0.1 %) above it. Adding the other packages (runtime 79 MB, the rest small) and the CUDA runtime (0.48 GB) should give about 6.9 GB, 0.9 GB under the limit. That full ISO has not been built yet.
+  - The `iso-size` check: the estimate on a known tree, bad values refused, `finalize_iso` refusing an image over the limit and passing one under it, `build-iso.sh` stopping 12 s in with a low limit (before the base ISO is read), and the test repository fitting the default.
 - Write `docs/jetson-acceptance.md`, a checklist for the first Orin:
   - the CUDA backend loads (`nvgpu` libcuda);
   - `llama-bench` tok/s;

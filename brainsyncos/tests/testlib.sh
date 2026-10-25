@@ -8,9 +8,15 @@ nfail=0
 failed=""
 
 # check NAME CMD...: run CMD with output in $LOGS/NAME.log, report PASS/FAIL.
+# With BSOS_TEST_ONLY=NAME[,NAME...] set, other checks are skipped (for
+# re-running some checks against a build/tmp tree left by --keep).
 check() {
     local name="$1" t0 rc
     shift
+    case ",${BSOS_TEST_ONLY:-$name}," in
+        *,"$name",*) ;;
+        *) printf 'SKIP  %s (BSOS_TEST_ONLY)\n' "$name"; return 0 ;;
+    esac
     t0="$(date +%s)"
     # Subshell outside any if/&&/|| so set -e stays in force inside the check.
     set +e
