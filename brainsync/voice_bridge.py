@@ -45,13 +45,14 @@ its stdin, then terminate and kill if it lingers) and never relaunched.
 iPhone app, which draws the code itself: no display process at all (--no-stimulus is implied).
 The hello carries ``paradigm: code``, the m-sequence's bits and each slot's ``lag_frames``;
 ``baseline`` needs no recording (still answered after its seconds); ``stim_markers`` (the
-phone's cycle onsets, relayed by the server) drive ``brainsync.vep.live.CodeEngine``, whose
-first commit among the active slots is the ``selection``, never before the trial's first
-marker; no ``stim_onset``. ``train`` fits the template from that trial's cycles and answers
+phone's cycle onsets, relayed by the server) drive ``brainsync.vep.phone.CodeEngine`` (the
+c-VEP standard's ``vep.live.CodeVepDecoder`` on the board thread), whose first commit among
+the active slots is the ``selection``, never before the trial's first marker; no
+``stim_onset``. ``train`` fits the template from that trial's cycles and answers
 ``train_done`` with its leave-one-out accuracy (the template is saved as
 ``<stamp>_cvep_template.npz``; --template FILE loads one instead). Without a template a trial
 that is not a training trial answers ``no_selection`` "not_trained" at its first marker.
-``status`` carries ``trained``. --fake there is ``vep.live.MarkerFakeBoard``: its EEG carries
+``status`` carries ``trained``. --fake there is ``vep.phone.MarkerFakeBoard``: its EEG carries
 a random active target's code response (a training trial's cued one) from the trial's first
 marker on; it hands out samples 2 s late, so markers that come late still line up.
 
@@ -97,7 +98,7 @@ from .launch import Stimulus, launch_stimulus_live
 from .online import TUNED, Decoder, Voter, fit_rest, threshold_arg
 from .recordings import MONTAGE, POSTERIOR
 from .stimulus import StimulusConfig, load_config
-from .vep.live import CodeEngine, MarkerFakeBoard, code_hello, load_template
+from .vep.phone import CodeEngine, MarkerFakeBoard, code_hello, load_template
 
 log = logging.getLogger("voice_bridge")
 

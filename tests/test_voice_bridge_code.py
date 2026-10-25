@@ -1,6 +1,6 @@
 """brainsync.voice_bridge --paradigm code: c-VEP for the phone (INTERFACE-v2-draft.md section 9).
 
-The engine tests drive brainsync.vep.live.CodeEngine and MarkerFakeBoard in virtual time (a
+The engine tests drive brainsync.vep.phone.CodeEngine (on vep.live.CodeVepDecoder) and MarkerFakeBoard in virtual time (a
 fake clock, ``step`` called by hand, markers handed in as the server would relay them), so
 training and twenty decoded trials take well under a second of real time. The scripted-server
 tests run a Bridge with a stub engine (the hello, not_trained, train / train_done routing, the
@@ -23,8 +23,8 @@ from brainsync import voice_bridge as vb
 from brainsync.stimulus import load_config as load_stimulus
 from brainsync.vep.codes import m_sequence
 from brainsync.vep.cvep import Template
-from brainsync.vep.live import (CodeEngine, MarkerFakeBoard, code_bits, code_hello,
-                                cycle_samples, load_template)
+from brainsync.vep.phone import (CodeEngine, MarkerFakeBoard, code_bits, code_hello,
+                                 cycle_samples, load_template)
 from tests.test_voice_bridge import Peer, with_server
 from tools.contract_check import CODE_CONFIG, Report, build_parser, serve_once
 
@@ -173,6 +173,17 @@ def test_a_saved_template_loads_and_decodes(tmp_path):
     assert hits >= 7
     with pytest.raises(ValueError, match="does not fit"):
         load_template(rig.engine.template_path, load_stimulus("cvep_4"), rig.board.fs)
+
+
+def test_markers_a_cycle_late_still_line_up(tmp_path):
+    rig = Rig(tmp_path, latency=1.1, seed=7)
+    (_, _, ok, acc, _, _), = rig.trial(1, [0, 1], train=(1, 0, 10), max_s=30)[0]
+    assert ok and acc >= 0.9
+    hits = 0
+    for i in range(8):
+        got, _ = rig.trial(10 + i, [0, 1])
+        hits += bool(got) and got[0][2] == rig.board.fixated
+    assert hits >= 7
 
 
 def test_one_active_target_is_the_only_answer(tmp_path):
