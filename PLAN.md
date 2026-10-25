@@ -238,6 +238,21 @@ pull requests.
     checklist), `INTERFACE-v2-draft.md` (our bridge's answer under each open question), the
     README's BCI Voice section and honest claim, and `docs/DEVPOST.md` (the write-up draft).
 
+- **The c-VEP standard in every app (2026-10-25, branch `feat/cvep3-everywhere`):** every
+  multiple-choice app now defaults to `docs/CVEP-STANDARD.md`: three white squares on black,
+  one 63-bit m-sequence 21 frames apart, 30 training cycles on the first square (held-out
+  accuracy against 33 % chance), then a decision per 1.05 s cycle with a confidence bar and
+  correlation score under each square. Shared code: `brainsync/vep/live.py`
+  (`CodeVepDecoder`), `clients/js/cvep.js`. **BCI Voice changes too:** page mode is 2 options
+  + NEXT (s1 / s2 / s3, lags 0 / 21 / 42), confirm on s1 (Say it) and s3 (Back), training
+  replaces the baseline, Claude writes 2 options per page; the 4-target f-VEP page mode is
+  `config/fvep_page.yaml` (the teammate's bridge) and list mode `config/fvep_list.yaml`. The
+  protocol 2 additions are a proposal in `INTERFACE-v2-draft.md` section 9 for the teammate.
+  The server speaks PROTOCOL-v3 section 6; BrainScroll, BrainSwipe, BrainChess, BrainPoint
+  (Chrome and Desktop) and the demos keep `--paradigm freq`. Synthetic board only so far; at
+  margin 0 the decoder never abstains (false actions while reading or watching), to tune on
+  headset data.
+
 ## System design
 
 ```

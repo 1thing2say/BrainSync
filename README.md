@@ -101,6 +101,38 @@ instead, so synthetic files never mix with real ones.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
 
+## The c-VEP standard: three white squares in every app
+
+Every app that offers a choice now uses one configuration by default
+(`docs/CVEP-STANDARD.md`): code-modulated VEP (c-VEP, Bin et al. 2009) with **three white
+squares on black** showing one 63-bit m-sequence 21 frames (350 ms) apart, a **training
+step** first (look at the first square for 30 cycles, about 32 s; the held-out accuracy is
+then shown against 33 % chance), and **live confidence** under each square after every
+1.05 s cycle: a bar and the correlation score (`YES  ███░░░░░ +0.42 <`) plus
+`lead 0.31   choice: YES`. Two agreeing decisions make a pick. The shared code is
+`brainsync/vep/live.py` (Python decoder and text) and `clients/js/cvep.js` (browsers).
+
+| App | Three targets | Run (synthetic board first) |
+| --- | --- | --- |
+| Live demo | YES / NO / HELP | `python -m brainsync.demo --fake --fast --no-stimulus`, then `python -m brainsync.demo` |
+| VEP demo | YES / NO / HELP (`cvep_3`) | `python -m brainsync.vep --paradigm code -c cvep_3` |
+| BrainSwipe | Pass / Super like / Like | `python -m brainsync.swipe --fake --fast --no-stimulus`; mock: `python -m brainsync.swipe_web --open --pretrain` |
+| BrainScroll Reels | Up / Pause-play / Down | `python -m brainsync.reels --fake --fast --no-browser --no-voice --seconds 30` |
+| BrainChess | group A / group B / Back | `python -m brainsync.brainchess --fake --fast --no-stimulus` |
+| Server + reference page | YES / NO / HELP | `python -m brainsync.server --board fake --no-auth` (open the printed URL) |
+| BrainPoint (Chrome, Desktop) | best / second / More | the server above, then load `clients/chrome` or build `clients/macos` |
+| BCI Voice | option 1 / option 2 / More options | `python -m app.server --fake-decoder`; headset: `python -m app.server --bridge cerelog` |
+
+Drop `--fake` (and `--fast`, `--no-stimulus`) for the Cerelog X8. `--template FILE` /
+`--save-template FILE` reuse a template for the same wearer and fit. **`--paradigm freq`**
+(BCI Voice: `--config config/fvep_page.yaml`) keeps each app's old frequency (SSVEP) mode,
+which is what the app sections below still describe in detail. The server protocol is
+`PROTOCOL-v3.md` section 6, the voice bridge's proposal `INTERFACE-v2-draft.md` section 9.
+Known limits (standard, section 6): nothing has run on the headset yet; at the default
+margin 0 the decoder never abstains, so reading or watching can trigger an action
+(`--margin` raises the bar; the swipe mock uses 0.2); a template holds for one refresh rate.
+Photosensitivity: the code is broadband and includes 15-25 Hz; show the warning, Esc stops it.
+
 ## BCI Voice: reply with your eyes
 
 BCI Voice turns the decoder into a way to talk. A conversation partner speaks (or types); Claude
@@ -431,7 +463,10 @@ crashes or refuses the display makes the demo exit with code 1.
 
 ## Phase 4: Instagram Reels
 
-`brainsync.reels` scrolls Instagram Reels in Chrome with the same decoder. The BrainScroll
+`brainsync.reels` scrolls Instagram Reels in Chrome. By default it uses the c-VEP standard
+(three white squares: up, pause / play, down; config `reels_cvep`, section "The c-VEP
+standard" above). The rest of this section describes the frequency mode,
+`--paradigm freq`, with the same decoder as the demo. The BrainScroll
 extension (`extension/`, details in `extension/README.md`) draws two squares to the right
 of the reel on instagram.com/reels: the top one, "up", at 15 Hz goes to the previous reel,
 the bottom one, "down", at 17 Hz to the next (config `reels`: squares 0.3 high at
@@ -509,7 +544,8 @@ On the mock Reels page (no Instagram login), in two terminals:
 
 ```bash
 .venv/bin/python -m http.server -d extension 8000 --bind 127.0.0.1
-.venv/bin/python -m brainsync.reels --fake --no-voice --seconds 60 --calibrate 10
+.venv/bin/python -m brainsync.reels --fake --no-voice --seconds 60   # c-VEP: trains first
+.venv/bin/python -m brainsync.reels --paradigm freq --fake --no-voice --seconds 60 --calibrate 10
 # open http://127.0.0.1:8000/test/reels_mock.html and press Start
 ```
 
@@ -730,7 +766,11 @@ after each card change are ignored.
 ```
 
 After about 1 s it prints `BrainSwipe mock at http://127.0.0.1:8780 (simulated EEG board,
-no flicker); Ctrl-C stops`. The 30 s rest baseline (`--calibrate`) is fitted in virtual
+no flicker); Ctrl-C stops`. In the c-VEP default it shows three static white squares
+(Pass, Super like, Like) with the simulated training and live confidence bars from real
+`CodeVepDecoder` decisions; `--pretrain` trains in virtual time at startup and `--margin`
+(default 0.2) keeps reading the card from swiping. The rest of this paragraph describes
+the older frequency mock: its rest baseline was fitted in virtual
 time on a separate fake board, which is why startup is quick. The first decoder window
 arrives about 3.5 s later, once the buffer is full. `--port 0` picks a free port and
 prints its URL. The server uses only the standard library and the page loads only local
@@ -765,7 +805,7 @@ before (the key press and the swipe event crossed), the server answers 409 and t
 moves on with the decoder's swipe, so the next card is never swiped unseen.
 
 `--no-decoder` runs no board and no decoder: plain arrows and clicks swipe at once.
-`--cooldown`, `--deck`, `--match-rate` and `--calibrate` work as in `brainsync.swipe`.
+`--cooldown`, `--deck` and `--match-rate` work as in `brainsync.swipe`.
 `--seed` defaults to 0, so the feed and the noise repeat from run to run. Ctrl-C,
 `kill -INT` or SIGTERM stops the server and removes the rendered cards (exit 0), also when
 it was started in the background, where the shell ignores SIGINT. A busy port exits 1

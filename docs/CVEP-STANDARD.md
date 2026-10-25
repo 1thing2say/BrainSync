@@ -93,19 +93,52 @@ sent, only these two do). Cycle times are read from the stimulus log (`cycle:<n>
 ### 4.3 Local bridge ↔ browser extension (`brainsync/bridge.py`, BrainScroll)
 
 The same names on `ws://127.0.0.1:8765`: the config message adds `"paradigm": "code"` and the
-`code` object of 4.2; the extension sends `{"type": "cycle", "n": 12, "t": 1792809201.512}`;
-the decoder sends `{"type": "train", …}`, `{"type": "trained", …}` and
-`{"type": "decision", "scores": {…}, "raw": …, "committed": …, "lead": …, "changed": …}`.
+`code` object of 4.2, and its targets carry `lag` and `"freq": null`; phase `train` carries
+the cue target; the extension sends `{"type": "cycle", "n": 12, "t": 1792809201.512}` (wall
+clock, `Date.now() - performance.now()` plus the rAF time); the decoder sends
+`{"type": "train", …}`, `{"type": "trained", …}`,
+`{"type": "decision", "scores": {…}, "raw": …, "committed": …, "lead": …, "changed": …}` and
+`{"type": "toggle"}` (pause / play the visible reel), acknowledged with `toggled`. The f-VEP
+config message is unchanged. Details: `brainsync/bridge.py`.
+
+### 4.4 Voice partner server ↔ bridge (protocol 2, `brainsync/voice_bridge.py`)
+
+Proposed additions in `INTERFACE-v2-draft.md` section 9 (nothing existing changes; a hello
+without `paradigm` is the old frequency bridge): hello `paradigm: "code"` with slots carrying
+`lag_frames`; server → bridge `train` instead of `baseline`; bridge → server `train_progress`,
+`trained` and a per-decision `decision`; selection scores are correlations. They need the
+teammate's agreement before the teammate's own bridge speaks them; our bridge already does.
 
 ## 5. Mapping each app onto three targets
 
 | App | Target 0 | Target 1 | Target 2 |
 | --- | --- | --- | --- |
 | Demo / VEP demo (`cvep_3`) | YES | NO | HELP |
-| BrainScroll Reels | Up (previous) | Like / pause | Down (next) |
-| BrainSwipe | Pass | Super like | Like |
-| BrainChess | first group | second group | Back (undo the last pick) |
-| BrainPoint (point mode) | best candidate | second candidate | More |
-| Voice partner (page mode) | option 1 | option 2 | NEXT (more options); confirm screen: Say it / Back on targets 0 and 2 |
+| BrainScroll Reels (`reels_cvep`) | Up (previous reel) | Pause / play (local, reversible; not Like, which is public) | Down (next reel) |
+| BrainSwipe (`swipe_cvep`) | Pass | Super like (a like that always matches) | Like |
+| BrainChess (`chess_cvep`) | first group of candidate squares | second group | Back (undo the last pick); on the PLAY screen PLAY / RESTART / BACK |
+| BrainPoint (point mode, Chrome and Desktop) | best candidate | second candidate | More; confirm screen: Do it / Back on targets 0 and 2 |
+| Voice partner (page mode, `voice_cvep3`) | option 1 | option 2 | NEXT (more options); confirm screen: Say it / Back on targets 0 and 2 |
 
-The training target is always target 0, labelled with its app's name for it.
+The training target is always target 0, labelled with its app's name for it. Every app
+keeps its old frequency mode behind `--paradigm freq` (the voice app: `config/fvep_page.yaml`
+or `config/fvep_list.yaml`). BrainChess restarts the code with every new screen; the
+server, BrainScroll, BrainSwipe and BrainChess drop cycles that began within a short
+cooldown after a screen change.
+
+## 6. Known limits
+
+- **Not run on the headset yet.** Every app was checked on the synthetic board only. The
+  first live sessions on 2026-10-25 trained at chance, because of electrode contact
+  (README, "VEP paradigms").
+- **The decoder never abstains at margin 0.** With the standard's margin 0 and 2 votes, two
+  noise decisions in a row agree about a third of the time, so a user who is reading or
+  watching rather than looking at a square can trigger an action: about 13 false swipes a
+  minute on the fake board. The BrainSwipe mock uses `--margin 0.2` (no false swipes in
+  6 × 60 s on the fake board); the other apps keep 0 with a `--margin` flag. Tune it on
+  headset data before raising the default everywhere, since a margin that suppresses noise
+  may also suppress weak real responses.
+- **One refresh rate per template.** The template holds for the rate it was trained at; the
+  server in code mode accepts exactly one `--refresh-rates` value (default 60).
+- **Marker-to-sample timing** is unmeasured on the demo Mac (PLAN.md V5); a constant offset is
+  learnt into the template, jitter is not.

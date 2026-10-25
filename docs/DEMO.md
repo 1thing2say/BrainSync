@@ -1,5 +1,11 @@
 # BCI Voice: demo runbook
 
+> **Default changed (2026-10-25):** the app now starts in the c-VEP standard
+> (`docs/CVEP-STANDARD.md`): three white squares in a row (option 1, option 2, More options),
+> about 32 s of training on the left square first, confidence bars under each square, and
+> Say it / Back on the left and right squares. This runbook still describes the 4-target
+> frequency setup; start that with `--config config/fvep_page.yaml`.
+
 The operator's script for the Cal Hacks demo (`PLAN.md` V6 items 2-3). The partner talks, Claude
 writes 3 reply options, the user picks one with their eyes on the flicker display, confirms it,
 and the laptop speaks it.
