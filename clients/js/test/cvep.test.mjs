@@ -10,16 +10,16 @@ const C = require("../cvep.js");
 test("63 bits with the m-sequence balance (32 ones) and the standard's constants", () => {
   assert.equal(C.BITS.length, 63);
   assert.equal(C.BITS.filter((b) => b === 1).length, 32);
-  assert.deepEqual([C.N_TARGETS, C.LAG_FRAMES, C.CYCLE_FRAMES, C.TRAIN_CYCLES], [3, 21, 63, 30]);
+  assert.deepEqual([C.N_TARGETS, C.MAX_TARGETS, C.LAG_FRAMES, C.CYCLE_FRAMES, C.TRAIN_CYCLES],
+                   [2, 2, 31, 63, 30]);
   assert.ok(Object.isFrozen(C.BITS));
 });
 
-test("target k shows the sequence delayed by 21 k frames", () => {
+test("target k shows the sequence delayed by 31 k frames", () => {
   for (let n = 0; n < 200; n++) {
     assert.equal(C.bit(0, n), C.BITS[n % 63]);
-    assert.equal(C.bit(1, n + 21), C.bit(0, n));
-    assert.equal(C.bit(2, n + 42), C.bit(0, n));
-    assert.deepEqual(C.frameBits(n), [C.bit(0, n), C.bit(1, n), C.bit(2, n)]);
+    assert.equal(C.bit(1, n + 31), C.bit(0, n));
+    assert.deepEqual(C.frameBits(n), [C.bit(0, n), C.bit(1, n)]);
     assert.equal(C.color(0, n), C.bit(0, n) ? "#ffffff" : "#000000");
   }
   assert.equal(C.bit(0, -1), C.BITS[62]);

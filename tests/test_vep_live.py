@@ -39,8 +39,8 @@ def _run(board, dec, seconds, switches=None):
 
 def test_constants_match_the_cvep_3_config():
     cfg = load_config(live.CONFIG)
-    assert cfg.n_targets == live.N_TARGETS == 3
-    assert cfg.code.lag_frames == live.LAG_FRAMES == 21
+    assert cfg.n_targets == live.N_TARGETS == live.MAX_TARGETS == 2
+    assert cfg.code.lag_frames == live.LAG_FRAMES == 31
     assert cfg.code.length == live.LENGTH == live.CYCLE_FRAMES == 63
     assert cfg.fill == (1.0, 1.0, 1.0)
     assert live.BITS == tuple(int(b) for b in m_sequence(63))
@@ -53,7 +53,7 @@ def test_js_bits_and_constants_match_python():
     text = JS.read_text()
     bits = re.search(r"const BITS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
     assert tuple(int(b) for b in re.findall(r"[01]", bits)) == live.BITS
-    for name, value in (("LENGTH", 63), ("N_TARGETS", 3), ("LAG_FRAMES", 21),
+    for name, value in (("LENGTH", 63), ("N_TARGETS", 2), ("MAX_TARGETS", 2), ("LAG_FRAMES", 31),
                         ("CYCLE_FRAMES", 63), ("TRAIN_CYCLES", live.TRAIN_CYCLES),
                         ("BAR_CELLS", live.BAR_CELLS)):
         assert re.search(rf"const {name} = {value};", text), name
@@ -96,10 +96,10 @@ def test_decoder_trains_then_follows_the_gaze():
         seen.append(dec.progress[0])
         assert len(seen) < 400
     assert seen == sorted(seen) and dec.progress == (30, 30)
-    assert dec.train_accuracy >= 0.9 and dec.chance == pytest.approx(1 / 3)
-    commits, decisions = _run(board, dec, 30.0, {0: 0, 100: 1, 200: 2})
-    assert commits == [0, 1, 2]
-    assert decisions and all(len(d.scores) == 3 for d in decisions)
+    assert dec.train_accuracy >= 0.9 and dec.chance == pytest.approx(1 / 2)
+    commits, decisions = _run(board, dec, 30.0, {0: 0, 100: 1, 200: 0})
+    assert commits == [0, 1, 0]
+    assert decisions and all(len(d.scores) == 2 for d in decisions)
 
 
 def test_template_skips_training_and_retrain_forgets_it():
@@ -113,13 +113,17 @@ def test_template_skips_training_and_retrain_forgets_it():
     assert not other.training and math.isnan(other.train_accuracy)
     other.retrain()
     assert other.training and other.template is None
+    from brainsync.vep.cvep import Template
+    three = Template(mean=dec.template.mean, base=0, n_targets=3, lag_samples=87.5,
+                     fs=board.fs)
     with pytest.raises(ValueError, match="targets"):
-        live.CodeVepDecoder(board.fs, n_targets=4, lag_frames=21, template=dec.template)
+        live.CodeVepDecoder(board.fs, template=three)   # a 3-target template never loads
 
 
 @pytest.mark.parametrize("kw, match", [
-    ({"n_targets": 1}, "n_targets"), ({"n_targets": 4, "lag_frames": 21}, "fit"),
-    ({"train_cycles": 1}, "train_cycles"), ({"train_target": 3}, "train_target")])
+    ({"n_targets": 1}, "n_targets"), ({"n_targets": 3, "lag_frames": 21}, "never more"),
+    ({"n_targets": 2, "lag_frames": 63}, "fit"),
+    ({"train_cycles": 1}, "train_cycles"), ({"train_target": 2}, "train_target")])
 def test_bad_arguments(kw, match):
     with pytest.raises(ValueError, match=match):
         live.CodeVepDecoder(250.0, **kw)

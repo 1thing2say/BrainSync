@@ -6,8 +6,8 @@
  *     BrainSyncCode.bar(0.42)            // "███░░░░░" confidence bar, 8 cells
  *     const C = require("./cvep.js")     // node tests
  *
- * The standard (docs/CVEP-STANDARD.md): three white squares on black show one 63-bit
- * m-sequence, target k delayed by k * 21 frames (350 ms at 60 Hz). Frame n of target k is
+ * The standard (docs/CVEP-STANDARD.md): two white squares on black (never more) show one
+ * 63-bit m-sequence, the second delayed by 31 frames (517 ms at 60 Hz). Frame n of target k is
  * white when BITS[(n - k * LAG_FRAMES) mod 63] is 1. n counts frames since the layout's
  * first flickering frame, so a cycle starts on every n with n mod 63 == 0: the display
  * stamps that frame's flip time (performance.timeOrigin + rAF timestamp, Unix ms / 1000)
@@ -23,8 +23,9 @@
     1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0,
     1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1]);
   const LENGTH = 63;
-  const N_TARGETS = 3;
-  const LAG_FRAMES = 21;
+  const N_TARGETS = 2;
+  const MAX_TARGETS = 2;   // the project-wide cap: never more than two squares
+  const LAG_FRAMES = 31;
   const CYCLE_FRAMES = 63;
   const TRAIN_CYCLES = 30;
   const BAR_CELLS = 8;
@@ -111,7 +112,7 @@
   }
 
   const api = Object.freeze({
-    BITS, LENGTH, N_TARGETS, LAG_FRAMES, CYCLE_FRAMES, TRAIN_CYCLES, BAR_CELLS, WHITE, BLACK,
+    BITS, LENGTH, N_TARGETS, MAX_TARGETS, LAG_FRAMES, CYCLE_FRAMES, TRAIN_CYCLES, BAR_CELLS, WHITE, BLACK,
     bit, frameBits, color, cycleStart, cycleIndex, bar, labelLine, statusLine, level,
     roundHalfEven,
   });

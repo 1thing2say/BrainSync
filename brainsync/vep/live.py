@@ -1,16 +1,18 @@
-"""The c-VEP standard every BrainSync app uses: three white squares, one m-sequence.
+"""The c-VEP standard every BrainSync app uses: two white squares, one m-sequence.
 
     dec = CodeVepDecoder(fs=250.0)                      # the standard: 3 targets, 21-frame lags
     for X, t in board_reads:                            # every board read, always
         events = [(t_cycle, "cycle", n), ...]           # each cycle's first flip (Unix time)
         for d in dec.feed(X, t, events):
-            show(confidence(d, ("YES", "NO", "HELP")))  # bars under the squares
+            show(confidence(d, ("YES", "NO")))          # bars under the squares
             if d.changed and d.committed != ABSTAIN:
                 act(d.committed)
 
 The standard (docs/CVEP-STANDARD.md): one 63-bit m-sequence (``codes.m_sequence(63)``, seed
 1), frame ``n`` of target ``k`` shows bit ``BITS[(n - k * LAG_FRAMES) mod 63]``, 1 white and
-0 black, so three targets are 21 frames (350 ms at 60 Hz) apart, the widest three allow.
+0 black, so the two targets are 31 frames (517 ms at 60 Hz) apart, the widest two allow.
+**Never more than two targets** (``MAX_TARGETS``): every app, tool and config in BrainSync
+uses at most two squares, as far apart as the screen allows.
 A cycle is 63 frames, 1.05 s at 60 Hz. The display reports the Unix time of every cycle's
 first flip as a ``(t, "cycle", n)`` event.
 
@@ -42,19 +44,20 @@ from .codes import m_sequence
 from .cvep import Template, cross_validate, fit_template, lag_samples
 from .sync import SyncDecoder, cut_epochs
 
-__all__ = ["BITS", "CONFIG", "CYCLE_FRAMES", "CodeVepDecoder", "Confidence", "LAG_FRAMES",
+__all__ = ["BITS", "CONFIG", "MAX_TARGETS", "CYCLE_FRAMES", "CodeVepDecoder", "Confidence", "LAG_FRAMES",
            "LENGTH", "N_TARGETS", "TRAIN_CYCLES", "bar", "code_frame", "confidence",
            "confidence_labels", "confidence_line", "frame_bit", "standard_fake_board"]
 
 LENGTH = 63              # bits in one m-sequence period
 SEED = 1                 # LFSR start state; the JS copy (clients/js/cvep.js) uses the same bits
-N_TARGETS = 3
-LAG_FRAMES = 21          # 63 // 3: the widest spacing three targets allow
+N_TARGETS = 2
+MAX_TARGETS = 2          # the project-wide cap: never more than two squares
+LAG_FRAMES = 31          # 63 // 2: the widest spacing two targets allow
 CYCLE_FRAMES = LENGTH    # one frame per bit
 TRAIN_CYCLES = 30
 CYCLES = 2               # cycles averaged per decision
 VOTES = 2                # agreeing decisions before a commit
-CONFIG = "cvep_3"        # the PsychoPy stimulus config with these values
+CONFIG = "cvep_2"        # the PsychoPy stimulus config with these values
 BAND: Band = (1.0, 30.0)
 BAR_CELLS = 8
 
@@ -92,6 +95,9 @@ class CodeVepDecoder:
                  train_target: int = 0, template: Template | None = None) -> None:
         if int(n_targets) != n_targets or n_targets < 2:
             raise ValueError(f"n_targets must be an integer >= 2, got {n_targets!r}")
+        if n_targets > MAX_TARGETS:
+            raise ValueError(f"never more than {MAX_TARGETS} targets (docs/CVEP-STANDARD.md), "
+                             f"got {n_targets}")
         if (n_targets - 1) * lag_frames >= cycle_frames:
             raise ValueError(f"{n_targets} targets {lag_frames} frames apart do not fit in a "
                              f"{cycle_frames}-frame cycle")

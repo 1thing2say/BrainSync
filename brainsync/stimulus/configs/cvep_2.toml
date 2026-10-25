@@ -1,8 +1,8 @@
-# c-VEP (Bin et al. 2009) with two targets, the live-demo pair: one 63-bit m-sequence, the
-# right square shows it delayed by 31 frames (517 ms, the widest spacing two lags allow in a
-# 63-frame cycle), so timing slips of several frames cost nothing. Same layout as
-# two_targets: two large squares one screen height apart (YES left, NO right), the cue box held on
-# through the run. Each cycle is 63 frames = 1.05 s at 60 Hz.
+# The BrainSync c-VEP standard (docs/CVEP-STANDARD.md): two white squares, never more. One
+# 63-bit m-sequence, the right square delayed by 31 frames (517 ms, the widest spacing two lags
+# allow in a 63-frame cycle), so timing slips of several frames cost nothing. YES at the left
+# edge, NO at the right edge of the screen, the cue box held on through the run. Each cycle is
+# 63 frames = 1.05 s at 60 Hz.
 name = "cvep_2"
 
 [targets]
@@ -16,8 +16,9 @@ frames_per_bit = 1
 [layout]
 rows = 1
 cols = 2
-size = 0.4      # side length, screen heights
-spacing = 1.0   # centre to centre, screen heights
+size = 0.3      # side length, screen heights
+spacing = 1.14  # centre to centre: each square at its edge of a 1.5:1 screen, as far apart
+                # as the display allows
 
 [stimulus]
 hold_cue = true

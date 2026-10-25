@@ -646,7 +646,13 @@ def _check_coding(cfg: StimulusConfig) -> None:
             raise ValueError(f"[time] unknown order {t.order!r}; expected one of {ORDERS}")
 
 
+MAX_TARGETS = 2   # the project-wide cap (docs/CVEP-STANDARD.md): never more than two squares
+
+
 def _check_geometry(cfg: StimulusConfig) -> None:
+    if cfg.n_targets > MAX_TARGETS:
+        raise ValueError(f"config {cfg.name!r} has {cfg.n_targets} targets; BrainSync uses at "
+                         f"most {MAX_TARGETS} (docs/CVEP-STANDARD.md)")
     if cfg.size <= 0:
         raise ValueError(f"[layout] size must be positive, got {cfg.size}")
     for t in cfg.targets:
