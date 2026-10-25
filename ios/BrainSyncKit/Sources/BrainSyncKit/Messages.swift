@@ -6,12 +6,14 @@ import Foundation
 
 // MARK: - Server -> app
 
+/// `halves`: Look to Speak on the phone (c-VEP): the first `split` options sit on the left card,
+/// the rest on the right. `calibrate`: the c-VEP training trial, the user looks at `cue`.
 public enum PageMode: String, Codable, Equatable {
-    case page, confirm, list
+    case page, confirm, list, halves, calibrate
 }
 
 public enum SlotRole: String, Codable, Equatable {
-    case option, next, say, back
+    case option, next, say, back, left, right
 }
 
 public struct UISlot: Codable, Equatable {
@@ -39,7 +41,8 @@ public struct UISlot: Codable, Equatable {
     }
 }
 
-/// A menu option (schemas.Option): the list-mode entries of `show_page.options`.
+/// A menu option (schemas.Option): the list-mode entries of `show_page.options`. In halves mode an
+/// option with an empty utterance is "More options" (`isMoreOptions`).
 public struct MenuOption: Codable, Equatable {
     public var label: String
     public var utterance: String
@@ -62,6 +65,9 @@ public struct MenuOption: Codable, Equatable {
         utterance = try c.decode(String.self, forKey: .utterance)
         intentId = try c.decodeIfPresent(String.self, forKey: .intentId) ?? ""
     }
+
+    /// Halves mode: "More options" (choosing it alone asks for a new page; nothing is spoken).
+    public var isMoreOptions: Bool { utterance.isEmpty }
 }
 
 public struct ShowPage: Codable, Equatable {
@@ -72,9 +78,14 @@ public struct ShowPage: Codable, Equatable {
     public var text: String
     public var options: [MenuOption]
     public var highlightIndex: Int?
+    /// Halves mode: how many of `options` are on the left card (the rest are on the right).
+    public var split: Int?
+    /// Calibrate mode: the slot the user looks at.
+    public var cue: String?
 
     public init(listId: String, page: Int, mode: PageMode, slots: [UISlot], text: String = "",
-                options: [MenuOption] = [], highlightIndex: Int? = nil) {
+                options: [MenuOption] = [], highlightIndex: Int? = nil, split: Int? = nil,
+                cue: String? = nil) {
         self.listId = listId
         self.page = page
         self.mode = mode
@@ -82,12 +93,21 @@ public struct ShowPage: Codable, Equatable {
         self.text = text
         self.options = options
         self.highlightIndex = highlightIndex
+        self.split = split
+        self.cue = cue
+    }
+
+    /// Halves mode: the options on the left card and on the right card (`split` of them left).
+    public var halves: (left: [MenuOption], right: [MenuOption]) {
+        let k = min(max(split ?? 0, 0), options.count)
+        return (Array(options[..<k]), Array(options[k...]))
     }
 
     enum CodingKeys: String, CodingKey {
         case listId = "list_id"
         case page, mode, slots, text, options
         case highlightIndex = "highlight_index"
+        case split, cue
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +119,8 @@ public struct ShowPage: Codable, Equatable {
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         options = try c.decodeIfPresent([MenuOption].self, forKey: .options) ?? []
         highlightIndex = try c.decodeIfPresent(Int.self, forKey: .highlightIndex)
+        split = try c.decodeIfPresent(Int.self, forKey: .split)
+        cue = try c.decodeIfPresent(String.self, forKey: .cue)
     }
 }
 
@@ -233,11 +255,16 @@ public struct UIStatus: Codable, Equatable {
     /// The page's last mic_report state ("listening", "offline", ...), "" before the first.
     public var mic: String
     public var resumeReady: Bool
+    /// Paradigm code: the bridge holds a c-VEP template.
+    public var trained: Bool
+    /// The last calibration's leave-one-cycle-out score, 0...1; nil before one.
+    public var calibrationAccuracy: Double?
 
     public init(decoderConnected: Bool = false, decoderOk: Bool = false, displayOk: Bool = false,
                 llmOk: Bool = false, fakeDecoder: Bool = false, keyboardMode: Bool = false,
                 boardOk: Bool = false, decoderMessage: String = "", decoderName: String = "",
-                llm: String = "off", micMuted: Bool = false, mic: String = "", resumeReady: Bool = false) {
+                llm: String = "off", micMuted: Bool = false, mic: String = "", resumeReady: Bool = false,
+                trained: Bool = false, calibrationAccuracy: Double? = nil) {
         self.decoderConnected = decoderConnected
         self.decoderOk = decoderOk
         self.displayOk = displayOk
@@ -251,6 +278,8 @@ public struct UIStatus: Codable, Equatable {
         self.micMuted = micMuted
         self.mic = mic
         self.resumeReady = resumeReady
+        self.trained = trained
+        self.calibrationAccuracy = calibrationAccuracy
     }
 
     enum CodingKeys: String, CodingKey {
@@ -267,6 +296,8 @@ public struct UIStatus: Codable, Equatable {
         case micMuted = "mic_muted"
         case mic
         case resumeReady = "resume_ready"
+        case trained
+        case calibrationAccuracy = "calibration_accuracy"
     }
 
     public init(from decoder: Decoder) throws {
@@ -288,6 +319,66 @@ public struct UIStatus: Codable, Equatable {
         micMuted = bool(.micMuted)
         mic = str(.mic)
         resumeReady = bool(.resumeReady)
+        trained = bool(.trained)
+        calibrationAccuracy = try? c.decodeIfPresent(Double.self, forKey: .calibrationAccuracy)
+    }
+}
+
+/// Paradigm code (schemas.Stimulus): what the phone flickers. Slot `s` is bright on frame n of a
+/// trial (n = 0 at the first flicker frame) when `bits[((n - lags[s]) mod cycleFrames) /
+/// framesPerBit]` is "1" (CVEPCode). `depth`: the white layer's opacity when bright.
+public struct StimulusSpec: Codable, Equatable {
+    public var paradigm: String
+    public var refreshHz: Double
+    public var framesPerBit: Int
+    public var bits: String
+    public var lags: [String: Int]
+    public var depth: Double
+
+    public init(paradigm: String = "code", refreshHz: Double = 60, framesPerBit: Int = 1,
+                bits: String, lags: [String: Int], depth: Double = 1) {
+        self.paradigm = paradigm
+        self.refreshHz = refreshHz
+        self.framesPerBit = framesPerBit
+        self.bits = bits
+        self.lags = lags
+        self.depth = depth
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case paradigm
+        case refreshHz = "refresh_hz"
+        case framesPerBit = "frames_per_bit"
+        case bits, lags, depth
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        paradigm = try c.decodeIfPresent(String.self, forKey: .paradigm) ?? "code"
+        refreshHz = try c.decode(Double.self, forKey: .refreshHz)
+        framesPerBit = try c.decode(Int.self, forKey: .framesPerBit)
+        bits = try c.decode(String.self, forKey: .bits)
+        lags = try c.decode([String: Int].self, forKey: .lags)
+        depth = try c.decodeIfPresent(Double.self, forKey: .depth) ?? 1
+    }
+}
+
+/// The server's answer to `clock_ping`: its own time when it answered.
+public struct ClockPong: Codable, Equatable {
+    public var id: Int
+    public var tPhone: Double
+    public var tServer: Double
+
+    public init(id: Int, tPhone: Double, tServer: Double) {
+        self.id = id
+        self.tPhone = tPhone
+        self.tServer = tServer
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case tPhone = "t_phone"
+        case tServer = "t_server"
     }
 }
 
@@ -300,6 +391,8 @@ public enum ServerMessage: Equatable {
     case state(StateMessage)
     case transcript(Transcript)
     case status(UIStatus)
+    case stimulus(StimulusSpec)
+    case clockPong(ClockPong)
     /// A message type this app does not know (its `type`), from a newer server.
     case unknown(String)
 
@@ -318,6 +411,8 @@ public enum ServerMessage: Equatable {
         case "state": return .state(try d.decode(StateMessage.self, from: data))
         case "transcript": return .transcript(try d.decode(Transcript.self, from: data))
         case "status": return .status(try d.decode(UIStatus.self, from: data))
+        case "stimulus": return .stimulus(try d.decode(StimulusSpec.self, from: data))
+        case "clock_pong": return .clockPong(try d.decode(ClockPong.self, from: data))
         default: return .unknown(type)
         }
     }
@@ -349,6 +444,23 @@ public enum MicState: String, Codable, CaseIterable {
     case paused
 }
 
+/// The first frame of c-VEP cycle `cycle` (0 = the trial's onset), in Unix seconds on the
+/// server's clock (the phone's time plus the ClockSync offset).
+public struct CycleMarker: Codable, Equatable {
+    public var cycle: Int
+    public var tUnix: Double
+
+    public init(cycle: Int, tUnix: Double) {
+        self.cycle = cycle
+        self.tUnix = tUnix
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cycle
+        case tUnix = "t_unix"
+    }
+}
+
 public enum ClientMessage: Equatable {
     case ttsDone(utteranceId: String)
     case partnerText(text: String, source: PartnerSource)
@@ -358,11 +470,26 @@ public enum ClientMessage: Equatable {
     case judgment(utteranceId: String, correct: Bool)
     case micSet(muted: Bool)
     case micReport(state: MicState, restarts: Int)
+    /// Clock sync: the phone's Unix time when sent; answered by `clock_pong`.
+    case clockPing(id: Int, tPhone: Double)
+    /// The phone drew the first frame of these cycles of trial `trialId` (server clock).
+    case cycleMarkers(trialId: Int, markers: [CycleMarker], droppedFrames: Int)
+    /// The phone's refresh check (locked to 60 Hz): the measured rate and whether it flickers.
+    case displayReport(refreshHz: Double, ok: Bool, message: String)
+    /// Train the c-VEP template now (Settings > Recalibrate).
+    case calibrate
 
     enum Keys: String, CodingKey {
         case type
         case utteranceId = "utterance_id"
         case text, source, key, correct, muted, state, restarts
+        case id
+        case tPhone = "t_phone"
+        case trialId = "trial_id"
+        case markers
+        case droppedFrames = "dropped_frames"
+        case refreshHz = "refresh_hz"
+        case ok, message
     }
 
     private struct Box: Codable {
@@ -398,6 +525,22 @@ public enum ClientMessage: Equatable {
                 try c.encode("mic_report", forKey: .type)
                 try c.encode(state, forKey: .state)
                 try c.encode(restarts, forKey: .restarts)
+            case .clockPing(let id, let tPhone):
+                try c.encode("clock_ping", forKey: .type)
+                try c.encode(id, forKey: .id)
+                try c.encode(tPhone, forKey: .tPhone)
+            case .cycleMarkers(let trialId, let markers, let dropped):
+                try c.encode("cycle_markers", forKey: .type)
+                try c.encode(trialId, forKey: .trialId)
+                try c.encode(markers, forKey: .markers)
+                try c.encode(dropped, forKey: .droppedFrames)
+            case .displayReport(let hz, let ok, let message):
+                try c.encode("display_report", forKey: .type)
+                try c.encode(hz, forKey: .refreshHz)
+                try c.encode(ok, forKey: .ok)
+                try c.encode(message, forKey: .message)
+            case .calibrate:
+                try c.encode("calibrate", forKey: .type)
             }
         }
 
@@ -419,6 +562,18 @@ public enum ClientMessage: Equatable {
             case "mic_report":
                 message = .micReport(state: try c.decode(MicState.self, forKey: .state),
                                      restarts: try c.decodeIfPresent(Int.self, forKey: .restarts) ?? 0)
+            case "clock_ping":
+                message = .clockPing(id: try c.decode(Int.self, forKey: .id),
+                                     tPhone: try c.decode(Double.self, forKey: .tPhone))
+            case "cycle_markers":
+                message = .cycleMarkers(trialId: try c.decode(Int.self, forKey: .trialId),
+                                        markers: try c.decode([CycleMarker].self, forKey: .markers),
+                                        droppedFrames: try c.decodeIfPresent(Int.self, forKey: .droppedFrames) ?? 0)
+            case "display_report":
+                message = .displayReport(refreshHz: try c.decode(Double.self, forKey: .refreshHz),
+                                         ok: try c.decode(Bool.self, forKey: .ok),
+                                         message: try c.decodeIfPresent(String.self, forKey: .message) ?? "")
+            case "calibrate": message = .calibrate
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                                                        debugDescription: "unknown ui message type \(type)")

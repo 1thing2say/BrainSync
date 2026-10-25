@@ -53,6 +53,12 @@ struct MirrorView: View {
                          active: flickering, keyboard: model.keyboardMode) { slot in model.tapSlot(slot) }
         case .list:
             listView(page, flickering: flickering)
+        case .halves, .calibrate:
+            // The phone's own Look to Speak screen (c-VEP) shows these; the mirror only lists them.
+            Text(page.mode == .calibrate ? page.text : page.options.map(\.label).joined(separator: " · "))
+                .foregroundStyle(Palette.muted)
+                .frame(maxWidth: .infinity, minHeight: 120)
+                .card()
         }
     }
 
@@ -93,6 +99,10 @@ struct MirrorView: View {
             return "Page \(page.page) · Pick a reply"
         case .confirm:
             return "Page \(page.page) · Say this?"
+        case .halves:
+            return "Page \(page.page) · Left or right"
+        case .calibrate:
+            return "Calibrating"
         }
     }
 }

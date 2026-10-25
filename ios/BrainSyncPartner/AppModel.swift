@@ -250,6 +250,8 @@ final class AppModel {
             addLine(fromPartner: String(describing: msg.who) == "partner", text: msg.text)
         case .status(let msg):
             status = msg
+        case .stimulus, .clockPong:
+            break  // c-VEP on the phone: wired by the Look to Speak screen (draft section 9)
         case .unknown:
             break
         }
