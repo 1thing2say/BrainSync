@@ -1208,3 +1208,324 @@ def test_resume_in_slots_mode_does_not_reach_the_mode():
     rig.message({"type": "pause"})
     rig.message({"type": "resume"})
     assert rig.session.phase == "run" and rig.tr.to(1, "error") == []
+
+
+# -- code mode (c-VEP, docs/CVEP-STANDARD.md section 4.2) -----------------------------------
+
+TRAIN = 6          # training cycles in these tests (the standard records 30)
+CODE_SLOTS = ("yes", "no", "help")
+
+
+class CodeRig(Rig):
+    """A code-mode session (CodeBank) on a virtual-time coded fake board."""
+
+    def __init__(self, *, fake: bool = True, point_factory=None, seed: int = 0,
+                 log: list | None = None, train_cycles: int = TRAIN, **kw: Any) -> None:
+        from brainsync.server.coding import CodeBank
+        from brainsync.stimulus import load_config
+        from brainsync.stimulus.coded import CodeSequence
+        from brainsync.vep.fake import SequenceFakeBoard
+        self.board = SequenceFakeBoard(CodeSequence(load_config("cvep_3")), t0=T0, amp=3.0,
+                                       noise=8.0, seed=seed)
+        self.tr = FakeTransport()
+        self.bank = CodeBank(self.board.fs, ch_names=self.board.ch_names,
+                             train_cycles=train_cycles)
+        self.records: list[tuple[str, dict]] = [] if log is None else log
+        self.session = Session(self.tr, self.board, self.bank, fake=fake,
+                               point_factory=point_factory, clock=lambda: self.board.now,
+                               log=lambda k, f: self.records.append((k, f)), **kw)
+
+    def run_code(self, conn_id: int = 1, slots=CODE_SLOTS, **kw: Any) -> dict:
+        """Connect a slots controller and train; returns the running layout."""
+        self.connect(conn_id, code_hello(slots=slots, **kw))
+        self.until(lambda: self.session.phase == "run", limit=30.0)
+        return self.session.layout
+
+
+def code_hello(**kw: Any) -> P.Hello:
+    kw.setdefault("slots", CODE_SLOTS)
+    h = hello(**kw)
+    return h
+
+
+def test_code_welcome_carries_the_code_and_three_slots():
+    rig = CodeRig()
+    w = rig.session.catchup(1, "controller", code_hello())[0]
+    assert w["paradigm"] == "code" and w["freqs"] == [] and w["max_slots"] == 3
+    assert w["refresh_rates"] == [60.0]            # one bit a frame: the nominal rate only
+    code = w["code"]
+    assert code["lag_frames"] == 21 and code["cycle_frames"] == 63 == len(code["bits"])
+    assert code["train_cycles"] == TRAIN and code["fill"] == "#ffffff"
+    from brainsync.vep.live import BITS
+    assert code["bits"] == list(BITS)
+
+
+def test_code_slots_layout_has_lags_and_trains_on_the_first_slot():
+    rig = CodeRig()
+    rig.connect(1, code_hello())
+    lay = rig.tr.of("layout")[0]
+    assert lay["stage"] == "slots"
+    assert [(t["slot"], t["lag"], t["freq"]) for t in lay["targets"]] == \
+        [("yes", 0, None), ("no", 21, None), ("help", 42, None)]
+    ph = rig.tr.of("phase")[-1]
+    assert ph == {"type": "phase", "phase": "train", "flicker": True, "seconds": None,
+                  "text": "Look at the YES square", "cue": "yes", "cycles": TRAIN}
+    assert rig.board.fixated == 0 and rig.board.flickering   # the fake user follows the cue
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+    progress = [m["cycle"] for m in rig.tr.of("train")]
+    assert progress[0] == 0 and progress[-1] == TRAIN and progress == sorted(progress)
+    assert all(m["of"] == TRAIN for m in rig.tr.of("train"))
+    (done,) = rig.tr.of("trained")
+    assert done["cycles"] == TRAIN and done["chance"] == 0.333 and done["accuracy"] >= 0.8
+    assert "calibrate" not in rig.tr.phases()
+    assert rig.tr.phases()[-1] == "run" and rig.board.fixated == -1
+    kinds = rig.kinds()
+    assert kinds.index("train_start") < kinds.index("trained")
+    # the train phase came before the first run, and the layout did not change
+    assert rig.tr.phases().index("train") < rig.tr.phases().index("run")
+    assert len(rig.tr.of("layout")) == 1
+
+
+def test_code_gaze_gives_decisions_and_a_selection_of_that_slot():
+    rig = CodeRig()
+    lay = rig.run_code()
+    trained_at = rig.now
+    rig.message({"type": "gaze", "slot": "help"})
+    assert rig.board.fixated == 2                 # lag 42 is decoder target 2
+    rig.until(lambda: rig.selections(), limit=15.0)
+    sel = rig.selections()[0]
+    assert sel["slot"] == "help" and sel["layout_id"] == lay["layout_id"]
+    assert set(sel["scores"]) == set(CODE_SLOTS) and sel["score"] == sel["scores"]["help"]
+    assert sel["score"] > 0.5 and -1.0 <= min(sel["scores"].values())   # correlations
+    assert sel["t_server"] >= trained_at + P.COOLDOWN_S
+    decisions = rig.tr.of("decision")
+    assert decisions and all(d["layout_id"] == lay["layout_id"] for d in decisions)
+    last = decisions[-1]
+    assert set(last["scores"]) == set(CODE_SLOTS) and last["raw"] == "help"
+    assert last["committed"] == "help" and isinstance(last["lead"], float)
+    assert any(d["changed"] for d in decisions)
+    # a gaze held on help selects it again after the cooldown (dwell to repeat)
+    rig.until(lambda: len(rig.selections()) >= 2, limit=15.0)
+    assert [s["slot"] for s in rig.selections()] == ["help", "help"]
+
+
+def test_code_decisions_come_about_once_a_cycle_without_a_gaze():
+    # Without a gaze the fake EEG is noise: the decisions still come (one per 1.05 s cycle),
+    # with low scores. (The standard's decoder has no margin, so noise may commit too.)
+    rig = CodeRig()
+    rig.run_code()
+    n = len(rig.tr.of("decision"))
+    rig.advance(6.3)
+    new = rig.tr.of("decision")[n:]
+    assert 5 <= len(new) <= 7
+    assert all(max(d["scores"].values()) < 0.5 for d in new)
+
+
+def test_code_decisions_and_selections_only_for_the_running_layout():
+    rig = CodeRig()
+    rig.run_code()
+    rig.message({"type": "gaze", "slot": "no"})
+    rig.message({"type": "pause"})
+    n = len(rig.tr.of("decision"))
+    rig.advance(5.0)
+    assert len(rig.tr.of("decision")) == n and rig.selections() == []
+    assert not rig.board.flickering and not rig.bank.active
+    rig.message({"type": "resume"})               # a short pause keeps the template
+    assert rig.session.phase == "run" and rig.tr.of("trained").__len__() == 1
+    rig.until(lambda: rig.selections(), limit=15.0)
+    assert rig.selections()[0]["slot"] == "no"
+
+
+def test_code_two_slots_never_select_the_unused_lag():
+    rig = CodeRig()
+    lay = rig.run_code(slots=("yes", "no"))
+    assert [t["lag"] for t in lay["targets"]] == [0, 21]
+    rig.message({"type": "gaze", "slot": "no"})
+    rig.until(lambda: rig.selections(), limit=15.0)
+    assert rig.selections()[0]["slot"] == "no"
+    assert all(set(d["scores"]) == {"yes", "no"} for d in rig.tr.of("decision"))
+
+
+def test_code_too_many_slots():
+    rig = CodeRig()
+    h = P.parse_hello({"type": "hello", "protocol": 3, "role": "controller", "mode": "slots",
+                       "slots": ["a", "b", "c", "d"], "refresh_hz": 60.0, "accepted": True},
+                      max_slots=4)
+    rig.connect(1, h)
+    (err,) = rig.tr.to(1, "error")
+    assert err["code"] == "too_many_slots" and "3 targets" in err["message"]
+    assert rig.session.phase == "wait"
+
+
+def test_code_pause_during_training_restarts_it_on_resume():
+    rig = CodeRig()
+    rig.connect(1, code_hello())
+    rig.until(lambda: rig.tr.of("train")[-1]["cycle"] >= 3)
+    rig.message({"type": "pause"})
+    assert rig.session.phase == "pause" and not rig.board.flickering
+    rig.advance(2.0)
+    rig.message({"type": "resume"})
+    assert rig.session.phase == "train" and rig.tr.of("train")[-1]["cycle"] == 0
+    assert rig.kinds().count("train_start") == 2
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+    assert len(rig.tr.of("trained")) == 1
+
+
+def test_code_long_pause_trains_again():
+    rig = CodeRig()
+    rig.run_code()
+    rig.message({"type": "pause"})
+    rig.advance(LONG_PAUSE_S + 1)
+    rig.message({"type": "resume"})
+    assert rig.session.phase == "train"
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+    assert len(rig.tr.of("trained")) == 2
+
+
+def test_code_template_is_kept_for_a_new_controller_and_sent_on_catchup():
+    rig = CodeRig()
+    rig.run_code()
+    rig.drop(1)
+    first = rig.connect(2, code_hello())
+    assert [m["type"] for m in first][-1] == "trained"
+    assert rig.session.phase == "run" and rig.kinds().count("train_start") == 1
+    viewer = rig.session.catchup(3, "viewer", hello(role="viewer", mode=None, slots=None))
+    assert viewer[-1]["type"] == "trained"
+
+
+def test_code_template_older_than_ten_minutes_is_trained_again():
+    rig = CodeRig()
+    rig.run_code()
+    rig.drop(1)
+    rig.advance(RECALIBRATE_AFTER_S + 1)
+    rig.connect(2, code_hello())
+    assert rig.session.phase == "train"
+
+
+def test_code_training_catchup_sends_the_progress():
+    rig = CodeRig()
+    rig.connect(1, code_hello())
+    rig.until(lambda: rig.tr.of("train")[-1]["cycle"] >= 2)
+    out = rig.session.catchup(2, "viewer", hello(role="viewer", mode=None, slots=None))
+    assert out[1]["phase"] == "train" and out[-1]["type"] == "train"
+    assert out[-1]["cycle"] >= 2
+
+
+def test_code_controller_leaving_mid_training_drops_it():
+    rig = CodeRig()
+    rig.connect(1, code_hello())
+    rig.until(lambda: rig.tr.of("train")[-1]["cycle"] >= 2)
+    rig.drop(1)
+    assert not rig.session.training and rig.bank.training and rig.bank.progress[0] == 0
+    assert rig.board.fixated == -1 and not rig.board.flickering
+    rig.connect(2, code_hello())
+    assert rig.session.phase == "train" and rig.tr.of("train")[-1]["cycle"] == 0
+
+
+class _NoEventsBoard:
+    """A coded board for fake=False: noise only, never any cycle events of its own."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.fs, self.ch_names = inner.fs, inner.ch_names
+
+    def read(self):
+        return self.inner.read()
+
+
+def test_code_cycles_are_mapped_to_the_board_clock_with_the_ping_offset():
+    rig = CodeRig(fake=False)
+    rig.session._board = _NoEventsBoard(rig.board)
+    rig.connect(1, code_hello())
+    lay = rig.session.layout
+    rig.advance(0.5)
+    rig.message({"type": "cycle", "layout_id": lay["layout_id"], "n": 0,
+                 "t_client": rig.now - 0.2})       # no ping yet: the receipt time is used
+    rec = [f for k, f in rig.records if k == "cycle"]
+    assert rec[-1]["t_cycle"] == pytest.approx(rig.now)
+    rig.message({"type": "ping", "ping_id": 1, "t_client": rig.now - 5.0})   # offset +5 s
+    t_client = rig.now - 5.0 - 0.3
+    rig.message({"type": "cycle", "layout_id": lay["layout_id"], "n": 1, "t_client": t_client})
+    rec = [f for k, f in rig.records if k == "cycle"]
+    assert rec[-1]["t_cycle"] == pytest.approx(t_client + 5.0) and rec[-1]["n"] == 1
+    # never later than its receipt
+    rig.message({"type": "cycle", "layout_id": lay["layout_id"], "n": 2,
+                 "t_client": rig.now - 5.0 + 3.0})
+    assert [f for k, f in rig.records if k == "cycle"][-1]["t_cycle"] == pytest.approx(rig.now)
+    # another layout's cycle is not decoded
+    rig.message({"type": "cycle", "layout_id": lay["layout_id"] + 5, "n": 3,
+                 "t_client": rig.now - 5.0})
+    assert [f["why"] for k, f in rig.records if k == "cycle_ignored"] == \
+        ["not the running layout"]
+
+
+def test_code_client_cycles_train_the_decoder_on_a_real_board():
+    """fake=False: only the controller's cycle messages time the epochs. The coded board
+    still makes the EEG (its flicker started by hand), and the client reports the board's
+    own cycle times, as a display on the same clock would."""
+    rig = CodeRig(fake=False)
+    rig.connect(1, code_hello())
+    lay = rig.session.layout
+    rig.board.set_target(0)
+    rig.board.start_flicker()
+    rig.message({"type": "ping", "ping_id": 1, "t_client": rig.now})   # offset 0
+
+    def step_with_cycles() -> None:
+        rig.board.advance(DT)
+        for t, kind, n in rig.board.read_events():
+            if kind == "cycle":
+                rig.push("message", 1, P.validate_client(
+                    {"type": "cycle", "layout_id": lay["layout_id"], "n": n, "t_client": t}))
+        rig.session.step()
+
+    end = rig.now + 30.0
+    while rig.session.phase != "run":
+        assert rig.now < end
+        step_with_cycles()
+    assert rig.tr.of("trained")[0]["accuracy"] >= 0.8
+
+
+def test_code_freq_server_ignores_cycles():
+    rig = Rig()
+    lay = rig.run_slots()
+    rig.message({"type": "cycle", "layout_id": lay["layout_id"], "n": 0, "t_client": rig.now})
+    assert [f["why"] for k, f in rig.records if k == "cycle_ignored"] == \
+        ["the server runs --paradigm freq"]
+    w = rig.session.catchup(2, "viewer", hello(role="viewer", mode=None, slots=None))[0]
+    assert w["paradigm"] == "freq" and "code" not in w
+
+
+def test_code_point_mode_trains_on_three_centred_patches_then_starts_the_mode():
+    pick = P.layout(0, "pick", [
+        P.Target("b1", 1.0, 0.0, "Sign in", "button", (P.Rect(0.1, 0.1, 0.2, 0.2),)),
+        P.Target("b2", 2.0, 0.0, "Help", "button", (P.Rect(0.4, 0.1, 0.2, 0.2),)),
+        P.Target("more", 3.0, 0.0, "More", "more", (P.Rect(0.7, 0.7, 0.2, 0.2),))])
+    mode = StubMode(start=lambda now: [pick, P.phase("run", True)])
+    rig = CodeRig(point_factory=lambda: mode)
+    rig.connect(1, hello(mode="point", slots=None, viewport={"w": 1600, "h": 900, "dpr": 1}))
+    lay = rig.tr.of("layout")[0]
+    assert lay["stage"] == "train" and [t["slot"] for t in lay["targets"]] == ["t0", "t1", "t2"]
+    assert [t["lag"] for t in lay["targets"]] == [0, 21, 42]
+    rects = [t["rects"][0] for t in lay["targets"]]
+    assert len({r["y"] for r in rects}) == 1                       # one row
+    assert abs(rects[0]["x"] + rects[2]["x"] + rects[2]["w"] - 1.0) < 1e-3   # centred
+    assert rects[0]["w"] * 1600 == pytest.approx(rects[0]["h"] * 900, abs=2)  # square in px
+    ph = rig.tr.of("phase")[-1]
+    assert ph["phase"] == "train" and ph["cue"] == "t0" and ph["text"] == "Look at the LEFT square"
+    assert mode.calls == []                         # the mode waits for the template
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+    assert mode.calls[0][0] == "start"
+    lay = rig.tr.of("layout")[-1]
+    assert lay["stage"] == "pick"
+    assert [(t["slot"], t["lag"], t["freq"]) for t in lay["targets"]] == \
+        [("b1", 0, None), ("b2", 21, None), ("more", 42, None)]
+    rig.message({"type": "gaze", "slot": "b2"})
+    rig.until(lambda: rig.selections(), limit=15.0)
+    assert rig.selections()[0]["slot"] == "b2" and ("on_selection", "b2") in mode.calls
+
+
+def test_code_onset_is_only_logged():
+    rig = CodeRig()
+    lay = rig.run_code()
+    rig.message({"type": "onset", "layout_id": lay["layout_id"], "t_client": rig.now})
+    assert [k for k, _ in rig.records].count("onset") == 1
