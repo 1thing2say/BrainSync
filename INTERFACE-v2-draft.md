@@ -365,7 +365,7 @@ the server pauses and waits for `display_ok: true` before sending `baseline` aga
 | Layout | diamond: s1 top, s2 left, s3 right, s4 bottom; fixation mark in each square, sentence beside it | |
 | Waveform | sine (17 Hz does not divide 60) | |
 | Decoder window | 4 s now; 2 s if the replay tuning agrees | |
-| Cue before each trial | 1.0 s | |
+| Cue before each trial | the server's: 2 s + 0.2 s per word on a new page, up to 6 s; 2 s for a page seen again; 1.5 s before Say it / Back (changed from 1.0 s on 2026-10-25, reading time) | |
 | Rest after each trial | 1.0 s | |
 | Max trial length | 10.0 s | |
 | Baseline length | 10.0 s | |

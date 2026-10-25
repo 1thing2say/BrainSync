@@ -212,6 +212,12 @@ pull requests.
   `stim_start` (logging only: the decoder slides over the stream). Not yet measured: the SSVEP
   from a Chrome flicker on the headset, and Chrome's frame timing on the demo Mac. Known gap:
   the iPhone app connecting takes over the one page connection, which pauses the session.
+- **Reading time before the flicker (2026-10-25, branch `feat/user-display`):** a new page used to
+  stay still for 1 s, then flicker, while the decoder can commit about 2–2.5 s into the flicker;
+  three sentences take 5–6 s to read, so the user was still reading as it flickered and the card
+  their eyes rested on could be picked. Now a new page stays still for `stim.cue_s` (2 s) + 0.2 s
+  per word on it, up to 6 s; a page seen again (after Didn't catch that or Back) for 2 s; the
+  confirm screen for 1.5 s (`Orchestrator._cue_seconds`).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
@@ -314,7 +320,7 @@ Design risks to settle:
 3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
    a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
    demo script rehearses switching to it.
-4. **Time per reply.** One pick is cue 1 s + decode ≥ 5 s + highlight 0.6 s, then the confirm
+4. **Time per reply.** One pick is the reading time (2–6 s, `stim.cue_s` + `read_s_per_word`) + decode ≥ 5 s + highlight 0.6 s, then the confirm
    step (decode ≥ 5 s), then speech + rest 1 s: about 13–14 s at best. Each NEXT (new page of 3)
    adds about 7 s, and each abstained trial repeats. Ranking quality (V3) and the decoder's abstain
    rate (section 13, item 10) matter more than any other choice. Showing the decoder's scores on
@@ -491,7 +497,9 @@ BrainSync/
 | `stim.slots` | s1 13 Hz, s2 15 Hz, s3 17 Hz, s4 11 Hz | Mirrors his `four_diamond.toml` (changed 2026-10-24 from 15/17/20/12); checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
 | `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 11 Hz, the lowest and nearest the user's alpha, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
-| `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
+| `stim.cue_s` | 2.0 | Still screen before each trial; a page already read (after Didn't catch that or Back) gets only this. Was 1.0 (2026-10-25: too short to read 3 sentences, and gaze resting on an option while reading during the flicker picks it) |
+| `stim.read_s_per_word` / `stim.cue_max_s` | 0.2 / 6.0 | A new page stays still for `cue_s` + 0.2 s per word on it, up to 6 s (3 sentences of about 20 words: 6 s) |
+| `stim.confirm_cue_s` | 1.5 | Still screen before the Say it / Back trial (its sentence was just picked) |
 | `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
 | `stim.rest_s` | 1.0 | Still screen after a trial |
 | `baseline.seconds` | 10.0 | Still screen at start for the decoder's resting baseline |
@@ -563,7 +571,7 @@ live decoding.
 
 ```
 IDLE --(warning accepted)--> BASELINE (still screen, baseline.seconds) --> MENU_CUE
-MENU_CUE --(cue_s, page ready)--> STIMULATING
+MENU_CUE --(reading time, page ready)--> STIMULATING
 STIMULATING --selection(option k)--> SELECTED --> CONFIRMING (sentence k shown; targets "Say it" / "Back")
 CONFIRMING --selection(say)-->  SPEAKING --(tts_done)--> REST --> MENU_CUE (new page)
 CONFIRMING --selection(back) / no_selection / timeout--> REST --> MENU_CUE (same page)

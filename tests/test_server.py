@@ -23,7 +23,7 @@ HELLO = DecoderHello(protocol=PROTOCOL, name="test", refresh_hz=60.0, waveform="
 def fast_config():
     """The default config with every wait shortened so a full trial takes well under a second."""
     return BASE.model_copy(update={
-        "stim": BASE.stim.model_copy(update={"cue_s": 0.05, "rest_s": 0.05, "max_trial_s": 2.0}),
+        "stim": BASE.stim.model_copy(update={"cue_s": 0.05, "read_s_per_word": 0.0, "confirm_cue_s": 0.05, "rest_s": 0.05, "max_trial_s": 2.0}),
         "baseline": BASE.baseline.model_copy(update={"seconds": 0.05, "timeout_s": 1.0}),
         "selection": BASE.selection.model_copy(update={"chosen_highlight_s": 0.05}),
         "speech": BASE.speech.model_copy(update={"max_speak_s": 2.0}),

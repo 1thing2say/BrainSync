@@ -177,6 +177,7 @@ class Orchestrator:
         self.active_trial: int | None = None
         self.selected_slot: str | None = None
         self.screen: Screen | None = None  # fixed from MENU_CUE until the trial ends
+        self.read_page: tuple | None = None  # the last page or list item given its reading time
 
         self._list_ids = itertools.count(1)
         self._utterance_ids = itertools.count(1)
@@ -559,10 +560,25 @@ class Orchestrator:
             self._set_list(self.pending_list)
             self.pending_list = None
         self.screen = self._build_screen()
-        self._enter(St.MENU_CUE, self.cfg.stim.cue_s)
+        self._enter(St.MENU_CUE, self._cue_seconds(self.screen.show))
         self._send_ui(self.screen.show)
         self._send_ui(Trial(trial_id=self.trial_id + 1, phase="cue"))
         self._send_decoder(self.screen.display)
+
+    def _cue_seconds(self, show: ShowPage) -> float:
+        """How long a screen stays still before its trial, so the user can read it before anything
+        flickers (gaze that rests on an option while reading would pick it). A new page: cue_s
+        plus read_s_per_word for each word on it, up to cue_max_s. The same page again (after
+        Didn't catch that or Back): cue_s. The confirm screen: confirm_cue_s."""
+        stim = self.cfg.stim
+        if show.mode == "confirm":
+            return stim.confirm_cue_s
+        key = (show.list_id, show.page, show.highlight_index if show.mode == "list" else None)
+        if key == self.read_page:
+            return stim.cue_s
+        self.read_page = key
+        text = show.text if show.mode == "list" else " ".join(s.utterance or s.label for s in show.slots)
+        return min(stim.cue_s + stim.read_s_per_word * len(text.split()), max(stim.cue_s, stim.cue_max_s))
 
     def _start_trial(self) -> None:
         self.trial_id += 1

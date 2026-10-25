@@ -351,8 +351,9 @@ Notes:
   DISPLAY OFF and BOARD ? are expected.
 - **The conversation** panel: each partner line and each spoken reply.
 
-**While waiting (PLAN design risk 4).** One reply is cue 1 s + decode + highlight, then the
-confirm step (cue and decode again), then the speech. The bridge's decoder (1.5 s windows every
+**While waiting (PLAN design risk 4).** One reply is the reading time (a new page stays still
+2–6 s, longer for longer sentences, so the user reads every option before anything flickers) +
+decode + highlight, then the confirm step (1.5 s still, then decode again), then the speech. The bridge's decoder (1.5 s windows every
 0.25 s, 4 agreeing windows in a row, starting fresh at each trial) committed about 4.3 s after
 the onset on the fake board, so a reply takes about 12-14 s at best; the headset can only be
 slower. Each NEXT adds one cue and one decode, and "Didn't catch that" means the decoder abstained and the trial repeats. Say
