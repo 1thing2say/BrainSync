@@ -11,9 +11,11 @@ server:
 
 display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
-  flicker: psychopy            # psychopy: the bridge's PsychoPy window flickers the code and stamps each
-                               # cycle's flip (c-VEP needs those times), the page is a still mirror;
-                               # browser: the session page flickers (config/fvep_page.yaml uses it)
+  flicker: browser             # browser: the session page in Chrome draws the code (ui/cvep.js) and
+                               # reports each cycle's flip, which the server relays to the headless
+                               # bridge (INTERFACE-v2-draft.md 9.7); psychopy (still available): the
+                               # bridge's PsychoPy window draws it and stamps the cycles, the page is
+                               # a still mirror
 
 stim:
   paradigm: code               # c-VEP (docs/CVEP-STANDARD.md); f-VEP fallbacks: config/fvep_*.yaml
