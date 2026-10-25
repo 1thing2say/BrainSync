@@ -1,0 +1,28 @@
+# BrainSyncOS tools: the native toolbox for the steps that do not run aarch64
+# code (scripts/builder.sh tools). Packing and compressing .debs, byte-compiling
+# Python (.pyc depends on the Python version only, not the CPU), signing the
+# repository, and the squashfs and ISO work of the ISO builds. It is built for
+# the host's own architecture (amd64 on an x86-64 laptop, arm64 on Apple
+# Silicon), so these steps skip qemu-user emulation. The same base image and
+# digest as docker/Dockerfile.builder (a manifest list, so it serves both
+# architectures), and the builder's tools minus the compilers. Its python3.12
+# must be the builder's exact Debian version; scripts/build-packages.sh checks
+# that before it compiles anything here. Installed versions are recorded in
+# /usr/share/brainsyncos/tools-packages.txt.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      xorriso squashfs-tools mtools fdisk gdisk dosfstools \
+      cpio zstd lz4 xz-utils dpkg-dev \
+      rsync file bsdextrautils gnupg apt-utils \
+      python3 python3.12 python3-yaml \
+      grub-common openssh-client openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /usr/share/brainsyncos \
+ && dpkg-query -W -f '${Package} ${Version}\n' > /usr/share/brainsyncos/tools-packages.txt
+
+WORKDIR /work

@@ -23,14 +23,15 @@
 # Every wheel is installed with --no-deps (the lock is the whole set; never
 # run pip check, which would list the PsychoPy dependencies left out on
 # purpose) and --no-compile; then folders named tests are removed (never
-# numpy/testing: scipy imports it) with psychopy/demos, and everything is
-# byte-compiled with unchecked-hash .pyc files, so nothing is written under
-# /opt at runtime and two builds give the same bytes.
+# numpy/testing: scipy imports it) with psychopy/demos. packages/brainsync-runtime
+# byte-compiles its staged copy with unchecked-hash .pyc files (build_deb
+# BSOS_DEB_COMPILE, in the native tools container when that is on), so nothing
+# is written under /opt at runtime and two builds give the same bytes.
 #
 #   venv_pip PYTHON ARGS...   the pinned pip, run by PYTHON
 #   venv_fetch                complete the wheelhouse (no network if it is)
 #   venv_build                build VENV_DIR, unless built with the same inputs
-#   venv_compile DIR...       byte-compile DIR (as the venv does)
+#   venv_compile DIR...       byte-compile DIR with the venv's python
 # VENV_WHEELS (after venv_build): "name==version sha256 file" per wheel.
 
 VENV_DIR=/opt/brainsyncos/venv
@@ -187,8 +188,6 @@ venv_build() {
     find "$VENV_SITE" -type d \( -name tests -o -name __pycache__ \) -prune -exec rm -rf {} +
     rm -rf "$VENV_SITE/psychopy/demos"
     [ -f "$VENV_SITE/numpy/testing/__init__.py" ] || die "numpy/testing is gone (scipy imports it)"
-    log "byte-compiling $(du -sm "$VENV_DIR" | awk '{print $1}') MB"
-    venv_compile "$VENV_SITE"
     printf '%s\n' "$inputs" > "$VENV_MARK"
     log "venv ready: $n wheels, $(du -sm "$VENV_DIR" | awk '{print $1}') MB"
 }

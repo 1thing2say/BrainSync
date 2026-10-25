@@ -353,22 +353,87 @@ installed_size() {
 # directories 755, gives every file root ownership and, when
 # BSOS_SOURCE_DATE_EPOCH is set (builder.sh: the commit time), that mtime
 # (dpkg-deb gets it as SOURCE_DATE_EPOCH). Prints the .deb's path.
+# Set by scripts/build-packages.sh or the caller:
+#   BSOS_DEB_COMPRESSION  xz (the default, dpkg-deb's own level) or
+#                         TYPE:LEVEL, e.g. zstd:19 (package.env PKG_COMPRESSION)
+#   BSOS_DEB_COMPILE      directories (relative to STAGING, comma-separated)
+#                         to byte-compile first (deb_compile); an Installed-Size
+#                         field in the control file is then counted again
+#   BSOS_PACK_DIR         defer: leave STAGING in BSOS_PACK_DIR/DEB/root with
+#                         its settings in DEB/pack.env instead of packing it;
+#                         build-packages.sh --pack packs it (native tools mode)
 build_deb() {
-    local s="$1" out="$2" pkg ver arch deb
+    local s="$1" out="$2" pkg ver arch deb d
     pkg="$(sed -n 's/^Package: //p' "$s/DEBIAN/control")"
     ver="$(sed -n 's/^Version: //p' "$s/DEBIAN/control")"
     arch="$(sed -n 's/^Architecture: //p' "$s/DEBIAN/control")"
     [ -n "$pkg" ] && [ -n "$ver" ] && [ -n "$arch" ] || die "$s/DEBIAN/control needs Package, Version and Architecture"
+    deb="$out/${pkg}_${ver}_${arch}.deb"
+    if [ -n "${BSOS_PACK_DIR:-}" ]; then
+        d="$BSOS_PACK_DIR/${pkg}_${ver}_${arch}"
+        force_rm_tree "$d"
+        mkdir -p "$d"
+        cp -a "$s" "$d/root" || die "cannot copy the staged $pkg to $d"
+        {
+            echo "# $pkg, staged by build_deb for build-packages.sh --pack."
+            echo "PACK_EPOCH=${BSOS_SOURCE_DATE_EPOCH:-}"
+            echo "PACK_COMPRESSION=${BSOS_DEB_COMPRESSION:-xz}"
+            echo "PACK_COMPILE=${BSOS_DEB_COMPILE:-}"
+            [ -z "${BSOS_DEB_COMPILE:-}" ] || echo "PACK_PYTHON=$(python_deb_version)"
+        } > "$d/pack.env"
+        printf '%s\n' "$deb"
+        return 0
+    fi
+    if [ -n "${BSOS_DEB_COMPILE:-}" ]; then
+        deb_compile "$s" "$BSOS_DEB_COMPILE"
+        if grep -q '^Installed-Size: ' "$s/DEBIAN/control"; then
+            sed -i "s/^Installed-Size: .*/Installed-Size: $(installed_size "$s")/" "$s/DEBIAN/control"
+        fi
+    fi
     (cd "$s" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0r md5sum) > "$s/DEBIAN/md5sums"
     find "$s" -type d -exec chmod 755 {} +
     chmod 644 "$s/DEBIAN/control" "$s/DEBIAN/md5sums"
     local epoch="${BSOS_SOURCE_DATE_EPOCH:-}"
     [ -z "$epoch" ] || find "$s" -exec touch -h -d "@$epoch" {} +
     mkdir -p "$out"
-    deb="$out/${pkg}_${ver}_${arch}.deb"
-    SOURCE_DATE_EPOCH="${epoch:-$(date +%s)}" dpkg-deb --root-owner-group -Zxz --build "$s" "$deb" > /dev/null \
-        || die "dpkg-deb failed for $pkg"
+    # shellcheck disable=SC2046  # the flags, split on purpose
+    SOURCE_DATE_EPOCH="${epoch:-$(date +%s)}" dpkg-deb --root-owner-group $(deb_compress_flags "${BSOS_DEB_COMPRESSION:-xz}") \
+        --build "$s" "$deb" > /dev/null || die "dpkg-deb failed for $pkg"
     printf '%s\n' "$deb"
+}
+
+# deb_compress_flags SPEC: dpkg-deb's flags for xz (its default level, as
+# before PKG_COMPRESSION existed) or TYPE:LEVEL (xz:0-9, zstd:1-22). zstd runs
+# with BSOS_JOBS threads at most.
+deb_compress_flags() {
+    case "$1" in
+        xz) echo "-Zxz" ;;
+        xz:[0-9]) echo "-Zxz -z${1#xz:}" ;;
+        zstd:[1-9]|zstd:1[0-9]|zstd:2[0-2]) echo "-Zzstd -z${1#zstd:} --threads-max=${BSOS_JOBS:-1}" ;;
+        *) die "unknown package compression '$1' (xz, xz:0-9 or zstd:1-22)" ;;
+    esac
+}
+
+# python_deb_version: the Debian version of python3.12 here. .pyc files depend
+# only on it, so the native tools container may compile for the arm64 target
+# when its python3.12 is exactly the builder's.
+python_deb_version() {
+    dpkg-query -W -f '${Version}' python3.12 2>/dev/null || die "python3.12 is not installed"
+}
+
+# deb_compile STAGING DIRS: byte-compile DIRS (comma-separated, relative to
+# STAGING) as scripts/venv.sh did in place: unchecked-hash .pyc files, the
+# same bytes on every build; each module's recorded path is its installed one
+# (compileall -d /DIR).
+deb_compile() {
+    local s="$1" d out
+    require_cmd python3.12
+    for d in $(printf '%s\n' "$2" | tr ',' ' '); do
+        [ -d "$s/$d" ] || die "nothing to byte-compile at $s/$d"
+        out="$(cd / && PYTHONDONTWRITEBYTECODE=1 SOURCE_DATE_EPOCH="${BSOS_SOURCE_DATE_EPOCH:-0}" python3.12 -I -m compileall -q -f \
+            -j "${BSOS_JOBS:-1}" --invalidation-mode unchecked-hash -d "/$d" "$s/$d" 2>&1)" \
+            || { printf '%s\n' "$out" | tail -20 >&2; die "byte-compiling /$d failed"; }
+    done
 }
 
 # --- product ISO builds (build-iso.sh, build-vm-iso.sh) --------------------------

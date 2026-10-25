@@ -12,7 +12,9 @@
 # display apps (PsychoPy and pyglet, X11 and GLX only) also load the GL and X
 # libraries listed as Recommends: NVIDIA's install puts them on the Jetson; on
 # the VM they come with a desktop. /usr/share/doc/brainsync-runtime/wheels.txt
-# names every wheel with its sha256.
+# names every wheel with its sha256. The venv is byte-compiled (unchecked-hash
+# .pyc) as it is packed: build_deb BSOS_DEB_COMPILE, in the native tools
+# container on an x86-64 host (scripts/build-packages.sh).
 
 BSOS_SCRIPT=brainsync-runtime
 source "$BRAINSYNCOS_ROOT/scripts/lib.sh"
@@ -62,4 +64,7 @@ Description: Python runtime of the BrainSync apps
  FastAPI, uvicorn, anthropic and the rest ($(wc -l < "$VENV_WHEELS" | tr -d ' ') wheels).
  The apps themselves are in the brainsync package.
 EOF
-build_deb "$s" "${BSOS_PKG_OUT:?}" > /dev/null
+# Byte-compiled while packed (lib.sh build_deb; natively where the builder is
+# emulated), then Installed-Size is counted again with the .pyc files.
+log "byte-compiling $(du -sm "$s/opt/brainsyncos/venv" | awk '{print $1}') MB as part of packing"
+BSOS_DEB_COMPILE="${VENV_SITE#/}" build_deb "$s" "${BSOS_PKG_OUT:?}" > /dev/null

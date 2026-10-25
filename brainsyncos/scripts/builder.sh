@@ -7,6 +7,11 @@
 #   scripts/builder.sh shell            interactive shell in the builder
 #   scripts/builder.sh image            print the image reference
 #   scripts/builder.sh clean [--all]    delete build/out (--all: all of build/)
+#   scripts/builder.sh tools CMD [ARG...]  run CMD in the native tools container
+#                                       (the builder when tools mode is off)
+#   scripts/builder.sh tools-mode       print "native PLATFORM" or "builder"
+#   scripts/builder.sh ids              print the image ids: "builder ID",
+#                                       "tools ID" (or "tools -"); builds them
 #
 # Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
 # only when the ISO is found; commands that do not need it run without),
@@ -28,6 +33,20 @@
 # need qemu-user/binfmt registered with Docker).
 # `clean` truncates large files before deleting them: Docker Desktop keeps
 # deleted bind-mounted files open, so a plain rm would not free their space.
+#
+# Native tools mode (BSOS_NATIVE_TOOLS=auto, the default; 1 forces it on, 0
+# off): `tools` runs in brainsyncos-tools (docker/Dockerfile.tools), built for
+# the Docker engine's own architecture, with the same mounts, caps and
+# environment as `run`. It takes the steps that run no aarch64 code: packing
+# and byte-compiling the packages, the repository, the ISO builds. auto turns
+# it on only where the builder is emulated (an x86-64 host); on an arm64 host
+# `tools` is simply `run`.
+# Build lock: `run` and `tools` of a heavy step (build-packages, build-wheels,
+# build-repo, build-iso, build-vm-iso, extract-iso, repack-iso) first take an
+# flock on BSOS_BUILD_LOCK_FILE (default /tmp/brainsyncos-build.lock, shared by
+# every worktree), so parallel builds queue instead of fighting over the CPUs.
+# It logs while it waits. BSOS_BUILD_LOCK=0 skips it; hosts without flock(1)
+# (macOS) do not queue.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 load_config
@@ -37,6 +56,9 @@ DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.builder"
 # tini as PID 1 passes Ctrl-C/SIGTERM to the whole process group. Without it the
 # script itself is PID 1, ignores SIGINT, and xorriso/dd keep running.
 INIT_FLAGS="--init -e TINI_KILL_PROCESS_GROUP=1"
+# The image and platform `run` uses: the builder's, unless `tools` set them.
+RUN_IMAGE=""
+RUN_PLATFORM=""
 
 image_ref() {
     printf '%s:%s\n' "$BUILDER_IMAGE_NAME" "$(sha256_of "$DOCKERFILE" | cut -c1-12)"
@@ -93,7 +115,15 @@ cmd_run() {
         case "$src" in *' '*) die "the BrainSync source path must not contain spaces: $src" ;; esac
         src_flags="-v $src:/src:ro -e BSOS_APP_SRC=/src"
     fi
-    ensure_image
+    if [ -z "${RUN_IMAGE:-}" ]; then
+        ensure_image
+        RUN_IMAGE="$(image_ref)"
+        RUN_PLATFORM="$BUILDER_PLATFORM"
+    fi
+    case "$1" in
+        scripts/build-packages.sh|scripts/build-wheels.sh|scripts/build-repo.sh|scripts/build-iso.sh|\
+        scripts/build-vm-iso.sh|scripts/extract-iso.sh|scripts/repack-iso.sh) take_build_lock ;;
+    esac
     # -t only for a real terminal; -i only when input is piped in, so a job
     # whose output is redirected does not hold on to the controlling TTY.
     if [ -t 0 ] && [ -t 1 ]; then
@@ -107,7 +137,7 @@ cmd_run() {
     local rc=0
     # shellcheck disable=SC2086
     docker run --rm $io_flags $INIT_FLAGS \
-        --platform "$BUILDER_PLATFORM" \
+        --platform "$RUN_PLATFORM" \
         --cpus "$BUILD_CPUS" --memory "$BUILD_MEMORY" \
         --cap-add SYS_ADMIN \
         --tmpfs "/scratch:rw,exec,size=$BUILD_SCRATCH_SIZE" \
@@ -121,7 +151,7 @@ cmd_run() {
         -e MAKEFLAGS="-j$BUILD_JOBS" \
         -e CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS" \
         -w /work \
-        "$(image_ref)" "$@" || rc=$?
+        "$RUN_IMAGE" "$@" || rc=$?
     give_back_files
     return "$rc"
 }
@@ -138,8 +168,8 @@ give_back_files() {
     [ "$uid" != 0 ] || return 0
     [ -n "$(find "$BRAINSYNCOS_ROOT" ! -user "$uid" -print 2>/dev/null | head -n 1)" ] || return 0
     # shellcheck disable=SC2086
-    docker run --rm $INIT_FLAGS --platform "$BUILDER_PLATFORM" -v "$BRAINSYNCOS_ROOT:/work" \
-        "$(image_ref)" find /work ! -uid "$uid" -exec chown -h "$uid:$gid" {} + \
+    docker run --rm $INIT_FLAGS --platform "${RUN_PLATFORM:-$BUILDER_PLATFORM}" -v "$BRAINSYNCOS_ROOT:/work" \
+        "${RUN_IMAGE:-$(image_ref)}" find /work ! -uid "$uid" -exec chown -h "$uid:$gid" {} + \
         || warn "could not hand container-written files under brainsyncos/ back to uid $uid"
 }
 
@@ -159,12 +189,92 @@ cmd_clean() {
         "$(image_ref)" bash -c 'source scripts/lib.sh; force_rm_tree "$1"' _ "$target"
 }
 
+# --- native tools mode -----------------------------------------------------------
+TOOLS_DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.tools"
+TOOLS_IMAGE_NAME=brainsyncos-tools
+
+TOOLS_PLATFORM=""
+
+# detect_tools_platform: set TOOLS_PLATFORM to the Docker engine's own
+# platform (linux/amd64 or linux/arm64), once.
+detect_tools_platform() {
+    [ -z "$TOOLS_PLATFORM" ] || return 0
+    case "$(docker info -f '{{.Architecture}}' 2>/dev/null)" in
+        x86_64|amd64) TOOLS_PLATFORM=linux/amd64 ;;
+        aarch64|arm64) TOOLS_PLATFORM=linux/arm64 ;;
+        *) die "cannot tell the Docker engine's architecture (docker info)" ;;
+    esac
+}
+
+# tools_on: native tools mode is on (BSOS_NATIVE_TOOLS, see the header).
+tools_on() {
+    detect_tools_platform
+    case "${BSOS_NATIVE_TOOLS:-auto}" in
+        0) return 1 ;;
+        1) return 0 ;;
+        auto) [ "$TOOLS_PLATFORM" != "$BUILDER_PLATFORM" ] ;;
+        *) die "BSOS_NATIVE_TOOLS must be auto, 1 or 0, got $BSOS_NATIVE_TOOLS" ;;
+    esac
+}
+
+tools_ref() {
+    printf '%s:%s-%s\n' "$TOOLS_IMAGE_NAME" "$(sha256_of "$TOOLS_DOCKERFILE" | cut -c1-12)" "${TOOLS_PLATFORM#*/}"
+}
+
+ensure_tools_image() {
+    local ref
+    ref="$(tools_ref)"
+    docker image inspect "$ref" > /dev/null 2>&1 && return 0
+    log "building $ref ($TOOLS_PLATFORM)"
+    docker build --platform "$TOOLS_PLATFORM" -t "$ref" -f "$TOOLS_DOCKERFILE" "$BRAINSYNCOS_ROOT/docker"
+}
+
+cmd_tools() {
+    require_cmd docker
+    [ "$#" -gt 0 ] || die "usage: builder.sh tools CMD [ARG...]"
+    if tools_on; then
+        ensure_tools_image
+        RUN_IMAGE="$(tools_ref)"
+        RUN_PLATFORM="$TOOLS_PLATFORM"
+    fi
+    cmd_run "$@"
+}
+
+cmd_ids() {
+    require_cmd docker
+    ensure_image
+    printf 'builder %s\n' "$(docker image inspect -f '{{.Id}}' "$(image_ref)")"
+    if tools_on; then
+        ensure_tools_image
+        printf 'tools %s\n' "$(docker image inspect -f '{{.Id}}' "$(tools_ref)")"
+    else
+        echo 'tools -'
+    fi
+}
+
+# take_build_lock: queue behind other heavy builds (see the header). The lock
+# is held on fd 9 until this script exits.
+take_build_lock() {
+    [ "${BSOS_BUILD_LOCK:-1}" != 0 ] || return 0
+    command -v flock > /dev/null 2>&1 || return 0
+    local f="${BSOS_BUILD_LOCK_FILE:-/tmp/brainsyncos-build.lock}" t0
+    exec 9>> "$f"
+    flock -n 9 && return 0
+    t0="$(date +%s)"
+    log "waiting for another BrainSyncOS build to finish (lock $f; BSOS_BUILD_LOCK=0 skips the queue)"
+    flock 9
+    log "lock taken after $(( $(date +%s) - t0 )) s"
+}
+
 case "${1:-}" in
     build) shift; cmd_build "$@" ;;
     run)   shift; cmd_run "$@" ;;
     shell) shift; cmd_run bash -l ;;
     image) image_ref ;;
     clean) shift; cmd_clean "$@" ;;
+    tools) shift; cmd_tools "$@" ;;
+    tools-mode) if tools_on; then echo "native $TOOLS_PLATFORM"; else echo builder; fi ;;
+    ids) cmd_ids ;;
     -h|--help|help|'') usage_from_header; [ -n "${1:-}" ] || exit 2 ;;
     *) die "unknown command: $1 (try --help)" ;;
 esac
