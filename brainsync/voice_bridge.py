@@ -5,6 +5,7 @@ app.server over /ws/decoder (INTERFACE-v2-draft.md).
     python -m brainsync.voice_bridge --fake                   # synthetic board, real display
     python -m brainsync.voice_bridge --fake --fast --no-stimulus   # no hardware, no window
     python -m app.server --bridge fake --bridge-headless      # the server starts it for you
+    python -m brainsync.voice_bridge --paradigm code [--template FILE] [--fake]   # c-VEP, phone
 
 Startup: connect the board once (about 16 s for the Cerelog X8), start the display
 (``python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --markers
@@ -40,6 +41,21 @@ display measured a different refresh (or none went out on this connection yet). 
 reconnects every --reconnect-s seconds. When the bridge stops, the display is closed (EOF on
 its stdin, then terminate and kill if it lingers) and never relaunched.
 
+--paradigm code (INTERFACE-v2-draft.md section 9, ``-c cvep_2`` by default) is c-VEP for the
+iPhone app, which draws the code itself: no display process at all (--no-stimulus is implied).
+The hello carries ``paradigm: code``, the m-sequence's bits and each slot's ``lag_frames``;
+``baseline`` needs no recording (still answered after its seconds); ``stim_markers`` (the
+phone's cycle onsets, relayed by the server) drive ``brainsync.vep.phone.CodeEngine`` (the
+c-VEP standard's ``vep.live.CodeVepDecoder`` on the board thread), whose first commit among
+the active slots is the ``selection``, never before the trial's first marker; no
+``stim_onset``. ``train`` fits the template from that trial's cycles and answers
+``train_done`` with its leave-one-out accuracy (the template is saved as
+``<stamp>_cvep_template.npz``; --template FILE loads one instead). Without a template a trial
+that is not a training trial answers ``no_selection`` "not_trained" at its first marker.
+``status`` carries ``trained``. --fake there is ``vep.phone.MarkerFakeBoard``: its EEG carries
+a random active target's code response (a training trial's cued one) from the trial's first
+marker on; it hands out samples 2 s late, so markers that come late still line up.
+
 --fake uses FakeBoard; during a trial it carries the tone of a random active target, so trials
 end in a selection. --fast runs it in virtual time, FAST_SPEED times faster than real time.
 --no-stimulus replaces the display with a headless stand-in: no window, the onset is the time
@@ -65,10 +81,12 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -80,12 +98,14 @@ from .launch import Stimulus, launch_stimulus_live
 from .online import TUNED, Decoder, Voter, fit_rest, threshold_arg
 from .recordings import MONTAGE, POSTERIOR
 from .stimulus import StimulusConfig, load_config
+from .vep.phone import CodeEngine, MarkerFakeBoard, code_hello, load_template
 
 log = logging.getLogger("voice_bridge")
 
 PROTOCOL = 2
 DEFAULT_URL = "ws://127.0.0.1:8000/ws/decoder"
 DEFAULT_CONFIG = "four_diamond"
+DEFAULT_CONFIGS = {"freq": DEFAULT_CONFIG, "code": "cvep_2"}   # -c per --paradigm
 REPLACED = 4000          # close code from app/server.py: a newer bridge took over
 FLICKER_ON = '{"flicker": true}'
 FLICKER_OFF = '{"flicker": false}'
@@ -267,6 +287,15 @@ class HeadlessDisplay:
     def close(self) -> None:
         self._closing = True
         self._alive = False
+
+
+class PhoneDisplay(HeadlessDisplay):
+    """--paradigm code: the phone draws the code, so there is nothing to drive here. Lines
+    are dropped (not kept), no marker is ever reported (no stim_onset: the onset is the
+    trial's first cycle marker), and it is up from the start at the config's refresh."""
+
+    def send(self, line: str) -> bool:
+        return self.alive
 
 
 class LineWriter:
@@ -661,6 +690,7 @@ class Trial:
     onset: float | None = None
     answered: bool = False
     pending: dict[str, Any] | None = None   # a selection waiting for its onset
+    training: int | None = None   # paradigm code: the train_id this trial collects for
 
 
 @dataclass
@@ -684,6 +714,8 @@ class Bridge:
         self.engine = engine
         self.display = display
         self.slots = slot_ids(cfg.n_targets)
+        self.code = getattr(args, "paradigm", "freq") == "code"
+        self.trains: set[int] = set()   # paradigm code: train_ids still to answer here
         self.name = bridge_name(args)
         self.labels = [""] * cfg.n_targets
         self.text = ""
@@ -716,7 +748,10 @@ class Bridge:
         """The exit code: 0 when stopped, 1 when --no-reconnect ends a run that never reached
         the server. A display that does not come up at startup raises RuntimeError."""
         self.loop = asyncio.get_running_loop()
-        self.engine.attach(self.loop, self._on_commit, self._on_baseline)
+        if self.code:
+            self.engine.attach(self.loop, self._on_commit, self._on_baseline, self._on_trained)
+        else:
+            self.engine.attach(self.loop, self._on_commit, self._on_baseline)
         self.display.attach(self.loop, self._on_display_event)
         self.engine.start()
         from websockets.asyncio.client import connect
@@ -811,6 +846,10 @@ class Bridge:
         self.acked = self.rejected = self.ready = False
         self.hello_sent = self.outbox is not None
         self.hello_refresh = self.refresh if self.refresh is not None else self.cfg.refresh
+        if self.code:
+            self._emit(code_hello(self.cfg, self.name, self.engine.decoder_params,
+                                  self.engine.score_kind))
+            return
         self._emit(hello_message(self.cfg, self.hello_refresh, self.name,
                                  self.engine.decoder_params, self.engine.score_kind))
 
@@ -820,6 +859,7 @@ class Bridge:
         self._end_trial(send_off=False)
         self._interrupt_baseline(cancel=True)
         self._drop_answers()
+        self.trains.clear()   # a train_done never goes to a later connection
         self.acked = self.ready = self.rejected = self.hello_sent = False
 
     def _drop_answers(self) -> None:
@@ -842,10 +882,15 @@ class Bridge:
         message = self.engine.message
         if not self.display_ok:
             message = "display down, relaunching" + (f"; {message}" if message else "")
+        elif isinstance(self.display, PhoneDisplay):
+            message += "; the phone draws the flicker"
         elif isinstance(self.display, HeadlessDisplay):
             message += "; headless display"
-        return {"type": "status", "ok": board_ok and self.display_ok, "board_ok": board_ok,
-                "display_ok": self.display_ok, "message": message}
+        status = {"type": "status", "ok": board_ok and self.display_ok, "board_ok": board_ok,
+                  "display_ok": self.display_ok, "message": message}
+        if self.code:
+            status["trained"] = bool(self.engine.trained)
+        return status
 
     def _send_status(self) -> None:
         self._last_status = self._status()
@@ -982,8 +1027,9 @@ class Bridge:
         self.trial = Trial(trial_id, [self.slots[k] for k in targets], now)
         self.engine.start_trial(trial_id, targets, now)
         self.flickering = True
-        self._flicker_timer = self.loop.call_later(   # type: ignore[union-attr]
-            self.args.max_flicker_s, self._flicker_limit, trial_id)
+        if not self.code:   # code: the phone draws (and stops) the flicker, not this process
+            self._flicker_timer = self.loop.call_later(   # type: ignore[union-attr]
+                self.args.max_flicker_s, self._flicker_limit, trial_id)
         if not self.display.send(FLICKER_ON):
             self._display_down("it does not take stdin lines")
             return
@@ -1015,8 +1061,14 @@ class Bridge:
         t = self.trial
         if t is None or t.onset is not None or t_unix < t.sent_at - ONSET_SLACK_S:
             return   # no trial, already stamped, or a marker of an earlier flicker
+        self._set_onset(t, t_unix, emit=True)
+
+    def _set_onset(self, t: Trial, t_unix: float, emit: bool) -> None:
+        """The trial's onset: from the display (freq, sent as stim_onset) or its first cycle
+        marker (code, not sent); a selection held for it goes out now."""
         t.onset = t_unix
-        self._emit({"type": "stim_onset", "trial_id": t.trial_id, "t_unix": t_unix})
+        if emit:
+            self._emit({"type": "stim_onset", "trial_id": t.trial_id, "t_unix": t_unix})
         if t.pending is not None:
             sel, t.pending = t.pending, None
             sel["t_unix"] = max(sel["t_unix"], t_unix)
@@ -1040,6 +1092,71 @@ class Bridge:
         else:
             sel["t_unix"] = max(sel["t_unix"], t.onset)
             self._emit(sel)
+
+    # -- paradigm code: cycle markers and training ---------------------------------
+
+    def _on_markers(self, msg: dict[str, Any]) -> None:
+        trial_id, raw = msg.get("trial_id"), msg.get("markers")
+        if not isinstance(trial_id, int) or not isinstance(raw, list):
+            log.warning("ignored invalid stim_markers: %.200s", msg)
+            return
+        t = self.trial
+        if t is None or t.trial_id != trial_id:
+            log.debug("ignored stim_markers of trial %s (not the current trial)", trial_id)
+            return
+        marks = [(int(m["cycle"]), float(m["t_unix"])) for m in raw
+                 if isinstance(m, dict) and _is_int(m.get("cycle")) and m["cycle"] >= 0
+                 and _is_number(m.get("t_unix"))]
+        if not marks:
+            log.warning("ignored stim_markers without a valid marker: %.200s", msg)
+            return
+        self.engine.add_markers(trial_id, marks)
+        if t.onset is not None:
+            return
+        # The trial's first marker (normally cycle 0) is its onset: nothing is answered before.
+        self._set_onset(t, min(marks)[1], emit=False)
+        if not self.engine.trained and t.training is None and not t.answered:
+            t.answered = True
+            log.warning("trial %d: no c-VEP template yet (train first)", trial_id)
+            self._emit({"type": "no_selection", "trial_id": trial_id, "reason": "not_trained"})
+
+    def _on_train(self, msg: dict[str, Any]) -> None:
+        train_id, trial_id = msg.get("train_id"), msg.get("trial_id")
+        slot, cycles = msg.get("slot"), msg.get("cycles")
+        if not _is_int(train_id) or not _is_int(trial_id):
+            log.warning("ignored invalid train: %.200s", msg)
+            return
+
+        def refuse(why: str) -> None:
+            log.warning("train %d: %s", train_id, why)
+            self._emit({"type": "train_done", "train_id": train_id, "ok": False,
+                        "accuracy": None, "cycles": 0, "message": why})
+
+        t = self.trial
+        if not _is_int(cycles) or cycles < 2:
+            refuse(f"cycles must be an integer >= 2, got {cycles!r}")
+        elif t is None or t.trial_id != trial_id:
+            refuse(f"trial {trial_id} is not running")
+        elif slot not in t.active:
+            refuse(f"slot {slot!r} is not active in trial {trial_id}")
+        else:
+            t.training = train_id
+            t.answered = True   # a training trial never answers with a selection
+            self.trains.add(train_id)
+            self.engine.start_training(train_id, trial_id, self.slots.index(slot), cycles)
+            log.info("train %d: %d cycles of trial %d looking at %s", train_id, cycles,
+                     trial_id, slot)
+
+    def _on_trained(self, train_id: int, ok: bool, accuracy: float | None, cycles: int,
+                    message: str) -> None:
+        if train_id not in self.trains:
+            return   # its connection (or handshake) is over
+        self.trains.discard(train_id)
+        log.info("train %d done: %s", train_id, message or ("ok" if ok else "failed"))
+        self._emit({"type": "train_done", "train_id": train_id, "ok": bool(ok),
+                    "accuracy": None if accuracy is None else round(float(accuracy), 4),
+                    "cycles": int(cycles), "message": message})
+        self._send_status()   # trained may have changed
 
     # -- baselines -----------------------------------------------------------------
 
@@ -1123,6 +1240,7 @@ class Bridge:
             self._end_trial(send_off=False)
             self._interrupt_baseline(cancel=True)
             self._drop_answers()
+            self.trains.clear()
             self.acked = self.ready = False
             self.rejected = True
         elif self.rejected:
@@ -1140,6 +1258,10 @@ class Bridge:
             if self.trial is not None and msg.get("trial_id") == self.trial.trial_id:
                 log.info("trial %d stopped (%s)", self.trial.trial_id, msg.get("reason"))
                 self._end_trial()
+        elif kind in ("stim_markers", "train") and self.code:
+            (self._on_markers if kind == "stim_markers" else self._on_train)(msg)
+        elif kind in ("stim_markers", "train"):
+            log.warning("ignored %s: this bridge runs paradigm freq", kind)
         elif kind == "pause":
             log.info("pause (%s): flicker and decoding off", msg.get("reason"))
             self._flicker_off(force=True)
@@ -1162,6 +1284,15 @@ class Bridge:
             self.display.send(line)
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
 # ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
@@ -1169,15 +1300,28 @@ class Bridge:
 
 def bridge_name(args: argparse.Namespace) -> str:
     """The hello name: "fake-..." with the fake board, so the server shows FAKE DECODER."""
+    if getattr(args, "paradigm", "freq") == "code":
+        return f"{'fake-' if args.fake else ''}cvep-template"
     return f"{'fake-' if args.fake else ''}brainsync-{args.classifier}"
+
+
+def config_name(args: argparse.Namespace) -> str:
+    """-c, or the paradigm's default config (four_diamond, or cvep_2 for code)."""
+    if args.config is not None:
+        return str(args.config)
+    return DEFAULT_CONFIGS[getattr(args, "paradigm", "freq")]
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.voice_bridge", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default=DEFAULT_URL, help=f"server websocket (default {DEFAULT_URL})")
-    p.add_argument("-c", "--config", default=DEFAULT_CONFIG,
-                   help=f"stimulus config name or .toml path (default {DEFAULT_CONFIG})")
+    p.add_argument("-c", "--config", default=None,
+                   help=f"stimulus config name or .toml path (default {DEFAULT_CONFIG}; "
+                        f"{DEFAULT_CONFIGS['code']} with --paradigm code)")
+    p.add_argument("--paradigm", choices=("freq", "code"), default="freq",
+                   help="freq: SSVEP with the PsychoPy display (default); code: c-VEP drawn "
+                        "by the phone (INTERFACE-v2-draft.md section 9), no display process")
     dec = p.add_argument_group("decoder (defaults as brainsync.demo)")
     dec.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
                      help=f"default {TUNED.classifier}")
@@ -1196,6 +1340,18 @@ def build_parser() -> argparse.ArgumentParser:
     dec.add_argument("--pad", type=float, default=2.0,
                      help="seconds filtered before each window and dropped (default 2)")
     dec.add_argument("--harmonics", type=int, default=3, help="template harmonics (default 3)")
+    code = p.add_argument_group("c-VEP (--paradigm code; defaults as python -m brainsync.vep)")
+    code.add_argument("--template", type=Path, default=None, metavar="FILE",
+                      help="a saved <stamp>_cvep_template.npz (default: none, the server's "
+                           "train makes one)")
+    code.add_argument("--cycles", type=int, default=2,
+                      help="cycles averaged before each decision (default 2)")
+    code.add_argument("--code-votes", type=int, default=2,
+                      help="consecutive agreeing decisions needed to commit (default 2)")
+    code.add_argument("--code-margin", type=float, default=0.0,
+                      help="abstain unless the best correlation leads by this much (default 0)")
+    code.add_argument("--code-pad", type=float, default=0.5,
+                      help="seconds filtered around each cycle and dropped (default 0.5)")
     board = p.add_argument_group("board")
     board.add_argument("--names", type=_names, default=list(MONTAGE),
                        help="comma-separated names of the 8 board channels, in order")
@@ -1240,6 +1396,16 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
     """Reject inconsistent flags through ``p.error`` (exit code 2)."""
     if args.fast and not args.fake:
         p.error("--fast needs --fake")
+    if args.paradigm == "code" and args.fast:
+        p.error("--fast is for --paradigm freq: in code mode the cycle markers come in real time")
+    if args.template is not None and args.paradigm != "code":
+        p.error("--template is for --paradigm code")
+    for flag, value in (("--cycles", args.cycles), ("--code-votes", args.code_votes)):
+        if value < 1:
+            p.error(f"{flag} must be >= 1, got {value}")
+    if args.code_margin < 0 or args.code_pad < 0:
+        p.error(f"--code-margin and --code-pad must be >= 0, got {args.code_margin}, "
+                f"{args.code_pad}")
     for flag, value in (("--window", args.window), ("--step", args.step),
                         ("--reconnect-s", args.reconnect_s),
                         ("--status-interval", args.status_interval),
@@ -1258,7 +1424,7 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
 def stimulus_args(args: argparse.Namespace) -> list[str]:
     """The display's command line: free run, feedback on stdin, still until {"flicker": true},
     flip-time markers; no --seconds, so it runs until its stdin closes or Esc."""
-    out = ["-c", str(args.config), "--free", "--feedback", "stdin", "--hold-still",
+    out = ["-c", config_name(args), "--free", "--feedback", "stdin", "--hold-still",
            "--markers", "unix"]
     if args.no_wait:
         out.append("--no-wait")
@@ -1272,7 +1438,10 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
 
     Raises one of BUILD_ERRORS on a bad setting.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(config_name(args))
+    if cfg.paradigm != "freq":
+        raise ValueError(f"config {cfg.name!r} is a [{cfg.paradigm}] config; c-VEP runs with "
+                         "--paradigm code")
     if args.fake:
         board: Any = FakeBoard(cfg.freqs, switch_s=math.inf, seed=args.seed or 0,
                                clock=None if args.fast else time.time, ch_names=args.names)
@@ -1286,8 +1455,70 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
     return cfg, board, decoder
 
 
+def build_code(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Any]:
+    """--paradigm code: the [code] config, the board (not yet connected; MarkerFakeBoard with
+    --fake) and the template from --template (None: train one).
+
+    Raises one of BUILD_ERRORS on a bad setting.
+    """
+    cfg = load_config(config_name(args))
+    if cfg.paradigm != "code":
+        raise ValueError(f"config {cfg.name!r} is a [{cfg.paradigm}] config, not code; the "
+                         f"default for --paradigm code is {DEFAULT_CONFIGS['code']}")
+    if args.fake:
+        board: Any = MarkerFakeBoard(cfg, seed=args.seed or 0, ch_names=args.names)
+    else:
+        board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
+    template = None
+    if args.template is not None:
+        template = load_template(args.template, cfg, board.fs, args.channels, args.names)
+    return cfg, board, template
+
+
+def code_engine(args: argparse.Namespace, cfg: StimulusConfig, board: Any,
+                template: Any) -> CodeEngine:
+    """The c-VEP engine for ``args``; a fake run saves its templates in a temp folder (as
+    python -m brainsync.vep does), a real one in the recordings folder."""
+    save_dir = Path(tempfile.gettempdir()) / "brainsync_fake" if args.fake else None
+    return CodeEngine(board, cfg, template=template, channels=args.channels,
+                      ch_names=args.names, votes=args.code_votes, cycles=args.cycles,
+                      margin=args.code_margin, pad_s=args.code_pad, fake=args.fake,
+                      seed=args.seed, save_dir=save_dir)
+
+
+async def serve_code(args: argparse.Namespace) -> int:
+    """--paradigm code: no display process, the c-VEP engine on the board thread."""
+    try:
+        cfg, board, template = build_code(args)
+    except BUILD_ERRORS as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    display = PhoneDisplay(cfg.refresh)
+    if not args.fake:
+        print("connecting to the Cerelog X8 (can take 15 s)...", file=sys.stderr)
+    try:
+        await asyncio.to_thread(board.open)   # once: kept across reconnects
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        engine = code_engine(args, cfg, board, template)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        with contextlib.suppress(Exception):
+            board.close()
+        return 2
+    print(f"{engine.message}; c-VEP {cfg.name}: {cfg.n_targets} targets "
+          f"{cfg.code.lag_frames} frames apart, {cfg.code.cycle_frames}-frame cycles; "
+          f"template {args.template or 'none (the server trains one)'}; {args.cycles} cycles "
+          f"per decision, {args.code_votes} votes; server {args.url}", file=sys.stderr)
+    return await _run_bridge(args, cfg, engine, display, board)
+
+
 async def serve(args: argparse.Namespace) -> int:
     """Build everything, connect the board once, run the bridge; the exit code."""
+    if getattr(args, "paradigm", "freq") == "code":
+        return await serve_code(args)
     try:
         cfg, board, decoder = build(args)
     except BUILD_ERRORS as exc:
@@ -1308,6 +1539,12 @@ async def serve(args: argparse.Namespace) -> int:
     print(f"{engine.message}; {decoder.classifier!r}; channels "
           f"{','.join(decoder.channel_names)}; window {args.window:g} s, step {args.step:g} s, "
           f"{args.votes} votes; server {args.url}", file=sys.stderr)
+    return await _run_bridge(args, cfg, engine, display, board)
+
+
+async def _run_bridge(args: argparse.Namespace, cfg: StimulusConfig, engine: Any, display: Any,
+                      board: Any) -> int:
+    """Run the bridge until it stops; then close the display, the engine and the board."""
     bridge = Bridge(args, cfg, engine, display)
     loop = asyncio.get_running_loop()
     # app.server stops its children with SIGTERM: end like Ctrl-C, so the display's stdin is

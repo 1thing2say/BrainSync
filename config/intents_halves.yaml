@@ -1,0 +1,93 @@
+# Fallback lists for halves mode (Look to Speak on the phone, config/phone_cvep.yaml): the same
+# intents, lists and fallback_match rules as config/intents.yaml, but every list has 6 options
+# (menus.option_count: 6), ranked most likely first, written in the first person as the user.
+# The first 3 of each list are intents.yaml's. The orchestrator adds "More options" as a 7th item.
+
+# "yes" and "no" are quoted: unquoted, YAML reads them as booleans.
+intents:
+  - {id: "yes", description: "Agree or accept"}
+  - {id: "no", description: "Decline or disagree"}
+  - {id: maybe, description: "Unsure or undecided"}
+  - {id: later, description: "Not now, maybe later"}
+  - {id: greeting, description: "Hello, goodbye or small talk"}
+  - {id: need, description: "Ask for something I need"}
+  - {id: feeling, description: "Say how I feel"}
+  - {id: comfort, description: "Physical comfort: position, temperature, pain"}
+  - {id: activity, description: "Suggest or respond to an activity"}
+  - {id: food_drink, description: "Food or drink"}
+  - {id: social, description: "People, conversation and company"}
+  - {id: thanks, description: "Thank someone"}
+  - {id: repeat, description: "Ask the partner to repeat or explain"}
+
+fallback_lists:
+  # Default page when there is no question to answer.
+  home:
+    - {label: "I'm good", utterance: "I'm doing well, thanks for asking.", intent_id: feeling}
+    - {label: "Need help", utterance: "Could you help me with something, please?", intent_id: need}
+    - {label: "Drink", utterance: "Could I have something to drink, please?", intent_id: food_drink}
+    - {label: "Hungry", utterance: "I'm a bit hungry, could I have something to eat?", intent_id: food_drink}
+    - {label: "Uncomfortable", utterance: "I'm not comfortable, could you help me move?", intent_id: comfort}
+    - {label: "Talk to me", utterance: "Could you sit with me and talk for a while?", intent_id: social}
+
+  # Used when the partner's last line is a question that no fallback_match rule below caught.
+  yes_no:
+    - {label: "Yes", utterance: "Yes, please.", intent_id: "yes"}
+    - {label: "No", utterance: "No, thank you.", intent_id: "no"}
+    - {label: "Maybe", utterance: "Maybe, let me think about it.", intent_id: maybe}
+    - {label: "Not now", utterance: "Not right now, maybe later.", intent_id: later}
+    - {label: "Sounds good", utterance: "Yes, that sounds good to me.", intent_id: "yes"}
+    - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
+
+  # The first "More options" page from home ("More options" twice in a row goes back home).
+  more:
+    - {label: "Thank you", utterance: "Thank you, I really appreciate it.", intent_id: thanks}
+    - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
+    - {label: "One moment", utterance: "Please give me a moment.", intent_id: later}
+    - {label: "Too warm", utterance: "I'm a little too warm, could you help?", intent_id: comfort}
+    - {label: "Too cold", utterance: "I'm a bit cold, could I have a blanket?", intent_id: comfort}
+    - {label: "Goodbye", utterance: "Goodbye, thanks for spending time with me.", intent_id: greeting}
+
+  # "How are you?", "How's it going?", "You okay?"
+  feeling:
+    - {label: "Good", utterance: "I'm doing well, thank you.", intent_id: feeling}
+    - {label: "Okay", utterance: "I'm okay, thanks for asking.", intent_id: feeling}
+    - {label: "Not great", utterance: "Not so great today, honestly.", intent_id: feeling}
+    - {label: "Tired", utterance: "I'm a bit tired today.", intent_id: feeling}
+    - {label: "In pain", utterance: "I'm in some pain, could you help me?", intent_id: comfort}
+    - {label: "And you?", utterance: "I'm fine, how about you?", intent_id: social}
+
+  # "How was your weekend?", "How did it go?"
+  how_was:
+    - {label: "Pretty good", utterance: "It was pretty good, thanks.", intent_id: feeling}
+    - {label: "Quiet", utterance: "It was quiet, nothing much happened.", intent_id: feeling}
+    - {label: "Not great", utterance: "Honestly, it wasn't great.", intent_id: feeling}
+    - {label: "Really nice", utterance: "It was really nice, thanks for asking.", intent_id: feeling}
+    - {label: "Tiring", utterance: "It was tiring, I need some rest.", intent_id: feeling}
+    - {label: "And yours?", utterance: "It was fine. How was yours?", intent_id: social}
+
+  # "Hi", "Good morning"
+  greeting:
+    - {label: "Hello", utterance: "Hello, it's good to see you.", intent_id: greeting}
+    - {label: "Hi there", utterance: "Hi! How are you?", intent_id: greeting}
+    - {label: "Thanks", utterance: "Thanks for coming to see me.", intent_id: thanks}
+    - {label: "Come in", utterance: "Come in, please sit down.", intent_id: social}
+    - {label: "Missed you", utterance: "I missed you, it's been a while.", intent_id: social}
+    - {label: "Goodbye", utterance: "Goodbye, see you soon.", intent_id: greeting}
+
+  # "What would you like?", "Where should we go?": yes / no does not answer these.
+  open_question:
+    - {label: "Not sure", utterance: "I'm not sure, let me think about it.", intent_id: maybe}
+    - {label: "You choose", utterance: "You choose, anything is fine with me.", intent_id: maybe}
+    - {label: "Say again", utterance: "Sorry, could you say that again?", intent_id: repeat}
+    - {label: "Something simple", utterance: "Something simple is fine with me.", intent_id: maybe}
+    - {label: "Ask me later", utterance: "Could you ask me again a bit later?", intent_id: later}
+    - {label: "Yes or no", utterance: "Could you ask me that as a yes or no question?", intent_id: repeat}
+
+# Which fallback list a partner line gets while the LLM is slow or down: the first rule whose
+# regex (case-insensitive) matches the line wins; with none, a question gets yes_no and anything
+# else home. The same rules as config/intents.yaml (keep the two in step).
+fallback_match:
+  - {show: feeling, when: "\\bhow (are|r) (you|ya)\\b|\\bhow('s| is) it going\\b|\\bhow do you feel\\b|\\bhow are you feeling\\b|^(\\w+,\\s*)?(are )?(you|u) (ok|okay|alright|all right)\\b"}
+  - {show: how_was, when: "\\bhow (was|were|did) (your|you|the|it)\\b"}
+  - {show: greeting, when: "^(\\w+,\\s*)?(hi|hello|hey|good (morning|afternoon|evening))\\b"}
+  - {show: open_question, when: "^(\\w+,\\s*)?((so|well|and|um|uh|okay|ok)\\b[\\s,]*)*(what|where|when|which|who|why)\\b"}

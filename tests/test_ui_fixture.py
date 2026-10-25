@@ -53,7 +53,13 @@ def test_every_variant_the_app_handles_is_there():
     by_type: dict[str, list[dict]] = {}
     for raw in committed()["server_to_ui"] + committed()["ui_to_server"]:
         by_type.setdefault(raw["type"], []).append(raw)
-    assert {p["mode"] for p in by_type["show_page"]} == {"page", "confirm", "list"}
+    assert {p["mode"] for p in by_type["show_page"]} == {"page", "confirm", "list", "halves",
+                                                          "calibrate"}
+    halves = next(p for p in by_type["show_page"] if p["mode"] == "halves")
+    assert 1 <= halves["split"] < len(halves["options"])
+    assert any(o["utterance"] == "" for o in halves["options"])  # More options
+    stimulus = by_type["stimulus"][0]
+    assert len(stimulus["bits"]) == 63 and stimulus["lags"] == {"s1": 0, "s2": 31}
     listing = next(p for p in by_type["show_page"] if p["mode"] == "list")
     assert listing["options"] and listing["highlight_index"] is not None
     assert {s["audio_url"] is None for s in by_type["speak"]} == {True, False}

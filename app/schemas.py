@@ -23,7 +23,15 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    model_serializer,
+    model_validator,
+)
 
 PROTOCOL = 2
 # Handshake tolerances (draft section 2): contract values, not tunables.
@@ -32,9 +40,13 @@ REFRESH_TOLERANCE_HZ = 1.0
 
 SlotId = Annotated[str, StringConstraints(pattern=r"^s[0-9]+$")]
 Waveform = Literal["sine", "square"]
+# freq: SSVEP, each slot flickers at its own frequency (freq_hz). code: c-VEP (Bin et al. 2009),
+# every slot shows one m-sequence delayed by its own lag_frames (draft section 9).
+Paradigm = Literal["freq", "code"]
 # option: one reply (page mode); next: new page or move the highlight; say / back: the confirm
-# screen in page mode, or SAY in list mode.
-Role = Literal["option", "next", "say", "back"]
+# screen in page mode, or SAY in list mode; left / right: the two halves in halves mode (Look to
+# Speak: each look keeps one half of the remaining phrases).
+Role = Literal["option", "next", "say", "back", "left", "right"]
 
 
 class Message(BaseModel):
@@ -48,11 +60,60 @@ class Message(BaseModel):
 
 
 class SlotSpec(Message):
-    """One stimulus target: slot id, flicker frequency and phase."""
+    """One stimulus target: slot id plus either a flicker frequency and phase (SSVEP) or a code
+    lag in frames (c-VEP), never both."""
 
     slot: SlotId
-    freq_hz: float = Field(gt=0)
+    freq_hz: float | None = Field(default=None, gt=0)
     phase_deg: float = 0
+    lag_frames: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _freq_or_lag(self) -> SlotSpec:
+        if (self.freq_hz is None) == (self.lag_frames is None):
+            raise ValueError(f"slot {self.slot}: give freq_hz (SSVEP) or lag_frames (c-VEP), "
+                             "exactly one")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _without_the_other_paradigm(self, handler: Any) -> dict[str, Any]:
+        """An SSVEP slot is written without lag_frames, a c-VEP slot without freq_hz and phase."""
+        data = handler(self)
+        if self.lag_frames is None:
+            data.pop("lag_frames", None)
+        else:
+            data.pop("freq_hz", None)
+            data.pop("phase_deg", None)
+        return data
+
+
+class CodeSpec(Message):
+    """The c-VEP code: one m-sequence period as a string of 0/1 bits (bit 1 bright), each held for
+    ``frames_per_bit`` frames. Slot k shows frame n of a trial (n = 0 at the onset) as
+    ``bits[((n - lag_k) mod cycle_frames) // frames_per_bit]``; a cycle starts every
+    ``cycle_frames`` frames (brainsync.vep.codes.lagged_codes)."""
+
+    length: int = Field(ge=3)
+    frames_per_bit: int = Field(default=1, ge=1)
+    bits: Annotated[str, StringConstraints(pattern=r"^[01]+$")]
+
+    @property
+    def cycle_frames(self) -> int:
+        return self.length * self.frames_per_bit
+
+    @model_validator(mode="after")
+    def _bits_length(self) -> CodeSpec:
+        if len(self.bits) != self.length:
+            raise ValueError(f"bits has {len(self.bits)} bits, length says {self.length}")
+        return self
+
+
+class CycleMarker(Message):
+    """The first frame of c-VEP cycle ``cycle`` (0 = the trial's onset frame), in Unix seconds on
+    the server's clock (the phone converts with its clock offset, draft section 9)."""
+
+    cycle: int = Field(ge=0)
+    t_unix: float
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +140,14 @@ class DecoderHello(Message):
     slots: list[SlotSpec] = Field(min_length=1)
     decoder: DecoderParams | None = None
     score_kind: str | None = None  # set only if selections carry scores
+    paradigm: Paradigm = "freq"
+    code: CodeSpec | None = None  # paradigm code only: the m-sequence the display must show
+
+    @model_validator(mode="after")
+    def _code_for_code(self) -> DecoderHello:
+        if (self.paradigm == "code") != (self.code is not None):
+            raise ValueError("code is required with paradigm code, and only then")
+        return self
 
 
 class StimOnset(Message):
@@ -128,6 +197,19 @@ class DecoderStatus(Message):
     ok: bool
     board_ok: bool
     display_ok: bool
+    message: str = ""
+    trained: bool | None = None  # paradigm code: a c-VEP template is loaded (None: no template needed)
+
+
+class TrainDone(Message):
+    """Paradigm code: the template from ``train`` is fitted (or not). ``accuracy``: the
+    leave-one-cycle-out score of the cycles it used (brainsync.vep.cvep.cross_validate), 0..1."""
+
+    type: Literal["train_done"] = "train_done"
+    train_id: int
+    ok: bool
+    accuracy: float | None = Field(default=None, ge=0, le=1)
+    cycles: int = Field(default=0, ge=0)
     message: str = ""
 
 
@@ -200,6 +282,28 @@ class Pause(Message):
     reason: str
 
 
+class StimMarkers(Message):
+    """Paradigm code: cycle onsets of trial ``trial_id`` reported by the phone that draws the
+    flicker, relayed in order (server clock). The bridge cuts its epochs at these times; a trial's
+    onset is its cycle 0."""
+
+    type: Literal["stim_markers"] = "stim_markers"
+    trial_id: int
+    markers: list[CycleMarker] = Field(min_length=1)
+
+
+class Train(Message):
+    """Paradigm code: fit the c-VEP template from trial ``trial_id``, in which the user looks at
+    ``slot`` (every active slot flickers), using its first ``cycles`` cycles; answered by
+    train_done. The trial is started and stopped as usual (stim_start / stim_stop)."""
+
+    type: Literal["train"] = "train"
+    train_id: int
+    trial_id: int
+    slot: SlotId
+    cycles: int = Field(ge=2)
+
+
 # ---------------------------------------------------------------------------
 # Handshake check (draft section 2)
 # ---------------------------------------------------------------------------
@@ -217,8 +321,15 @@ def hello_problems(
     slots: list[SlotSpec],
     waveform: str,
     refresh_hz: float,
+    paradigm: str = "freq",
+    code_length: int | None = None,
+    frames_per_bit: int | None = None,
 ) -> list[str]:
-    """Why the bridge's hello does not match our config; an empty list means hello_ack."""
+    """Why the bridge's hello does not match our config; an empty list means hello_ack.
+
+    Paradigm code compares each slot's lag_frames exactly and the code's length and
+    frames_per_bit with ``code_length`` / ``frames_per_bit`` (the bits themselves come from the
+    bridge: the server forwards them to the phone)."""
     problems: list[str] = []
     if hello.protocol != PROTOCOL:
         problems.append(f"protocol {hello.protocol}, server speaks {PROTOCOL}")
@@ -229,6 +340,14 @@ def hello_problems(
         )
     if hello.waveform != waveform:
         problems.append(f"waveform {hello.waveform}, expected {waveform}")
+    if hello.paradigm != paradigm:
+        problems.append(f"paradigm {hello.paradigm}, expected {paradigm}")
+        return problems  # slots of another paradigm cannot be compared
+    if paradigm == "code" and hello.code is not None:
+        if code_length is not None and hello.code.length != code_length:
+            problems.append(f"code length {hello.code.length}, expected {code_length}")
+        if frames_per_bit is not None and hello.code.frames_per_bit != frames_per_bit:
+            problems.append(f"frames_per_bit {hello.code.frames_per_bit}, expected {frames_per_bit}")
     theirs = {s.slot: s for s in hello.slots}
     ours = {s.slot: s for s in slots}
     if len(theirs) != len(hello.slots):
@@ -236,8 +355,15 @@ def hello_problems(
     if set(theirs) != set(ours):
         problems.append(f"slots {sorted(theirs)}, expected {sorted(ours)}")
     for slot_id in sorted(set(theirs) & set(ours)):
+        if paradigm == "code":
+            got_lag, want_lag = theirs[slot_id].lag_frames, ours[slot_id].lag_frames
+            if got_lag != want_lag:
+                problems.append(f"{slot_id} lags {got_lag} frames, expected {want_lag}")
+            continue
         got, want = theirs[slot_id].freq_hz, ours[slot_id].freq_hz
-        if abs(got - want) > FREQ_TOLERANCE_HZ:
+        if got is None or want is None:
+            problems.append(f"{slot_id} has no frequency")
+        elif abs(got - want) > FREQ_TOLERANCE_HZ:
             problems.append(f"{slot_id} is {got:g} Hz, expected {want:g} Hz")
     return problems
 
@@ -267,17 +393,29 @@ class ShowPage(Message):
     type: Literal["show_page"] = "show_page"
     list_id: str
     page: int = Field(ge=1)
-    mode: Literal["page", "confirm", "list"]
+    mode: Literal["page", "confirm", "list", "halves", "calibrate"]
     slots: list[UISlot] = Field(min_length=1)
     text: str = ""
     options: list[Option] = Field(default_factory=list)
     highlight_index: int | None = None
+    # halves mode: the phrases still in play are ``options``; the first ``split`` of them sit on
+    # the "left" slot's card, the rest on the "right" slot's. An option with an empty utterance is
+    # "More options" (choosing it alone asks for a new page; nothing is spoken).
+    split: int | None = None
+    # calibrate mode: the slot the user looks at while the c-VEP template is trained.
+    cue: SlotId | None = None
 
     @model_validator(mode="after")
     def _highlight_in_range(self) -> ShowPage:
         if self.highlight_index is not None and not 0 <= self.highlight_index < len(self.options):
             raise ValueError(f"highlight_index {self.highlight_index} out of range for "
                              f"{len(self.options)} options")
+        if self.mode == "halves" and (self.split is None
+                                      or not 1 <= self.split < len(self.options)):
+            raise ValueError(f"halves needs 1 <= split < {len(self.options)} options, "
+                             f"got {self.split}")
+        if self.mode == "calibrate" and self.cue is None:
+            raise ValueError("calibrate needs a cue slot")
         return self
 
 
@@ -379,6 +517,35 @@ class UIStatus(Message):
     mic_muted: bool = False  # the partner's Mute
     mic: str = ""  # the page's last mic_report state ("listening", "offline", "denied", ...)
     resume_ready: bool = False
+    # Paradigm code: the bridge holds a c-VEP template, and the last calibration's score (0..1).
+    trained: bool = False
+    calibration_accuracy: float | None = None
+
+
+class Stimulus(Message):
+    """Paradigm code, display.flicker phone: what the phone draws. Sent to a page that connects
+    and again after every hello_ack. Slot ``s`` shows frame n of a trial (n = 0 at its first
+    flicker frame) bright when ``bits[((n - lags[s]) mod (len(bits) * frames_per_bit)) //
+    frames_per_bit]`` is "1" (CodeSpec). ``depth`` scales the contrast (1 = black / white)."""
+
+    type: Literal["stimulus"] = "stimulus"
+    paradigm: Paradigm = "code"
+    refresh_hz: float = Field(gt=0)
+    frames_per_bit: int = Field(ge=1)
+    bits: Annotated[str, StringConstraints(pattern=r"^[01]+$")]
+    lags: dict[SlotId, int]
+    depth: float = Field(default=1.0, gt=0, le=1)
+
+
+class ClockPong(Message):
+    """The answer to clock_ping, sent at once: ``t_server`` is the server's time.time() when it
+    answered. The phone keeps the offset t_server - (t_send + t_receive) / 2 of the pings with
+    the shortest round trip (draft section 9)."""
+
+    type: Literal["clock_pong"] = "clock_pong"
+    id: int
+    t_phone: float
+    t_server: float
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +614,41 @@ class Judgment(Message):
     correct: bool
 
 
+class ClockPing(Message):
+    """The phone's clock sync (draft section 9): its own Unix time when sent."""
+
+    type: Literal["clock_ping"] = "clock_ping"
+    id: int
+    t_phone: float
+
+
+class CycleMarkers(Message):
+    """The phone drew the first frame of these c-VEP cycles of trial ``trial_id`` (server clock).
+    Sent once per cycle, in order, from cycle 0 (the onset). ``dropped_frames``: frames the phone
+    missed in this trial so far."""
+
+    type: Literal["cycle_markers"] = "cycle_markers"
+    trial_id: int
+    markers: list[CycleMarker] = Field(min_length=1)
+    dropped_frames: int = Field(default=0, ge=0)
+
+
+class DisplayReport(Message):
+    """The phone's own refresh check: the frame rate it measured while locked to 60 Hz, and
+    whether it will flicker (``ok``). Sent on connect and when it changes."""
+
+    type: Literal["display_report"] = "display_report"
+    refresh_hz: float = Field(ge=0)
+    ok: bool
+    message: str = ""
+
+
+class Calibrate(Message):
+    """Train the c-VEP template now (the setup step, or Recalibrate in Settings)."""
+
+    type: Literal["calibrate"] = "calibrate"
+
+
 # ---------------------------------------------------------------------------
 # Shared menu option
 # ---------------------------------------------------------------------------
@@ -494,21 +696,24 @@ def validate_option(
 # ---------------------------------------------------------------------------
 
 DecoderToServer = Annotated[
-    Union[DecoderHello, StimOnset, Selection, NoSelection, BaselineDone, DecoderStatus],
+    Union[DecoderHello, StimOnset, Selection, NoSelection, BaselineDone, DecoderStatus, TrainDone],
     Field(discriminator="type"),
 ]
 ServerToDecoder = Annotated[
-    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause],
+    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause, StimMarkers,
+          Train],
     Field(discriminator="type"),
 ]
 ShowPage.model_rebuild()
 
 ServerToUI = Annotated[
-    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus],
+    Union[ShowPage, Trial, Highlight, Speak, Listen, State, Transcript, UIStatus, Stimulus,
+          ClockPong],
     Field(discriminator="type"),
 ]
 UIToServer = Annotated[
-    Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment, MicSet, MicReport],
+    Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment, MicSet, MicReport, ClockPing,
+          CycleMarkers, DisplayReport, Calibrate],
     Field(discriminator="type"),
 ]
 
@@ -563,9 +768,21 @@ __all__ = [
     "REFRESH_TOLERANCE_HZ",
     "SlotId",
     "Waveform",
+    "Paradigm",
     "Role",
     "Message",
     "SlotSpec",
+    "CodeSpec",
+    "CycleMarker",
+    "TrainDone",
+    "StimMarkers",
+    "Train",
+    "Stimulus",
+    "ClockPong",
+    "ClockPing",
+    "CycleMarkers",
+    "DisplayReport",
+    "Calibrate",
     "DecoderParams",
     "DecoderHello",
     "StimOnset",

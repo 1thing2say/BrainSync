@@ -93,6 +93,11 @@ struct SettingsView: View {
                 }
                 .listRowBackground(Palette.panel)
 
+                if model.isCodeParadigm {
+                    LookToSpeakSettings()
+                        .listRowBackground(Palette.panel)
+                }
+
                 Section {
                     if let link = model.link {
                         LabeledContent("Server") {
@@ -152,6 +157,56 @@ struct SettingsView: View {
         if let url = URL(string: UIApplication.openSettingsURLString) {
             openURL(url)
         }
+    }
+}
+
+/// Look to Speak on this phone (c-VEP, INTERFACE-v2-draft.md section 9): Recalibrate, and what
+/// the operator checks when selections go wrong: the calibration score, the phone's refresh check
+/// and the clock that turns its frame times into the laptop's.
+private struct LookToSpeakSettings: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Section {
+            Button("Recalibrate") { model.recalibrate() }
+                .disabled(!model.connected)
+            LabeledContent("Calibration", value: calibration)
+            LabeledContent("Refresh", value: refresh)
+            if let report = model.displayReport, !report.message.isEmpty {
+                Text(report.message)
+                    .font(.footnote)
+                    .foregroundStyle(report.ok ? Palette.muted : Palette.warn)
+            }
+            LabeledContent("Clock offset", value: model.clock.offset.map { Self.ms($0, signed: true) } ?? "No pong yet")
+            LabeledContent("Best round trip", value: model.clock.best.map { Self.ms($0.roundTrip) } ?? "–")
+            if model.markersWithoutClock > 0 {
+                Text("\(model.markersWithoutClock) cycle markers not sent: there was no clock yet.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.warn)
+            }
+        } header: {
+            MonoLabel("Look to Speak (c-VEP)")
+        } footer: {
+            Text("Recalibrate runs the calibration again before the next page: about 20 seconds, the user looks at the left card. The phone flickers only at exactly 60 Hz; the clock turns its frame times into the laptop's.")
+        }
+    }
+
+    private var calibration: String {
+        guard let status = model.status else { return "–" }
+        if let score = status.calibrationAccuracy {
+            let percent = Int((score * 100).rounded())
+            return score < StateLine.lowScore ? "\(percent) % (low)" : "\(percent) %"
+        }
+        return status.trained ? "Trained" : "Not yet"
+    }
+
+    private var refresh: String {
+        guard let report = model.displayReport else { return "Not measured yet" }
+        return String(format: "%.2f Hz · ", report.refreshHz) + (report.ok ? "OK" : "Not OK")
+    }
+
+    private static func ms(_ seconds: Double, signed: Bool = false) -> String {
+        String(format: signed ? "%+.1f ms" : "%.1f ms", seconds * 1000)
     }
 }
 

@@ -48,7 +48,10 @@ struct BrainSyncPartnerApp: App {
 }
 
 /// Voice: the first-run setup until it is done, then pairing until there is a server link, then
-/// the partner screen with the flicker warning on top until it is accepted in this run (rule 10).
+/// the main screen with the flicker warning on top until it is accepted in this run (rule 10).
+/// The main screen is the user's Look to Speak screen when app.server sent a c-VEP `stimulus`
+/// (this phone flickers, config/phone_cvep.yaml), otherwise the partner screen (the laptop
+/// flickers, the default config).
 struct VoiceRootView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("setupDone") private var setupDone = false
@@ -60,6 +63,13 @@ struct VoiceRootView: View {
                 SetupFlow()
             } else if model.link == nil || model.showPairing {
                 PairView()
+            } else if model.isCodeParadigm {
+                LookToSpeakView()
+                    .overlay {
+                        if !model.accepted {
+                            WarningView()
+                        }
+                    }
             } else {
                 PartnerView()
                     .overlay {

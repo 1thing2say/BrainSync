@@ -12,7 +12,9 @@ gitignored .env.
     python -m app.server --fake-decoder     # also start tools/fake_decoder.py --random
     python -m app.server --bridge cerelog   # also start brainsync.voice_bridge (headset + display)
     python -m app.server --bridge fake --bridge-headless   # the bridge on fake EEG, no window
-    python -m app.server --keyboard         # keys 1-4 on the page select
+    python -m app.server --config config/phone_cvep.yaml --bridge cerelog   # c-VEP, the iPhone draws
+    python -m app.server --config config/phone_cvep.yaml --bridge cerelog --template FILE
+    python -m app.server --keyboard        # keys 1-4 on the page select
     python -m app.server --tunnel           # also a public https link for the partner's phone
 """
 
@@ -55,7 +57,14 @@ from app.log import DEFAULT_LOG_DIR, EventLog
 from app.menus import Create, MenuMaker, first_name
 from app.orchestrator import Orchestrator
 from app.remote import RemoteGate, is_remote, key_problem, new_key
-from app.schemas import Message, parse_decoder_to_server, parse_ui_to_server, to_json
+from app.schemas import (
+    ClockPing,
+    ClockPong,
+    Message,
+    parse_decoder_to_server,
+    parse_ui_to_server,
+    to_json,
+)
 from app.tts import AUDIO_ROUTE, CartesiaTTS
 from app.tunnel import Tunnel, find_cloudflared, stop_process
 
@@ -103,6 +112,71 @@ def lan_ip() -> str:
     return ""
 
 
+def page_slots(cfg: AppConfig) -> dict[str, dict]:
+    """/api/config's ``slots``: ``{slot: {"freq_hz", "phase_deg"}}`` for paradigm freq (SSVEP),
+    ``{slot: {"lag_frames"}}`` for paradigm code (c-VEP)."""
+    if cfg.stim.paradigm == "code":
+        return {s.slot: {"lag_frames": s.lag_frames} for s in cfg.stim.slots}
+    return {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg} for s in cfg.stim.slots}
+
+
+def phone_health(orch: Any) -> dict:
+    """/api/health's ``phone`` block: the iPhone app's last refresh report (``display_report``)
+    and the bridge's c-VEP template. Read with getattr, so an orchestrator without them reports
+    nothing."""
+    report = getattr(orch, "phone_display", None)
+    accuracy = getattr(orch, "calibration_accuracy", None)
+    return {"display": None if report is None else {"refresh_hz": report.refresh_hz,
+                                                    "ok": report.ok, "message": report.message},
+            "trained": bool(getattr(orch, "bridge_trained", False)),
+            "calibration_accuracy": None if accuracy is None else float(accuracy)}
+
+
+def code_bits(length: int) -> str:
+    """One period of the c-VEP m-sequence (brainsync.vep.codes.m_sequence, seed 1) as "0"/"1"
+    characters, "1" bright: what the bridge's hello carries (draft section 9)."""
+    from brainsync.vep.codes import m_sequence  # numpy: only when paradigm code needs it
+
+    return "".join(str(int(b)) for b in m_sequence(length))
+
+
+def fake_decoder_command(cfg: AppConfig, url: str, parent_pid: int) -> list[str]:
+    """``python -m tools.fake_decoder --random`` for ``--fake-decoder``, with a hello that passes
+    this config's check: the slots' frequencies (paradigm freq), or their lags and the code's bits
+    (paradigm code). --parent-pid makes it exit once this server is gone."""
+    cmd = [sys.executable, "-m", "tools.fake_decoder", "--random", "--parent-pid", str(parent_pid),
+           "--url", url]
+    stim = cfg.stim
+    if stim.paradigm == "code":
+        code = stim.code
+        cmd += ["--paradigm", "code",
+                "--lags", ",".join(f"{s.slot}={s.lag_frames}" for s in stim.slots),
+                "--code-bits", code_bits(code.length), "--frames-per-bit", str(code.frames_per_bit)]
+    else:
+        cmd += ["--slots", ",".join(f"{s.slot}={s.freq_hz:g}" for s in stim.slots)]
+    return cmd + ["--waveform", stim.waveform,
+                  "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"]
+
+
+DRAWN_BY = {"browser": "this computer's page in Chrome", "psychopy": "the bridge's PsychoPy window",
+            "phone": "the iPhone app"}
+
+
+def stimulus_line(cfg: AppConfig, config_path: str | Path | None = None) -> str:
+    """The startup line that says what flickers and who draws it, e.g. "stimulus: c-VEP (63-bit
+    m-sequence, lags s1 0, s2 31 frames), drawn by the iPhone app (config/phone_cvep.yaml)"."""
+    stim = cfg.stim
+    if stim.paradigm == "code":
+        lags = ", ".join(f"{s.slot} {s.lag_frames}" for s in stim.slots)
+        what = f"c-VEP ({stim.code.length}-bit m-sequence, lags {lags} frames)"
+    else:
+        what = f"SSVEP {'/'.join(f'{s.freq_hz:g}' for s in stim.slots)} Hz {stim.waveform}"
+    path = Path(config_path) if config_path is not None else REPO_ROOT / "config" / "default.yaml"
+    with contextlib.suppress(ValueError):
+        path = path.resolve().relative_to(REPO_ROOT)
+    return f"stimulus: {what}, drawn by {DRAWN_BY[cfg.display.flicker]} ({path})"
+
+
 def run_shutdown(app: FastAPI) -> None:
     """Run ``app.state.on_shutdown`` (stop the tunnel, the fake decoder), each hook once: they are
     taken off the list as they run, so the lifespan and ``main``'s finally can both call this.
@@ -137,6 +211,7 @@ class Conn:
     queue: asyncio.Queue[Message] = field(default_factory=asyncio.Queue)
     task: asyncio.Task | None = None
     client: str = "browser"  # partner pages only: "ios" (the iPhone app) or "browser"
+    pings: int = 0  # clock_ping messages answered on this connection (logged once, at the end)
 
     def send(self, msg: Message) -> None:
         self.queue.put_nowait(msg)
@@ -197,6 +272,7 @@ def create_app(
     ends the process before ``main``'s finally, which runs whatever is left."""
     cfg = cfg or load_config()
     intents = intents or load_intents(
+        REPO_ROOT / cfg.menus.intents,  # an absolute menus.intents stays as it is
         option_count=cfg.menus.option_count,
         label_max_chars=cfg.menus.label_max_chars,
         utterance_max_words=cfg.menus.utterance_max_words,
@@ -274,10 +350,11 @@ def create_app(
                 "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
                 "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile),
                 # display.flicker browser: the page draws each target's flicker (ui/flicker_core.js).
+                # "display" says who draws it: browser, psychopy or phone (the iPhone app, c-VEP).
                 "flicker": cfg.display.flicker == "browser", "waveform": cfg.stim.waveform,
+                "paradigm": cfg.stim.paradigm, "display": cfg.display.flicker,
                 "refresh_hz": cfg.display.expected_refresh_hz,
-                "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg}
-                          for s in cfg.stim.slots},
+                "slots": page_slots(cfg),
                 # The phone links carry the access key: only this computer's page gets them.
                 "phone_url": "" if remote else app.state.phone_url,
                 "app_link": "" if remote else app_link(app.state.phone_url)}
@@ -291,6 +368,9 @@ def create_app(
         page = hub.ui is not None
         return {
             "state": orch.state.value,
+            "paradigm": cfg.stim.paradigm,
+            "display": cfg.display.flicker,  # who draws the flicker: browser, psychopy or phone
+            "phone": phone_health(orch),
             "resume_ready": status.resume_ready,
             # Which partner page is connected: "ios" (the iPhone app), "browser", or "" (none).
             "ui_client": hub.ui.client if page else "",
@@ -415,9 +495,21 @@ def create_app(
         conn = await attach(ws, "ui", client)
         event_log.log("ui_client", client=client)
         orch.on_ui_connected()
+
+        def handle(msg: Message) -> None:
+            # The phone's clock sync is answered here at once, on this connection: the
+            # orchestrator never sees it, and it is not logged per ping (one count at the end).
+            if isinstance(msg, ClockPing):
+                conn.pings += 1
+                conn.send(ClockPong(id=msg.id, t_phone=msg.t_phone, t_server=clock()))
+                return
+            orch.on_ui_message(msg)
+
         try:
-            await receive(ws, parse_ui_to_server, orch.on_ui_message, "ui")
+            await receive(ws, parse_ui_to_server, handle, "ui")
         finally:
+            if conn.pings:
+                event_log.log("clock_pings", client=client, count=conn.pings)
             if await detach(conn, "ui"):
                 orch.on_ui_disconnected()
 
@@ -443,20 +535,30 @@ def create_app(
 
 BRIDGE_KINDS = ("cerelog", "fake")  # --bridge: the Cerelog X8, or brainsync's FakeBoard
 BRIDGE_STOP_S = 12.0  # how long the bridge gets to clean up after SIGTERM
+CODE_STIMULUS = "cvep_2"  # paradigm code: the bridge's stimulus config (brainsync/stimulus/configs)
 
 
-def bridge_command(kind: str, url: str, parent_pid: int, headless: bool = False) -> list[str]:
+def bridge_command(kind: str, url: str, parent_pid: int, headless: bool = False,
+                   paradigm: str = "freq", template: str | Path | None = None) -> list[str]:
     """``python -m brainsync.voice_bridge`` for ``--bridge``: ``kind`` "cerelog" (the headset) or
-    "fake" (FakeBoard); ``headless`` adds --no-stimulus (no PsychoPy window). --parent-pid makes
-    it exit once this server is gone, however the server was stopped."""
+    "fake" (FakeBoard); ``headless`` adds --no-stimulus (no PsychoPy window). Paradigm "code"
+    adds ``--paradigm code -c cvep_2`` and always --no-stimulus (the iPhone app draws), and
+    ``template`` a saved c-VEP template (--template). --parent-pid makes it exit once this server
+    is gone, however the server was stopped."""
     if kind not in BRIDGE_KINDS:
         raise ValueError(f"bridge kind must be one of {BRIDGE_KINDS}, got {kind!r}")
+    if paradigm not in ("freq", "code"):
+        raise ValueError(f"paradigm must be freq or code, got {paradigm!r}")
     cmd = [sys.executable, "-m", "brainsync.voice_bridge", "--url", url,
            "--parent-pid", str(parent_pid)]
     if kind == "fake":
         cmd.append("--fake")
-    if headless:
+    if paradigm == "code":
+        cmd += ["--paradigm", "code", "-c", CODE_STIMULUS]
+    if headless or paradigm == "code":
         cmd.append("--no-stimulus")
+    if template is not None:
+        cmd += ["--template", str(template)]
     return cmd
 
 
@@ -485,14 +587,26 @@ def main(argv: list[str] | None = None) -> None:
                         "the Cerelog X8 and the PsychoPy display, fake = FakeBoard")
     p.add_argument("--bridge-headless", action="store_true",
                    help="with --bridge: no PsychoPy window (the bridge's --no-stimulus)")
+    p.add_argument("--template", type=Path,
+                   help="with --bridge and stim.paradigm code: a saved c-VEP template for the "
+                        "bridge (else the session starts with a calibration trial)")
     args = p.parse_args(argv)
     if args.bridge and args.fake_decoder:
         p.error("--bridge and --fake-decoder both connect to /ws/decoder: pick one")
     if args.bridge_headless and not args.bridge:
         p.error("--bridge-headless needs --bridge")
+    if args.template is not None and not args.bridge:
+        p.error("--template needs --bridge")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     cfg = load_config(args.config)
+    template = None
+    if args.template is not None:
+        if cfg.stim.paradigm != "code":
+            p.error("--template is for stim.paradigm code (e.g. --config config/phone_cvep.yaml)")
+        template = args.template.resolve()  # the bridge runs in the repo root
+        if not template.is_file():
+            p.error(f"--template: no file {template}")
     load_env()  # API keys from the gitignored .env, unless already in the environment
     host = cfg.server.host
     local_only = host in ("127.0.0.1", "localhost", "::1") and not args.tunnel
@@ -523,7 +637,8 @@ def main(argv: list[str] | None = None) -> None:
                else f"fixed lists only ({menus.why_disabled})")
     who = ("your profile (profiles/user.yaml)" if app.state.profile_source == "user"
            else "the demo persona (edit at /profile.html)")
-    print(f"voice: {voice}\nreplies: {replies}\nprofile: {who}", file=sys.stderr)
+    print(f"voice: {voice}\nreplies: {replies}\nprofile: {who}\n"
+          f"{stimulus_line(cfg, args.config)}", file=sys.stderr)
     # "::" listens on IPv6 only (asyncio sets IPV6_V6ONLY), so local clients use [::1] there.
     url_host = {"0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(host, host)
     # Children start only once the app exists, and inside the try: every way out stops them.
@@ -537,14 +652,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.fake_decoder:
             # It retries every second until the server is up, so starting it first is fine.
             # Its hello uses this server's config, so it passes the handshake check.
-            slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
-            # --parent-pid: it exits once this server is gone, however the server was stopped.
-            fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
-                                     "--parent-pid", str(os.getpid()),
-                                     "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
-                                     "--slots", slots, "--waveform", cfg.stim.waveform,
-                                     "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
-                                    cwd=REPO_ROOT)
+            fake = subprocess.Popen(fake_decoder_command(
+                cfg, f"ws://{url_host}:{cfg.server.port}/ws/decoder", os.getpid()), cwd=REPO_ROOT)
             app.state.on_shutdown.append(lambda: stop_process(fake))
         if args.bridge:
             # Like the fake decoder: it retries every second until the server is up. The board
@@ -552,9 +661,11 @@ def main(argv: list[str] | None = None) -> None:
             bridge = subprocess.Popen(bridge_command(args.bridge,
                                                      f"ws://{url_host}:{cfg.server.port}/ws/decoder",
                                                      os.getpid(),
-                                                     # The page draws the flicker: no PsychoPy window.
+                                                     # The page draws the flicker: no PsychoPy window
+                                                     # (paradigm code: the phone, always headless).
                                                      headless=args.bridge_headless
-                                                     or cfg.display.flicker == "browser"),
+                                                     or cfg.display.flicker == "browser",
+                                                     paradigm=cfg.stim.paradigm, template=template),
                                       cwd=REPO_ROOT)
             # SIGTERM ends it like Ctrl-C; its cleanup (display EOF, terminate and kill, up to
             # 3 s; the board thread, 2 s; then the board) must finish before a kill, or the

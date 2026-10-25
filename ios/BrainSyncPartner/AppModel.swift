@@ -1,5 +1,8 @@
 // The app's state: what the server last said, and the events going back. Mirrors ui/app.js; the
-// server stays the owner of every decision (PLAN rule 6).
+// server stays the owner of every decision (PLAN rule 6). With a c-VEP server (a `stimulus`
+// message, INTERFACE-v2-draft.md section 9) this phone is also the user's screen: the model starts
+// and stops the FlickerEngine from the server's trial phases, keeps the clock in step with the
+// server (clock_ping / clock_pong) and sends the engine's cycle markers and refresh check back.
 
 import Foundation
 import Observation
@@ -47,6 +50,30 @@ final class AppModel {
     private(set) var trialStarted: Date?
     /// The partner's Mute, held by the server (the last listen message).
     private(set) var micMuted = false
+    /// The current trial's id (the last `trial` message); nil before the first trial.
+    private(set) var trialId: Int?
+
+    // MARK: c-VEP on the phone (INTERFACE-v2-draft.md section 9)
+
+    /// Draws the flicker over the Look to Speak cards, frame by frame outside SwiftUI. Only the
+    /// model starts it (`updateFlicker`); anything unsafe stops it at once.
+    let flicker = FlickerEngine()
+    /// The phone's estimate of the server's clock, from clock_ping / clock_pong.
+    private(set) var clock = ClockSync()
+    /// The server's c-VEP code. nil: the laptop draws the flicker and this phone mirrors it still.
+    private(set) var stimulus: StimulusSpec?
+    /// The engine's last refresh check, as sent in display_report (Settings shows it).
+    private(set) var displayReport: FlickerEngine.Report?
+    /// The engine accepted `start` and has not been stopped since.
+    private(set) var flickering = false
+    /// Cycle markers not sent because no pong had come back yet: no markers without a clock.
+    private(set) var markersWithoutClock = 0
+    /// A new calibration score arrived and no page has flickered since: the state line shows it.
+    private(set) var calibrationNotice = false
+    /// The app is in front (scene phase active).
+    private(set) var foreground = true
+    /// The Look to Speak screen is up and not covered by the partner tools.
+    private(set) var userScreenVisible = false
 
     // MARK: Local
 
@@ -70,6 +97,20 @@ final class AppModel {
     /// The last open Listen that arrived before the warning was accepted (the warning is where
     /// the partner learns that the mic listens); applied on accept.
     @ObservationIgnored private var pendingListen: Listen?
+    /// The trial the engine flickers now.
+    @ObservationIgnored private var flickerTrialId: Int?
+    /// A trial stopped here (a tap, Stop, the app leaving the front): it never flickers again on
+    /// this phone, whatever the server says late.
+    @ObservationIgnored private var suppressedTrialId: Int?
+    /// The clock pings while connected to a c-VEP server; nil when none run.
+    @ObservationIgnored private var clockTask: Task<Void, Never>?
+    @ObservationIgnored private var nextPingId = 0
+    /// The engine's display link measures the refresh rate (the Look to Speak screen is up).
+    @ObservationIgnored private var monitoring = false
+    /// Clock pings right after a connect, `quickPingS` apart, then one every `pingS`.
+    private static let quickPings = 5
+    private static let quickPingS = 0.2
+    private static let pingS = 2.0
 
     let speaker = Speaker()
     let listener = Listener()
@@ -85,6 +126,12 @@ final class AppModel {
         }
         listener.prepareSession = { [weak self] in
             self?.speaker.activateSession()
+        }
+        flicker.onReport = { [weak self] report in
+            self?.reportDisplay(report)
+        }
+        flicker.onCycles = { [weak self] trialId, cycles, droppedFrames in
+            self?.sendCycles(trialId: trialId, cycles: cycles, droppedFrames: droppedFrames)
         }
         if let data = UserDefaults.standard.data(forKey: Self.linkDefaultsKey),
            let saved = try? JSONDecoder().decode(ServerLink.self, from: data) {
@@ -123,6 +170,9 @@ final class AppModel {
     /// Pairs at once (the pair screen, or Pair on the confirmation of `pendingLink`).
     func pair(with newLink: ServerLink) {
         pendingLink = nil
+        if let current = link, !current.sameServer(as: newLink) {
+            forgetStimulus()  // another server: it says again whether it runs c-VEP
+        }
         if let data = try? JSONEncoder().encode(newLink) {
             UserDefaults.standard.set(data, forKey: Self.linkDefaultsKey)
         }
@@ -198,6 +248,11 @@ final class AppModel {
                 pendingResumeAt = nil
                 if accepted && Date().timeIntervalSince(at) < Self.pendingResumeS { send(.resume) }
             }
+            // c-VEP: a fresh clock (the server may have restarted), the refresh check again.
+            clock.reset()
+            if let report = flicker.report ?? displayReport { sendReport(report) }
+            if stimulus != nil { startClockPings() }
+            updateFlicker()
         case .message(let message):
             apply(message)
         case .disconnected(let why):
@@ -220,6 +275,8 @@ final class AppModel {
     private func setDisconnected() {
         connected = false
         IdleTimer.hold("voice", false)
+        stopClockPings()
+        updateFlicker()  // no server: dark at once (draft section 9)
         // The server re-sends the mic state when we are back.
         pendingListen = nil
         listener.stop("disconnected")
@@ -236,7 +293,9 @@ final class AppModel {
         switch message {
         case .showPage(let msg):
             page = msg
+            updateFlicker()
         case .trial(let msg):
+            trialId = msg.trialId
             setPhase(String(describing: msg.phase))
         case .highlight(let msg):
             pickedSlot = msg.slot
@@ -249,7 +308,17 @@ final class AppModel {
         case .transcript(let msg):
             addLine(fromPartner: String(describing: msg.who) == "partner", text: msg.text)
         case .status(let msg):
+            if let score = msg.calibrationAccuracy, score != status?.calibrationAccuracy {
+                calibrationNotice = true
+            }
             status = msg
+        case .stimulus(let spec):
+            stimulus = spec
+            flicker.setStimulus(spec)
+            if connected && clockTask == nil { startClockPings() }
+            updateFlicker()
+        case .clockPong(let pong):
+            clock.add(tSend: pong.tPhone, tReceive: Date().timeIntervalSince1970, tServer: pong.tServer)
         case .unknown:
             break
         }
@@ -259,7 +328,9 @@ final class AppModel {
         if next == "flicker" && phase != "flicker" { trialStarted = Date() }
         if next != "flicker" { trialStarted = nil }
         if next == "cue" { pickedSlot = nil }
+        if next == "flicker" && page?.mode != .calibrate { calibrationNotice = false }
         phase = next
+        updateFlicker()
     }
 
     private func applyState(_ msg: StateMessage) {
@@ -366,10 +437,13 @@ final class AppModel {
         } else {
             pendingResumeAt = Date()  // sent on the next connect
         }
+        updateFlicker()
     }
 
     /// STOP works before the warning is accepted too (a relaunch during a flickering session).
+    /// The phone's own flicker goes dark first, without waiting for the server.
     func stopPressed() {
+        stopFlickerNow()
         pendingResumeAt = nil
         send(.stop)
     }
@@ -422,6 +496,8 @@ final class AppModel {
         connection?.stop()
         connection = nil
         connected = false
+        stopClockPings()
+        updateFlicker()
         showPairing = true
         pendingListen = nil
         pendingResumeAt = nil
@@ -442,20 +518,160 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            foreground = true
             speaker.activateSession()
             if wasInBackground, link != nil, !showPairing, stopReason == nil, !connected {
                 connect()  // a socket that died in the background
             }
             wasInBackground = false
             listener.resumeFromBackground()
+            updateFlicker()
         case .background:
+            leaveForeground(pauseSession: true)
             wasInBackground = true
             // iOS stops the microphone in the background: say so (mic_report hidden), like a
             // hidden browser tab.
             listener.suspend()
-        default:
+        case .inactive:
+            leaveForeground(pauseSession: false)
+        @unknown default:
             break
         }
+    }
+
+    /// The app leaves the front (draft section 9): the flicker stops at once and Stop goes to the
+    /// server if it was flickering. In the background the user's screen is gone, so a running
+    /// c-VEP session is paused too; inactive (Control Center, the app switcher) only stops a
+    /// flicker in progress.
+    private func leaveForeground(pauseSession: Bool) {
+        foreground = false
+        let wasFlickering = flickering
+        stopFlickerNow()
+        let running = !["", "IDLE", "PAUSED"].contains(stateName)
+        if wasFlickering || (pauseSession && isCodeParadigm && running) {
+            pendingResumeAt = nil
+            send(.stop)
+        }
+    }
+
+    // MARK: c-VEP flicker (INTERFACE-v2-draft.md section 9)
+
+    /// This phone is the user's screen (the server sent a c-VEP stimulus).
+    var isCodeParadigm: Bool { stimulus != nil }
+
+    /// A tap anywhere stops the flicker: while the server's trial flickers, or the engine does.
+    var tapStops: Bool { isCodeParadigm && (flickering || phase == "flicker") }
+
+    /// The Look to Speak screen appeared (true) or went away or was covered (false). The engine
+    /// measures the refresh rate from the moment the screen is up, before any flicker.
+    func setUserScreen(visible: Bool) {
+        if visible && !monitoring {
+            monitoring = true
+            flicker.startMonitoring()
+        }
+        guard visible != userScreenVisible else { return }
+        userScreenVisible = visible
+        updateFlicker()
+    }
+
+    /// The Look to Speak screen is gone for good (another screen replaced it).
+    func userScreenClosed() {
+        setUserScreen(visible: false)
+        if monitoring {
+            monitoring = false
+            flicker.stopMonitoring()
+        }
+    }
+
+    /// A tap anywhere on the flickering screen: dark at once, then Stop to the server.
+    func tapToStop() {
+        stopPressed()
+    }
+
+    /// Settings > Recalibrate: the server runs the calibration trial before the next page.
+    func recalibrate() {
+        send(.calibrate)
+    }
+
+    /// Starts or stops the engine from what the server said: it flickers only in a trial's flicker
+    /// phase, with the warning accepted, a page, a connection, the app in front and the Look to
+    /// Speak screen up. Anything else stops it at once.
+    private func updateFlicker() {
+        let wanted = isCodeParadigm && accepted && connected && foreground && userScreenVisible
+            && phase == "flicker" && trialId != nil && trialId != suppressedTrialId
+            && (displayReport?.ok ?? true)
+        if wanted, let page, let trialId {
+            if flickering && flickerTrialId == trialId { return }
+            flickering = flicker.start(trialId: trialId, slots: page.slots.map(\.slot))
+            flickerTrialId = flickering ? trialId : nil
+        } else if flickering || flicker.isFlickering {
+            flicker.stop()
+            flickering = false
+            flickerTrialId = nil
+        }
+    }
+
+    /// Every overlay dark now; a trial that was flickering never flickers again here. (A trial
+    /// still in its cue is not marked: a glance at Control Center must not cost the next look.)
+    private func stopFlickerNow() {
+        if trialId != nil && (flickering || phase == "flicker") { suppressedTrialId = trialId }
+        flicker.stop()
+        flickering = false
+        flickerTrialId = nil
+    }
+
+    private func reportDisplay(_ report: FlickerEngine.Report) {
+        displayReport = report
+        sendReport(report)
+        if !report.ok { updateFlicker() }  // the engine refuses too; the server pauses on it
+    }
+
+    private func sendReport(_ report: FlickerEngine.Report) {
+        send(.displayReport(refreshHz: report.refreshHz, ok: report.ok, message: report.message))
+    }
+
+    /// The engine drew the first frame of these cycles: their times on the server's clock go out
+    /// as cycle_markers. Without a pong yet there is no clock, so nothing is sent (and counted).
+    private func sendCycles(trialId: Int, cycles: [(cycle: Int, phoneTime: Double)], droppedFrames: Int) {
+        guard clock.offset != nil else {
+            markersWithoutClock += cycles.count
+            return
+        }
+        let markers = cycles.compactMap { item in
+            clock.serverTime(item.phoneTime).map { CycleMarker(cycle: item.cycle, tUnix: $0) }
+        }
+        guard !markers.isEmpty else { return }
+        send(.cycleMarkers(trialId: trialId, markers: markers, droppedFrames: droppedFrames))
+    }
+
+    /// Five quick pings right after a connect, then one every two seconds while connected.
+    private func startClockPings() {
+        clockTask?.cancel()
+        clockTask = Task { [weak self] in
+            var sent = 0
+            while !Task.isCancelled {
+                guard let self, self.connected else { return }
+                self.nextPingId += 1
+                self.send(.clockPing(id: self.nextPingId, tPhone: Date().timeIntervalSince1970))
+                sent += 1
+                let wait = sent < Self.quickPings ? Self.quickPingS : Self.pingS
+                try? await Task.sleep(for: .seconds(wait))
+            }
+        }
+    }
+
+    private func stopClockPings() {
+        clockTask?.cancel()
+        clockTask = nil
+    }
+
+    /// Another server: no stimulus until it sends one, a fresh clock, nothing flickering.
+    private func forgetStimulus() {
+        stimulus = nil
+        clock.reset()
+        stopClockPings()
+        calibrationNotice = false
+        updateFlicker()
     }
 
     // MARK: Helpers
@@ -492,6 +708,24 @@ final class AppModel {
 
     var banner: Banner {
         Banner.make(name: stateName, detail: stateDetail, mode: page.map { String(describing: $0.mode) })
+    }
+
+    /// The Look to Speak screen's state line, or the connection note while not connected.
+    var stateLine: StateLine {
+        guard connected else {
+            let note = connectionNote.isEmpty ? "Connecting…" : connectionNote
+            return StateLine(text: note, tone: stopReason == nil ? .warn : .stop)
+        }
+        return StateLine.make(name: stateName, detail: stateDetail,
+                              mode: page.map { String(describing: $0.mode) },
+                              accuracy: status?.calibrationAccuracy, notice: calibrationNotice)
+    }
+
+    /// The sentence being spoken now, or nil.
+    var speakingSentence: String? {
+        guard stateName == "SPEAKING" else { return nil }
+        let text = stateDetail.isEmpty ? speaker.speakingText : stateDetail
+        return text.isEmpty ? nil : text
     }
 
     var health: Health? {
@@ -534,6 +768,7 @@ struct Banner: Equatable {
         "REST": ("Rest", .idle),
         "NOT_CAUGHT": ("Didn't catch that: look again", .warn),
         "PAUSED": ("Paused", .stop),
+        "CALIBRATING": ("Calibrating: look at the left card", .look),
     ]
 
     static func make(name: String, detail: String, mode: String?) -> Banner {
@@ -542,8 +777,41 @@ struct Banner: Equatable {
         var text = entry.0
         let tone = entry.1
         if name == "STIMULATING" && mode == "list" { text = "Look at SAY or NEXT" }
+        if name == "STIMULATING" && mode == "halves" { text = "Look at the left or right card" }
+        if name == "STIMULATING" && mode == "calibrate" { text = "Calibrating: look at the left card" }
         if !detail.isEmpty && name != "SPEAKING" { text += " — \(detail)" }
         return Banner(text: text, tone: tone)
+    }
+}
+
+/// The Look to Speak screen's state line, in the still centre (ui/view_core.js status): empty
+/// while the user reads, looks, confirms or hears the reply, so nothing new appears between the
+/// cards; otherwise what is going on. A calibration score shows until the first page flickers,
+/// and stays (as a warning) while it is below `lowScore`.
+struct StateLine: Equatable {
+    let text: String
+    let tone: Tone
+
+    static let empty = StateLine(text: "", tone: .idle)
+    /// draft section 9: a calibration below this still runs, but the screen says so.
+    static let lowScore = 0.7
+    static let quiet: Set<String> = ["MENU_CUE", "STIMULATING", "CONFIRMING", "SELECTED", "SPEAKING",
+                                     "REST", "CALIBRATING"]
+
+    static func make(name: String, detail: String, mode: String?, accuracy: Double?,
+                     notice: Bool) -> StateLine {
+        if name == "NOT_CAUGHT" { return StateLine(text: "Didn't catch that", tone: .warn) }
+        if !quiet.contains(name) {
+            let banner = Banner.make(name: name, detail: detail, mode: mode)
+            return StateLine(text: banner.text, tone: banner.tone)
+        }
+        if let accuracy, notice || accuracy < lowScore {
+            let percent = Int((accuracy * 100).rounded())
+            return accuracy < lowScore
+                ? StateLine(text: "Calibrated: \(percent) % (low: Recalibrate in Settings)", tone: .warn)
+                : StateLine(text: "Calibrated: \(percent) %", tone: .idle)
+        }
+        return .empty
     }
 }
 
