@@ -34,6 +34,11 @@ READY = {"type": "status", "decoder_connected": True, "decoder_ok": True, "displ
          "board_ok": True, "llm_ok": True, "llm": "ok", "fake_decoder": False, "keyboard_mode": False,
          "mic": "listening", "mic_muted": False, "resume_ready": False,
          "decoder_name": "ssvep-fbcca", "decoder_message": ""}
+LONG_TALK = [{"type": "transcript", "who": w, "text": t} for w, t in [
+    ("partner", "Good morning Sam, did you sleep well?"), ("user", "Yes, I slept well."),
+    ("partner", "Great. Your sister is coming by at noon."), ("user", "That's wonderful news."),
+    ("partner", "She asked if you want her to bring anything."), ("user", "Could she bring some fruit?"),
+    ("partner", "I'll tell her. Do you want to go outside before she comes?")]]
 TALK = [{"type": "transcript", "who": "partner", "text": "Hi Sam, how are you feeling today?"},
         {"type": "transcript", "who": "user", "text": "I'm doing well, thank you."},
         {"type": "transcript", "who": "partner", "text": "Do you want to go outside?"}]
@@ -84,6 +89,10 @@ STATES: dict[str, tuple[int, int, list[dict], tuple[str, str], bool]] = {
                          state("STIMULATING"), trial("flicker")], ("muted", ""), False),
     "list": (1440, 900, [READY, *TALK, LIST, state("STIMULATING"), trial("flicker")],
              ("listening", ""), False),
+    # A 1366 x 768 laptop once the browser's bars take their part: a long talk, a reply being
+    # spoken and the phone links must still fit without a page scroll.
+    "laptop-busy": (1366, 650, [READY, *LONG_TALK, CONFIRM, state("SPEAKING", "Yes, let's go outside."),
+                                trial("rest")], ("speaking", ""), False),
     # Headless Chrome on Windows lays out no narrower than about 510 px; 520 is still a phone
     # (the 600 px breakpoint in style.css).
     "phone": (520, 960, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
@@ -93,6 +102,12 @@ STATES: dict[str, tuple[int, int, list[dict], tuple[str, str], bool]] = {
 CONFIG = {"tts_rate": 1.0, "keyboard_mode": False, "stt_mode": "always", "listen_window_s": 10,
           "stt_gap_s": 1.2, "stt_max_line_s": 15, "stt_echo_s": 4, "cue_s": 1.0, "max_trial_s": 10.0,
           "user_name": "Sam"}
+# Extra /api/config fields per state.
+STATE_CONFIG: dict[str, dict] = {
+    "laptop-busy": {"phone_url": "https://example-words-here.trycloudflare.com/?key=0123456789abcdef0123",
+                    "app_link": "brainsync://pair?url=https%3A%2F%2Fexample-words-here.trycloudflare.com"
+                                "&key=0123456789abcdef0123"},
+}
 
 
 def harness(name: str, base_url: str) -> str:
@@ -105,7 +120,7 @@ def harness(name: str, base_url: str) -> str:
 <style>* {{ transition: none !important; }}</style>
 <script>
 // tools/ui_shots.py: no server. The page's WebSocket and /api/config are stand-ins.
-window.fetch = () => Promise.resolve({{ json: () => Promise.resolve({json.dumps(CONFIG)}) }});
+window.fetch = () => Promise.resolve({{ json: () => Promise.resolve({json.dumps({**CONFIG, **STATE_CONFIG.get(name, {})})}) }});
 window.SpeechRecognition = window.webkitSpeechRecognition = undefined;
 class ShotSocket {{
   constructor() {{ this.readyState = 1; setTimeout(() => {{
