@@ -9,7 +9,8 @@
 #   - dpkg -i installs both: their Depends are met by a plain Ubuntu with
 #     python3.12; dpkg --verify passes; the three YAMLs are conffiles;
 #   - every compiled library in the venv finds its system libraries (ldd);
-#   - as an ordinary user: every module of brainsync, app and tools imports
+#   - as an ordinary user: BrainFlow reports the Cerelog X8 at 250 Hz; every
+#     module of brainsync, app and tools imports
 #     (tests/runtime/import_all.py), and under Xvfb PsychoPy opens a window
 #     and draws (smoke.py), as do the apps' own renderers (real_renderer.py,
 #     chess_renderer.py); every /usr/bin command answers --help;
@@ -56,6 +57,12 @@ echo "== imports"
 # Under Xvfb: import_all.py also imports psychopy.visual, which connects to X on import.
 (cd /tmp && as_user xvfb-run -a /opt/brainsyncos/venv/bin/python /tmp/import_all.py) | tee /tmp/import.out
 ! grep -q '^FAIL' /tmp/import.out || die "imports failed (above)"
+
+echo "== BrainFlow (Cerelog fork)"
+out="$(cd /tmp && as_user /opt/brainsyncos/venv/bin/python -W ignore -c 'from brainflow.board_shim import BoardShim, BoardIds
+print(BoardShim.get_sampling_rate(BoardIds.CERELOG_X8_BOARD), BoardShim.get_eeg_channels(BoardIds.CERELOG_X8_BOARD))')"
+echo "Cerelog X8: $out"
+[ "$out" = "250 [1, 2, 3, 4, 5, 6, 7, 8]" ] || die "BrainFlow in the venv does not report 250 Hz and EEG channels 1-8"
 
 echo "== PsychoPy under Xvfb"
 for t in smoke.py real_renderer.py chess_renderer.py; do

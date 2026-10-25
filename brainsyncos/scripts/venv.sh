@@ -17,7 +17,8 @@
 # Caches (gitignored build/):
 #   build/pip/           the pip wheel
 #   build/wheelhouse/    the downloaded wheels; once complete, builds are offline
-#   build/wheels/local/  the local wheels named in local-wheels.txt
+#   build/wheels/        the local wheels named in local-wheels.txt, as
+#                        scripts/build-wheels.sh leaves them (with SHA256SUMS)
 #
 # Every wheel is installed with --no-deps (the lock is the whole set; never
 # run pip check, which would list the PsychoPy dependencies left out on
@@ -43,7 +44,7 @@ PY_LOCK="$PY_DIR/brainsync.lock.txt"
 PY_LOCAL_LIST="$PY_DIR/local-wheels.txt"
 PIP_DIR="$BUILD_DIR/pip"
 WHEELHOUSE="$BUILD_DIR/wheelhouse"
-LOCAL_WHEELS="$BUILD_DIR/wheels/local"
+LOCAL_WHEELS="$BUILD_DIR/wheels"
 SYSTEM_PY=/usr/bin/python3.12
 
 # venv_pip PYTHON ARGS...: run the pip pinned in python/pip.env from its wheel.
@@ -94,7 +95,8 @@ venv_fetch() {
 venv_lock_count() { grep -cE '^[A-Za-z0-9]' "$PY_LOCK"; }
 
 # venv_local_wheels: the wheels python/local-wheels.txt names, one path per
-# line; dies on a missing, doubled or unlisted wheel.
+# line; dies on a missing, doubled or unlisted wheel, or one whose sha256 is
+# not the one build/wheels/SHA256SUMS records.
 venv_local_wheels() {
     local names n f found norm
     names="$(sed 's/#.*//' "$PY_LOCAL_LIST" | tr -d ' \t' | grep -v '^$' || true)"
@@ -102,17 +104,19 @@ venv_local_wheels() {
         [ -e "$f" ] || continue
         norm="$(basename "$f" | cut -d- -f1 | tr 'A-Z_.' 'a-z--')"
         printf '%s\n' "$names" | tr 'A-Z_.' 'a-z--' | grep -qx "$norm" \
-            || die "build/wheels/local/$(basename "$f") is not listed in python/local-wheels.txt"
+            || die "build/wheels/$(basename "$f") is not listed in python/local-wheels.txt"
     done
     for n in $names; do
         norm="$(printf '%s' "$n" | tr 'A-Z.-' 'a-z__')"
         found=""
         for f in "$LOCAL_WHEELS/$norm"-*.whl; do
             [ -e "$f" ] || continue
-            [ -z "$found" ] || die "more than one wheel of $n in build/wheels/local"
+            [ -z "$found" ] || die "more than one wheel of $n in build/wheels"
             found="$f"
         done
-        [ -n "$found" ] || die "python/local-wheels.txt lists $n, but build/wheels/local has no wheel of it (build it first)"
+        [ -n "$found" ] || die "python/local-wheels.txt lists $n, but build/wheels has no wheel of it (scripts/build.sh wheels)"
+        grep -qx "$(sha256_of "$found")  $(basename "$found")" "$LOCAL_WHEELS/SHA256SUMS" 2> /dev/null \
+            || die "build/wheels/$(basename "$found") does not match build/wheels/SHA256SUMS"
         printf '%s\n' "$found"
     done
 }

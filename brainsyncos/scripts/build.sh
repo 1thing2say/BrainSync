@@ -168,6 +168,7 @@ c_iso() {
 c_all() {
     c_doctor || die "prerequisites missing (see above)"
     [ "$edition" = jetson ] || "$S/fetch-vm-base.sh"
+    "$B" run scripts/build-wheels.sh   # skipped while up to date; brainsync-runtime needs them
     c_packages
     c_repo
     c_iso
