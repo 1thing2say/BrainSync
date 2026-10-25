@@ -966,13 +966,35 @@ each on the same board and PsychoPy display:
 | c-VEP | One 63-bit m-sequence; every target shows it delayed by k lags (the paper: 16 targets, 4-frame lags) | One template trained while looking at square 0, shifted per target, Pearson correlation, argmax (`vep.cvep`) | `cvep_4` (16-frame lags), `cvep_16` (the paper's grid) | 91 %, 92.8 bits/min |
 
 ```bash
+# plans and synthetic runs (no headset)
 .venv/bin/python -m brainsync.stimulus -c cvep_4 --plan          # the sequences, no display
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --plan          # the two-square pair (YES / NO)
 .venv/bin/python -m brainsync.vep --compare --fake               # all three on the synthetic board
 .venv/bin/python -m brainsync.vep --paradigm code --fake --fast --no-stimulus   # instant dry run
-.venv/bin/python -m brainsync.vep --paradigm code                # Cerelog X8 + display: train, then decode
-.venv/bin/python -m brainsync.vep --paradigm time
-.venv/bin/python -m brainsync.vep --paradigm freq                # brainsync.demo with the SNR rule
+.venv/bin/python -m brainsync.vep --paradigm code --fake --seconds 120          # display + fake user
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --fake --seconds 20 --train-cycles 10 --no-voice
+
+# live: Cerelog X8 + the PsychoPy display (train on the first square, then decode)
+.venv/bin/python -m brainsync.vep --paradigm code                # 4 squares, cvep_4
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2      # 2 squares, labels + confidence line
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --cycles 3 --votes 2 --margin 0.1 --train-cycles 40 --seconds 120
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --template data/spectrum_checks/<stamp>_cvep_template.npz
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --no-scores        # bare squares
+.venv/bin/python -m brainsync.vep --paradigm time                # t-VEP, tvep_4
+.venv/bin/python -m brainsync.vep --paradigm freq                # f-VEP, brainsync.demo with the SNR rule
+
+# the display alone, driven by hand: cue index, or {"text": "..."} lines, on stdin
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --free --feedback stdin --labels --status stdin --no-wait
 ```
+
+Live-run knobs: `--cycles` (c-VEP cycles averaged per decision, 1.05 s each), `--votes`
+(agreeing decisions before a commit), `--margin` (abstain unless the best target's
+correlation leads by this much; 0 commits on any lead), `--train-cycles` (cycles on the
+first square for the template; its held-out accuracy prints and shows on screen),
+`--template FILE` (skip training), `--seconds`, `--port` (the board's serial port, else
+auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The display
+needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
+venv with PsychoPy is the one described in "Install"; run the commands with its python.
 
 How it fits the code base. A stimulus config may carry a `[code]` table (m-sequence length,
 lag in frames, frames per bit) or a `[time]` table (flash and gap frames, round order)
