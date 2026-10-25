@@ -113,6 +113,19 @@ struct Callout<Content: View>: View {
 }
 
 extension View {
+    /// White text with a black outline (ui/style.css `.target` text-shadow), so it reads on every
+    /// frame of a flickering card, from black through grey to white, and looks the same when the
+    /// flicker stops. Rendered once into its own layer (`drawingGroup`), so the flicker underneath
+    /// never makes Core Animation redraw the shadows frame by frame.
+    func outlined() -> some View {
+        self.shadow(color: .black, radius: 1)
+            .shadow(color: .black, radius: 1)
+            .shadow(color: .black, radius: 1.5)
+            .shadow(color: .black, radius: 0, x: 1, y: 1)
+            .shadow(color: .black, radius: 0, x: -1, y: -1)
+            .drawingGroup()
+    }
+
     /// A card: the panel colour, a 1px line, rounded 12.
     func card(padding: CGFloat = 14) -> some View {
         self.padding(padding)

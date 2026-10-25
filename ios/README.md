@@ -50,6 +50,8 @@ Look to Speak, with a step indicator and a big **Continue**:
 3. **Safety:** the full flicker warning, and "I have read this warning" before Continue.
 4. **Microphone:** asks iOS for microphone and speech recognition access. It only asks: the mic
    opens when the server wants it, after the session starts.
+   - **How the user picks** (only with a c-VEP server, see "Look to Speak on the phone" below):
+     left or right card, Say it / Back, the 20 s calibration first, tap anywhere to stop.
 5. **Practice:** an offline walk-through with sample replies (no server, nothing spoken): a
    question, three reply cards and More options, a pick, the Say it / Back screen, Speaking.
 6. **Done:** "Start the session" accepts the warning for this run and sends resume, like the
@@ -116,6 +118,44 @@ and edits the profile.
   permission with a link to iOS Settings, the server with **Pair again**, and **Show setup
   again**. Mute and the session stay on the main screen (the server holds them), and Stop is on
   the Settings sheet too.
+
+## Look to Speak on the phone (c-VEP)
+
+With `config/phone_cvep.yaml` the phone is the **user's** screen, like Google's Look to Speak, and
+it draws the flicker itself (`INTERFACE-v2-draft.md` section 9):
+
+```
+python -m app.server --config config/phone_cvep.yaml --bridge cerelog --tunnel
+```
+
+Pair as above. Once the server sends its `stimulus` (the c-VEP code, on connect), the app shows
+the Look to Speak screen instead of the partner screen; with the default config nothing changes.
+
+- **Two cards**, left (s1) and right (s2), each with half of the phrases still in play ("More
+  options" muted). The user looks at the card with the phrase they want; both cards flash one
+  black/white code, the right one half a cycle behind, and the headset decodes which one the user
+  watched. That half stays and is split again until one phrase is left; then **Say it** (left) /
+  **Back** (right), with the phrase in the centre. Nothing is spoken without Say it. The picked
+  card gets a white ring; the state line in the centre says "Waiting to start", why it is paused,
+  "Didn't catch that" or the calibration score, and is empty while the user reads or looks.
+- **60 Hz, never ProMotion.** The app locks its display link to exactly 60 Hz, measures it and
+  reports it to the server (`display_report`). A phone that cannot hold 60 Hz (Low Power Mode, a
+  hot phone) does not flicker, and the server pauses until it can. Settings shows the measured
+  rate.
+- **Calibration.** After the start and the still baseline, both cards flicker for about 20 s
+  while the user looks at the left card (Look here); the bridge fits this user's template from
+  it. The score shows on the state line (below 70 % it stays, as a warning). **Settings >
+  Recalibrate** runs it again before the next page. Settings also shows the clock the phone uses
+  to time-stamp its frames on the laptop's clock (offset and best round trip).
+- **Stop.** A **tap anywhere** on the flickering screen turns it dark at once and sends Stop; the
+  small red **Stop** at the bottom is always there, and **Resume** appears while paused. The
+  flicker also stops when the connection drops or the app leaves the screen (in the background a
+  running session is paused). Nothing flickers before the warning is accepted.
+- **Partner** (bottom right) opens the partner tools over it: the conversation, typing, the mic,
+  Correct / Wrong and Settings, with a still copy of the two cards. The phone does not flicker
+  while they are open.
+- The setup gains a step, **How the user picks**, and the practice round walks through the two
+  cards (still, never flickering).
 
 ## Troubleshooting
 

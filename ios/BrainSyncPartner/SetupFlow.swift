@@ -1,8 +1,9 @@
 // The first-run setup, one step per screen like Google's Look to Speak: what the app does,
-// pairing, the flicker warning, the microphone, a practice round and the start (BrainSyncKit's
-// SetupSteps holds the order). No step sends resume or starts anything before the last one
-// (PLAN rule 10: the warning comes first). Once the phone is paired, Stop is on every step,
-// because the app may be opened while the laptop already flickers.
+// pairing, the flicker warning, the microphone, how the user looks (Look to Speak on this phone,
+// c-VEP only), a practice round and the start (BrainSyncKit's SetupSteps holds the order). No
+// step sends resume or starts anything before the last one (PLAN rule 10: the warning comes
+// first). Once the phone is paired, Stop is on every step, because the app may be opened while
+// the session already flickers.
 
 import SwiftUI
 import UIKit
@@ -22,7 +23,9 @@ struct SetupFlow: View {
     @State private var permission = MicPermission.notAsked
     @State private var asking = false
 
-    private var steps: SetupSteps { order ?? SetupSteps(paired: model.link != nil) }
+    private var steps: SetupSteps {
+        order ?? SetupSteps(paired: model.link != nil, lookToSpeak: model.isCodeParadigm)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,11 +44,18 @@ struct SetupFlow: View {
         .foregroundStyle(Palette.text)
         .onAppear {
             if order == nil {
-                let fixed = SetupSteps(paired: model.link != nil)
+                let fixed = SetupSteps(paired: model.link != nil, lookToSpeak: model.isCodeParadigm)
                 order = fixed
                 step = fixed.first
             }
             permission = MicPermission.current()
+        }
+        .onChange(of: model.isCodeParadigm) { _, code in
+            // Paired during the setup with a c-VEP server: the looking step comes in after the
+            // microphone; the steps before it keep their places.
+            if code, let current = order, !current.lookToSpeak {
+                order = current.withLookToSpeak()
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { permission = MicPermission.current() }  // back from iOS Settings
@@ -95,8 +105,10 @@ struct SetupFlow: View {
         case .microphone:
             MicrophoneStep(permission: permission, asking: asking, live: model.accepted,
                            ask: askPermission, openSettings: openSettings)
+        case .looking:
+            LookingStep()
         case .practice:
-            PracticeView { practiced = true }
+            PracticeView(lookToSpeak: model.isCodeParadigm) { practiced = true }
         case .done:
             DoneStep()
         }
@@ -199,16 +211,25 @@ struct StepIndicator: View {
 // MARK: - The steps
 
 private struct WelcomeStep: View {
+    @Environment(AppModel.self) private var model
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             MonoLabel("BCI Voice partner")
             Heading("What this app does", font: .largeTitle.weight(.bold))
             Text("You are the conversation partner. This phone is your side of the conversation; setting it up takes a minute.")
                 .foregroundStyle(Palette.muted)
-            FeatureRow(icon: "eye", title: "The user picks replies with their eyes",
-                       text: "On the laptop's flicker screen each reply sits beside its own flickering square. The user looks at the one they want, then confirms it.")
-            FeatureRow(icon: "iphone", title: "This phone shows what they see",
-                       text: "A still copy of the user's screen: the replies on offer and the one picked. Nothing on this phone flickers.")
+            if model.isCodeParadigm {
+                FeatureRow(icon: "eye", title: "The user picks replies with their eyes",
+                           text: "This phone becomes the user's screen, like Look to Speak: two cards, each with half of the replies. The user looks at one card, then the other, until one reply is left, then confirms it.")
+                FeatureRow(icon: "person.2", title: "Your tools stay one tap away",
+                           text: "The Partner button opens the conversation, typing and the mic, with a still copy of the user's screen.")
+            } else {
+                FeatureRow(icon: "eye", title: "The user picks replies with their eyes",
+                           text: "On the laptop's flicker screen each reply sits beside its own flickering square. The user looks at the one they want, then confirms it.")
+                FeatureRow(icon: "iphone", title: "This phone shows what they see",
+                           text: "A still copy of the user's screen: the replies on offer and the one picked. Nothing on this phone flickers.")
+            }
             FeatureRow(icon: "ear", title: "It listens to you",
                        text: "Speak normally. What you say becomes text, and new replies are written for it.")
             FeatureRow(icon: "speaker.wave.2", title: "It plays the replies",
@@ -364,11 +385,18 @@ private struct DoneStep: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Heading("Ready", font: .largeTitle.weight(.bold))
-            Text("Start the session when the user is ready and the headset is on. The user's screen stays still for a short baseline, then shows the first replies.")
+            Text(model.isCodeParadigm
+                 ? "Start the session when the user is ready, the headset is on and the phone is in front of them. The screen stays still for a short baseline, then the calibration (about 20 seconds on the left card), then the first replies."
+                 : "Start the session when the user is ready and the headset is on. The user's screen stays still for a short baseline, then shows the first replies.")
                 .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
-            FeatureRow(icon: "hand.raised", title: "Stop is always at the bottom",
-                       text: "It turns the flicker off and pauses. Esc on the flicker display does the same.")
+            if model.isCodeParadigm {
+                FeatureRow(icon: "hand.tap", title: "Tap anywhere to stop the flicker",
+                           text: "A tap on the flickering screen, or the red Stop at the bottom, turns it off at once and pauses.")
+            } else {
+                FeatureRow(icon: "hand.raised", title: "Stop is always at the bottom",
+                           text: "It turns the flicker off and pauses. Esc on the flicker display does the same.")
+            }
             FeatureRow(icon: "mic.slash", title: "Mute and typing",
                        text: "Mute turns the mic off; typing always works.")
             FeatureRow(icon: "gearshape", title: "Settings",
@@ -379,6 +407,31 @@ private struct DoneStep: View {
                         .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+}
+
+/// Look to Speak on this phone (c-VEP): how the user picks, and the calibration that comes first.
+private struct LookingStep: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Heading("How the user picks", font: .largeTitle.weight(.bold))
+            Text("This phone is the user's screen. Hold it in front of them, in portrait, at reading distance, with the brightness up.")
+                .foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            FeatureRow(icon: "rectangle.split.2x1", title: "Look at the left or right card",
+                       text: "The replies are split between two cards. The user looks at the card that holds the reply they want for a few seconds; that half stays and is split again, until one reply is left.")
+            FeatureRow(icon: "checkmark.circle", title: "Then confirm",
+                       text: "Say it (left) speaks the reply; Back (right) shows all the replies again. Nothing is spoken without Say it.")
+            FeatureRow(icon: "scope", title: "First, a 20-second calibration",
+                       text: "After the start and a still baseline, both cards flicker for about 20 seconds while the user keeps looking at the left card (Look here). It teaches the headset this user's response; the score shows when it is done, 70 % or more is good. Settings > Recalibrate runs it again.")
+            FeatureRow(icon: "hand.tap", title: "Tap anywhere to stop",
+                       text: "A tap on the flickering screen turns it off at once and pauses. It also stops when the app leaves the screen.")
+            Callout(title: "60 Hz", icon: "info.circle", tint: Palette.next) {
+                Text("The app runs the flicker at exactly 60 frames a second, also on ProMotion iPhones. If the phone cannot hold it (Low Power Mode, a hot phone), the screen says so and does not flicker.")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
