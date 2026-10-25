@@ -53,3 +53,7 @@ CLAUDE.local.md
 .venv-tribe/
 .tribe-cache/
 extension/heatmap/clips/
+
+# Xcode per-user state and SwiftPM caches
+xcuserdata/
+.swiftpm/

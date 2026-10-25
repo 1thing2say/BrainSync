@@ -20,7 +20,15 @@ from pathlib import Path
 if __package__ in (None, ""):  # python tools/ui_fixture.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from brainsync.vep.codes import m_sequence  # noqa: E402
 from app.schemas import (  # noqa: E402
+    Calibrate,
+    ClockPing,
+    ClockPong,
+    CycleMarker,
+    CycleMarkers,
+    DisplayReport,
+    Stimulus,
     Highlight,
     Judgment,
     Key,
@@ -59,6 +67,11 @@ def message_type(model: type) -> str:
 
 def literal_values(model: type, field: str) -> list[str]:
     return list(typing.get_args(model.model_fields[field].annotation))
+
+
+# cvep_2's code (brainsync/stimulus/configs/cvep_2.toml): the 63-bit m-sequence, seed 1, as the
+# bridge's hello sends it, so the app's CVEPCode tests check the same bits the bridge decodes.
+CVEP_BITS = "".join(str(int(b)) for b in m_sequence(63))
 
 
 def server_to_ui() -> list:
@@ -103,7 +116,30 @@ def server_to_ui() -> list:
     ]
     assert {m.llm for m in statuses} == set(literal_values(UIStatus, "llm"))
     trials = [Trial(trial_id=7, phase=p) for p in literal_values(Trial, "phase")]
-    return [page, confirm, listing, *trials, Highlight(slot="s1"),
+    # Halves mode (Look to Speak on the phone, c-VEP): the first `split` options on the left card;
+    # an option with an empty utterance is "More options".
+    halves_options = [Option(label="Go outside", utterance="Yes, let's go outside.", intent_id="yes"),
+                      Option(label="Not now", utterance="Not right now.", intent_id="no"),
+                      Option(label="After lunch", utterance="Maybe after lunch.", intent_id="maybe"),
+                      Option(label="More options", utterance="", intent_id="more")]
+    halves = ShowPage(list_id="m4", page=3, mode="halves", options=halves_options, split=2,
+                      slots=[UISlot(slot="s1", role="left", label="Left"),
+                             UISlot(slot="s2", role="right", label="Right")])
+    halves_confirm = ShowPage(list_id="m4", page=3, mode="confirm", text="Not right now.",
+                              slots=[UISlot(slot="s1", role="say", label="Say it"),
+                                     UISlot(slot="s2", role="back", label="Back")])
+    calibrate = ShowPage(list_id="calibrate", page=1, mode="calibrate", cue="s1",
+                         text="Look at the left card",
+                         slots=[UISlot(slot="s1", role="left", label="Look here"),
+                                UISlot(slot="s2", role="right", label="")])
+    trained = UIStatus(decoder_connected=True, decoder_ok=True, display_ok=True, llm_ok=True,
+                       fake_decoder=False, keyboard_mode=False, board_ok=True, llm="ok",
+                       decoder_name="cvep-template", trained=True, calibration_accuracy=0.85)
+    stimulus = Stimulus(refresh_hz=60.0, frames_per_bit=1, bits=CVEP_BITS,
+                        lags={"s1": 0, "s2": 31}, depth=1.0)
+    return [page, confirm, listing, halves, halves_confirm, calibrate, stimulus,
+            ClockPong(id=12, t_phone=1792809201.5, t_server=1792809201.538), trained,
+            *trials, Highlight(slot="s1"),
             Speak(text="Yes, let's go outside.", utterance_id="u-7", audio_url="/audio/3f2a9c"),
             Speak(text="Not right now.", utterance_id="u-8"),
             *listens,
@@ -122,7 +158,14 @@ def ui_to_server() -> list:
             Key(key="1"), Key(key="C"), Stop(), Resume(),
             Judgment(utterance_id="u-7", correct=True), Judgment(utterance_id="u-8", correct=False),
             MicSet(muted=True), MicSet(muted=False),
-            *reports]
+            *reports,
+            ClockPing(id=12, t_phone=1792809201.5),
+            CycleMarkers(trial_id=9, markers=[CycleMarker(cycle=0, t_unix=1792809201.512),
+                                              CycleMarker(cycle=1, t_unix=1792809202.562)],
+                         dropped_frames=0),
+            DisplayReport(refresh_hz=60.0, ok=True),
+            DisplayReport(refresh_hz=120.0, ok=False, message="ProMotion: 120 Hz, needs 60 Hz"),
+            Calibrate()]
 
 
 def build() -> dict:

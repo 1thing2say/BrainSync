@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, TypeVar
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from app.schemas import Option, SlotId, SlotSpec, Waveform, validate_option
+from app.schemas import Option, Paradigm, SlotId, SlotSpec, Waveform, validate_option
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
@@ -36,7 +36,8 @@ REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
 
 # Page mode: "option" slots carry one reply each, "next" asks for a new page.
 # List mode (the 2-target fallback): "say" speaks the highlighted option, "next" moves the highlight.
-Role = Literal["option", "say", "next"]
+# Halves mode (Look to Speak on the phone): "left" and "right" each keep one half of the phrases.
+Role = Literal["option", "say", "next", "left", "right"]
 
 
 class ConfigError(Exception):
@@ -74,9 +75,24 @@ class ServerConfig(Strict):
 class DisplayConfig(Strict):
     expected_refresh_hz: float = Field(gt=0)
     # Who draws the flicker the user looks at: "browser" (the session page, ui/flicker_core.js;
-    # the bridge runs without its PsychoPy window) or "psychopy" (the bridge's display window;
-    # the page is then a still mirror).
-    flicker: Literal["browser", "psychopy"] = "browser"
+    # the bridge runs without its PsychoPy window), "psychopy" (the bridge's display window;
+    # the page is then a still mirror) or "phone" (the iPhone app, c-VEP; draft section 9).
+    flicker: Literal["browser", "psychopy", "phone"] = "browser"
+    # Paradigm code: contrast of the phone's c-VEP flicker (1 = black / white).
+    depth: float = Field(default=1.0, gt=0, le=1)
+
+
+class CodeConfig(Strict):
+    """stim.code (paradigm code): the m-sequence's length and frames per bit, as in the bridge's
+    stimulus config (brainsync/stimulus/configs/cvep_2.toml); the bits come from the bridge's hello."""
+
+    length: int = Field(ge=3)
+    frames_per_bit: int = Field(default=1, ge=1)
+    train_cycles: int = Field(default=20, ge=2)  # cycles the calibration trial collects
+
+    @property
+    def cycle_frames(self) -> int:
+        return self.length * self.frames_per_bit
 
 
 class ConfirmSlots(Strict):
@@ -87,6 +103,8 @@ class ConfirmSlots(Strict):
 
 
 class StimConfig(Strict):
+    paradigm: Paradigm = "freq"
+    code: CodeConfig | None = None  # paradigm code only
     slots: list[SlotConfig] = Field(min_length=1)
     roles: dict[SlotId, Role]
     confirm: ConfirmSlots
@@ -110,7 +128,10 @@ class BaselineConfig(Strict):
 
 
 class MenusConfig(Strict):
-    mode: Literal["page", "list"]
+    # page: an option per target + NEXT; list: SAY / NEXT; halves: Look to Speak, each look keeps
+    # one half of the phrases (left / right), then Say it / Back
+    mode: Literal["page", "list", "halves"]
+    intents: str = "config/intents.yaml"  # fallback lists (relative to the repo), option_count each
     dynamic: bool
     option_count: int = Field(ge=1)
     # extra candidates Claude writes, ranked last, that replace an invalid or repeated option
@@ -195,13 +216,17 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     role_counts = Counter(stim.roles.values())
     mode = cfg.menus.mode
     if mode == "page":
-        wanted = {"option": cfg.menus.option_count, "next": 1, "say": 0}
+        wanted = {"option": cfg.menus.option_count, "next": 1, "say": 0, "left": 0, "right": 0}
+    elif mode == "halves":
+        wanted = {"option": 0, "next": 0, "say": 0, "left": 1, "right": 1}
     else:
-        wanted = {"option": 0, "say": 1, "next": 1}
+        wanted = {"option": 0, "say": 1, "next": 1, "left": 0, "right": 0}
     for role, n in wanted.items():
         if role_counts[role] != n:
             problems.append(f"stim.roles: {mode} mode needs {n} '{role}' slot(s), found {role_counts[role]}")
-    if mode == "page":
+    if mode == "halves" and cfg.menus.option_count < 2:
+        problems.append("menus.option_count: halves mode needs at least 2 options")
+    if mode in ("page", "halves"):
         for name in ("say", "back"):
             if getattr(stim.confirm, name) not in slot_ids:
                 problems.append(f"stim.confirm.{name}: {getattr(stim.confirm, name)} is not a defined slot")
@@ -220,6 +245,51 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     if cfg.speech.model.endswith("-latest"):
         problems.append(f"speech.model: pin a model version, not {cfg.speech.model}")
 
+    if stim.paradigm == "code":
+        problems += _code_problems(cfg)
+    else:
+        problems += _freq_problems(cfg)
+    if cfg.display.flicker == "phone" and stim.paradigm != "code":
+        problems.append("display.flicker: phone draws c-VEP only; set stim.paradigm: code")
+    if cfg.baseline.timeout_s <= cfg.baseline.seconds:
+        problems.append(
+            f"baseline.timeout_s ({cfg.baseline.timeout_s:g}) must be longer than "
+            f"baseline.seconds ({cfg.baseline.seconds:g})"
+        )
+    return problems
+
+
+def _code_problems(cfg: AppConfig) -> list[str]:
+    """Paradigm code: every slot has a lag, distinct within one cycle, and stim.code is set."""
+    stim = cfg.stim
+    problems: list[str] = []
+    if stim.code is None:
+        return ["stim.code: paradigm code needs code: {length, frames_per_bit}"]
+    if cfg.display.flicker != "phone":
+        problems.append("display.flicker: paradigm code is drawn by the phone; use flicker: phone")
+    lags = []
+    for s in stim.slots:
+        if s.lag_frames is None:
+            problems.append(f"stim.slots: {s.slot} needs lag_frames (paradigm code)")
+            continue
+        if s.lag_frames >= stim.code.cycle_frames:
+            problems.append(f"stim.slots: {s.slot} lags {s.lag_frames} frames, but a cycle has "
+                            f"only {stim.code.cycle_frames}")
+        lags.append(s.lag_frames)
+    if len(set(lags)) != len(lags):
+        problems.append("stim.slots: two slots share the same lag_frames")
+    return problems
+
+
+def _freq_problems(cfg: AppConfig) -> list[str]:
+    """Paradigm freq (SSVEP): every slot has a frequency below Nyquist, square only if it divides
+    the refresh rate, and no two slots share a frequency and phase."""
+    stim = cfg.stim
+    refresh = cfg.display.expected_refresh_hz
+    problems: list[str] = []
+    if any(s.freq_hz is None for s in stim.slots):
+        return [f"stim.slots: {s.slot} needs freq_hz (paradigm freq)"
+                for s in stim.slots if s.freq_hz is None]
     nyquist = refresh / 2
     for s in stim.slots:
         if not 0 < s.freq_hz < nyquist:
@@ -237,11 +307,6 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     pairs = [(s.freq_hz, round(s.phase_deg % 360, 6)) for s in stim.slots]
     if len(set(pairs)) != len(pairs):
         problems.append("stim.slots: two slots share the same frequency and phase")
-    if cfg.baseline.timeout_s <= cfg.baseline.seconds:
-        problems.append(
-            f"baseline.timeout_s ({cfg.baseline.timeout_s:g}) must be longer than "
-            f"baseline.seconds ({cfg.baseline.seconds:g})"
-        )
     return problems
 
 
@@ -515,6 +580,7 @@ __all__ = [
     "SlotConfig",
     "ServerConfig",
     "DisplayConfig",
+    "CodeConfig",
     "StimConfig",
     "BaselineConfig",
     "MenusConfig",

@@ -430,3 +430,92 @@ Proposed additions, one JSON object per line, alongside the integers:
   second one a confirm trial with only s1 and s4 active), checks
   every message the bridge sends against the v2 schemas and the rules above, and prints pass or
   fail per message. Passing it is the SYNC 2 gate.
+
+## 9. c-VEP on the phone (Look to Speak), `config/phone_cvep.yaml`
+
+An addition to protocol 2, off unless the config says `stim.paradigm: code` and
+`display.flicker: phone`. The iPhone app is the user's screen, like Google's Look to Speak: two
+cards, **left (s1)** and **right (s2)**. Every look keeps one half of the phrases still in play,
+until one is left; then **Say it** (left) / **Back** (right) confirms it, so nothing is spoken
+without a confirmation (PLAN rule 2). Selections come from c-VEP (Bin et al. 2009,
+`brainsync/vep/`): both cards show one 63-bit m-sequence, the right card 31 frames (517 ms)
+behind, as `brainsync/stimulus/configs/cvep_2.toml`. The bridge is
+`python -m brainsync.voice_bridge -c cvep_2 --paradigm code` (no display window: the phone draws).
+
+```
+iPhone app (60 Hz)  ──cycle_markers (server clock)──▶  server  ──stim_markers──▶  bridge (SyncDecoder)
+       ◀── stimulus, show_page halves, trial phases ──  server  ◀── selection / train_done ──
+       ──clock_ping──▶ server ──clock_pong──▶ (answered at once by the server, not the orchestrator)
+```
+
+**Handshake.** The bridge's `hello` adds `"paradigm": "code"` and
+`"code": {"length": 63, "frames_per_bit": 1, "bits": "1000001..."}` (one period of
+`brainsync.vep.codes.m_sequence(63)`, seed 1, "1" bright), and each slot has `lag_frames`
+instead of `freq_hz` / `phase_deg`: `[{"slot": "s1", "lag_frames": 0}, {"slot": "s2",
+"lag_frames": 31}]`, `waveform` `square`, `refresh_hz` 60. The server checks the paradigm, the
+lags (exactly), the length and `frames_per_bit` against its config (`hello_problems`), and
+forwards the bits to the phone in `stimulus`.
+
+**What the phone draws.** Server → page `stimulus`
+`{refresh_hz, frames_per_bit, bits, lags: {"s1": 0, "s2": 31}, depth}`, sent to a page when it
+connects and again after every `hello_ack`. In a trial, frame n (n = 0 is the first flicker
+frame) of slot s is bright when `bits[((n - lags[s]) mod (len(bits) * frames_per_bit)) //
+frames_per_bit]` is `"1"` (`brainsync.vep.codes.lagged_codes`: `np.roll(cycle, lag)`). Bright is
+a white layer at opacity `depth` over the black card; dark is the black card. Frame indices come
+from the display link's timestamps rounded to the frame period, so a dropped frame never shifts
+the code. The phone flickers the slots listed in the current `show_page` between the
+`trial` phase `flicker` and any other phase (the same signal the web page uses), never before its
+own start button, and stops at once on a tap anywhere, a lost connection, or the app leaving the
+foreground (and then sends `stop`).
+
+**60 Hz, never ProMotion.** The phone asks its display link for exactly 60 Hz
+(`CADisplayLink.preferredFrameRateRange = 60...60, preferred 60`), measures the real frame
+period, and reports it: page → server `display_report {refresh_hz, ok, message}` on connect and
+on every change. `ok` is false when the measured rate is more than 1 Hz from 60 or frames are
+uneven; the server then treats the display as down (pauses, resume refused, like
+`display_ok: false`).
+
+**Clock.** The bridge cuts its epochs at Unix times on the Mac's clock (board samples are stamped
+there). Page → server `clock_ping {id, t_phone}` about every 2 s (5 quick ones right after
+connecting); the server answers at once with `clock_pong {id, t_phone, t_server}`. The phone
+keeps the offset `t_server - (t_send + t_receive) / 2` of the ping with the shortest round trip
+among the last 20. A constant error in the offset does not matter (the template is trained through
+the same path); only its jitter does, and the 31-frame lag tolerates several frames.
+
+**Cycle markers.** For every cycle start (n = 0, 63, 126, ...) the phone sends page → server
+`cycle_markers {trial_id, markers: [{cycle, t_unix}], dropped_frames}` with `t_unix` = the
+frame's presentation time on the phone's clock + the offset, as soon as that frame is on screen
+(once per cycle; a marker may be batched with the next one if the socket was busy). The server
+relays them to the bridge unchanged as `stim_markers {trial_id, markers}` (only for the current
+trial), and the first marker (cycle 0) is the trial's onset: the server logs it as the onset and
+ignores a `selection` that comes before it (rule 8). The bridge sends no `stim_onset` in
+paradigm code.
+
+**Calibration (the template).** c-VEP needs a template of this user's response, made each time
+the headset goes on. The bridge's `status` carries `trained: true|false` (a template is loaded,
+from `--template FILE` or the last training). After the baseline, if the bridge is not trained
+(or the page sent `calibrate {}`), the server runs one calibration trial: `show_page` mode
+`calibrate` with `cue: "s1"` and `text: "Look at the left card"`, both cards flickering, then
+server → bridge `train {train_id, trial_id, slot: "s1", cycles: stim.code.train_cycles}` right
+after that trial's `stim_start`. The bridge collects that many cycles from the markers, fits the
+template (`brainsync.vep.cvep.fit_template`, cycles of every cued slot shifted back to s1),
+cross-validates it and answers `train_done {train_id, ok, accuracy, cycles, message}`; the server
+then stops the trial (`stim_stop` reason `selected`), shows the score (`status.trained`,
+`status.calibration_accuracy`) and goes on to the first page. The calibration trial has no
+`max_trial_s` timeout of its own: it ends on `train_done`, or after `train_cycles` cycles plus
+`max_trial_s` (then it is a failed calibration: pause with the reason). A failed or low score
+(below 0.7) still lets the session run, but the page says so.
+
+**Halves mode (`menus.mode: halves`).** A page has `menus.option_count` phrases (6) from Claude or
+`menus.intents` (`config/intents_halves.yaml`), plus a last item "More options" (an option with
+an empty utterance and intent `more`). `show_page` mode `halves` carries the items still in play
+as `options` and `split`: the first `split` items are on the left card, the rest on the right
+(`split = ceil(n / 2)`). Slots: `s1` role `left`, `s2` role `right`. A selection keeps that half;
+when one item is left it is the pick: a phrase goes to the confirm screen (mode `confirm`, `say`
+on s1, `back` on s2, the phrase as `text`); "More options" asks for a new page at once (no
+confirm). Back, a confirm timeout, or two misses in a row go back to the whole page; one miss
+(`no_selection` / timeout) repeats the same screen. Partner lines behave as in page mode.
+
+**Safety (PLAN rule 10).** The flicker warning is the app's first setup step; the c-VEP flicker
+is full-contrast on/off (broadband), so the warning says so. Tap anywhere stops it on the phone
+at once. The bridge's rule 3 is unchanged (it draws nothing in this mode).
