@@ -101,21 +101,19 @@
           <div class="badges" id="badges"></div>
           <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
         </div>
-        <div class="judgment" aria-label="Mark the last spoken reply">
+        <div class="judgment" aria-label="Mark the last spoken reply" title="Keys C / W do the same">
           <span>Last reply:</span>
           <button id="correct">Correct</button>
           <button id="wrong">Wrong</button>
           <span id="judged" class="judged" aria-live="polite"></span>
         </div>
         <p class="hint" id="hint"></p>
-        <!-- With --tunnel (or on the LAN): the links for the partner's phone (they carry the
-             access key): the web page, and the pairing link for the BrainSync Partner iPhone app. -->
+        <!-- With --tunnel (or on the LAN): the pairing link for the BrainSync Partner iPhone app
+             (it carries the access key). The web phone link is printed in the server's terminal. -->
         <div id="phone" class="phone-link" hidden>
-          <button id="copy-phone" type="button">Copy phone link</button>
-          <button id="copy-app" type="button" hidden>Copy iPhone app link</button>
+          <button id="copy-app" type="button">Copy iPhone app link</button>
           <span id="phone-copied" class="judged" aria-live="polite"></span>
-          <code id="phone-url" class="phone-url"></code>
-          <code id="app-url" class="phone-url" hidden></code>
+          <code id="app-url" class="phone-url"></code>
         </div>
         <a href="/profile.html" class="profile-link">Edit the user's profile</a>
       </footer>

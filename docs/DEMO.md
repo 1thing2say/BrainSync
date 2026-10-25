@@ -80,9 +80,8 @@ python -m app.server --tunnel           # add --fake-decoder / --keyboard as abo
 ```
 
 `--tunnel` starts a Cloudflare quick tunnel (`cloudflared`, no account: `brew install cloudflared`)
-and prints a **phone link**, `https://….trycloudflare.com/?key=…`. The laptop's partner page shows
-it too: **Copy phone link** in the footer. Send it to the phone (AirDrop, Messages) and open it in
-Safari. Then:
+and prints a **phone link**, `https://….trycloudflare.com/?key=…`, in the terminal. Send it to the
+phone (AirDrop, Messages) and open it in Safari. Then:
 
 - The phone link is new every start and carries a secret key: share it only with the partner's
   phone. Without the key the address answers 403; the decoder socket never works through it.

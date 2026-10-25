@@ -12,6 +12,7 @@ let accepted = false;    // flicker warning accepted
 let keyboardMode = false;
 let lastSpoken = null;   // utterance_id of the last spoken reply, for Correct / Wrong
 let userName = "User";   // the user's first name in the conversation, from /api/config
+const CONVERSATION_LINES = 4;  // partner + user lines kept on screen (the server keeps the full log)
 
 // Returns false when the server is not connected, so callers can say so.
 function send(msg) {
@@ -241,8 +242,11 @@ function addLine(who, text) {
   li.innerHTML = `<span class="who"></span>`;
   li.querySelector(".who").textContent = who === "partner" ? "Partner" : userName;
   li.append(document.createTextNode(text));
-  $("conversation").append(li);
-  li.scrollIntoView({ block: "end" });
+  const list = $("conversation");
+  list.append(li);
+  // Only the latest lines: the partner needs what was just said, not the whole log.
+  while (list.children.length > CONVERSATION_LINES) list.firstElementChild.remove();
+  li.scrollIntoView({ block: "nearest" });
 }
 
 function renderStatus(s) {
@@ -287,7 +291,7 @@ function renderStatus(s) {
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
   $("hint").textContent = s.keyboard_mode
     ? "Keyboard mode: tap a box (or its key, 1 = top … 4 = bottom) while it flickers. C / W mark the last reply."
-    : "C / W mark the last spoken reply correct / wrong.";
+    : "";
   if (shown && modeChanged) renderPage(shown);
 }
 
@@ -329,15 +333,14 @@ $("resume").addEventListener("click", () => {
   keepAwake();
   send({ type: "resume" });
 });
-// The laptop's page offers the phone links (python -m app.server --tunnel, or on the LAN): the web
-// page and the iPhone app's pairing link. A phone never gets them.
+// The laptop's page offers the iPhone app's pairing link (python -m app.server --tunnel, or on the
+// LAN). A phone never gets it.
 function copyLink(sourceId, copiedText) {
   const url = $(sourceId).textContent;
   const done = (text) => { $("phone-copied").textContent = text; };
   if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => done(copiedText), () => done("Select the link and copy it"));
   else done("Select the link and copy it");
 }
-$("copy-phone").addEventListener("click", () => copyLink("phone-url", "Copied: send it to the phone"));
 $("copy-app").addEventListener("click", () => copyLink("app-url", "Copied: open it on the iPhone"));
 $("take-over").addEventListener("click", connect);
 $("ptt").addEventListener("click", () => {
@@ -398,14 +401,9 @@ fetch("/api/config")
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
     if (c.user_name) userName = c.user_name;
-    if (c.phone_url) {
-      $("phone-url").textContent = c.phone_url;
-      $("phone").hidden = false;
-    }
     if (c.app_link) {
       $("app-url").textContent = c.app_link;
-      $("app-url").hidden = false;
-      $("copy-app").hidden = false;
+      $("phone").hidden = false;
     }
     $("ptt").textContent = sttMode === "always" ? "Restart mic" : "Listen";
     Listener.configure({ gapMs: (c.stt_gap_s || 1.2) * 1000, maxLineMs: (c.stt_max_line_s || 15) * 1000,

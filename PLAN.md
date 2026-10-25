@@ -135,9 +135,9 @@ pull requests.
 
 - **Phone version (2026-10-24, branch `feat/mobile`):** `python -m app.server --tunnel` opens a
   Cloudflare quick tunnel (`app/tunnel.py`, `cloudflared`, no account) and prints a phone link
-  with a per-start access key; the laptop page offers **Copy phone link**. `app/remote.py` gates
-  every request from outside this computer: the key (link once, then an HttpOnly cookie), else
-  403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
+  with a per-start access key (in the terminal only; the laptop page offers just the iPhone app
+  link). `app/remote.py` gates every request from outside this computer: the key (link once,
+  then an HttpOnly cookie), else 403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
   (one reused audio element), the screen stays awake (Wake Lock), safe-area insets, 16 px inputs.
   Checked through a real tunnel; the iPhone test itself is still to do. Server shutdown now runs
   `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan. The native app below is now
