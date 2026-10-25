@@ -2,7 +2,7 @@
 
     python -m brainsync.server --board fake --no-auth        # try it all without a headset
     python -m brainsync.server --board cerelog               # the Cerelog X8 on USB serial
-    python -m brainsync.server --host 0.0.0.0 --origin 'https://.*\\.ts\\.net'
+    python -m brainsync.server --origin 'https://ripe-banana\\.trycloudflare\\.com'  # behind cloudflared
     python -m brainsync.server --board fake --env-file .env  # point mode, key from a file
 
 It wires the pieces of PROTOCOL-v3.md together: the board (a real-time FakeBoard with
@@ -337,7 +337,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="127.0.0.1",
                    help="address to listen on (default 127.0.0.1: this machine only; 0.0.0.0 "
-                        "or a Tailscale address for other machines)")
+                        "for the LAN). Other machines reach it through a cloudflared tunnel "
+                        "(deploy/jetson/cloudflare/)")
     p.add_argument("--port", type=int, default=P.DEFAULT_PORT,
                    help=f"port for HTTP and WebSocket (default {P.DEFAULT_PORT}; 0 picks a "
                         f"free one)")
@@ -371,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "half its refresh")
     p.add_argument("--origin", metavar="REGEX", action="append", default=[],
                    help="also allow browser pages whose Origin fully matches REGEX "
-                        "(repeatable), e.g. 'https://.*\\.ts\\.net'")
+                        "(repeatable), e.g. 'https://ripe-banana\\.trycloudflare\\.com'")
     p.add_argument("--model", default=None,
                    help="the Claude model for point mode (default claude-haiku-5-5)")
     p.add_argument("--no-detect", action="store_true",

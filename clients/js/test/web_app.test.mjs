@@ -58,7 +58,8 @@ test("parseHash reads the token and takeover", () => {
 
 test("wsUrlFor follows the page's scheme and host", () => {
   assert.equal(W.wsUrlFor({ protocol: "http:", host: "127.0.0.1:8765" }), "ws://127.0.0.1:8765/ws");
-  assert.equal(W.wsUrlFor({ protocol: "https:", host: "box.tail.ts.net" }), "wss://box.tail.ts.net/ws");
+  assert.equal(W.wsUrlFor({ protocol: "https:", host: "ripe-banana.trycloudflare.com" }),
+    "wss://ripe-banana.trycloudflare.com/ws");
 });
 
 test("squareLayout centres n squares that fit and never overlap", () => {

@@ -1,7 +1,8 @@
 /*
  * BrainPoint options: the server address and the token, kept in chrome.storage.local.
  *
- *     serverUrl  ws://127.0.0.1:8765/ws (the default), or wss://<host>/ws through tailscale serve
+ *     serverUrl  ws://127.0.0.1:8765/ws (the default), or wss://<name>.trycloudflare.com/ws
+ *                through a cloudflared tunnel
  *     token      the token `python -m brainsync.server` prints (empty when it runs --no-auth)
  *
  * The service worker reads both when it opens a connection and reconnects every running tab
