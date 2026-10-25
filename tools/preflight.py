@@ -103,8 +103,11 @@ def check_config(path: str | Path | None = None) -> tuple[Result, AppConfig | No
     except ConfigError as exc:
         return Result("config", FAIL, f"{exc.path.name}: {'; '.join(exc.problems)[:300]}",
                       "fix the listed keys (PLAN.md section 5)"), None
-    slots = ", ".join(f"{s.slot} {s.freq_hz:g} Hz" for s in cfg.stim.slots)
-    return Result("config", PASS, f"{cfg.menus.mode} mode, {slots}, {cfg.stim.waveform}"), cfg
+    # code slots (the c-VEP default) carry a lag in frames, frequency slots a frequency
+    slots = ", ".join(f"{s.slot} {s.freq_hz:g} Hz" if s.freq_hz is not None
+                      else f"{s.slot} lag {s.lag_frames}" for s in cfg.stim.slots)
+    stimulus = "c-VEP code" if cfg.stim.paradigm == "code" else cfg.stim.waveform
+    return Result("config", PASS, f"{cfg.menus.mode} mode, {slots}, {stimulus}"), cfg
 
 
 def check_keys(cfg: AppConfig, env: Mapping[str, str]) -> list[Result]:
