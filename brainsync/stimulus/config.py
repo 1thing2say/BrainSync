@@ -20,6 +20,20 @@ The optional [card] table sets up the BrainSwipe profile card drawn at the centr
 the targets, and the box flash that confirms a swipe; configs without it are unchanged.
 A flash colour is "#rrggbb" or three values in [-1, 1] (PsychoPy rgb), one per target.
 
+Instead of the grid, [layout] positions places every target by hand, one [x, y] centre
+per target in screen heights (the four-square diamond of four_diamond.toml):
+
+    [layout]    size = 0.3; positions = [[0, 0.33], [-0.55, 0], [0.55, 0], [0, -0.33]]
+
+rows, cols and spacing then make no sense and are refused; x_offset still shifts them.
+
+[stimulus] fixation (default false) draws a small mark, fixation_size screen heights
+across, at the centre of every square, so gaze has a point to rest on (it drifts off a
+plain square after about 2 s). labels_during_flicker (default true) keeps the per-target
+sentences and the centre text a decoder sends (see brainsync.stimulus.feedback) on screen
+while the targets flicker; false hides them during the flicker, in case drawing text then
+drops frames.
+
 [stimulus] depth (default 1.0, in (0, 1]) is the flicker's modulation depth: luminance
 swings around mid-grey 0.5 by depth / 2, so 1.0 is full black-to-white and 0.5 is a
 gentler 0.25-0.75 flicker with the same mean.
@@ -66,9 +80,11 @@ _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels", "count"}),
     "code": frozenset({"length", "lag_frames", "frames_per_bit"}),
     "time": frozenset({"flash_frames", "gap_frames", "order"}),
-    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "shape", "spacing_x"}),
+    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "shape", "spacing_x",
+                         "positions"}),
     "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px",
-                           "depth", "fill"}),
+                           "depth", "fill", "fixation", "fixation_size",
+                           "labels_during_flicker"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
@@ -197,6 +213,10 @@ class StimulusConfig:
     conditions: tuple[Condition, ...] = ()   # mixed per trial; empty: waveform and depth
     code: CodeSpec | None = None   # the [code] table (c-VEP), else None
     time: TimeSpec | None = None   # the [time] table (t-VEP), else None
+    positioned: bool = False   # True: [layout] positions placed the targets, not the grid
+    fixation: bool = False     # a small mark at the centre of every square
+    fixation_size: float = 0.03   # the mark's width, screen heights
+    labels_during_flicker: bool = True   # decoder-sent text stays up while flickering
 
     @property
     def paradigm(self) -> str:
@@ -317,6 +337,20 @@ class _Table:
         if not isinstance(v, (list, tuple)) or not all(isinstance(x, str) for x in v):
             raise ValueError(f"{self._where(key)} must be a list of strings, got {v!r}")
         return list(v)
+
+    def points(self, key: str) -> list[tuple[float, float]]:
+        v = self.raw.get(key, [])
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(f"{self._where(key)} must be a list of [x, y] pairs, got {v!r}")
+        out = []
+        for p in v:
+            if (not isinstance(p, (list, tuple)) or len(p) != 2
+                    or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in p)
+                    or not all(math.isfinite(x) for x in p)):
+                raise ValueError(f"{self._where(key)} must hold [x, y] pairs of finite "
+                                 f"numbers, got {p!r}")
+            out.append((float(p[0]), float(p[1])))
+        return out
 
     def colors(self, key: str) -> tuple[Color, ...]:
         v = self.raw.get(key, [])
@@ -449,16 +483,23 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         if got != n:
             raise ValueError(f"[targets] has {got} {what} for {n} target(s)")
 
+    positioned = "positions" in lay
+    if positioned:
+        grid = sorted(k for k in ("rows", "cols", "spacing") if k in lay)
+        if grid:
+            raise ValueError(f"[layout] positions places the targets by hand; drop {grid}")
     rows = lay.integer("rows", 1)
     cols = lay.integer("cols", n)
     size = lay.number("size", 0.4)
-    spacing = lay.number("spacing", 1.0 if n > 1 else 0.0)
+    spacing = lay.number("spacing", 1.0 if n > 1 and not positioned else 0.0)
     x_offset = lay.number("x_offset", 0.0)
     if not math.isfinite(x_offset):
         raise ValueError(f"[layout] x_offset must be finite, got {x_offset}")
     shape = lay.text("shape", "grid")
     if shape not in ("grid", "diamond"):
         raise ValueError(f'[layout] shape must be "grid" or "diamond", got {shape!r}')
+    if positioned and "shape" in lay:
+        raise ValueError("[layout] positions places the targets by hand; drop shape")
     spacing_x = lay.number("spacing_x", spacing)
     if "spacing_x" in data.get("layout", {}) and shape != "diamond":
         raise ValueError('[layout] spacing_x is for shape = "diamond"')
@@ -466,6 +507,14 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     if len(fill) != 3 or not all(0.0 <= v <= 1.0 for v in fill) or max(fill) <= 0.0:
         raise ValueError(f"[stimulus] fill must be three values in [0, 1], not all 0, "
                          f"got {fill}")
+    if positioned:
+        given = lay.points("positions")
+        if len(given) != n:
+            raise ValueError(f"[layout] has {len(given)} positions for {n} target(s)")
+    elif shape == "diamond":
+        given = diamond_positions(n, spacing, spacing_x)
+    else:
+        given = grid_positions(n, rows, cols, spacing)
 
     color = stim.numbers("cue_color", [1.0, -1.0, -1.0])
     if len(color) != 3 or not all(-1.0 <= v <= 1.0 for v in color):
@@ -477,9 +526,7 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         card = Card(height=ct.number("height", 0.6), flash_s=ct.number("flash_s", 0.35),
                     flash_colors=ct.colors("flash_colors"))
 
-    cells = (diamond_positions(n, spacing, spacing_x) if shape == "diamond"
-             else grid_positions(n, rows, cols, spacing))
-    positions = [(x + x_offset + 0.0, y) for x, y in cells]
+    positions = [(x + x_offset + 0.0, y + 0.0) for x, y in given]
     cfg = StimulusConfig(
         name=name,
         targets=tuple(Target(index=k, freq=freqs[k], phase=phases_pi[k] * math.pi,
@@ -512,6 +559,10 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         card=card,
         code=code,
         time=time,
+        positioned=positioned,
+        fixation=stim.flag("fixation", False),
+        fixation_size=stim.number("fixation_size", 0.03),
+        labels_during_flicker=stim.flag("labels_during_flicker", True),
     )
     validate(cfg)
     return cfg
@@ -572,13 +623,23 @@ def _check_geometry(cfg: StimulusConfig) -> None:
     if cfg.cue_scale < 1.0:
         raise ValueError(f"[stimulus] cue_scale must be >= 1 (box outside the target), "
                          f"got {cfg.cue_scale}")
-    if cfg.n_targets > 1 and cfg.spacing < cfg.size:
+    if cfg.n_targets > 1 and not cfg.positioned and cfg.spacing < cfg.size:
         raise ValueError(f"[layout] spacing {cfg.spacing:g} < size {cfg.size:g}: "
                          "targets would overlap")
     if cfg.shape == "diamond" and cfg.spacing_x < cfg.size and cfg.spacing < cfg.size:
         raise ValueError(f"[layout] diamond spacing {cfg.spacing:g} and spacing_x "
                          f"{cfg.spacing_x:g} are both under size {cfg.size:g}: "
                          "neighbouring squares would overlap")
+    for i, a in enumerate(cfg.targets):
+        for b in cfg.targets[i + 1:]:
+            if (abs(a.pos[0] - b.pos[0]) < cfg.size - 1e-9
+                    and abs(a.pos[1] - b.pos[1]) < cfg.size - 1e-9):
+                raise ValueError(f"[layout] targets {a.index} and {b.index} would overlap: "
+                                 f"centres {a.pos} and {b.pos} are closer than the "
+                                 f"{cfg.size:g} side")
+    if not 0.0 < cfg.fixation_size < cfg.size:   # also refuses nan
+        raise ValueError(f"[stimulus] fixation_size must be in (0, size {cfg.size:g}), "
+                         f"got {cfg.fixation_size}")
     aspect = cfg.display.aspect
     if aspect <= 0:
         raise ValueError(f"[display] aspect must be positive, got {aspect}")

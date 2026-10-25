@@ -134,10 +134,10 @@ def test_coded_stimulus_args():
     assert a[a.index("--markers") + 1] == "unix" and "--seconds" not in a
 
 
-def test_coded_stimulus_args_carry_labels_and_status_unless_no_scores():
+def test_coded_stimulus_args_carry_labels_unless_no_scores():
     args = cli.build_parser().parse_args(["--paradigm", "code"])
     a = cli.coded_stimulus_args(cli.config_for(args), args)
-    assert "--labels" in a and a[a.index("--status") + 1] == "stdin"
+    assert "--labels" in a and "--hold-still" in a and "--status" not in a
     bare = cli.build_parser().parse_args(["--paradigm", "code", "--no-scores"])
     b = cli.coded_stimulus_args(cli.config_for(bare), bare)
     assert "--labels" not in b and "--status" not in b

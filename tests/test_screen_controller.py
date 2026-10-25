@@ -639,3 +639,214 @@ def test_constructor_rejects_object_without_detect():
 def test_phases_reach_the_layout():
     mode, _, out = ready(phases=(0.0, 1.0, 2.0, 3.0))
     assert [t["phase"] for t in find(out, "layout")["targets"]] == [0.0, 1.0, 2.0, 3.0]
+
+
+# -- ax scans (v3.1) ------------------------------------------------------------------------
+
+APP = {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 412}
+
+
+class RankStub(StubDetector):
+    """A StubDetector that also ranks: rank() and detect() share the answers."""
+
+    def __init__(self, *answers):
+        super().__init__(*answers)
+        self.ranks = []
+
+    def rank(self, *args, **kwargs):
+        self.ranks.append((args, kwargs))
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(a, BaseException):
+            raise a
+        return a
+
+
+def ax_hints(n):
+    return [{"id": i, "x": 10 + 60 * i, "y": 20, "w": 40, "h": 20, "role": "AXButton",
+             "text": f"b{i}", "tag": "", "actions": ["AXPress"], "enabled": True}
+            for i in range(n)]
+
+
+def ax_scan(scan_id, *, n_hints=6, image=False, vw=1000.0, vh=500.0, title="All iCloud"):
+    msg = {"type": "scan", "scan_id": scan_id, "source": "ax",
+           "viewport": {"w": vw, "h": vh, "dpr": 2}, "app": APP, "window": {"title": title},
+           "hints": ax_hints(n_hints)}
+    if image:
+        msg["image"] = {"media_type": "image/jpeg", "data": JPEG, "w": 1000, "h": 500}
+    return protocol.validate_client(msg)
+
+
+def ax_mode(stub, **kwargs):
+    mode = PointMode(stub, FREQS, executor=SyncExecutor(), **kwargs)
+    mode.start(T0)
+    return mode
+
+
+def test_ax_scan_is_ranked_from_its_hints_without_an_image():
+    stub = RankStub(detection(*THREE))
+    mode = ax_mode(stub)
+    assert mode.on_message(ax_scan(1), T0 + 1) == []
+    out = mode.tick(T0 + 2)
+    assert kinds(out) == ["scan_result", "layout:pick", "phase:run"]
+    assert find(out, "scan_result")["cached"] is False
+    assert stub.calls == []
+    ((args, kwargs),) = stub.ranks
+    assert args == (ax_hints(6), 1000.0, 500.0)
+    assert kwargs == {"app": APP, "window_title": "All iCloud", "history": (), "url": ""}
+    assert mode.aspect == 1600 / 900 and mode._future_aspect == 2.0
+
+
+def test_ax_scan_with_few_hints_and_an_image_goes_to_vision():
+    stub = RankStub(detection(*THREE))
+    mode = ax_mode(stub)
+    mode.on_message(ax_scan(1, n_hints=4, image=True), T0 + 1)
+    assert kinds(mode.tick(T0 + 2)) == ["scan_result", "layout:pick", "phase:run"]
+    assert stub.ranks == []
+    ((args, kwargs),) = stub.calls
+    assert args == (JPEG, "image/jpeg", 1000, 500, 1000.0, 500.0)
+    assert kwargs["title"] == "All iCloud" and kwargs["hints"] == ax_hints(4)
+
+
+def test_ax_scan_with_few_hints_and_no_image_is_still_ranked():
+    stub = RankStub(detection(*THREE))
+    mode = ax_mode(stub)
+    mode.on_message(ax_scan(1, n_hints=2), T0 + 1)
+    mode.tick(T0 + 2)
+    assert len(stub.ranks) == 1 and stub.calls == []
+    stub2 = RankStub(detection(*THREE))
+    mode2 = ax_mode(stub2)
+    mode2.on_message(ax_scan(1, n_hints=5, image=True), T0 + 1)   # 5 hints: rank, not vision
+    mode2.tick(T0 + 2)
+    assert len(stub2.ranks) == 1 and stub2.calls == []
+
+
+def test_ax_scan_with_nothing_answers_ok_idle_and_rescans_after_retry_s():
+    stub = RankStub(detection(*THREE))
+    records = []
+    mode = ax_mode(stub, retry_s=3.0, log=lambda k, f: records.append((k, f)))
+    out = mode.on_message(ax_scan(1, n_hints=0), T0 + 1)
+    assert kinds(out) == ["scan_result", "layout:idle"]
+    res = find(out, "scan_result")
+    assert res["ok"] is True and res["n_elements"] == 0 and res["elements"] == []
+    assert res["cached"] is False
+    assert stub.ranks == [] and stub.calls == []
+    assert mode.tick(T0 + 3.9) == []
+    out = mode.tick(T0 + 4.0)
+    assert kinds(out) == ["scan_request", "layout:idle"]
+    assert find(out, "scan_request")["scan_id"] == 2
+    assert records[0][0] == "scan" and records[0][1]["n_elements"] == 0
+
+
+def test_ax_scan_with_only_an_image_goes_to_vision():
+    stub = RankStub(detection(*THREE))
+    mode = ax_mode(stub)
+    mode.on_message(ax_scan(1, n_hints=0, image=True), T0 + 1)
+    mode.tick(T0 + 2)
+    assert len(stub.calls) == 1 and stub.ranks == []
+
+
+def test_cached_ranking_is_reported_in_scan_result_and_log():
+    det = Detection(elements=THREE, summary="Notes", ms=2, input_tokens=0, output_tokens=0,
+                    model="claude-haiku-5-5", cached=True)
+    records = []
+    mode = ax_mode(RankStub(det), log=lambda k, f: records.append((k, f)))
+    mode.on_message(ax_scan(1), T0 + 1)
+    res = find(mode.tick(T0 + 2), "scan_result")
+    assert res["cached"] is True and res["ms"] == 2
+    assert dict(records)["scan"]["cached"] is True
+
+
+def test_ax_scan_on_a_detector_without_rank_fails_and_retries():
+    mode = ax_mode(StubDetector(detection(*THREE)))
+    mode.on_message(ax_scan(1), T0 + 1)
+    out = mode.tick(T0 + 2)
+    assert kinds(out) == ["scan_result", "error"]
+    assert find(out, "error")["code"] == "scan_failed" and "rank" in find(out, "error")["message"]
+
+
+def test_ax_scan_history_reaches_rank():
+    stub = RankStub(detection(*THREE))
+    mode = ax_mode(stub)
+    mode.on_message(ax_scan(1), T0 + 1)
+    mode.tick(T0 + 2)
+    out = mode.on_selection("b1", T0 + 3)
+    click = find(out, "click")
+    mode.on_message(clicked(click["click_id"]), T0 + 4)
+    mode.on_message(ax_scan(2), T0 + 5)
+    assert stub.ranks[-1][1]["history"] == ("e0",)
+
+
+# -- rescan (v3.1) --------------------------------------------------------------------------
+
+RESCAN = {"type": "rescan"}
+
+
+def test_rescan_drops_the_pages_and_asks_for_a_scan_with_a_short_settle():
+    mode, _, _ = ready()
+    out = mode.on_message(RESCAN, T0 + 3)
+    assert kinds(out) == ["scan_request", "layout:idle"]           # hold was run already
+    assert find(out, "scan_request")["settle_ms"] == 300
+    assert mode.selector is None and mode.scan_id == find(out, "scan_request")["scan_id"]
+    assert mode.on_selection("b1", T0 + 3.1) == []                 # the old page is gone
+
+
+def test_rescan_leaves_the_confirm_stage():
+    risky = (el(0, 0.1, 0.1, risky=True), el(1, 0.4, 0.1))
+    mode, _, _ = ready(detection(*risky))
+    assert kinds(mode.on_selection("b1", T0 + 3)) == ["layout:confirm"]
+    out = mode.on_message(RESCAN, T0 + 4)
+    assert kinds(out) == ["scan_request", "layout:idle"]
+    assert mode.on_selection("confirm", T0 + 4.1) == []
+
+
+def test_rescan_cancels_a_click_in_flight_and_ignores_its_late_clicked(capsys):
+    mode, _, _ = ready()
+    click = find(mode.on_selection("b1", T0 + 3), "click")
+    out = mode.on_message(RESCAN, T0 + 4)
+    assert kinds(out) == ["scan_request", "layout:idle", "phase:run"]   # hold released
+    assert mode.click_id is None and "click 1 is cancelled" in capsys.readouterr().err
+    assert mode.on_message(clicked(click["click_id"]), T0 + 5) == []
+    assert list(mode.history) == []
+
+
+def test_rescan_drops_a_pending_scan_and_detection():
+    stub = StubDetector(detection(*THREE))
+    ex = ManualExecutor()
+    mode = PointMode(stub, FREQS, executor=ex)
+    first = find(mode.start(T0), "scan_request")
+    mode.on_message(scan(first["scan_id"]), T0 + 1)                # detection running
+    out = mode.on_message(RESCAN, T0 + 2)
+    new_id = find(out, "scan_request")["scan_id"]
+    ex.finish()
+    assert mode.tick(T0 + 3) == []                                 # its result is ignored
+    assert mode.on_message(scan(first["scan_id"]), T0 + 3) == []   # stale scan id
+    mode.on_message(scan(new_id), T0 + 4)
+    ex.finish()
+    assert kinds(mode.tick(T0 + 5)) == ["scan_result", "layout:pick", "phase:run"]
+
+
+def test_rescans_are_debounced_to_one_every_half_second():
+    mode, _, _ = ready()
+    assert kinds(mode.on_message(RESCAN, T0 + 3.0)) == ["scan_request", "layout:idle"]
+    assert mode.on_message(RESCAN, T0 + 3.1) == []
+    assert mode.on_message(RESCAN, T0 + 3.2) == []
+    assert mode.tick(T0 + 3.49) == []
+    out = mode.tick(T0 + 3.5)                                      # one trailing rescan
+    assert kinds(out) == ["scan_request", "layout:idle"]
+    assert find(out, "scan_request")["settle_ms"] == 300
+    assert mode.tick(T0 + 4.5) == []
+    assert kinds(mode.on_message(RESCAN, T0 + 4.6)) == ["scan_request", "layout:idle"]
+
+
+def test_resume_rescans_at_once_and_is_not_debounced():
+    mode, _, _ = ready()
+    mode.on_message(RESCAN, T0 + 3.0)
+    out = mode.on_message({"type": "resume"}, T0 + 3.1)
+    assert kinds(out) == ["scan_request", "layout:idle"]
+    assert mode.tick(T0 + 4) == []
+
+
+def test_rescan_after_stop_does_nothing():
+    mode, _, _ = ready()
+    mode.stop()
+    assert mode.on_message(RESCAN, T0 + 3) == [] and mode.tick(T0 + 10) == []

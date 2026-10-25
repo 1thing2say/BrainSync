@@ -239,12 +239,30 @@ def test_plan_for_coded_configs(capsys):
     assert cli.main(["--plan", "-c", "tvep_4", "--rate"]) == 2
 
 
-def test_coded_free_frames_poll_status_every_frame():
+def test_coded_free_frames_follow_the_json_control_lines():
+    from brainsync.stimulus.feedback import apply_control, initial_control
     cfg = load_config("cvep_4")
     seq = sequence_for(cfg, seed=1)
-    texts = iter(["t1", "t2", "t3"])
+    still = initial_control(4)
+    text = apply_control(still, {"text": "t1"})
+    on = apply_control(text, {"text": "t2", "active": (0, 2), "flicker": True})
+    states = [text, on, on, apply_control(on, {"flicker": False})]
+    frames = list(coded_free_frames(cfg, seq, stop=lambda: not states,
+                                    control=lambda: states.pop(0)))
+    assert [f.centre for f in frames] == ["t1", "t2", "t2", "t2"]
+    assert frames[0].trial == -1 and np.array_equal(frames[0].lum, seq.still)
+    # the run starts at the sequence's frame 0, with its cycle marker after flicker_on
+    assert frames[1].events == ("flicker_on",) + seq.events(0) and frames[1].trial == 0
+    on_lum = seq.luminance(0)
+    assert frames[1].lum[0] == on_lum[0] and frames[1].lum[2] == on_lum[2]
+    assert frames[1].lum[1] == seq.still[1] and frames[1].lum[3] == seq.still[3]
+    assert frames[3].events == ("flicker_off",) and frames[3].trial == -1
+
+
+def test_coded_free_frames_without_json_run_the_sequence_after_the_hold():
+    cfg = load_config("cvep_4")
+    seq = sequence_for(cfg, seed=1)
     held = iter([True, False, False])
-    frames = list(coded_free_frames(cfg, seq, seconds=2 / 60, hold=lambda: next(held),
-                                    status=lambda: next(texts)))
-    assert [f.text for f in frames] == ["t1", "t2", "t3"]
+    frames = list(coded_free_frames(cfg, seq, seconds=2 / 60, hold=lambda: next(held)))
     assert frames[0].cue == -1 and frames[1].events == seq.events(0)
+    assert np.array_equal(frames[2].lum, seq.luminance(1))
