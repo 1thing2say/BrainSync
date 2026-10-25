@@ -13,7 +13,8 @@ browser voice, keyboard mode) or something to look at.
    browser voice then speaks every reply. Then how many fixed-list clips are already on disk
    (speech.cache_dir); WARN if some are missing (python tools/prerender_tts.py fetches them).
 6. The running server (GET /api/health and /api/config at --url): decoder, display, partner page,
-   mic, Claude keep-alive, Cartesia.
+   mic, Claude keep-alive, Cartesia. With c-VEP on the iPhone app (display "phone",
+   config/phone_cvep.yaml) the display line is the phone's 60 Hz report, then the c-VEP template.
 Then the headset checklist is printed as a reminder (manual, not checked).
 
     python tools/preflight.py                        # server at http://127.0.0.1:8000
@@ -103,7 +104,10 @@ def check_config(path: str | Path | None = None) -> tuple[Result, AppConfig | No
     except ConfigError as exc:
         return Result("config", FAIL, f"{exc.path.name}: {'; '.join(exc.problems)[:300]}",
                       "fix the listed keys (PLAN.md section 5)"), None
-    slots = ", ".join(f"{s.slot} {s.freq_hz:g} Hz" for s in cfg.stim.slots)
+    if cfg.stim.paradigm == "code":  # c-VEP: lags instead of frequencies
+        slots = "c-VEP " + ", ".join(f"{s.slot} lag {s.lag_frames}" for s in cfg.stim.slots) + " frames"
+    else:
+        slots = ", ".join(f"{s.slot} {s.freq_hz:g} Hz" for s in cfg.stim.slots)
     return Result("config", PASS, f"{cfg.menus.mode} mode, {slots}, {cfg.stim.waveform}"), cfg
 
 
@@ -309,8 +313,9 @@ def check_cartesia(cfg: AppConfig, api_key: str | None, *, transport: httpx.Base
 
 
 def check_clips(cfg: AppConfig, clips_dir: str | Path | None = None) -> Result:
-    """How many fixed-list sentences (intents.yaml) already have a Cartesia clip on disk. Missing
-    ones are fetched when the server starts, which is slow on a busy network: WARN."""
+    """How many fixed-list sentences (``menus.intents``, config/intents.yaml by default) already
+    have a Cartesia clip on disk. Missing ones are fetched when the server starts, which is slow
+    on a busy network: WARN."""
     speech = cfg.speech
     if speech.provider != "cartesia":
         return Result("clips", SKIP, "speech.provider is browser")
@@ -319,11 +324,12 @@ def check_clips(cfg: AppConfig, clips_dir: str | Path | None = None) -> Result:
     clips_dir = Path(clips_dir) if clips_dir is not None else REPO_ROOT / speech.cache_dir
     m = cfg.menus
     try:
-        intents = load_intents(option_count=m.option_count, label_max_chars=m.label_max_chars,
+        intents = load_intents(REPO_ROOT / m.intents, option_count=m.option_count,
+                               label_max_chars=m.label_max_chars,
                                utterance_max_words=m.utterance_max_words,
                                label_max_words=m.label_max_words)
     except ConfigError as exc:
-        return Result("clips", FAIL, f"config/intents.yaml is invalid: {exc}",
+        return Result("clips", FAIL, f"{m.intents} is invalid: {exc}",
                       "fix the problems listed above")
     ready, total = CartesiaTTS(speech, None, cache_dir=clips_dir).cached_count(intents.utterances)
     reason = f"{ready}/{total} fixed-list clips on disk ({speech.model}, voice {speech.voice_id[:8]})"
@@ -384,14 +390,58 @@ MIC_FIX = {
 }
 
 
+CALIBRATION_OK = 0.7  # c-VEP template accuracy below this still runs, but the page says so
+
+
+def check_phone(h: dict, page_cfg: dict) -> list[Result]:
+    """display.flicker phone (c-VEP on the iPhone app): its refresh report and the bridge's
+    template, from the server's ``phone`` block."""
+    phone = h.get("phone") or {}
+    report = phone.get("display")
+    expected = float(page_cfg.get("refresh_hz") or 60)
+    results = []
+    if not report:
+        results.append(Result("phone display", WARN, "no refresh report from the iPhone app yet",
+                              "open the iPhone app and pair it; it reports its 60 Hz check on connect"))
+    else:
+        hz = float(report.get("refresh_hz") or 0)
+        why = f" ({report['message']})" if report.get("message") else ""
+        if report.get("ok") and abs(hz - expected) <= 1:
+            results.append(Result("phone display", PASS, f"iPhone at {hz:.2f} Hz{why}"))
+        else:
+            results.append(Result("phone display", FAIL, f"iPhone at {hz:.2f} Hz, not ok{why}: "
+                                  "it will not flicker",
+                                  "reopen the iPhone app and keep it in front (it must hold an "
+                                  "even 60 Hz); the server pauses until it reports ok"))
+    accuracy = phone.get("calibration_accuracy")
+    if not phone.get("trained"):
+        results.append(Result("c-VEP template", WARN, "not trained: the session starts with a "
+                              "calibration trial (look at the left card)",
+                              "or restart with --template FILE for a saved one"))
+    elif accuracy is None:
+        results.append(Result("c-VEP template", WARN, "loaded, not scored this session",
+                              "recalibrate in the app's Settings for a score (electrodes move "
+                              "each time the headset goes on)"))
+    elif accuracy >= CALIBRATION_OK:
+        results.append(Result("c-VEP template", PASS, f"trained, accuracy {accuracy:.0%}"))
+    else:
+        results.append(Result("c-VEP template", WARN, f"trained, accuracy {accuracy:.0%} (below "
+                              f"{CALIBRATION_OK:.0%})", "check the electrodes, then recalibrate in "
+                              "the app's Settings"))
+    return results
+
+
 def check_health(h: dict, page_cfg: dict) -> list[Result]:
-    """Go/no-go from the server's own view: decoder, display, page, mic, Claude, voice."""
+    """Go/no-go from the server's own view: decoder, display, page, mic, Claude, voice. With
+    display "phone" (c-VEP on the iPhone app) the display line is the phone's refresh report,
+    followed by the c-VEP template."""
     d, p, llm, tts = h["decoder"], h["partner_page"], h["llm"], h["tts"]
     keyboard, fake = d["keyboard_mode"] or page_cfg.get("keyboard_mode", False), d["fake_decoder"]
     # fake_decoder is also true for a tools/fake_decoder.py started by hand (its hello's name);
     # a server without fake_flag only knew the --fake-decoder flag.
     fake_flag, name = d.get("fake_flag", fake), d.get("name", "")
     msg = f" ({d['message']})" if d["message"] else ""
+    phone = h.get("display") == "phone"
     results = []
 
     if keyboard:
@@ -412,13 +462,17 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               "restart the server with --fake-decoder (it starts the fake decoder)"))
     elif not d["connected"]:
         results.append(Result("decoder", FAIL, "no bridge connected",
+                              "restart the server with --bridge cerelog (the c-VEP bridge, "
+                              "-c cvep_2 --paradigm code)" if phone else
                               "start the bridge: python -m ssvep.online.bridge (in ../ssvep)"))
     elif not d["ok"]:
         rejected = d["message"].startswith("Rejected")
+        match = ("a rejected hello: match the lags, code length and 60 Hz refresh (-c cvep_2 "
+                 "--paradigm code)" if phone else
+                 "a rejected hello: match the slots, waveform and 60 Hz refresh")
         results.append(Result("decoder", FAIL, "bridge connected but not ok" + msg,
-                              "a rejected hello: match the slots, waveform and 60 Hz refresh"
-                              if rejected else "no hello yet, or the bridge reports ok false: "
-                              "check the bridge's terminal"))
+                              match if rejected else "no hello yet, or the bridge reports ok "
+                              "false: check the bridge's terminal"))
     else:
         board = "" if d["board_ok"] else "; board_ok is false (check the headset and USB)"
         bridge = f"bridge {name}" if name else "bridge"
@@ -426,7 +480,9 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
                               f"{bridge} connected and ok" + msg + board,
                               "reseat the headset or replug the board" if board else ""))
 
-    if fake and not keyboard:
+    if phone:  # the iPhone app draws the flicker: its own refresh check, then the template
+        results += check_phone(h, page_cfg)
+    elif fake and not keyboard:
         results.append(Result("display", WARN, "fake decoder: no PsychoPy display, the mirror "
                               "stands in", "start the bridge for the real display"))
     elif d["connected"] and d["ok"]:
@@ -447,7 +503,8 @@ def check_health(h: dict, page_cfg: dict) -> list[Result]:
         results.append(Result("partner page", PASS, f"connected ({client})" if client else "connected"))
     else:
         results.append(Result("partner page", FAIL, "not open",
-                              "open the server's address in Chrome"))
+                              "open the iPhone app and pair it (it is the user's screen)" if phone
+                              else "open the server's address in Chrome"))
 
     mic, mode = "muted" if p["mic_muted"] else p["mic"], p["stt_mode"]
     if not p["connected"]:
