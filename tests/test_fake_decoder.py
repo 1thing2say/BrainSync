@@ -14,6 +14,7 @@ from app.schemas import (
     PROTOCOL,
     Baseline,
     BaselineDone,
+    CycleMarker,
     DecoderHello,
     DecoderStatus,
     HelloAck,
@@ -22,9 +23,12 @@ from app.schemas import (
     Pause,
     ProtocolError,
     Selection,
+    StimMarkers,
     StimOnset,
     StimStart,
     StimStop,
+    Train,
+    TrainDone,
     parse_decoder_to_server,
     to_json,
 )
@@ -428,3 +432,89 @@ async def test_pause_cancels_the_pending_answer_and_the_baseline(server: StubSer
 async def test_scores_set_score_kind(server: StubServer, start_decoder) -> None:
     decoder, _ = await start_decoder("--scores")
     assert decoder.hello().score_kind is not None
+
+
+# ---------------------------------------------------------------------------
+# Paradigm code (draft section 9): the phone draws, markers come relayed
+# ---------------------------------------------------------------------------
+
+CODE_ARGS = ("--paradigm", "code", "--lags", "s1=0,s2=31", "--waveform", "square")
+
+
+def markers(trial_id: int, cycle: int = 0, t: float = 1000.0) -> StimMarkers:
+    return StimMarkers(trial_id=trial_id, markers=[CycleMarker(cycle=cycle, t_unix=t)])
+
+
+async def test_code_hello_carries_bits_and_lags(server: StubServer, start_decoder) -> None:
+    from brainsync.vep.codes import m_sequence
+
+    decoder, _ = await start_decoder(*CODE_ARGS)
+    hello = decoder.hello()
+    assert hello.paradigm == "code" and hello.waveform == "square" and hello.refresh_hz == 60.0
+    assert hello.code.bits == "".join(str(b) for b in m_sequence(63)) and hello.code.length == 63
+    assert hello.code.frames_per_bit == 1
+    assert [(s.slot, s.lag_frames, s.freq_hz) for s in hello.slots] == [("s1", 0, None), ("s2", 31, None)]
+    assert "fake" in hello.name
+    await wait_until(lambda: server.statuses)
+    assert server.statuses[0].trained is False
+    # the bits the server passes are used as they are
+    decoder2, _ = await start_decoder(*CODE_ARGS, "--code-bits", "1110010", "--frames-per-bit", "2")
+    assert (decoder2.hello().code.bits, decoder2.hello().code.length,
+            decoder2.hello().code.frames_per_bit) == ("1110010", 7, 2)
+
+
+async def test_code_answers_only_after_markers_and_never_with_an_onset(
+        server: StubServer, start_decoder) -> None:
+    await start_decoder(*CODE_ARGS, "--trained", "--latency", "0.02")
+    await server.start_trial(1, ["s1", "s2"])
+    assert await server.nothing_within(0.3)
+    await server.send(markers(2))   # another trial's markers: still nothing
+    assert await server.nothing_within(0.2)
+    await server.send(markers(1))
+    msg = await server.next()
+    assert isinstance(msg, Selection) and msg.trial_id == 1 and msg.slot in ("s1", "s2")
+    assert server.onsets == []
+
+
+async def test_code_untrained_trial_is_not_trained_until_a_train(
+        server: StubServer, start_decoder) -> None:
+    await start_decoder(*CODE_ARGS, "--latency", "0.02")
+    await server.start_trial(1, ["s1", "s2"])
+    await server.send(markers(1))
+    msg = await server.next()
+    assert isinstance(msg, NoSelection) and msg.reason == "not_trained"
+    await server.stop_trial(1, "no_selection")
+    # the calibration trial: train right after stim_start, train_done once markers came
+    await server.start_trial(2, ["s1", "s2"])
+    await server.send(Train(train_id=5, trial_id=2, slot="s1", cycles=20))
+    assert await server.nothing_within(0.2)
+    await server.send(markers(2))
+    done = await server.next()
+    assert isinstance(done, TrainDone)
+    assert (done.train_id, done.ok, done.accuracy, done.cycles) == (5, True, 0.9, 20)
+    await wait_until(lambda: server.statuses and server.statuses[-1].trained)
+    assert await server.nothing_within(0.2)   # a training trial is never answered
+    await server.stop_trial(2, "selected")
+    await server.start_trial(3, ["s1", "s2"])
+    await server.send(markers(3))
+    assert isinstance(await server.next(), Selection)
+
+
+async def test_code_train_edge_cases(server: StubServer, start_decoder) -> None:
+    await start_decoder(*CODE_ARGS, "--train-delay", "0.1")
+    # a train for a trial that is not running
+    await server.send(Train(train_id=1, trial_id=9, slot="s1", cycles=20))
+    done = await server.next()
+    assert isinstance(done, TrainDone) and not done.ok and "not running" in done.message
+    # no markers ever: train_done after --train-delay, still only for the current trial
+    await server.start_trial(2, ["s1", "s2"])
+    await server.send(Train(train_id=2, trial_id=2, slot="s1", cycles=20))
+    done = await server.next()
+    assert isinstance(done, TrainDone) and done.ok
+    # a trial stopped before its training finished: train_done ok false
+    await server.stop_trial(2)
+    await server.start_trial(3, ["s1", "s2"])
+    await server.send(Train(train_id=3, trial_id=3, slot="s1", cycles=20))
+    await server.stop_trial(3)
+    done = await server.next()
+    assert isinstance(done, TrainDone) and (done.train_id, done.ok) == (3, False)
