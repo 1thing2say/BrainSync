@@ -27,6 +27,9 @@ meanwhile. Then the mode starts and the phase is "run". A resume after a pause o
 more recalibrates. A controller that leaves (disconnect, bye or a takeover) stops its mode,
 clears the layout and returns the session to "wait"; the board stays open.
 
+Point mode also gets the controller's "rescan" (v3.1: the focused app or window changed), and
+a "resume" message after a user pause ends, so it can ask for a fresh scan.
+
 Mode messages. The session intercepts "layout": it stamps a session-wide layout_id (so an
 onset from an older layout never matches), activates the bank with the targets' frequencies
 and phases, broadcasts it and keeps it for clients that join later. It intercepts "phase":
@@ -41,6 +44,12 @@ during "run" becomes a broadcast "selection" for that target's slot, and then
 first decision at or past its end re-arms the voter (bank.rearm) and is dropped, and a commit
 counts again only once ``votes`` decisions arrived after the re-arm. A user who keeps looking
 gets one selection about every 2.7 s (dwell to repeat).
+
+Streaming gate (v3.1). A commit becomes a selection, and so can lead to a click, only while
+the board streams: no board error, and samples delivered within STATUS_S (1.0 s) before the
+read that produced it. Otherwise the pick is dropped: a "selection_dropped" log record and a
+note say why, and the voter is re-armed, so a gaze that is still held commits again once the
+board streams.
 
 Refresh. A controller's display must refresh within ``refresh_tolerance_hz`` of one of
 ``refresh_rates`` (60, 90, 120 and 144 Hz by default; the first is the nominal rate, the
@@ -272,6 +281,7 @@ class Session:
         self._board_state = "unknown"
         self._board_error = ""
         self._last_sample = -math.inf
+        self._gap_s = math.inf        # seconds without samples before the latest delivery
         self._status_at = -math.inf
         self._acc_n = 0
         self._acc_sum = np.zeros(len(self._posterior))
@@ -518,6 +528,9 @@ class Session:
                 if now - self._paused_at >= LONG_PAUSE_S and self._cal_start is None:
                     self._start_calibration(now)
                 self._update_phase(now)
+                # the screen may have changed while paused: point mode scans again
+                if self._started and self._hello is not None and self._hello.mode == "point":
+                    self._mode_call("on_message", {"type": "resume"}, now)
         elif kind == "bye":
             self._controller_left(now, "bye")
         elif kind == "gaze":
@@ -528,7 +541,7 @@ class Session:
             slot = msg.get("slot")
             self._gaze = slot if isinstance(slot, str) else None
             self._apply_gaze()
-        elif kind in ("scan", "clicked"):
+        elif kind in ("scan", "clicked", "rescan"):
             if self._hello is None or self._hello.mode != "point":
                 self._refuse("not_allowed", f"{kind} is for point mode only; this controller "
                                             f"said mode \"slots\" in its hello")
@@ -717,12 +730,33 @@ class Session:
             return
         try:
             self._bank.activate([float(t["freq"]) for t in self._targets],
-                                [float(t["phase"]) for t in self._targets], now)
+                                [float(t["phase"]) for t in self._targets], now,
+                                positions=self._positions())
         except ValueError as exc:   # a saved decoder model that was not trained for this layout
             self._bank.deactivate()
             self._refuse("layout", f"This layout cannot be decoded: {exc}")
             return
         self._activated_at = now
+
+    def _positions(self) -> list[tuple[float, float]] | None:
+        """Each target's centre from its rects, as (x right, y up) CSS pixels from the middle
+        of the viewport, for the EOG gaze prior; None unless every target has a rect
+        (slots mode has none) or the viewport size is unknown."""
+        hello = self._hello
+        if hello is None or not hello.viewport:
+            return None
+        w, h = float(hello.viewport["w"]), float(hello.viewport["h"])
+        out: list[tuple[float, float]] = []
+        for t in self._targets:
+            rects = t.get("rects") or []
+            if not rects:
+                return None
+            cx = float(np.mean([float(r["x"]) + float(r["w"]) / 2 for r in rects]))
+            cy = float(np.mean([float(r["y"]) + float(r["h"]) / 2 for r in rects]))
+            out.append(((cx - 0.5) * w, (0.5 - cy) * h))
+        if any(x == 0 and y == 0 for x, y in out):
+            return None       # a target at the centre has no gaze direction
+        return out
 
     # -- selections ---------------------------------------------------------------------
 
@@ -755,9 +789,36 @@ class Session:
                 _note(f"decision named target {d.committed} but the layout has "
                       f"{len(self._targets)}; ignored")
                 continue
+            why = self._not_streaming()
+            if why:
+                self._drop_pick(d, layout_id, why)
+                continue
             self._select(d, layout_id, now)
             if dwell:
                 self._cool_until = d.time + P.COOLDOWN_S
+
+    def _not_streaming(self) -> str:
+        """Why the board is not streaming well enough to act on a pick, or "" when it is.
+
+        The board must have delivered samples within STATUS_S (1.0 s) before the read that
+        produced the decision, so a backlog that arrives after a stall (a loose USB cable, a
+        stalled driver) never selects or clicks anything.
+        """
+        if self._board_error:
+            return self._board_error
+        if self._gap_s > STATUS_S:
+            return (f"the board delivered no samples for {self._gap_s:.1f} s before this "
+                    f"decision")
+        return ""
+
+    def _drop_pick(self, d: Decision, layout_id: int, why: str) -> None:
+        """Log a commit that was not acted on, and re-arm the voter so a held gaze commits
+        again once the board streams."""
+        slot = str(self._targets[d.committed].get("slot"))
+        _note(f"dropped a pick of {slot!r}: {why}")
+        self._log("selection_dropped", {"layout_id": layout_id, "slot": slot,
+                                        "t_decision": d.time, "why": why})
+        self._bank.rearm()
 
     def _select(self, d: Decision, layout_id: int, now: float) -> None:
         slots = [str(t["slot"]) for t in self._targets]
@@ -828,6 +889,7 @@ class Session:
         t = np.asarray(t, dtype=float).reshape(-1)
         self._board_error = ""
         if X.ndim == 2 and X.shape[1]:
+            self._gap_s = now - self._last_sample
             self._last_sample = now
             if self._posterior:
                 rows = X[self._posterior]

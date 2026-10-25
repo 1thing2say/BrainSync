@@ -5,11 +5,15 @@
     python -m brainsync.stimulus -c one_target_15 --no-wait     # single-target trials
     python -m brainsync.stimulus --free --feedback stdin        # live demo: cue box from a decoder
     python -m brainsync.stimulus --free --feedback stdin --hold-still   # still until the first line
+    python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --markers unix
+                                                                # page mode, driven by the bridge
     python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
+    python -m brainsync.stimulus -c cvep_2 --free --feedback stdin --labels   # labelled squares
     python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
-Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
-flushed right after the flip that shows the event. Once the window is up and its measured
+Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>" (a [code] or
+[time] config adds cycle:<n> on each m-sequence cycle's first frame and flash:<k> on each
+flash onset), printed and flushed right after the flip that shows the event. Once the window is up and its measured
 refresh has passed the check against [display] refresh_hz (or --refresh auto adopted it),
 "measured refresh: <x> Hz" goes to stderr; a refused rate exits with code 2 before that
 line. Space starts, Escape quits.
@@ -18,6 +22,17 @@ With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card
 the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
 lights target k's box (see brainsync.stimulus.feedback).
 
+A bridge drives the free run with JSON lines on stdin next to the integer ones
+(brainsync.stimulus.feedback): {"labels": [...]} puts a sentence beside each square,
+{"text": "..."} a line at the centre, {"active": [0, 3]} picks the targets that flicker
+and {"flicker": true} / {"flicker": false} turns their flicker on and off. Once a JSON line
+has arrived only {"flicker": true} starts the flicker, so with --hold-still the targets
+stand still until then. "[marker <unix seconds>] flicker_on" is printed right after the
+flip of the first flickering frame, "[marker <unix seconds>] flicker_off" after the first
+still frame. Without --seconds the free run lasts until EOF on stdin or Escape. With
+--feedback stdin the lines are read from the start screen on: they apply at once (the pipe
+never fills while nobody presses space), and EOF there ends the run with code 0.
+
 --conditions mixes flicker conditions in one cued session (see brainsync.ab, which runs
 it with the headset): each block cues every (condition, target) pair once, the still
 screen is mid-grey for all of them, each trial's first marker is "cond:<j>" (j indexes the
@@ -25,6 +40,15 @@ list, printed as "conditions: ..." before the first trial), and --rate asks for 
 comfort rating after each rest ("rate:<n>"). --status stdin shows the latest
 {"text": "..."} line under the targets between flickers, and holds the end screen until
 space, Escape or EOF.
+
+In a free run, --labels writes each target's config label beside its square (signage for
+the audience) until a {"labels": [...]} line replaces them. The labels and the centre line
+stay up on flicker frames unless [stimulus] labels_during_flicker = false: the timing
+summary's dropped-frame count says whether the machine keeps up.
+
+A [code] (c-VEP) or [time] (t-VEP) config runs its m-sequence or flash schedule in place of
+the frequency flicker, in a cued session and in the free run alike; in the free run each
+{"flicker": true} restarts it from frame 0.
 """
 from __future__ import annotations
 
@@ -38,6 +62,8 @@ from typing import TextIO
 
 from .config import (CARD_ASPECT, DEFAULT_CONFIG, Card, StimulusConfig, Trial,
                      config_warnings, load_config, override, parse_conditions, session_trials)
+from ..vep.codes import flash_rate_hz, min_lag_distance
+from .coded import coded_cued_frames, coded_free_frames, sequence_for
 from .display import (MARKER_CLOCKS, Aborted, MarkerWriter, card_paths, cued_frames,
                       free_frames, play, refresh_mismatch, still_luminances)
 from .flicker import frames_per_cycle, phase_pi
@@ -70,7 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(-1 = no box); EOF stops the run")
     p.add_argument("--hold-still", action="store_true",
                    help="with --feedback stdin: show the targets still (no flicker) until "
-                        "the first feedback line, e.g. while a decoder calibrates")
+                        "the first {\"flicker\": true} line (from a decoder that sends only "
+                        "integer lines: its first one), e.g. while a decoder calibrates")
+    p.add_argument("--labels", action="store_true",
+                   help="free run: write each target's config label beside its square, "
+                        "until a {\"labels\": [...]} line on the feedback stdin replaces them")
     p.add_argument("--cards", metavar="DIR",
                    help="free run: show DIR/*.png (sorted by name) as a profile card between "
                         "the targets; 'card <k>' and 'flash <k>' lines on stdin drive it")
@@ -112,19 +142,41 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
                 cards: Sequence[Path] = ()) -> list[str]:
     hz = cfg.refresh
     flicker = (f"conditions {', '.join(c.spec for c in cfg.conditions)} mixed per trial"
-               if cfg.conditions else f"{cfg.waveform} flicker")
+               if cfg.conditions else "c-VEP m-sequence" if cfg.code is not None
+               else "t-VEP flashes" if cfg.time is not None else f"{cfg.waveform} flicker")
     lines = [
         f"config {cfg.name}" + (f" ({cfg.path})" if cfg.path else ""),
         f"  {cfg.n_targets} target(s), {flicker}, refresh {hz:g} Hz, "
         f"side {cfg.size:g} screen heights, cue held through flicker: "
         f"{'yes' if cfg.hold_cue else 'no'}"
-        + ("" if cfg.conditions else f", flicker depth {cfg.depth:g}"),
+        + ("" if cfg.conditions else f", flicker depth {cfg.depth:g}")
+        + (f", fixation marks {cfg.fixation_size:g} wide" if cfg.fixation else ""),
     ]
+    if cfg.code is not None:
+        c = cfg.code
+        apart = min_lag_distance(cfg.n_targets, c.lag_frames, c.cycle_frames)
+        lines.append(f"  code: {c.length}-bit m-sequence, {c.frames_per_bit} frame(s) per "
+                     f"bit, cycle {c.cycle_frames} frames = {c.cycle_frames / hz:.3f} s, "
+                     f"lag {c.lag_frames} frames = {1000 * c.lag_frames / hz:.0f} ms per "
+                     f"target, nearest two targets {apart} frames apart")
+    if cfg.time is not None:
+        t = cfg.time
+        rate = flash_rate_hz(cfg.n_targets, t.flash_frames, t.gap_frames, hz)
+        lines.append(f"  time: {t.flash_frames}-frame flashes ({1000 * t.flash_frames / hz:.0f} "
+                     f"ms) in {t.slot_frames}-frame slots, {t.order} order, each target "
+                     f"{rate:.2f} flashes/s")
     for t in cfg.targets:
         x, y = t.pos
-        lines.append(f"  target {t.index}  label {t.label!r}  {t.freq:.3f} Hz  phase "
-                     f"{phase_pi(t.phase):.2f} pi  {frames_per_cycle(t.freq, hz):.3f} "
-                     f"frames/cycle  centre ({x:+.3f}, {y:+.3f})")
+        if cfg.code is not None:
+            lag = t.index * cfg.code.lag_frames
+            how = f"lag {lag} frames = {1000 * lag / hz:.0f} ms"
+        elif cfg.time is not None:
+            how = "flashes in turn"
+        else:
+            how = (f"{t.freq:.3f} Hz  phase {phase_pi(t.phase):.2f} pi  "
+                   f"{frames_per_cycle(t.freq, hz):.3f} frames/cycle")
+        lines.append(f"  target {t.index}  label {t.label!r}  {how}  centre "
+                     f"({x:+.3f}, {y:+.3f})")
     if cards:
         c = cfg.card_spec
         flash = f"flash {c.flash_s:g} s" + (" in the cue colour" if not c.flash_colors else "")
@@ -193,7 +245,7 @@ def _check_refresh(cfg: StimulusConfig, args: argparse.Namespace,
 def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                  cards: Sequence[Path] = ()) -> int:
     from .display import PsychoPyRenderer
-    from .feedback import FeedbackReader, StatusReader
+    from .feedback import FeedbackReader, StatusReader, initial_control
 
     renderer = PsychoPyRenderer(cfg, cards=cards) if cards else PsychoPyRenderer(cfg)
     try:
@@ -208,25 +260,44 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
         # launchers wait for this line, so it comes only after the refresh check passed
         print(f"measured refresh: {measured:.2f} Hz", file=sys.stderr, flush=True)
         markers = MarkerWriter(args.markers)
+        # The free run's reader starts before the start screen, so a driver's lines never fill
+        # the stdin pipe while it waits for space (the screen stays still meanwhile), and a
+        # driver that closes stdin ends the start screen too instead of leaving the window up.
+        reader = (FeedbackReader(sys.stdin, cfg.n_targets, n_cards=len(cards),
+                                 labels=cfg.labels if args.labels else ()).start()
+                  if args.free and args.feedback == "stdin" else None)
         if not args.no_wait:
             try:
-                renderer.wait_for_start(still_luminances(cfg))
+                if reader is None:
+                    renderer.wait_for_start(still_luminances(cfg))
+                else:
+                    renderer.wait_for_start(still_luminances(cfg), stop=lambda: reader.done)
             except Aborted:
                 print("aborted before start", file=sys.stderr)
                 return 1
+            if reader is not None and reader.done:
+                print("stdin closed before start", file=sys.stderr)
+                return 0
         if args.free:
-            reader = (FeedbackReader(sys.stdin, cfg.n_targets, n_cards=len(cards)).start()
-                      if args.feedback == "stdin" else None)
             # without feedback nothing can swap the card, so card 0 stays up
             card = (None if not cards else (lambda: 0) if reader is None
                     else (lambda: reader.card))
-            frames = free_frames(cfg, args.seconds,
-                                 cue=None if reader is None else (lambda: reader.current),
-                                 stop=None if reader is None else (lambda: reader.done),
-                                 hold=None if reader is None or not args.hold_still
-                                 else (lambda: not reader.heard),
-                                 card=card,
-                                 flash=None if reader is None else (lambda: reader.flash))
+            # --labels without a feedback stream: the config's labels, never replaced
+            start = initial_control(cfg.n_targets, cfg.labels)
+            control = (None if reader is None and not args.labels
+                       else (lambda: start) if reader is None else (lambda: reader.control))
+            cue = None if reader is None else (lambda: reader.current)
+            stop = None if reader is None else (lambda: reader.done)
+            hold = (None if reader is None or not args.hold_still
+                    else (lambda: not reader.heard))
+            if cfg.coded:
+                frames = coded_free_frames(cfg, sequence_for(cfg, seed), args.seconds,
+                                           cue=cue, stop=stop, hold=hold, control=control)
+            else:
+                frames = free_frames(cfg, args.seconds, cue=cue, stop=stop, hold=hold,
+                                     card=card,
+                                     flash=None if reader is None else (lambda: reader.flash),
+                                     control=control)
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0
@@ -236,12 +307,18 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
             print("conditions: " + " ".join(c.spec for c in cfg.conditions), file=sys.stderr,
                   flush=True)
         status = StatusReader(sys.stdin).start() if args.status == "stdin" else None
-        frames = cued_frames(
-            cfg, trials,
-            status=None if status is None else (lambda: status.text),
-            rate=renderer.rating if args.rate else None,
-            finish=None if status is None
-            else (lambda: status.done or renderer.close_pressed()))
+        finish = (None if status is None
+                  else (lambda: status.done or renderer.close_pressed()))
+        if cfg.coded:
+            frames = coded_cued_frames(
+                cfg, trials, sequence_for(cfg, seed),
+                status=None if status is None else (lambda: status.text), finish=finish)
+        else:
+            frames = cued_frames(
+                cfg, trials,
+                status=None if status is None else (lambda: status.text),
+                rate=renderer.rating if args.rate else None,
+                finish=finish)
         timing = play(frames, renderer, markers, cfg.refresh,
                       trial_targets={t.index: t.target for t in trials},
                       measured_refresh=measured)
@@ -260,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--hold-still needs --free --feedback stdin")
     if args.cards is not None and not args.free:
         p.error("--cards needs --free")
+    if args.labels and not args.free:
+        p.error("--labels needs --free")
     if args.seconds is not None and args.seconds <= 0:
         p.error(f"--seconds must be positive, got {args.seconds}")
     if args.free and (args.conditions is not None or args.rate or args.status != "none"):
@@ -269,6 +348,10 @@ def main(argv: list[str] | None = None) -> int:
         cards = card_paths(args.cards) if args.cards is not None else []
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if cfg.coded and (cards or cfg.conditions or args.rate):
+        print(f"error: --cards, --conditions and --rate are for a flicker config, not the "
+              f"[{cfg.paradigm}] config {cfg.name!r}", file=sys.stderr)
         return 2
     if cards and cfg.card is None:
         # cards in use: default [card] settings, so the overlap check below covers them

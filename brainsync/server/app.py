@@ -9,7 +9,10 @@ It wires the pieces of PROTOCOL-v3.md together: the board (a real-time FakeBoard
 ``--board fake``, else the Cerelog X8 through the BrainFlow fork) feeds a DecoderBank, the
 Session runs the phases, calibration, onset gating and the client's mode, and the Transport
 serves WebSocket and HTTP on one port. ``GET /`` is the reference page from ``clients/web/``
-(with ``clients/js/`` beside it), ``GET /health`` the board and client state.
+(with ``clients/js/`` beside it), ``GET /health`` the board and client state, and
+``GET /api/speech?text=...`` a WAV of the text in the Cartesia voice of brainsync.voice
+(``speech_clip``; 503 without CARTESIA_API_KEY or with BRAINSYNC_TTS=off), so a desktop
+client can speak status changes without holding the key.
 
 Startup prints, once, the address of the reference page with the token in its fragment
 (``#token=...``), so it can be opened or pasted into the BrainPoint extension's options. The
@@ -52,6 +55,8 @@ from pathlib import Path
 from typing import Any
 
 from ..envfile import load_env_file
+from ..eog import GazeDecoder
+from ..recordings import EOG_MONTAGE
 from . import protocol as P
 from .decoding import DecoderBank
 from .session import Session
@@ -67,6 +72,7 @@ JS_DIR = ROOT / "clients" / "js"
 WEB_FILES = ("index.html", "style.css", "app.js")
 JS_FILES = ("flicker.js", "brainsync-client.js")
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png"}
+SPEECH_TIMEOUT_S = 10.0     # one /api/speech synthesis (Cartesia's own limit is 8 s a try)
 
 
 def _note(text: str) -> None:
@@ -246,7 +252,10 @@ class ScanArchive:
         self.saved = 0
 
     def save(self, msg: dict) -> Path | None:
-        """Write one scan message; returns the image path, or None (noted) when it failed."""
+        """Write one scan message; returns the image path, or None (noted) when it failed.
+        An ax scan without an image (v3.1) has nothing to keep and is skipped quietly."""
+        if msg.get("image") is None and msg.get("source") == "ax":
+            return None
         try:
             image = msg["image"]
             ext = IMAGE_EXT[image["media_type"]]
@@ -321,13 +330,27 @@ def make_point_factory(detector: Any, freqs: Sequence[float], *, min_p_button: f
     return factory
 
 
+def speech_clip(text: str) -> bytes | None:
+    """The WAV of ``text`` in the shared Cartesia voice (brainsync.voice), for
+    ``GET /api/speech``; None when there is no voice (BRAINSYNC_TTS=off, no
+    CARTESIA_API_KEY, or the synthesis failed). Blocking: the transport runs it on a thread."""
+    from .. import voice
+
+    speaker = voice.default_speaker()
+    if speaker is None:
+        return None
+    clip = speaker.clip(text, timeout=SPEECH_TIMEOUT_S)
+    return None if clip is None else clip.read_bytes()
+
+
 def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
     """The board, not yet opened. ImportError when BrainFlow is missing."""
     from ..board import CerelogBoard, FakeBoard
 
+    names = EOG_MONTAGE if getattr(args, "eog", False) else None
     if args.board == "fake":
-        return FakeBoard(freqs, clock=time.time)
-    return CerelogBoard(serial_port=args.serial_port)
+        return FakeBoard(freqs, clock=time.time, ch_names=names)
+    return CerelogBoard(serial_port=args.serial_port, ch_names=names)
 
 
 # -- command line -------------------------------------------------------------------------
@@ -353,6 +376,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "cerelog: the Cerelog X8 (default)")
     p.add_argument("--serial-port", metavar="DEV", default=None,
                    help="the Cerelog's serial device (default: the first USB serial device)")
+    p.add_argument("--eog", action="store_true",
+                   help="the C3/C4 leads sit on gel pads at the left and right temple (channels "
+                        f"{','.join(EOG_MONTAGE)}): the eye's horizontal and vertical EOG "
+                        "becomes a gaze prior added to the SSVEP scores for layouts whose "
+                        "target positions are known (point mode); brainsync.eog")
     p.add_argument("--freqs", default=",".join(f"{f:g}" for f in DEFAULT_FREQS),
                    help="stimulus frequencies in Hz, best first (default 15,17,12,20); point "
                         "mode shows len-1 buttons plus \"more\"")
@@ -492,7 +520,11 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         return 1
     archive: ScanArchive | None = None
     try:
-        bank = DecoderBank(board.fs, ch_names=board.ch_names, model=args.decoder_model)
+        gaze = GazeDecoder(board.fs, board.ch_names) if args.eog else None
+        bank = DecoderBank(board.fs, ch_names=board.ch_names, model=args.decoder_model,
+                           gaze=gaze)
+        if gaze is not None:
+            _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
         if detector is None:
             detector = make_detector(args)
         elif args.no_detect:
@@ -512,7 +544,7 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
                               health=lambda: session.health(),
                               catchup=lambda conn_id, role, hello:
                                   session.catchup(conn_id, role, hello),
-                              max_slots=len(freqs))
+                              speech=speech_clip, max_slots=len(freqs))
         session = Session(transport, board, bank, freqs, fake=args.board == "fake",
                           point_factory=point_factory, calibrate_s=args.calibrate_s,
                           refresh_hz=args.refresh_rates[0], refresh_rates=args.refresh_rates,

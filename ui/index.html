@@ -8,41 +8,41 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
-<body class="partner">
+<body class="session">
   <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
   <div id="warning" class="overlay" role="dialog" aria-modal="true" aria-labelledby="warning-title">
     <div class="card callout warn">
       <p class="callout-title">Safety</p>
       <h1 id="warning-title">Flicker warning</h1>
-      <p>The user's screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
-        photosensitive seizures, with up to four squares at once. Nobody with photosensitive
+      <p>This screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
+        photosensitive seizures, with up to four boxes at once. Nobody with photosensitive
         epilepsy or flicker sensitivity should look at it.</p>
-      <p><kbd>Esc</kbd> on the flicker display or <strong>Stop</strong> here turns the flicker off
-        immediately.</p>
+      <p><kbd>Esc</kbd> or <strong>Stop</strong> turns the flicker off immediately, and so does
+        leaving this tab.</p>
+      <!-- Filled by app.js when the screen's refresh does not suit the flicker. -->
+      <p id="refresh-note" class="refresh-note" hidden></p>
       <p>While the session runs, the microphone listens to the conversation partner and Chrome
         sends the speech to Google to turn it into text. Press <strong>Mute</strong> any time.</p>
       <button id="accept" class="primary">I understand, start</button>
     </div>
   </div>
 
-  <!-- Shown when another tab or phone opened the partner page (only one can be connected). -->
+  <!-- Shown when another tab or phone opened the session (only one page can be connected). -->
   <div id="replaced" class="overlay" role="dialog" aria-modal="true" aria-labelledby="replaced-title" hidden>
     <div class="card callout">
       <p class="callout-title">Note</p>
       <h1 id="replaced-title">Open on another page</h1>
-      <p>The partner page was opened in another tab or on another device, which now runs the
-        session. Only one partner page can be connected at a time.</p>
+      <p>BrainSync was opened in another tab or on another device, which now runs the
+        session. Only one page can be connected at a time.</p>
       <button id="take-over" class="primary">Use this page instead</button>
     </div>
   </div>
 
-  <!-- Top bar: the name, which page this is, the profile link. -->
+  <!-- Top bar: the name and the profile link. -->
   <header class="topbar">
     <span class="wordmark">BrainSync</span>
-    <span class="topbar-sep" aria-hidden="true">/</span>
-    <span class="topbar-label">Partner</span>
     <nav class="topbar-nav" aria-label="Pages">
       <a href="/profile.html" class="profile-link" title="Edit the user's profile">Profile</a>
     </nav>
@@ -50,13 +50,6 @@
 
   <main class="layout">
     <section class="mirror" aria-label="User's screen (mirror, no flicker)">
-      <header id="banner" class="banner tone-idle">
-        <span id="state" class="state" role="status" aria-live="polite">Connecting…</span>
-        <span class="banner-side">
-          <span id="flags" class="flags"></span>
-          <span id="phase" class="phase"></span>
-        </span>
-      </header>
       <!-- The sentence being spoken, big, while it plays. -->
       <div id="speaking" class="speaking" hidden>
         <span class="speaking-tag">Speaking</span>
@@ -68,11 +61,18 @@
         <span id="progress-text" class="progress-text"></span>
       </div>
       <div id="option" class="option">
-        <div id="option-count" class="option-count"></div>
         <div id="option-text" class="option-text"></div>
       </div>
       <ol id="list" class="option-list" hidden></ol>
-      <div id="targets" class="targets diamond"></div>
+      <!-- The targets in a diamond. Its still centre holds the confirm screen's sentence and the
+           state line, which says something only when the user is not picking (Paused, Didn't
+           catch that, …). -->
+      <div id="targets" class="targets diamond">
+        <div id="centre" class="target-centre">
+          <span id="centre-text" class="centre-text"></span>
+          <span id="state" class="state" role="status" aria-live="polite"></span>
+        </div>
+      </div>
     </section>
 
     <aside class="panel">
@@ -98,44 +98,22 @@
       <h2>Conversation</h2>
       <ol id="conversation" class="conversation" aria-live="polite"></ol>
 
-      <form id="say-form" class="say-form" autocomplete="off">
-        <input id="partner-input" type="text" placeholder="Type what the partner says, Enter to send"
-               aria-label="Partner says">
-        <button type="submit">Send</button>
-      </form>
-
-      <!-- For whoever runs the demo, not the partner. -->
-      <footer class="operator" aria-label="Operator">
-        <button id="health" class="health level-ok" aria-expanded="false" aria-controls="health-details">
-          <span class="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span>
-        </button>
-        <div id="health-details" class="health-details callout" hidden>
-          <p class="callout-title">Details</p>
-          <div class="badges" id="badges"></div>
-          <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
-        </div>
-        <div class="judgment" aria-label="Mark the last spoken reply" title="Keys C / W do the same">
-          <span>Last reply:</span>
-          <button id="correct">Correct</button>
-          <button id="wrong">Wrong</button>
-          <span id="judged" class="judged" aria-live="polite"></span>
-        </div>
-        <p class="hint" id="hint"></p>
-        <!-- With --tunnel (or on the LAN): the pairing link for the BrainSync Partner iPhone app
-             (it carries the access key). The web phone link is printed in the server's terminal. -->
-        <div id="phone" class="phone-link" hidden>
-          <button id="copy-app" type="button">Copy iPhone app link</button>
-          <span id="phone-copied" class="judged" aria-live="polite"></span>
-          <code id="app-url" class="phone-url"></code>
-        </div>
-      </footer>
+      <!-- With --tunnel (or on the LAN) only: the pairing link for the BrainSync Partner iPhone app
+           (it carries the access key). The web phone link is printed in the server's terminal. -->
+      <div id="phone" class="phone-link" hidden>
+        <button id="copy-app" type="button">Copy iPhone app link</button>
+        <span id="phone-copied" class="copied" aria-live="polite"></span>
+        <code id="app-url" class="phone-url"></code>
+      </div>
     </aside>
   </main>
 
-  <script src="listen_core.js"></script>
-  <script src="voice_core.js"></script>
-  <script src="view_core.js"></script>
-  <script src="speech.js"></script>
-  <script src="app.js"></script>
+  <!-- ?v= makes browsers that cached these before the server sent no-cache fetch them again. -->
+  <script src="listen_core.js?v=2"></script>
+  <script src="voice_core.js?v=2"></script>
+  <script src="view_core.js?v=2"></script>
+  <script src="flicker_core.js?v=2"></script>
+  <script src="speech.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

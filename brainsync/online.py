@@ -179,7 +179,8 @@ class Decoder:
     def __init__(self, classifier: CCA, fs: float, window_s: float = 4.0, step_s: float = 0.5,
                  votes: int = 3, channels: Sequence[str | int] | None = POSTERIOR,
                  pad_s: float = 2.0, band: Band | None = (1.0, 100.0), notch_hz: float = 60.0,
-                 ch_names: Sequence[str] = MONTAGE) -> None:
+                 ch_names: Sequence[str] = MONTAGE,
+                 prior: Callable[[], np.ndarray | None] | None = None) -> None:
         self.fs = float(fs)
         if not np.isfinite(self.fs) or self.fs <= 0:
             raise ValueError(f"fs must be positive, got {fs}")
@@ -207,6 +208,10 @@ class Decoder:
                              f"{len(self.rows)} channels (need >= {need} samples)")
         self.band = band
         self.notch_hz = float(notch_hz)
+        # A prior (brainsync.eog.GazeDecoder.bonus, say) returns one value per target in
+        # baseline spreads, or None to leave the window alone; it is added to the scores
+        # before the margin and threshold rules, so it can resolve an abstention.
+        self.prior = prior
         self.voter = Voter(votes)
         self._data = RingBuffer(len(self.rows), self.needed)
         self._times = RingBuffer(1, self.needed)
@@ -352,7 +357,15 @@ class Decoder:
             scores = np.zeros((1, clf.n_targets))
             gap = level = 0.0
         else:
-            pred, scores = clf.decide(window, 0.0 if math.isnan(offset) else offset)
+            scores = clf.scores(window, 0.0 if math.isnan(offset) else offset)
+            bonus = None if self.prior is None else self.prior()
+            if bonus is not None:
+                bonus = np.asarray(bonus, dtype=float).reshape(-1)
+                if bonus.shape != (clf.n_targets,) or not np.all(np.isfinite(bonus)):
+                    raise ValueError(f"the prior must return {clf.n_targets} finite "
+                                     f"values (one per target), got {bonus.tolist()}")
+                scores = scores + bonus * clf.baseline_spread
+            pred = clf.predict_scores(scores)
             gap = float(clf.gaps(scores)[0])
             level = float(clf.levels(scores)[0])
             raw = int(pred[0])

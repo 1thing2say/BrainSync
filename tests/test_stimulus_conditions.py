@@ -330,8 +330,7 @@ def test_main_plan_lists_condition_target_pairs(capsys):
     assert f"block 1/1: {' '.join(pairs)}" in out
 
 
-@pytest.mark.parametrize("argv", [["--free", "--conditions", "sine:1"], ["--free", "--rate"],
-                                  ["--free", "--status", "stdin"]])
+@pytest.mark.parametrize("argv", [["--free", "--conditions", "sine:1"], ["--free", "--rate"]])
 def test_conditions_rate_and_status_need_a_cued_session(argv, capsys):
     with pytest.raises(SystemExit):
         cli.main(argv)

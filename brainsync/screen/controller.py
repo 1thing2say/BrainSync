@@ -29,6 +29,18 @@ Rules:
   fresh scan_request goes out, so a lost message never leaves the user stuck.
 - The labels of the last ``history_len`` successful clicks go to the detector as history, so
   ``p_next`` can follow the task.
+- An ax scan (v3.1, a desktop client's accessibility tree) goes to ``detector.rank``, a
+  text-only call over its hints. With fewer than ``MIN_AX_HINTS`` (5) hints and an image it
+  goes to ``detector.detect`` (vision) instead, with the window title as the title. With no
+  hints and no image (no usable window in front) the answer is ``scan_result`` ok with no
+  elements, the layout stays idle, and a new scan_request goes out ``retry_s`` later.
+  ``scan_result.cached`` says whether the ranking came from the rank cache.
+- A client ``rescan`` (v3.1: the focused app or window changed) drops the pages, the confirm
+  stage, a pending scan and a click in flight (its late ``clicked`` is ignored), and sends a
+  new scan_request with ``RESCAN_SETTLE_MS`` (300) plus an idle layout, releasing the hold.
+  At most one goes out every ``RESCAN_GAP_S`` (0.5 s); one that comes sooner is sent when the
+  gap ends. A ``resume`` (the session forwards it after a user pause) rescans the same way,
+  without the wait.
 - Screenshots are never logged. ``log(kind, fields)`` gets "scan", "scan_failed", "pick" and
   "click" records with ids, timings, counts and labels only.
 """
@@ -50,6 +62,10 @@ from brainsync.server.protocol import SETTLE_MS
 RETRY_S = 3.0
 REPLY_TIMEOUT_S = 15.0
 HISTORY_LEN = 5
+MIN_AX_HINTS = 5      # an ax scan with fewer hints and an image goes to vision (detect)
+NO_WINDOW = "No usable window"
+RESCAN_SETTLE_MS = 300  # a rescan's scan_request: the new window is already in front
+RESCAN_GAP_S = 0.5      # at most one rescan scan_request this often
 
 
 def _note(text: str) -> None:
@@ -63,6 +79,11 @@ def _positive(value: Any, name: str) -> float:
     if not math.isfinite(f) or f <= 0:
         raise ValueError(f"{name} must be a positive number of seconds, got {value!r}")
     return f
+
+
+def _no_rank(*args: Any, **kwargs: Any) -> Detection:
+    raise DetectError("this detector has no rank() for ax scans; pass a "
+                      "brainsync.screen.detect.Detector", "disabled")
 
 
 def _clamp01(v: float) -> float:
@@ -122,6 +143,8 @@ class PointMode:
         self.click_id: int | None = None            # the click awaiting its clicked
         self._clicked_el: Element | None = None
         self.layout_id: int | None = None
+        self._last_rescan = -math.inf               # when the last rescan went out
+        self._rescan_due: float | None = None       # a debounced rescan waiting for its turn
         self._stopped = False
 
     # -- message helpers --------------------------------------------------------------------
@@ -141,9 +164,10 @@ class PointMode:
         self.layout_id = next(self._layout_ids)
         return protocol.layout(self.layout_id, stage, targets)
 
-    def _new_scan(self, now: float) -> list[dict]:
+    def _new_scan(self, now: float, settle_ms: int | None = None) -> list[dict]:
         """A scan_request and an idle layout; any selector, click or detection in flight is
         dropped (a detection already running finishes, and its result is ignored)."""
+        self._rescan_due = None
         if self._future is not None:
             self._future.cancel()
             self._future = None
@@ -154,7 +178,9 @@ class PointMode:
         self.selector = None
         self.click_id = None
         self._clicked_el = None
-        return [protocol.scan_request(self.scan_id, self.settle_ms), self._layout("idle")]
+        return [protocol.scan_request(self.scan_id,
+                                      self.settle_ms if settle_ms is None else settle_ms),
+                self._layout("idle")]
 
     # -- Mode -------------------------------------------------------------------------------
 
@@ -173,7 +199,29 @@ class PointMode:
             return self._on_scan(msg, now)
         if kind == "clicked":
             return self._on_clicked(msg, now)
+        if kind == "rescan":
+            return self._rescan(now, debounce=True)
+        if kind == "resume":
+            return self._rescan(now, debounce=False)
         return []
+
+    def _rescan(self, now: float, *, debounce: bool) -> list[dict]:
+        """Forget the pages, the confirm stage, a pending scan and a click in flight (a late
+        ``clicked`` is then ignored), and ask for a new scan with RESCAN_SETTLE_MS. With
+        ``debounce``, a rescan within RESCAN_GAP_S of the last one waits for the gap to end."""
+        if debounce and now - self._last_rescan < RESCAN_GAP_S:
+            if self._rescan_due is None:
+                self._rescan_due = self._last_rescan + RESCAN_GAP_S
+            return []
+        self._last_rescan = now
+        dropped = self.click_id
+        if dropped is not None:
+            _note(f"rescan: click {dropped} is cancelled; a late clicked is ignored")
+        self._emit("rescan", {"debounced": debounce, "cancelled_click": dropped})
+        out = self._new_scan(now, RESCAN_SETTLE_MS)
+        if self.hold != "run":
+            out.append(self._phase("run"))
+        return out
 
     def _on_scan(self, msg: dict, now: float) -> list[dict]:
         scan_id = msg.get("scan_id")
@@ -181,28 +229,54 @@ class PointMode:
             _note(f"ignored scan {scan_id!r}: waiting for "
                   f"{'no scan' if self.scan_id is None else f'scan {self.scan_id}'}")
             return []
+        ax = msg.get("source") == "ax"
         try:
-            image, viewport = msg["image"], msg["viewport"]
+            image, viewport = msg.get("image"), msg["viewport"]
             vw, vh = float(viewport["w"]), float(viewport["h"])
             aspect = vw / vh if vw > 0 and vh > 0 else self.aspect
-            args = (image["data"], image["media_type"], image["w"], image["h"], vw, vh)
-            kwargs = {"hints": msg.get("hints") or (), "history": tuple(self.history),
-                      "url": msg.get("url") or "", "title": msg.get("title") or ""}
+            hints = msg.get("hints") or ()
+            if ax and not hints and not image:
+                return self._empty(scan_id, now)
+            if ax and (len(hints) >= MIN_AX_HINTS or not image):
+                fn: Callable[..., Any] = getattr(self.detector, "rank", None) or _no_rank
+                args: tuple = (hints, vw, vh)
+                kwargs: dict[str, Any] = {
+                    "app": msg["app"], "window_title": msg["window"]["title"],
+                    "history": tuple(self.history), "url": msg.get("url") or ""}
+            else:
+                fn = self.detector.detect
+                args = (image["data"], image["media_type"], image["w"], image["h"], vw, vh)
+                title = msg["window"]["title"] if ax else msg.get("title")
+                kwargs = {"hints": hints, "history": tuple(self.history),
+                          "url": msg.get("url") or "", "title": title or ""}
         except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            need = ("app {bundle_id, name, pid}, window {title} and viewport {w, h}" if ax
+                    else "image {media_type, data, w, h} and viewport {w, h}")
             return [protocol.error("protocol", f"scan {scan_id} is missing a field ({exc!r}); "
-                                   f"send image {{media_type, data, w, h}} and viewport "
-                                   f"{{w, h}}")]
+                                   f"send {need}")]
         self.scan_id = None
         self._asked_at = None
         self._future_scan = scan_id
         self._future_t = now
         self._future_aspect = aspect
         try:
-            self._future = self._pool().submit(self.detector.detect, *args, **kwargs)
+            self._future = self._pool().submit(fn, *args, **kwargs)
         except Exception as exc:  # a shut-down executor
             self._future = concurrent.futures.Future()
             self._future.set_exception(exc)
         return []
+
+    def _empty(self, scan_id: int, now: float) -> list[dict]:
+        """An ax scan with no hints and no image (no usable window in front): nothing to show,
+        so the layout stays idle and a new scan_request goes out ``retry_s`` later."""
+        self.scan_id = None
+        self._asked_at = None
+        self._retry_at = now + self.retry_s
+        self._emit("scan", {"scan_id": scan_id, "ok": True, "ms": 0, "n_elements": 0,
+                            "n_candidates": 0, "n_pages": 0, "n_dropped": 0, "input_tokens": 0,
+                            "output_tokens": 0, "model": None, "cached": False,
+                            "summary": NO_WINDOW})
+        return [protocol.scan_result(scan_id, True, 0, [], 0, NO_WINDOW), self._layout("idle")]
 
     def _on_clicked(self, msg: dict, now: float) -> list[dict]:
         click_id = msg.get("click_id")
@@ -260,7 +334,9 @@ class PointMode:
         if fut is not None and fut.done():
             self._future = None
             out += self._finish(fut, now)
-        if self._retry_at is not None and now >= self._retry_at:
+        if self._rescan_due is not None and now >= self._rescan_due:
+            out += self._rescan(now, debounce=False)
+        elif self._retry_at is not None and now >= self._retry_at:
             out += self._new_scan(now)
         elif self._asked_at is not None and now - self._asked_at >= self.reply_timeout_s:
             what = (f"click {self.click_id}" if self.click_id is not None
@@ -293,10 +369,10 @@ class PointMode:
                             "n_pages": len(sel.pages), "n_dropped": len(sel.dropped),
                             "input_tokens": det.input_tokens,
                             "output_tokens": det.output_tokens, "model": det.model,
-                            "summary": det.summary})
+                            "cached": det.cached, "summary": det.summary})
         return [protocol.scan_result(scan_id, True, det.ms,
                                      [e.to_dict() for e in det.elements],
-                                     len(sel.candidates), det.summary),
+                                     len(sel.candidates), det.summary, cached=det.cached),
                 self._layout("pick", sel.targets()),
                 self._phase("run")]
 
@@ -324,7 +400,7 @@ class PointMode:
             self._executor = None
         self.selector = None
         self.scan_id = self.click_id = None
-        self._asked_at = self._retry_at = None
+        self._asked_at = self._retry_at = self._rescan_due = None
 
     def _pool(self) -> concurrent.futures.Executor:
         if self._executor is None:

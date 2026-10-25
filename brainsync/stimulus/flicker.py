@@ -75,6 +75,13 @@ def to_psychopy_rgb(lum: float) -> tuple[float, float, float]:
     return (v, v, v)
 
 
+def to_psychopy_fill(lum: float, fill: tuple[float, float, float] = (1.0, 1.0, 1.0)
+                     ) -> tuple[float, float, float]:
+    """``lum`` scaled per channel by ``fill`` (each in [0, 1]; (1, 1, 1) is grey) in
+    PsychoPy's -1..1 rgb space: (1, 0, 0) flickers a red square on black."""
+    return tuple(2.0 * float(lum) * float(f) - 1.0 for f in fill)   # type: ignore[return-value]
+
+
 def dropped_frames(flip_times: np.ndarray | list[float], refresh: float,
                    factor: float = DROP_FACTOR) -> int:
     """Count flip intervals longer than ``factor`` refresh periods."""

@@ -53,6 +53,8 @@ OPTION_SLOTS, NEXT = ["s1", "s2", "s3"], "s4"
 SAY_IT, BACK = CFG.stim.confirm.say, CFG.stim.confirm.back  # s1, s4
 
 # List mode: two slots, SAY / NEXT, no confirm step.
+# The PsychoPy window draws the flicker and the page is a still mirror: a page may come and go.
+CFG_PSYCHOPY = CFG.model_copy(update={"display": CFG.display.model_copy(update={"flicker": "psychopy"})})
 CFG_LIST = CFG.model_copy(update={
     "stim": CFG.stim.model_copy(update={
         "slots": CFG.stim.slots[:2], "roles": {"s1": "say", "s2": "next"}}),
@@ -283,6 +285,42 @@ def test_board_not_ok_is_a_badge_only():
     status = r.last(r.ui, UIStatus)
     assert not status.board_ok and status.display_ok
     assert status.decoder_message == "posterior RMS 250 uV"
+
+
+def test_closing_the_flickering_page_pauses_the_session():
+    r = Rig()  # display.flicker: browser, the default
+    r.to_trial()
+    r.o.on_ui_disconnected()
+    assert r.o.state is St.PAUSED and r.last(r.ui, State).detail == "Screen closed"
+    assert r.last(r.decoder, StimStop).reason == "paused"
+    assert r.last(r.decoder, Pause).reason == "screen_closed"
+
+
+def test_a_new_page_mid_session_pauses_until_its_own_start():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_connected()  # a reload or a second tab: it flickers only after its start button
+    assert r.o.state is St.PAUSED and r.last(r.ui, State).detail == "New screen: press start"
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.BASELINE
+
+
+def test_a_page_coming_and_going_while_idle_or_paused_changes_nothing():
+    r = Rig()
+    r.o.on_ui_disconnected()
+    r.o.on_ui_connected()
+    assert r.o.state is St.IDLE
+    r.to_trial()
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_disconnected()
+    assert r.o.state is St.PAUSED and r.last(r.ui, State).detail == "Stopped"
+
+
+def test_with_psychopy_drawing_the_flicker_the_page_may_close_mid_trial():
+    r = Rig(CFG_PSYCHOPY)
+    r.to_trial()
+    r.o.on_ui_disconnected()
+    assert r.o.state is St.STIMULATING
 
 
 def test_decoder_loss_pauses_and_reconnect_resumes():
@@ -704,7 +742,7 @@ def test_stale_onset_does_not_change_the_mirror():
 
 
 def test_shown_page_never_changes_during_a_trial():
-    r = Rig()
+    r = Rig(CFG_PSYCHOPY)
     r.to_trial()
     shown = r.last(r.ui, ShowPage)
     r.o.on_ui_connected()  # a reconnecting page gets the same screen again: allowed
@@ -860,6 +898,85 @@ def test_partner_line_asks_the_llm_and_waits_for_its_page():
     assert r.page_utterances() == [o.utterance for o in LLM_OPTIONS]  # ranked: option 1 on s1
     assert r.last(r.decoder, Display).labels["s1"] == LLM_OPTIONS[0].utterance
     assert r.last(r.ui, UIStatus).llm_ok
+
+
+def test_start_from_a_new_page_begins_at_home_with_an_empty_conversation():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()  # the room's talk made a page of its own
+    r.answer(req=req)
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.conversation.turns == []
+    while r.o.state is not St.MENU_CUE:
+        r.finish_baseline() if r.o.state is St.BASELINE else r.run_out()
+    assert r.page_utterances() == [o.utterance for o in HOME]
+
+
+def test_start_from_a_reloaded_page_while_running_goes_home_at_once():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()
+    assert r.o.state is St.PREPARING  # waiting for Claude's page
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.MENU_CUE
+    assert r.page_utterances() == [o.utterance for o in HOME]
+    r.answer(req=req)  # the old conversation's page arrives late: dropped
+    assert r.page_utterances() == [o.utterance for o in HOME]
+    r.to_trial()
+    r.o.on_ui_message(Resume(start=True))  # mid-trial: the trial ends, home again
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.page_utterances() == [o.utterance for o in HOME]
+
+
+def test_plain_resume_keeps_the_conversation():
+    r = LLMRig()
+    r.to_trial()
+    r.answer(req=r.partner())
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume())
+    assert r.o.conversation.partner_last == QUESTION
+
+
+def cue_length(r) -> float:
+    """How long the MENU_CUE just entered lasts."""
+    assert r.o.state is St.MENU_CUE
+    return r.o.deadline - r.clock.t
+
+
+def words_on(show) -> int:
+    return len(" ".join(s.utterance or s.label for s in show.slots).split())
+
+
+def test_a_new_page_stays_still_long_enough_to_read_it():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    r.finish_baseline()
+    stim = CFG.stim
+    page = r.last(r.ui, ShowPage)
+    expected = min(stim.cue_s + stim.read_s_per_word * words_on(page), stim.cue_max_s)
+    assert cue_length(r) == pytest.approx(expected)
+    assert cue_length(r) > stim.cue_s  # more than the bare minimum for three sentences
+
+
+def test_the_reading_time_has_a_cap():
+    long = CFG.model_copy(update={"stim": CFG.stim.model_copy(update={"read_s_per_word": 5.0})})
+    r = Rig(long)
+    r.o.on_ui_message(Resume())
+    r.finish_baseline()
+    assert cue_length(r) == pytest.approx(CFG.stim.cue_max_s)
+
+
+def test_the_confirm_screen_and_a_page_seen_again_get_short_cues():
+    r = Rig()
+    r.pick_and_confirm_screen("s1")
+    assert cue_length(r) == pytest.approx(CFG.stim.confirm_cue_s)
+    r.to_trial()
+    r.select(BACK)  # the same page again: already read
+    while r.o.state is not St.MENU_CUE:
+        r.run_out()
+    assert r.last(r.ui, ShowPage).mode == "page"
+    assert cue_length(r) == pytest.approx(CFG.stim.cue_s)
 
 
 def test_llm_timeout_shows_the_fallback_and_ignores_the_late_page():
@@ -1210,9 +1327,17 @@ def run_unattended_llm(cfg, trials: int = 30, seed: int = 5):
     raise AssertionError("did not finish")
 
 
+def fixed_cue(cfg):
+    """A 1 s cue on every screen, as before the reading time: run_unattended_llm sends a partner
+    line with a fixed chance per step, so longer cues (more steps) would bury every NEXT under
+    partner lines and no "More options" page would ever show."""
+    return cfg.model_copy(update={"stim": cfg.stim.model_copy(
+        update={"cue_s": 1.0, "read_s_per_word": 0.0, "confirm_cue_s": 1.0})})
+
+
 @pytest.mark.parametrize("cfg", [CFG, CFG_LIST], ids=["page", "list"])
 def test_unattended_with_a_flaky_llm_and_partner_lines_at_any_moment(cfg):
-    r, reason_of, late, partner_states = run_unattended_llm(cfg)
+    r, reason_of, late, partner_states = run_unattended_llm(fixed_cue(cfg))
     assert r.spoken()
     # Every spoken sentence was on screen right before: the confirm text, or the highlighted option.
     for i, msg in enumerate(r.ui):
@@ -1411,7 +1536,7 @@ def test_no_mic_on_message_is_ever_sent_while_speaking():
 
 
 def test_a_reconnected_page_gets_the_mic_state():
-    r = Rig()
+    r = Rig(CFG_PSYCHOPY)
     r.to_trial()
     r.o.on_ui_connected()
     assert listens(r)[-1] == Listen(seconds=0, until_stopped=True, reason="reconnect")
@@ -1438,7 +1563,7 @@ def test_the_mic_reopens_after_a_decoder_reconnect_in_turn_mode_too():
 
 
 def test_mute_is_held_by_the_server_across_stop_resume_and_reconnect():
-    r = Rig()
+    r = Rig(CFG_PSYCHOPY)
     r.to_trial()
     r.o.on_ui_message(MicSet(muted=True))
     assert listens(r)[-1] == Listen(seconds=0, muted=True, reason="muted")

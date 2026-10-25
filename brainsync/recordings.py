@@ -20,11 +20,31 @@ from .signal import preprocess
 
 MONTAGE = ("Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2")
 POSTERIOR = ("P7", "P8", "O1", "O2")
+# The C3/C4 pins never reach the scalp on the dry headset; with their leads moved to gel
+# pads at the left and right outer canthus (LO, RO) they record the horizontal EOG, and
+# Fp1/Fp2 against the mastoid reference give the vertical one (brainsync.eog).
+EOG = ("LO", "RO")
+EOG_MONTAGE = ("Fp1", "Fp2", "LO", "RO", "P7", "P8", "O1", "O2")
 KINDS = ("trials", "cued")
 
 Marker = tuple[float, str, int]
+Event = tuple[float, str, int]
 
 _MARKER_RE = re.compile(r"^\s*\[marker\s+([-+0-9.eE]+)\]\s+(stim_on|stim_off):(\d+)\s*$")
+_EVENT_RE = re.compile(r"^\s*\[marker\s+([-+0-9.eE]+)\]\s+([A-Za-z_]+):(-?\d+)\s*$")
+
+
+def parse_events(text: str, kinds: Sequence[str] | None = None) -> list[Event]:
+    """Return (unix_time, kind, index) for every ``[marker t] kind:index`` line, in file
+    order: stim_on / stim_off, cue, cond, rate, and the coded stimuli's cycle and flash
+    markers. ``kinds`` keeps only those event names."""
+    out: list[Event] = []
+    wanted = None if kinds is None else set(kinds)
+    for line in text.splitlines():
+        m = _EVENT_RE.match(line)
+        if m and (wanted is None or m.group(2) in wanted):
+            out.append((float(m.group(1)), m.group(2), int(m.group(3))))
+    return out
 
 
 def parse_markers(text: str) -> list[Marker]:

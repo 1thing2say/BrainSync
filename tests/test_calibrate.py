@@ -15,7 +15,7 @@ from brainsync.templates import load_model
 def test_four_diamond_config_positions() -> None:
     cfg = load_config("four_diamond")
     assert cfg.freqs.tolist() == [13.0, 15.0, 17.0, 11.0]
-    assert [t.pos for t in cfg.targets] == [(0.0, 0.3), (-0.55, 0.0), (0.55, 0.0), (0.0, -0.3)]
+    assert [t.pos for t in cfg.targets] == [(0.0, 0.33), (-0.55, 0.0), (0.55, 0.0), (0.0, -0.33)]
     assert cfg.waveform == "sine" and cfg.hold_cue and cfg.session.blocks == 8
 
 
@@ -26,7 +26,7 @@ def test_explicit_positions_validation() -> None:
     with pytest.raises(ValueError, match=r"positions\[1\]"):
         explicit_positions([[0, 0.3], [1, "a"]], 2)
     data = {"targets": {"freqs": [15.0, 17.0]},
-            "layout": {"size": 0.3, "spacing": 0.6, "positions": [[0.2, 0.0], [-0.2, 0.0]],
+            "layout": {"size": 0.3, "positions": [[0.2, 0.0], [-0.2, 0.0]],
                        "x_offset": 0.1}}
     cfg = parse_config(data)
     np.testing.assert_allclose([t.pos for t in cfg.targets], [(0.3, 0.0), (-0.1, 0.0)])

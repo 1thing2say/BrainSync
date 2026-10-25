@@ -9,6 +9,8 @@ server:
 
 display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
+  flicker: browser             # browser: the session page flickers the targets (the user's screen);
+                               # psychopy: the bridge's PsychoPy window does, the page is a still mirror
 
 stim:
   # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.
@@ -30,7 +32,10 @@ stim:
     say: s1                    # "Say it"
     back: s4                   # "Back"
   waveform: sine               # sine or square; 17 Hz does not divide 60 Hz, so square is rejected
-  cue_s: 1.0                   # option shown, no flicker, before each trial
+  cue_s: 2.0                   # still screen before each trial (a page already read gets only this)
+  read_s_per_word: 0.2         # a new page: + this per word on it, so the user can read every option
+  cue_max_s: 6.0               #   before anything flickers, up to this many seconds in all
+  confirm_cue_s: 1.5           # still screen before the Say it / Back trial
   max_trial_s: 10.0            # no selection by then -> NOT_CAUGHT (decoder needs about 5 s)
   rest_s: 1.0                  # still screen after a trial
 

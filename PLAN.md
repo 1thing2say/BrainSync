@@ -55,10 +55,13 @@ pull requests.
     recordings is what section 14 reports.
   - `custom-operating-brain-seperate`: BrainSyncOS, a Jetson appliance OS (phase 1: base ISO
     extract/repack only). See section 10.
-- **Next up:** the 4-target gate recording (section 14) and SYNC 1 to settle section 13 and agree
-  `INTERFACE-v2-draft.md` (teammate: please read System design, sections 12, 13 and 14, and the
-  draft), then Cartesia TTS (V2 items 3–4), V3 (LLM option ranking) and V4 (partner speech
-  input).
+- **Next up:** on the demo Mac, the checks in `docs/DEMO.md` section 2, in order: PsychoPy and
+  the 60 Hz refresh check, SYNC 1.5 (frame drops with the four sentences on screen), the 4-target
+  gate recording (section 14) and its decision, the first live run of `python -m app.server
+  --bridge cerelog` (SYNC 3) and 10 live trials with C / W marks, then the numbers into the
+  README's "Honest claim" and `docs/DEVPOST.md`, the iPhone app built on a device, the screen
+  recording and two rehearsals (V7). SYNC 1 with the teammate: confirm `INTERFACE-v2-draft.md`
+  (each open question now says how our bridge answers it) and item 9 of section 13.
 - **Cartesia TTS built (2026-10-24):** `app/tts.py` pre-generates each page's 3 clips, the server
   serves them at `/audio/{id}`, `speech.js` plays them with the `speechSynthesis` fallback. Key from
   `.env`; without it the server prints "browser speechSynthesis only". Tested live on the venue
@@ -168,6 +171,53 @@ pull requests.
   the user's screen) and a Settings sheet (text size, haptics, speaker test, mic access, pair
   again, show setup again). `Palette.swift` uses the same colours as `ui/style.css`. Not yet
   compiled.
+- **The laptop page is the user's screen (2026-10-25, branch `feat/user-display`):** only the
+  user sees it, so it lost the "Partner" label, the typed text box and the operator footer
+  (health line and its details, Correct / Wrong, keyboard hint), the banner with its pills (FAKE
+  DECODER / KEYBOARD, the trial phase) and the "Page N · …" heading. The state line now sits in the
+  diamond's still centre and says something only when the user is not picking (Waiting to start,
+  Paused — why, Didn't catch that); `ViewCore.status`. The page's start button
+  (the flicker warning, so every newly opened page) sends `resume` with `start: true`: a fresh
+  session, an empty conversation and the fixed home page, also when a running session is
+  reloaded; the Resume button keeps the conversation. Before this, lines the always-on mic had
+  heard in the room (nonsense to Claude) left "could you say that again"-style pages on screen. The C / W keys still mark the last reply; a fake decoder
+  or keyboard mode shows in the terminal, `/api/health`, `tools/preflight.py` and the log; the iPhone app link shows only with `--tunnel` or on the LAN, and the
+  iPhone app keeps its own text box. Laid out for SSVEP: each target sits against its own edge of
+  the mirror (top, bottom, left, right; at most 28 % of its width) and the empty middle takes the
+  rest, so the targets are as far apart as the window allows; the confirm screen's sentence sits
+  in that still centre between Say it (top) and Back (bottom), as on the flicker display. The page
+  itself never scrolls when a conversation line arrives (only the list does). Phones: a list,
+  2 rem between cards, Say it and Back side by side 3 rem apart.
+  It is no longer called the partner page (the profile page links back to "Session"; the server
+  prints "BrainSync page: …"), and `ui/` is served with `Cache-Control: no-cache`, so a browser
+  never runs a cached old `app.js` against a new `index.html` (that left the page stuck on
+  "Connecting…").
+- **The page draws the flicker (2026-10-25, branch `feat/user-display`; Elijah's decision):** the
+  session page in Chrome is the user's screen and flickers the answer cards itself
+  (`display.flicker: browser`, the new default); the PsychoPy window stays as
+  `display.flicker: psychopy`, with the page then a still mirror. This replaces "Flicker:
+  settled" (section 13, item 1) and the System design's PsychoPy display. `ui/flicker_core.js`
+  (node-tested) computes each card's luminance like `brainsync/stimulus/flicker.py`,
+  0.5 * (1 + sin(2 pi f n / refresh + phase)), with the frame index n from the
+  requestAnimationFrame timestamp rounded to the measured frame period, so a dropped frame never
+  shifts the phase; each card is black under a white layer whose opacity follows it, the text
+  white with a black outline. The cards are black and white in every state (no green or blue
+  text, a white ring for the pick), so nothing changes colour when the flicker stops. The flicker warning measures the refresh and flags a rate more than
+  1 Hz off `display.expected_refresh_hz` or uneven frames. The page flickers only between the
+  server's flicker and the next phase, and only after its own start button; Esc, Stop, a lost
+  connection or a hidden tab stop it on the page at once (a hidden tab also sends Stop). The
+  server pauses when the page closes mid-session, and when a new page connects mid-session
+  ("New screen: press start"), so the decoder never picks from a still screen. `app.server
+  --bridge` runs the bridge with `--no-stimulus` then; its `stim_onset` is its own clock at
+  `stim_start` (logging only: the decoder slides over the stream). Not yet measured: the SSVEP
+  from a Chrome flicker on the headset, and Chrome's frame timing on the demo Mac. Known gap:
+  the iPhone app connecting takes over the one page connection, which pauses the session.
+- **Reading time before the flicker (2026-10-25, branch `feat/user-display`):** a new page used to
+  stay still for 1 s, then flicker, while the decoder can commit about 2–2.5 s into the flicker;
+  three sentences take 5–6 s to read, so the user was still reading as it flickered and the card
+  their eyes rested on could be picked. Now a new page stays still for `stim.cue_s` (2 s) + 0.2 s
+  per word on it, up to 6 s; a page seen again (after Didn't catch that or Back) for 2 s; the
+  confirm screen for 1.5 s (`Orchestrator._cue_seconds`).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
@@ -180,6 +230,76 @@ pull requests.
   Windows quoting in `record.score_command`; POSIX paths untouched. Not WSL: only Windows sees
   the COM port, and WSLg windows are not vsynced. BrainFlow checks pass on Windows; the live run
   with the board is still to do. Details and known Windows test gaps: `deploy/windows/INSTALL.md`.
+- **VEP paradigm demos (2026-10-25, branch `different-according-interfaces-modulations`):** the
+  three codings of Bin et al. (2009), t-VEP, f-VEP and c-VEP, as `python -m brainsync.vep`
+  (README "VEP paradigms"). Stimulus configs may carry a `[code]` (m-sequence, lags) or `[time]`
+  (non-overlapping flashes) table instead of frequencies (`cvep_2`, `cvep_4`, `cvep_16`, `tvep_4`;
+  `fvep_6` is the paper's six-frequency flicker set); `brainsync.stimulus.coded` draws them with `cycle:<n>` / `flash:<k>` markers;
+  `brainsync.vep` holds the paper's three decoders (FFT-SNR, shifted template, flash averages),
+  a marker-synchronous live decoder, a synthetic board that follows the sequence, c-VEP
+  training with a saved template, and `--compare --fake` (accuracy, s/selection, ITR beside the
+  paper's numbers; synthetic, pipeline only). Not touched: the `/ws/decoder` contract and the
+  bridge. Still to do: a live run on the headset, and the marker-to-sample jitter check (V5)
+  that c-VEP depends on.
+
+- **The bridge in this repo (2026-10-24, branch `feat/finish-project`):** BCI Voice now runs end
+  to end without the teammate's repo.
+  - `brainsync/voice_bridge.py` (`python -m brainsync.voice_bridge`): the protocol 2 bridge on
+    the `brainsync/` decoder (FBCCA, `brainsync.online.TUNED`: 1.5 s windows, 0.25 s step,
+    4 votes, margin and threshold 0.5), the Cerelog X8 (`--fake`: FakeBoard, a random active
+    target's tone per trial; `--fast`) and the PsychoPy display (`--no-stimulus`: a headless
+    stand-in). Votes only among `active_slots`; a commit before the onset is held until
+    `stim_onset`; `not_ready` / `unknown_slot` / `board_stalled` answers; flicker off on a
+    drop, a pause and an error; the display relaunched after `Esc`; close code 4000 stops it.
+    `tools/contract_check.py` against `--fake --no-stimulus`: 25/25.
+  - Display commands in `brainsync/stimulus` (`feedback.py`, `display.py`, `config.py`): stdin
+    JSON `labels`, `text`, `active`, `flicker` next to the integer box line; `flicker_on` /
+    `flicker_off` markers at the flip; `--hold-still` holds until `{"flicker": true}` once a
+    JSON line has arrived (the bridge's first line is always `{"flicker": false}`); per-target
+    sentences, a centre line and fixation marks; `[layout] positions` and the `[stimulus]` keys
+    `fixation`, `fixation_size`, `labels_during_flicker`.
+  - `brainsync/stimulus/configs/four_diamond.toml`: 13/15/17/11 Hz top/left/right/bottom, sine,
+    0.3 squares, fixation marks, and the 4-target gate session (32 cued trials).
+  - `python -m app.server --bridge cerelog|fake [--bridge-headless]` starts the bridge with
+    `--parent-pid` and stops it on shutdown, like `--fake-decoder` (the two exclude each other).
+    `brainsync.launch.launch_stimulus_live` streams the display's output lines to the bridge.
+  - Tests: `test_voice_bridge.py`, `test_bridge_display_contract.py` (the bridge's exact stdin
+    lines through the real stimulus command line), `test_server_bridge.py` (end to end) and
+    `test_stimulus_commands.py`. The bridge has not run with the headset or the real PsychoPy
+    window yet (no PsychoPy where it was built).
+  - Review fixes: a `baseline_done` goes only to the connection that asked; no `hello` while
+    the display is down (it follows the relaunch); a baseline that cannot start answers after
+    its `seconds`; every display launch writes `{"flicker": false}` first and writes go through
+    a thread, so a display that stops reading never blocks the loop; stopping (Ctrl-C, SIGTERM,
+    4000) never relaunches the display and closes one still launching (EOF, terminate, kill;
+    the server gives the bridge 12 s); `--max-flicker-s` (20 s) turns the flicker off at the
+    bridge if the server never stops a trial; a shorter websocket keepalive; `--no-reconnect`
+    that never connects exits 1. The display reads stdin from its start screen on (EOF there
+    closes it), reads the hold before the JSON state each frame, counts a rejected `{` line as
+    JSON, and keeps its status and prompt lines on screen (between the squares in four_diamond).
+  - Housekeeping: `brainsync/server/transport.py` queues each connect / disconnect event under
+    the same lock as the controller change (a race the transport tests hit), the brain map and
+    transport tests wait for state instead of a fixed count, the extension's flicker fixture is
+    compared within 1e-12 (`make_fixture.same`; macOS and Linux libm differ in the last bit, so
+    an exact compare failed on one or the other) and kept as generated on the Mac. Docs: `docs/DEMO.md` (start with `--bridge`, the "On the Mac, before the demo"
+    checklist), `INTERFACE-v2-draft.md` (our bridge's answer under each open question), the
+    README's BCI Voice section and honest claim, and `docs/DEVPOST.md` (the write-up draft).
+
+- **EOG gaze prior (2026-10-25, branch `electrode-downloads`):** the C3/C4 pins never reach
+  the scalp, so their leads go to gel pads at the left and right outer canthus (channels `LO`,
+  `RO`; montage `EOG_MONTAGE` in `brainsync/recordings.py`). REF stays on the mastoid and DRL
+  where it is: DRL is not recorded, and a temple reference would put jaw EMG and blinks into
+  O1/O2. `brainsync/eog.py` turns the horizontal (RO − LO) and vertical (Fp1/Fp2) EOG into a
+  gaze vector per window, scores each target by direction (from the layout, or fitted on
+  labelled trials) and abstains on blinks, a centred gaze or a small margin; the decoder adds
+  `weight` (1.5) baseline spreads of it to the SSVEP scores (`Decoder.prior`), so a clear gaze
+  resolves an abstain and a strong SSVEP still wins. `python -m brainsync.server --eog` turns it
+  on (point mode, where target rects are known); `python -m brainsync.record -c four_eog --names
+  Fp1,Fp2,LO,RO,P7,P8,O1,O2` records the gate (2 x 2 grid, 13/15/17/11 Hz, 28 trials) and
+  `python -m brainsync.eog <file>` scores gaze, FBCCA and the fusion held out. Not yet recorded:
+  whether the board keeps the near-DC level (the ADS1299 is DC coupled; the 1 Hz high-pass is
+  ours and the EOG path skips it) and pad drift over minutes (`recentre` after a confirmed
+  pick) are the open questions. Tested on synthetic data only (`tests/test_eog.py`).
 
 ## System design
 
@@ -227,7 +347,7 @@ Design risks to settle:
 3. **The bridge is a single point of failure.** It holds the board, the decoder and the display;
    a crash costs the ~16 s board connect plus a baseline. Keyboard mode is the fallback, and the
    demo script rehearses switching to it.
-4. **Time per reply.** One pick is cue 1 s + decode ≥ 5 s + highlight 0.6 s, then the confirm
+4. **Time per reply.** One pick is the reading time (2–6 s, `stim.cue_s` + `read_s_per_word`) + decode ≥ 5 s + highlight 0.6 s, then the confirm
    step (decode ≥ 5 s), then speech + rest 1 s: about 13–14 s at best. Each NEXT (new page of 3)
    adds about 7 s, and each abstained trial repeats. Ranking quality (V3) and the decoder's abstain
    rate (section 13, item 10) matter more than any other choice. Showing the decoder's scores on
@@ -387,8 +507,8 @@ BrainSync/
 - TTS: Cartesia sonic-3.5 via REST `/tts/bytes`, pre-generated per menu; browser `speechSynthesis`
   (local voice) as fallback. Called with `httpx`, not the `cartesia` SDK (older examples use
   outdated model names such as `sonic-english`).
-- STT: Web Speech API (`webkitSpeechRecognition`). It needs internet in Chrome, so a typed text box
-  is always available as fallback.
+- STT: Web Speech API (`webkitSpeechRecognition`). It needs internet in Chrome; the iPhone app's
+  text box is the typed fallback (the laptop page has none since 2026-10-25).
 - LLM: Anthropic Messages API, default `claude-haiku-5-5` for speed; force a single tool call whose
   input schema is the ranked option list, so the output is structured JSON.
 - **Demo machine: the teammate's Mac.** The vendored BrainFlow for the Cerelog X8 ships only macOS
@@ -404,7 +524,9 @@ BrainSync/
 | `stim.slots` | s1 13 Hz, s2 15 Hz, s3 17 Hz, s4 11 Hz | Mirrors his `four_diamond.toml` (changed 2026-10-24 from 15/17/20/12); checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
 | `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 11 Hz, the lowest and nearest the user's alpha, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
-| `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
+| `stim.cue_s` | 2.0 | Still screen before each trial; a page already read (after Didn't catch that or Back) gets only this. Was 1.0 (2026-10-25: too short to read 3 sentences, and gaze resting on an option while reading during the flicker picks it) |
+| `stim.read_s_per_word` / `stim.cue_max_s` | 0.2 / 6.0 | A new page stays still for `cue_s` + 0.2 s per word on it, up to 6 s (3 sentences of about 20 words: 6 s) |
+| `stim.confirm_cue_s` | 1.5 | Still screen before the Say it / Back trial (its sentence was just picked) |
 | `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
 | `stim.rest_s` | 1.0 | Still screen after a trial |
 | `baseline.seconds` | 10.0 | Still screen at start for the decoder's resting baseline |
@@ -476,7 +598,7 @@ live decoding.
 
 ```
 IDLE --(warning accepted)--> BASELINE (still screen, baseline.seconds) --> MENU_CUE
-MENU_CUE --(cue_s, page ready)--> STIMULATING
+MENU_CUE --(reading time, page ready)--> STIMULATING
 STIMULATING --selection(option k)--> SELECTED --> CONFIRMING (sentence k shown; targets "Say it" / "Back")
 CONFIRMING --selection(say)-->  SPEAKING --(tts_done)--> REST --> MENU_CUE (new page)
 CONFIRMING --selection(back) / no_selection / timeout--> REST --> MENU_CUE (same page)
@@ -715,7 +837,7 @@ Take shifts with the teammate. Commit a working state before sleeping.
 ## 11. Commands
 
 ```
-pip install -e ".[dev]"
+pip install -e ".[dev,display]"            # display = PsychoPy, for the bridge's display
 pytest
 python -m app.server                        # real decoder connects to /ws/decoder
 python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
@@ -732,13 +854,18 @@ python tools/log_summary.py                 # numbers from the newest log (--all
 
 # demo runbook: docs/DEMO.md
 
-# in ../ssvep (his venv), once he adds the bridge
+# the bridge in this repo (brainsync/voice_bridge.py)
+python -m app.server --bridge cerelog       # server + bridge: headset + PsychoPy display
+python -m app.server --bridge fake --bridge-headless   # fake EEG, no window
+python -m brainsync.voice_bridge [--fake] [--no-stimulus]   # the bridge alone, against a running server
+
+# in ../ssvep (his venv), if he adds his own bridge
 python -m ssvep.online.bridge               # headset + PsychoPy display, connects to our server
 python -m ssvep.online.bridge --fake        # FakeSource instead of the headset
 ```
 
-Open `http://127.0.0.1:8000` in Chrome for the partner page; the bridge opens his display
-fullscreen.
+Open `http://127.0.0.1:8000` in Chrome for the partner page; the bridge opens the display full
+screen (press Space on its start screen).
 
 ## 12. What the teammate's code does (`../ssvep`, read 2026-10-23)
 
@@ -857,6 +984,10 @@ questions for the teammate"), with a note asking the teammate's Claude session t
    fallback. Settled by the 4-target gate (section 14).
 9. **Where the decoder lives.** `../ssvep` (his repo) or the `brainsync/` rebuild on branch
    `check-implemtation-calhacks-desktop`. The bridge (item 3) has to be written against one of them.
+   **Elijah's decision (2026-10-24), pending the teammate:** for the demo the decoder lives in this
+   repo's `brainsync/` (the rebuild, now merged here), with the bridge `brainsync/voice_bridge.py`;
+   the teammate's `ssvep` stays the research repo. A bridge he writes there can still replace ours
+   if it passes `tools/contract_check.py`.
 10. **The teammate's demo-improvement plan** (`../ssvep/.claude/plans/demo-improvements.plan.md`,
     phases A–E, waiting for the teammate's go as of 2026-10-23). It overlaps this plan:
     - **A** (save and score each demo run, replay source) and **B** (tune window, votes and margin
@@ -872,7 +1003,10 @@ questions for the teammate"), with a note asking the teammate's Claude session t
     trained on the user's own trials (TRCA / eTRCA, stubs in his repo, his plan C) usually beats
     CCA clearly with more targets and short windows, which is this case. Plan:
     - Fix the hardware first: gel or paste on O1/O2, C3/C4 tied to CH1+ or moved to Oz/POz. A
-      trained classifier learns noise if the signal is poor.
+      trained classifier learns noise if the signal is poor. Alternative for C3/C4 (2026-10-25):
+      gel pads at the outer canthi as `LO`/`RO`, which gives a horizontal EOG gaze prior
+      (`brainsync/eog.py`, Status above); the gate recording then uses `four_eog` and
+      `--names Fp1,Fp2,LO,RO,P7,P8,O1,O2`.
     - The gate recording (section 14) doubles as TRCA training data.
     - TRCA is about 100 lines of numpy; Elijah can write it as a PR to his repo if the teammate is
       on the bridge. Judge it only on held-out trials, never on its training trials.
