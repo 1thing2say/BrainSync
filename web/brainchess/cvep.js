@@ -72,13 +72,19 @@
     return Math.floor(frame / cycleFrames);
   }
 
+  /** Python's round(): halves go to the even neighbour (2.5 -> 2, 3.5 -> 4). */
+  function roundHalfEven(x) {
+    const r = Math.round(x);
+    return Math.abs(x % 1) === 0.5 && r % 2 !== 0 ? r - 1 : r;
+  }
+
   /** `cells` characters filled in proportion to `value` clipped to 0..1 (a correlation). */
   function bar(value, cells) {
     if (cells === undefined) cells = BAR_CELLS;
     let v = Number(value);
     if (!Number.isFinite(v)) v = 0;
     v = Math.min(1, Math.max(0, v));
-    const n = Math.round(v * cells);
+    const n = roundHalfEven(v * cells);
     return "█".repeat(n) + "░".repeat(cells - n);
   }
 
@@ -107,6 +113,7 @@
   const api = Object.freeze({
     BITS, LENGTH, N_TARGETS, LAG_FRAMES, CYCLE_FRAMES, TRAIN_CYCLES, BAR_CELLS, WHITE, BLACK,
     bit, frameBits, color, cycleStart, cycleIndex, bar, labelLine, statusLine, level,
+    roundHalfEven,
   });
   root.BrainSyncCode = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
