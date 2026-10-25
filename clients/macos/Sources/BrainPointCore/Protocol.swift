@@ -45,6 +45,10 @@ public struct Welcome: Equatable, Sendable {
     public var detect: Bool
     public var serverName: String
     public var serverVersion: String
+    /// "code" for the c-VEP standard (CVEP-STANDARD 4.2), else nil or "freq".
+    public var paradigm: String? = nil
+    /// The code of a code-mode welcome (missing fields filled from the standard).
+    public var code: CodeSpec? = nil
 }
 
 public struct PhaseMsg: Equatable, Sendable {
@@ -52,16 +56,25 @@ public struct PhaseMsg: Equatable, Sendable {
     public var flicker: Bool
     public var seconds: Double?
     public var text: String
-    public init(phase: String, flicker: Bool, seconds: Double? = nil, text: String = "") {
+    /// Phase "train" (code mode): the slot the user looks at, and the cycles it records.
+    public var cue: String?
+    public var cycles: Int?
+    public init(phase: String, flicker: Bool, seconds: Double? = nil, text: String = "",
+                cue: String? = nil, cycles: Int? = nil) {
         self.phase = phase; self.flicker = flicker; self.seconds = seconds; self.text = text
+        self.cue = cue; self.cycles = cycles
     }
 }
 
 public struct LayoutTarget: Equatable, Sendable {
+    /// `freq` is 0 for a code target (`"freq": null`), which has its `lag` in frames instead.
     public var slot: String, freq: Double, phase: Double, label: String, kind: String
     public var rects: [NormRect]
-    public init(slot: String, freq: Double, phase: Double, label: String, kind: String, rects: [NormRect]) {
+    public var lag: Int?
+    public init(slot: String, freq: Double, phase: Double, label: String, kind: String, rects: [NormRect],
+                lag: Int? = nil) {
         self.slot = slot; self.freq = freq; self.phase = phase; self.label = label; self.kind = kind; self.rects = rects
+        self.lag = lag
     }
 }
 
@@ -76,6 +89,34 @@ public struct SelectionMsg: Equatable, Sendable {
     public var selectionID: Int, layoutID: Int, slot: String, tServer: Double
     public var score: Double?
     public var scores: [String: Double]
+}
+
+/// Code mode: training progress, `{"type": "train", "cycle": 12, "of": 30}`.
+public struct TrainMsg: Equatable, Sendable {
+    public var cycle: Int, of: Int
+    public init(cycle: Int, of: Int) { self.cycle = cycle; self.of = of }
+}
+
+/// Code mode: the template is ready, `{"type": "trained", "accuracy": 0.83, "chance": 0.333, "cycles": 30}`.
+public struct TrainedMsg: Equatable, Sendable {
+    public var accuracy: Double?, chance: Double?, cycles: Int?
+    public init(accuracy: Double?, chance: Double?, cycles: Int?) {
+        self.accuracy = accuracy; self.chance = chance; self.cycles = cycles
+    }
+}
+
+/// Code mode: one decision of the current layout. Scores are correlations, not probabilities.
+public struct DecisionMsg: Equatable, Sendable {
+    public var layoutID: Int?
+    public var scores: [String: Double]
+    public var raw: String?, committed: String?
+    public var lead: Double?
+    public var changed: Bool
+    public init(layoutID: Int?, scores: [String: Double], raw: String?, committed: String?, lead: Double?,
+                changed: Bool) {
+        self.layoutID = layoutID; self.scores = scores; self.raw = raw; self.committed = committed
+        self.lead = lead; self.changed = changed
+    }
 }
 
 public struct ScanRequestMsg: Equatable, Sendable {
@@ -132,6 +173,9 @@ public enum ServerMessage: Equatable, Sendable {
     case status(StatusMsg)
     case error(ErrorMsg)
     case pong(PongMsg)
+    case train(TrainMsg)
+    case trained(TrainedMsg)
+    case decision(DecisionMsg)
     case ping                    // the server's 20 s keepalive; nothing to answer
     case unknown(String)         // a type this client does not handle
 
@@ -147,6 +191,9 @@ public enum ServerMessage: Equatable, Sendable {
         case .status: "status"
         case .error: "error"
         case .pong: "pong"
+        case .train: "train"
+        case .trained: "trained"
+        case .decision: "decision"
         case .ping: "ping"
         case .unknown(let t): t
         }
@@ -205,6 +252,11 @@ public enum Codec {
         ["type": "onset", "layout_id": layoutID, "t_client": tClient]
     }
 
+    /// Code mode: the first flip of cycle `n` of layout `layoutID`, in Unix seconds.
+    public static func cycle(layoutID: Int, n: Int, tClient: Double) -> [String: Any] {
+        ["type": "cycle", "layout_id": layoutID, "n": n, "t_client": tClient]
+    }
+
     public static func frames(refreshHz: Double, dropped: Int) -> [String: Any] {
         ["type": "frames", "refresh_hz": (refreshHz * 1000).rounded() / 1000, "dropped": max(0, dropped)]
     }
@@ -256,10 +308,13 @@ public enum Codec {
                 refreshRates: rates.isEmpty ? [hz] : rates,
                 freqs: (m["freqs"] as? [Any])?.compactMap(Reader.double) ?? [],
                 maxSlots: r.optInt("max_slots") ?? 0, detect: r.bool("detect") ?? true,
-                serverName: server["name"] as? String ?? "", serverVersion: server["version"] as? String ?? ""))
+                serverName: server["name"] as? String ?? "", serverVersion: server["version"] as? String ?? "",
+                paradigm: m["paradigm"] as? String,
+                code: (m["paradigm"] as? String) == "code" ? codeSpec(m["code"]) : nil))
         case "phase":
             return .phase(PhaseMsg(phase: try r.str("phase"), flicker: r.bool("flicker") ?? false,
-                                   seconds: r.optNum("seconds"), text: m["text"] as? String ?? ""))
+                                   seconds: r.optNum("seconds"), text: m["text"] as? String ?? "",
+                                   cue: m["cue"] as? String, cycles: r.optInt("cycles")))
         case "layout":
             guard let raw = m["targets"] as? [Any] else { throw CodecError("layout: no targets list") }
             var targets: [LayoutTarget] = []
@@ -272,9 +327,13 @@ public enum Codec {
                     let rrd = Reader(rd, "layout.targets[\(k)].rects[\(j)]")
                     rects.append(NormRect(x: try rrd.num("x"), y: try rrd.num("y"), w: try rrd.num("w"), h: try rrd.num("h")))
                 }
-                targets.append(LayoutTarget(slot: try tr.str("slot"), freq: try tr.num("freq"),
+                // A code target has its lag in frames and "freq": null; any other needs a freq.
+                let lag = tr.optInt("lag")
+                let freq = lag == nil ? try tr.num("freq") : (tr.optNum("freq") ?? 0)
+                if let l = lag, l < 0 { throw CodecError("layout.targets[\(k)].lag must be >= 0") }
+                targets.append(LayoutTarget(slot: try tr.str("slot"), freq: freq,
                                             phase: tr.optNum("phase") ?? 0, label: t["label"] as? String ?? "",
-                                            kind: t["kind"] as? String ?? "button", rects: rects))
+                                            kind: t["kind"] as? String ?? "button", rects: rects, lag: lag))
             }
             return .layout(LayoutMsg(layoutID: try r.int("layout_id"), stage: (m["stage"] as? String) ?? "pick", targets: targets))
         case "selection":
@@ -309,11 +368,45 @@ public enum Codec {
         case "pong":
             return .pong(PongMsg(pingID: try r.int("ping_id"), tClient: r.optNum("t_client") ?? 0,
                                  tServer: try r.num("t_server")))
+        case "train":
+            return .train(TrainMsg(cycle: try r.int("cycle"), of: r.optInt("of") ?? CodeVEP.trainCycles))
+        case "trained":
+            return .trained(TrainedMsg(accuracy: r.optNum("accuracy"), chance: r.optNum("chance"),
+                                       cycles: r.optInt("cycles")))
+        case "decision":
+            var scores: [String: Double] = [:]
+            for (k, v) in (m["scores"] as? [String: Any]) ?? [:] { if let d = Reader.double(v) { scores[k] = d } }
+            return .decision(DecisionMsg(layoutID: r.optInt("layout_id"), scores: scores, raw: m["raw"] as? String,
+                                         committed: m["committed"] as? String, lead: r.optNum("lead"),
+                                         changed: r.bool("changed") ?? false))
         case "ping":
             return .ping
         default:
             return .unknown(type)
         }
+    }
+}
+
+extension Codec {
+    /// The welcome's `code` object as a CodeSpec; missing or malformed fields take the
+    /// standard's values (bits that are not all 0 / 1 give the standard bits, bitsFromServer false).
+    static func codeSpec(_ any: Any?) -> CodeSpec {
+        let c = any as? [String: Any] ?? [:]
+        let r = Reader(c, "welcome.code")
+        var bits: [UInt8] = []
+        var good = false
+        if let raw = c["bits"] as? [Any], !raw.isEmpty {
+            let ints = raw.compactMap(Reader.integer)
+            if ints.count == raw.count, ints.allSatisfy({ $0 == 0 || $0 == 1 }) {
+                bits = ints.map { UInt8($0) }
+                good = true
+            }
+        }
+        func pos(_ k: String) -> Int? { r.optInt(k).flatMap { $0 > 0 ? $0 : nil } }
+        let fill = (c["fill"] as? String).flatMap { $0.range(of: "^#[0-9a-fA-F]{6}$", options: .regularExpression) != nil ? $0 : nil }
+        return CodeSpec(bits: good ? bits : CodeVEP.standardBits, lagFrames: pos("lag_frames") ?? CodeVEP.lagFrames,
+                        cycleFrames: pos("cycle_frames"), trainCycles: pos("train_cycles") ?? CodeVEP.trainCycles,
+                        fill: fill ?? CodeVEP.fill, bitsFromServer: good)
     }
 }
 

@@ -44,6 +44,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .off: "OFF"
         case .paused: "PAUSED"
         case .calibrating: "CALIB"
+        case .training: "TRAIN"
         }
     }
 
@@ -52,6 +53,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .armed: .systemGreen
         case .dryRun: .systemOrange
         case .calibrating: .systemBlue
+        case .training: .systemPurple
         case .paused: .systemGray
         case .off: .systemRed
         }

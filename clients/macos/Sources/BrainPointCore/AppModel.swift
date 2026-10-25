@@ -36,12 +36,16 @@ public struct PressInfo: Equatable, Sendable {
     public var detail: String
 }
 
-/// What the overlay should draw: global-point rects, and whether they flicker.
+/// What the overlay should draw: global-point rects, and whether they flicker. With `code`
+/// (the c-VEP standard) each target shows its lag's bit per frame instead of a sine, and
+/// `status` is the line for the strip: training progress, the template, or the decision.
 public struct OverlayPlan: Equatable, Sendable {
     public var layoutID: Int
     public var flicker: Bool
     public var refreshHz: Double
     public var targets: [OverlayTarget]
+    public var code: CodeSpec? = nil
+    public var status: String = ""
 }
 
 public enum AppEvent: Sendable {
@@ -60,6 +64,8 @@ public enum AppEvent: Sendable {
     case scanned(scanID: Int, snapshot: WindowSnapshot?, front: FrontApp?, screen: Viewport, why: String?)
     case pressed(clickID: Int, label: String, ok: Bool, method: String, detail: String)
     case onset(layoutID: Int, tClient: Double)
+    case cycle(layoutID: Int, n: Int, tClient: Double)   // code mode: a cycle's first flip
+    case display(CGRect)               // the main screen in global top-left points (training row)
     case frames(hz: Double, dropped: Int)
     case hover(String?)
     case settings(allowFakeControl: Bool, denyList: [String])
@@ -116,6 +122,13 @@ public struct AppModel: Sendable {
     public private(set) var lastScan: ScanInfo?
     public private(set) var lastPress: PressInfo?
 
+    // code mode (c-VEP)
+    public private(set) var train: TrainMsg?
+    public private(set) var trained: TrainedMsg?
+    public private(set) var decision: DecisionMsg?
+    public private(set) var displayFrame: CGRect?
+    public private(set) var cyclesSent = 0
+
     public private(set) var gate: GateDecision
     private var headsetGood: Bool?
 
@@ -133,6 +146,30 @@ public struct AppModel: Sendable {
     // MARK: derived
 
     public var connected: Bool { conn == .open && welcome != nil }
+
+    /// The welcome's c-VEP code; nil with a frequency server.
+    public var code: CodeSpec? { welcome?.paradigm == "code" ? (welcome?.code ?? .standard) : nil }
+
+    private func labelOf(_ slot: String?) -> String? {
+        guard let slot else { return nil }
+        guard let t = layout?.targets.first(where: { $0.slot == slot }) else { return slot }
+        return t.label.isEmpty ? slot : t.label
+    }
+
+    /// The strip's line in code mode: "Look at the … patch   cycle k/30" while training, the
+    /// decision's status line, or the template's accuracy; "" otherwise.
+    public var codeStatus: String {
+        guard let c = code, layout != nil else { return "" }
+        if phase?.phase == "train" {
+            return CodeVEP.trainLine(text: phase?.text ?? "", cueLabel: labelOf(phase?.cue), cycle: train?.cycle,
+                                     of: train?.of ?? phase?.cycles ?? c.trainCycles)
+        }
+        if let d = decision {
+            return CodeVEP.statusLine(lead: d.lead, committed: labelOf(d.committed), changed: d.changed)
+        }
+        if let t = trained { return CodeVEP.trainedLine(accuracy: t.accuracy, chance: t.chance) }
+        return ""
+    }
 
     public var frontAppDenied: String? {
         guard let f = front else { return nil }
@@ -191,6 +228,7 @@ public struct AppModel: Sendable {
             closeNote = "closed" + (code.map { " (code \($0))" } ?? "") + (reason.isEmpty ? "" : ": \(reason)")
             welcome = nil; phase = nil; layout = nil; status = nil; streamingSince = nil
             pendingScan = nil; onsetSentFor = nil; gazeSlot = nil; rttMs = nil
+            train = nil; decision = nil
         case .message(let msg):
             out += onMessage(msg, now: now)
         case .axTrusted(let t):
@@ -240,6 +278,13 @@ public struct AppModel: Sendable {
                 onsetSentFor = id
                 out += send(Codec.onset(layoutID: id, tClient: t))
             }
+        case .cycle(let id, let n, let t):
+            if code != nil, layout?.layoutID == id, overlay?.flicker == true, overlay?.layoutID == id {
+                cyclesSent += 1
+                out += send(Codec.cycle(layoutID: id, n: n, tClient: t))
+            }
+        case .display(let frame):
+            if frame.width > 0, frame.height > 0 { displayFrame = frame }
         case .frames(let hz, let dropped):
             if hz > 0 { measuredHz = hz }
             out += send(Codec.frames(refreshHz: hz, dropped: dropped))
@@ -275,15 +320,32 @@ public struct AppModel: Sendable {
         case .welcome(let w):
             welcome = w
             lastError = nil
-            out.append(.note("welcome: role \(w.role), mode \(w.mode ?? "-"), \(w.fake ? "SIMULATED board" : "real board"), detect \(w.detect), refresh \(w.refreshHz) Hz, freqs \(w.freqs)"))
+            let stim = w.paradigm == "code"
+                ? "c-VEP code \(w.code?.bits.count ?? 63) bits, lag \(w.code?.lagFrames ?? 21) frames" : "freqs \(w.freqs)"
+            out.append(.note("welcome: role \(w.role), mode \(w.mode ?? "-"), \(w.fake ? "SIMULATED board" : "real board"), detect \(w.detect), refresh \(w.refreshHz) Hz, \(stim)"))
+            if w.paradigm == "code", w.code?.bitsFromServer == false {
+                out.append(.note("the welcome's code bits are missing or malformed; drawing the standard 63-bit code"))
+            }
             if w.role != "controller" { out.append(.note("this client is a viewer: it cannot control the headset")) }
             if userPaused { out += send(Codec.pause()) }   // the server starts every controller in run
         case .phase(let p):
             if p != phase { out.append(.note("phase \(p.phase)\(p.flicker ? " (flicker)" : "")\(p.text.isEmpty ? "" : ": \(p.text)")")) }
+            if p.phase == "train", phase?.phase != "train" { trained = nil; train = nil }
             phase = p
         case .layout(let l):
             layout = l
-            out.append(.note("layout \(l.layoutID) \(l.stage): " + l.targets.map { "\($0.slot)=\($0.label) \($0.freq) Hz" }.joined(separator: ", ")))
+            decision = nil
+            out.append(.note("layout \(l.layoutID) \(l.stage): " + l.targets.map { t in
+                "\(t.slot)=\(t.label) " + (t.lag.map { "lag \($0)" } ?? "\(t.freq) Hz") }.joined(separator: ", ")))
+        case .train(let t):
+            train = t
+        case .trained(let t):
+            trained = t
+            train = nil
+            out.append(.note(CodeVEP.trainedLine(accuracy: t.accuracy, chance: t.chance)
+                             + (t.cycles.map { " from \($0) cycles" } ?? "")))
+        case .decision(let d):
+            if let l = layout, d.layoutID == nil || d.layoutID == l.layoutID { decision = d }
         case .selection(let s):
             lastSelection = s
             let label = layout?.targets.first(where: { $0.slot == s.slot })?.label ?? ""
@@ -414,15 +476,35 @@ public struct AppModel: Sendable {
     }
 
     func desiredOverlay() -> OverlayPlan? {
-        guard [.armed, .dryRun, .calibrating].contains(gate.state), let l = layout, !l.targets.isEmpty,
-              let s = snapshot, !snapshotStale else { return nil }
-        let flicker = gate.mayFlicker && phase?.phase == "run" && phase?.flicker == true
+        guard [.armed, .dryRun, .calibrating, .training].contains(gate.state), let l = layout,
+              !l.targets.isEmpty else { return nil }
+        // The training row (stage "train") comes before any scan and is drawn on the main
+        // screen; every other layout is normalized to the last scan's viewport.
+        let window: CGRect
+        if l.stage == "train", let d = displayFrame {
+            window = d
+        } else if let s = snapshot, !snapshotStale {
+            window = s.viewport
+        } else {
+            return nil
+        }
+        let training = phase?.phase == "train"
+        let flicker = gate.mayFlicker && (phase?.phase == "run" || training) && phase?.flicker == true
+        let code = self.code
+        let cue = training ? phase?.cue : nil
         let targets = l.targets.compactMap { t -> OverlayTarget? in
             guard let r = t.rects.first else { return nil }
-            return OverlayTarget(slot: t.slot, label: t.label, kind: t.kind, freq: t.freq, phase: t.phase,
-                                 rect: Geometry.toScreen(r, window: s.viewport))
+            var label = t.label
+            if code != nil, let d = decision {
+                label = CodeVEP.labelLine(t.label.isEmpty ? t.slot : t.label, score: d.scores[t.slot] ?? .nan,
+                                          best: d.raw == t.slot)
+            }
+            return OverlayTarget(slot: t.slot, label: label, kind: t.kind, freq: t.freq, phase: t.phase,
+                                 rect: Geometry.toScreen(r, window: window), lag: code == nil ? nil : t.lag,
+                                 cue: cue == t.slot)
         }
-        return targets.isEmpty ? nil : OverlayPlan(layoutID: l.layoutID, flicker: flicker, refreshHz: lumHz, targets: targets)
+        return targets.isEmpty ? nil : OverlayPlan(layoutID: l.layoutID, flicker: flicker, refreshHz: lumHz,
+                                                   targets: targets, code: code, status: codeStatus)
     }
 
     private mutating func syncOverlay() -> [AppEffect] {

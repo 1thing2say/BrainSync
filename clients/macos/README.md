@@ -16,9 +16,28 @@ when the Dock shows on that screen; never BrainPoint's own). The scan's viewport
 screen's frame in points, and every hint and protocol rect is relative to it. A denied front
 app gets no scan at all, so its menus and the Dock are off too.
 
-> **Photosensitivity.** The patches flicker at 12 to 20 Hz; 15 to 25 Hz is the band most likely
-> to trigger seizures. BrainPoint asks for an explicit Accept every launch before it draws any
-> flicker, and Esc stops it at once.
+> **Photosensitivity.** With the c-VEP standard the three patches switch between white and
+> black up to 30 times a second; with a frequency server they flicker at 12 to 20 Hz. 15 to
+> 25 Hz is the band most likely to trigger seizures. BrainPoint asks for an explicit Accept
+> every launch before it draws any flicker, and Esc stops it at once.
+
+## Code mode (the c-VEP standard)
+
+A server started with the default `--paradigm code` (`docs/CVEP-STANDARD.md`) sends a welcome
+with `paradigm: "code"` and the code: 63 bits, 21-frame lags, 63-frame cycles, 30 training
+cycles. Its layouts give each target a `lag` (0, 21, 42) instead of a frequency: three white
+patches, the best candidate, the second and More (confirm: "Do it" and "Back" on lags 0 and
+42). On frame n since the layout's first flickering frame, a patch with lag L is white when
+bit (n - L) mod 63 is 1 and black when 0 (`CodeVEP.bit`, checked against
+`brainsync.vep.live` in `Tests/BrainPointCoreTests/Fixtures/cvep_fixture.json`, made by
+`scripts/make_cvep_fixture.py`); a still patch is white. Every cycle's first flip is reported
+as `cycle {layout_id, n, t_client}`. The `train` phase draws its training row on the main
+screen with a red cue box on the `cue` patch (menu title **TRAIN**, nothing is pressed) and
+the strip counts "cycle k/30"; `trained` puts the held-out accuracy against chance (33 %) on
+the strip; every `decision` writes a label line under each patch
+(`Sign in ███░░░░░ +0.42 <`, monospaced) and the status line on the strip
+(`lead 0.31   choice: Sign in`). Scores are correlations, not percentages. A frequency server
+is drawn as before.
 
 ## Build and run
 
@@ -51,7 +70,8 @@ permission usually survives rebuilds; if it stops working, remove and re-add the
 ## What the menu bar says
 
 The title is the control state: **ARMED** (a pick presses), **DRY RUN** (the SIMULATED board:
-picks are shown, nothing is pressed), **CALIB**, **PAUSED** or **OFF**. The menu shows the
+picks are shown, nothing is pressed), **CALIB**, **TRAIN** (c-VEP training: the patches
+flicker, nothing is pressed), **PAUSED** or **OFF**. The menu shows the
 server, the headset (board state, round-trip time), the control state with the one-sentence
 reason, the front app, the last scan (hints, walk ms, server ms, cached), the last press, and
 Pause / Resume, Settings…, Open Log Folder and Quit. The same state and reason are on a thin
@@ -77,7 +97,8 @@ result. The token is never logged.
 ## Layout
 
 - `Sources/BrainPointCore`: pure logic, unit-tested. `Luminance` (bit-exact with
-  `brainsync/stimulus/flicker.py`), `RefreshMeter`, `Geometry`, `Hints`, `ControlGate`, the
+  `brainsync/stimulus/flicker.py`), `CodeVEP` (the c-VEP code, frame rule, confidence text and
+  `CycleCounter`), `RefreshMeter`, `Geometry`, `Hints`, `ControlGate`, the
   protocol codec (`Codec`, `ServerMessage`) and `AppModel`, the app's state as a reducer.
 - `Sources/BrainPointPlatform`: AppKit and Accessibility: focus watching, the AX walk and
   presses, the overlay, safety and Esc monitors.

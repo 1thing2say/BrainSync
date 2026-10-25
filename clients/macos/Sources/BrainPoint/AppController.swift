@@ -91,7 +91,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         a.alertStyle = .critical
         a.messageText = "Flicker warning"
         a.informativeText = """
-            BrainPoint draws flickering squares over the app you control, at 12 to 20 Hz. \
+            BrainPoint draws flickering squares over the app you control: three white squares \
+            that switch between white and black up to 30 times a second (the c-VEP code), or \
+            12 to 20 Hz with a frequency server. \
             Flicker between 15 and 25 Hz is the band most likely to trigger seizures in people \
             with photosensitive epilepsy. Do not use BrainPoint if you or anyone watching has \
             epilepsy or is sensitive to flicker.
@@ -173,6 +175,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func wireOverlay() {
         overlay.onOnset = { [weak self] id, t in self?.dispatch(.onset(layoutID: id, tClient: t)) }
+        overlay.onCycle = { [weak self] id, n, t in self?.dispatch(.cycle(layoutID: id, n: n, tClient: t)) }
         overlay.onFrames = { [weak self] hz, dropped in self?.dispatch(.frames(hz: hz, dropped: dropped)) }
         overlay.onHover = { [weak self] slot in self?.dispatch(.hover(slot)) }
         overlay.setStrip(text: "BrainPoint: OFF - starting", color: StatusMenu.color(.off))
@@ -194,7 +197,10 @@ final class AppController: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch s {
             case .connecting: self.dispatch(.connecting)
-            case .open: self.retryIn = nil; self.dispatch(.opened)
+            case .open:
+                self.retryIn = nil
+                self.dispatch(.display(self.mainScreenFrame()))   // where a training row goes
+                self.dispatch(.opened)
             case .closed: break   // onClose carries the code
             }
         }
@@ -286,9 +292,13 @@ final class AppController: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated { self?.press(clickID: clickID, hintID: hintID, label: label) }
             }
         case .showOverlay(let plan):
-            overlay.show(targets: plan.targets, flicker: plan.flicker, refreshHz: plan.refreshHz, layoutID: plan.layoutID)
+            overlay.show(targets: plan.targets, flicker: plan.flicker, refreshHz: plan.refreshHz, layoutID: plan.layoutID,
+                         code: plan.code)
+            if !plan.status.isEmpty { setStrip(model.gate) }
             log.write("overlay", ["layout_id": plan.layoutID, "flicker": plan.flicker, "refresh_hz": plan.refreshHz,
+                                  "code": plan.code != nil, "status": plan.status,
                                   "targets": plan.targets.map { ["slot": $0.slot, "label": $0.label, "freq": $0.freq,
+                                                                 "lag": $0.lag.map { $0 as Any } ?? NSNull(),
                                                                  "x": Double($0.rect.minX), "y": Double($0.rect.minY),
                                                                  "w": Double($0.rect.width), "h": Double($0.rect.height)] }])
         case .hideOverlay:
@@ -296,8 +306,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             log.write("overlay", ["hidden": true])
         case .gate(let from, let to):
             statusMenu.setTitle(to.state)
-            overlay.setStrip(text: "BrainPoint: \(StatusMenu.shortName(to.state)) - \(to.reason)  |  \(to.headsetLine)",
-                             color: StatusMenu.color(to.state))
+            setStrip(to)
             log.write("gate", ["from": from.state.rawValue, "to": to.state.rawValue, "reason": to.reason,
                                "headset": to.headsetLine, "may_flicker": to.mayFlicker, "may_press": to.mayPress])
             if from.state != to.state {
@@ -308,6 +317,15 @@ final class AppController: NSObject, NSApplicationDelegate {
         case .note(let text):
             log.write("note", ["text": text])
         }
+    }
+
+    /// The strip under the menu bar: the gate's state and reason, or in code mode the c-VEP
+    /// line (training progress, the decision's confidence, the template), then the headset.
+    private func setStrip(_ g: GateDecision) {
+        let status = model.overlay?.status ?? ""
+        let what = status.isEmpty ? g.reason : status
+        overlay.setStrip(text: "BrainPoint: \(StatusMenu.shortName(g.state)) - \(what)  |  \(g.headsetLine)",
+                         color: StatusMenu.color(g.state))
     }
 
     /// A short, token-free log record of an outgoing message.
@@ -391,6 +409,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         let s = NSScreen.main ?? NSScreen.screens.first
         let f = s?.frame.size ?? CGSize(width: 1440, height: 900)
         return Viewport(w: Double(f.width), h: Double(f.height), dpr: Double(s?.backingScaleFactor ?? 2))
+    }
+
+    /// The main screen in global top-left points (the hello's viewport): the c-VEP training
+    /// row, which comes before any scan, is drawn there.
+    private func mainScreenFrame() -> CGRect {
+        let s = NSScreen.main ?? NSScreen.screens.first
+        let f = s?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        return OverlayController.cocoaRect(fromTopLeft: f)   // the flip is its own inverse
     }
 
     private func note(_ text: String) { log.write("note", ["text": text]) }

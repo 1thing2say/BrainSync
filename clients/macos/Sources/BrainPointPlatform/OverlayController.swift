@@ -15,6 +15,14 @@ import QuartzCore
 /// the refresh would alias and is drawn still, as is everything when `flicker` is false
 /// (luminance 0.5).
 ///
+/// Code mode (`show(code:)`, the c-VEP standard): each patch is the code's fill (white) or black
+/// by `CodeVEP.bit(lag:frame:)` on frame n, and white while still; the labels are drawn in a
+/// monospaced font (the confidence lines' bars line up) and a training cue patch gets a red cue
+/// box. `onCycle(layoutID, cycle, unix s)` reports every cycle's first flip (a dropped first frame
+/// is reported on the next frame with the time it was due, `CycleCounter`). A label-only change
+/// of the same layout (a decision's confidence lines) relabels the patches without restarting
+/// the frame count.
+///
 /// Callbacks: `onOnset(layoutID, unix s)` once per layout on its first flickering frame (a
 /// pause and restart within the same layout sends none); `onFrames(hz, dropped)` every 5 s
 /// while flickering, with the measured refresh (1 / mean frame interval, intervals outside
@@ -25,6 +33,7 @@ import QuartzCore
 @MainActor
 public final class OverlayController {
     public var onOnset: ((Int, Double) -> Void)?
+    public var onCycle: ((Int, Int, Double) -> Void)?
     public var onFrames: ((Double, Int) -> Void)?
     public var onHover: ((String?) -> Void)?
 
@@ -42,6 +51,9 @@ public final class OverlayController {
     private var panels: [ScreenPanel] = []
     private var targets: [OverlayTarget] = []
     private var flicker = false
+    private var code: CodeSpec?
+    private var cycles = CycleCounter()
+    private var lastFrame: Int?          // the frame index last painted while flickering
     private var refreshHz = 60.0
     private var layoutID = -1
     private var t0: CFTimeInterval?
@@ -58,23 +70,40 @@ public final class OverlayController {
         let v = CGFloat(i) / 255
         return CGColor(srgbRed: v, green: v, blue: v, alpha: 1)
     }
+    private var codeFill = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+    private let black = CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
 
     public init() {}
 
     // MARK: - public API
 
-    public func show(targets: [OverlayTarget], flicker: Bool, refreshHz: Double, layoutID: Int) {
+    public func show(targets: [OverlayTarget], flicker: Bool, refreshHz: Double, layoutID: Int,
+                     code: CodeSpec? = nil) {
         ensurePanels()
-        let changed = targets != self.targets || layoutID != self.layoutID
-            || refreshHz != self.refreshHz
+        let sameStimulus = targets.count == self.targets.count
+            && zip(targets, self.targets).allSatisfy { $0.sameStimulus($1) }
+        let changed = !sameStimulus || layoutID != self.layoutID || refreshHz != self.refreshHz || code != self.code
+        let relabel = !changed && targets != self.targets
         if layoutID != self.layoutID { onsetSent = false }
         if changed || !flicker || !self.flicker { t0 = nil }
         self.targets = targets
         self.flicker = flicker
         self.refreshHz = refreshHz > 0 ? refreshHz : 60
         self.layoutID = layoutID
-        if changed { layoutPatches() }
-        drawStill()
+        self.code = code
+        if let c = code {
+            let (r, g, b) = c.fillRGB
+            codeFill = CGColor(srgbRed: r, green: g, blue: b, alpha: 1)
+        }
+        // A relabel while flickering (a decision's confidence lines) keeps the frame count:
+        // the rebuilt patches are painted with the current frame, never a still frame between.
+        let running = t0 != nil
+        if changed || relabel { layoutPatches() }
+        if running, let n = lastFrame {
+            for p in panels { paint(panel: p, frame: n) }
+        } else {
+            drawStill()
+        }
         updateRunning()
         startMouse()
         hitTest(at: NSEvent.mouseLocation)
@@ -142,7 +171,8 @@ public final class OverlayController {
     }
 
     private func layoutPatches() {
-        for p in panels { p.setPatches(targets, greys: greys) }
+        let still = code == nil ? greys[128] : codeFill
+        for p in panels { p.setPatches(targets, still: still, mono: code != nil) }
     }
 
     private func layoutStrip() {
@@ -169,8 +199,9 @@ public final class OverlayController {
     private func drawStill() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        let still = code == nil ? greys[128] : codeFill
         for p in panels {
-            for patch in p.patches { patch.fill.backgroundColor = greys[128] }
+            for patch in p.patches { patch.fill.backgroundColor = still }
         }
         CATransaction.commit()
     }
@@ -190,6 +221,12 @@ public final class OverlayController {
             }
         }
         guard let t0 else { return }
+        let n = FlickerMath.frameIndex(t: t, t0: t0, refresh: refreshHz)
+        if panel.index == measurePanelIndex(), let c = code,
+           let due = cycles.due(layoutID: layoutID, t0: t0, frame: n, t: t, period: 1 / refreshHz,
+                                cycleFrames: c.cycleFrames) {
+            onCycle?(layoutID, due.n, Date().timeIntervalSince1970 + (due.t - CACurrentMediaTime()))
+        }
         if panel.index == measurePanelIndex() {
             if let last = lastMeasureTs, t > last {
                 let dt = t - last
@@ -203,9 +240,24 @@ public final class OverlayController {
                 onFrames?(meter.hz() ?? refreshHz, droppedTotal)
             }
         }
-        let n = FlickerMath.frameIndex(t: t, t0: t0, refresh: refreshHz)
+        lastFrame = n
+        paint(panel: panel, frame: n)
+    }
+
+    /// Paint one panel's patches for flicker frame `n`: the code's bit per lag in code mode,
+    /// else the frequency's luminance.
+    private func paint(panel: ScreenPanel, frame n: Int) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        if let c = code {
+            for patch in panel.patches {
+                // a target without a lag stays white (still), as the standard says
+                let bit = patch.target.lag.map { CodeVEP.bit(lag: $0, frame: n, bits: c.bits) } ?? 1
+                patch.fill.backgroundColor = bit == 1 ? codeFill : black
+            }
+            return
+        }
         for patch in panel.patches {
             let tg = patch.target
             var lum = Luminance.still
@@ -215,7 +267,6 @@ public final class OverlayController {
             let i = max(0, min(255, Int((lum * 255).rounded())))
             patch.fill.backgroundColor = greys[i]
         }
-        CATransaction.commit()
     }
 
     // MARK: - hover
@@ -345,7 +396,7 @@ private final class ScreenPanel {
         return c.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY)
     }
 
-    func setPatches(_ targets: [OverlayTarget], greys: [CGColor]) {
+    func setPatches(_ targets: [OverlayTarget], still: CGColor, mono: Bool) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         patchLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
@@ -353,16 +404,26 @@ private final class ScreenPanel {
         let scale = screen.backingScaleFactor
         let size = screen.frame.size
         let fontSize = max(13, (0.018 * size.height).rounded())
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let font = mono ? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .semibold)
+            : NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         for t in targets {
             guard let r = local(t.rect) else { continue }
             let pad = Self.border(for: t.rect)
             let frame = r.insetBy(dx: -pad, dy: -pad)
             let fill = CALayer()
             fill.frame = frame
-            fill.backgroundColor = greys[128]
+            fill.backgroundColor = still
             fill.borderColor = CGColor(gray: 0, alpha: 1)
             fill.borderWidth = pad
+            if t.cue {
+                // the training cue box: red, outside the black border, never over the patch
+                let box = CALayer()
+                let w = max(4, pad)
+                box.frame = frame.insetBy(dx: -2 * w, dy: -2 * w)
+                box.borderColor = CGColor(srgbRed: 1, green: 0.23, blue: 0.19, alpha: 1)
+                box.borderWidth = w
+                patchLayer.addSublayer(box)
+            }
             patchLayer.addSublayer(fill)
             patches.append(Patch(target: t, fill: fill))
             guard !t.label.isEmpty else { continue }
