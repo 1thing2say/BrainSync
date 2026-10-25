@@ -28,7 +28,9 @@
 #                target untouched, no Jetson warning; then the product_uuid and
 #                machine-id fallbacks; the autoinstall's user-data passes the
 #                target's own `cloud-init schema`; the hook mounts the ISO's
-#                package repository and 60-apt-repo.sh installs its keyring
+#                package repository and 60-apt-repo.sh installs its keyring;
+#                75-usb-serial.sh installs the board's udev rules but not the
+#                Jetson-only ch341 module
 # Work happens in /scratch (tmpfs); nothing is written to build/.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
@@ -410,12 +412,16 @@ c_hook() {
         || die "/etc/issue line 1: $(head -1 "$t/etc/issue")"
     head -2 "$t/etc/issue"
     tail -1 "$log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$log")"
-    grep -q 'BrainSyncOS layer installed (7 steps)' "$log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (8 steps)' "$log" || die "log lacks the summary"
     grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$log" || die "60-apt-repo.sh did not finish"
     cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
         || die "the installed keyring is not the build's repository key"
     ! mountpoint -q "$t/tmp/brainsyncos-repo" && [ ! -e "$t/tmp/brainsyncos-repo" ] || die "the repository is still mounted"
     echo "packages: brainsyncos-archive-keyring installed from the ISO's repository; repository unmounted"
+    grep -q '75-usb-serial.sh: vm-arm64 edition: no brainsyncos-ch341-tegra' "$log" || die "75-usb-serial.sh did not skip the module"
+    [ -s "$t/usr/lib/udev/rules.d/70-brainsync-cerelog.rules" ] || die "the board's udev rules are missing"
+    ! in_target "$t" dpkg -s brainsyncos-ch341-tegra > /dev/null 2>&1 || die "the VM got the Jetson-only ch341 module"
+    echo "board: brainsync-udev installed, no ch341 module (Ubuntu's kernel has it)"
     grep -q 'hook.sh: vm-arm64 edition on: QEMU QEMU Virtual Machine, serial UTM0042AB12CD (from dmi product_serial)' "$log" \
         || die "machine identity not logged: $(grep 'edition on' "$log")"
     ! grep -n 'WARNING\|No such file' "$log" || die "the VM install logged a warning"

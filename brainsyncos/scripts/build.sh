@@ -5,6 +5,8 @@
 #
 #   doctor     check everything a build of the edition needs, and say what to do
 #   key        create the package repository signing key (once; kept in config/)
+#   wheels [--force]  build the Python wheels BrainSyncOS compiles (the
+#              BrainFlow Cerelog fork; same for both editions) -> build/wheels/
 #   packages   build the edition's packages        -> build/debs/EDITION/
 #   repo       sign them into an apt repository    -> build/repo/EDITION/
 #   iso        build the installer ISO from it     -> build/out/ (ISO OPTIONS are
@@ -109,6 +111,11 @@ c_doctor() {
     else
         note "package repository: not built yet (scripts/build.sh packages and repo, or all)"
     fi
+    if [ -s "$BUILD_DIR/wheels/SHA256SUMS" ]; then
+        ok "wheels: build/wheels ($(wc -l < "$BUILD_DIR/wheels/SHA256SUMS" | tr -d ' '); for the BrainSync venv)"
+    else
+        note "wheels: not built yet (scripts/build.sh wheels; the BrainFlow fork, for the BrainSync venv)"
+    fi
     # The ISO build's need (iso_need_gb), plus the Ubuntu download for a vm build without it.
     if [ "$edition" = jetson ]; then
         need="$(iso_need_gb "$BASE_ISO_SIZE" "$REPO_DIR/$edition")"
@@ -142,6 +149,11 @@ c_key() {
 }
 
 c_packages() { "$B" run scripts/build-packages.sh --edition "$edition"; }
+c_wheels() {
+    case "$rest" in ''|' --force') ;; *) die "wheels takes only --force:$rest" ;; esac
+    # shellcheck disable=SC2086  # [--force], split as given
+    "$B" run scripts/build-wheels.sh $rest
+}
 c_repo()     { "$B" run scripts/build-repo.sh --edition "$edition"; }
 
 c_iso() {
@@ -181,6 +193,7 @@ c_clean() { "$B" clean $rest; }
 case "$cmd" in
     doctor) no_args; c_doctor ;;
     key) no_args; c_key ;;
+    wheels) c_wheels ;;
     packages) no_args; c_packages ;;
     repo) no_args; c_repo ;;
     iso) c_iso ;;
