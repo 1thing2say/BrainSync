@@ -850,3 +850,71 @@ def test_rescan_after_stop_does_nothing():
     mode, _, _ = ready()
     mode.stop()
     assert mode.on_message(RESCAN, T0 + 3) == [] and mode.tick(T0 + 10) == []
+
+
+# -- code mode (c-VEP, docs/CVEP-STANDARD.md section 5): K = 3 -------------------------------
+
+LAGS = (0, 21, 42)
+
+
+@pytest.fixture
+def code_targets(monkeypatch):
+    """Stand in for the c-VEP protocol.Target (lag L as the distinct freq 100 + L) until the
+    server side of CVEP-STANDARD 4.2 lands; returns the lags of a layout message."""
+    from brainsync.screen import selector
+
+    def make(slot, lag, label, kind, rects):
+        return protocol.Target(slot, 100.0 + lag, 0.0, label, kind, tuple(rects))
+
+    monkeypatch.setattr(selector, "code_target", make)
+    return lambda lay: [(t["slot"], round(t["freq"] - 100.0)) for t in lay["targets"]]
+
+
+def code_ready(det):
+    mode = PointMode(StubDetector(det), None, lags=LAGS, executor=SyncExecutor())
+    mode.start(T0)
+    mode.on_message(scan(1), T0 + 1)
+    out = mode.tick(T0 + 2)
+    assert kinds(out) == ["scan_result", "layout:pick", "phase:run"]
+    return mode, out
+
+
+def test_code_mode_pages_show_best_second_and_more(code_targets):
+    mode, out = code_ready(detection(*THREE))
+    assert mode.k == 3 and mode.lags == LAGS and mode.freqs is None
+    assert code_targets(find(out, "layout")) == [("b1", 0), ("b2", 21), ("more", 42)]
+    assert find(out, "scan_result")["n_candidates"] == 3
+    nxt = mode.on_selection("more", T0 + 3)
+    lay = find(nxt, "layout")
+    assert code_targets(lay) == [("b1", 0), ("more", 42)]
+    assert [t["label"] for t in lay["targets"]] == ["e2", "Rescan"]
+    assert kinds(mode.on_selection("b1", T0 + 4)) == ["phase:pause", "click"]
+
+
+def test_code_mode_confirm_is_do_it_on_0_and_back_on_2(code_targets):
+    mode, _ = code_ready(detection(el(0, 0.3, 0.3, risky=True, label="Pay")))
+    lay = find(mode.on_selection("b1", T0 + 3), "layout")
+    assert lay["stage"] == "confirm"
+    assert code_targets(lay) == [("confirm", 0), ("back", 42)]
+    back = find(mode.on_selection("back", T0 + 4), "layout")
+    assert back["stage"] == "pick"
+    mode.on_selection("b1", T0 + 5)
+    out = mode.on_selection("confirm", T0 + 6)
+    assert kinds(out) == ["phase:pause", "click"] and out[1]["element"]["label"] == "Pay"
+
+
+def test_train_targets_follow_the_viewport_and_the_stimulus(code_targets):
+    mode = PointMode(StubDetector(detection()), None, lags=LAGS, viewport=(1600, 900),
+                     executor=SyncExecutor())
+    t = mode.train_targets()
+    assert [(x.slot, round(x.freq - 100)) for x in t] == [("b1", 0), ("b2", 21), ("more", 42)]
+    assert all(x.rects[0].w * 16 / 9 == pytest.approx(x.rects[0].h) for x in t)
+    freq = PointMode(StubDetector(detection()), FREQS, executor=SyncExecutor())
+    assert freq.k == 4 and [x.freq for x in freq.train_targets()] == list(FREQS)
+
+
+def test_point_mode_needs_freqs_or_lags():
+    with pytest.raises(ValueError, match="freqs"):
+        PointMode(StubDetector(detection()), None)
+    with pytest.raises(ValueError, match="not both"):
+        PointMode(StubDetector(detection()), FREQS, lags=LAGS)

@@ -3,14 +3,17 @@
 A Chrome extension (Manifest V3) for clicking any web page with an EEG headset (SSVEP). It is
 the `point` mode client of the BrainSync server (`PROTOCOL-v3.md` at the repo root). The
 extension sends the server a screenshot of the tab. The server asks Claude Haiku where the
-clickable elements are and shows the most likely ones as flickering patches over the page:
-up to three buttons plus "More". When the decoder decides which patch you are looking at, the
-server sends `click`, and the extension clicks there. Risky buttons (pay, delete, send) ask
-for a second look at "Do it" first.
+clickable elements are and shows the most likely ones as flickering patches over the page.
+With the BrainSync c-VEP standard (`docs/CVEP-STANDARD.md`, the server's default paradigm
+`code`) that is three white patches: the best candidate, the second and "More"; with a
+frequency server (`--paradigm freq`) up to three buttons plus "More". When the decoder
+decides which patch you are looking at, the server sends `click`, and the extension clicks
+there. Risky buttons (pay, delete, send) ask for a second look at "Do it" first.
 
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
-> trigger a seizure in people with photosensitive epilepsy, and the default frequencies (15,
-> 17, 12 and 20 Hz) are mostly inside it. Ask about epilepsy before every session. Stop at
+> trigger a seizure in people with photosensitive epilepsy. The c-VEP code switches a patch
+> up to 30 times a second, and the frequency defaults (15, 17, 12 and 20 Hz) are mostly
+> inside that band too. Ask about epilepsy before every session. Stop at
 > once if anyone feels unwell. The overlay shows this warning and draws nothing until you
 > press Start. Escape stops the flicker at any time, in any frame of the page; if it ever
 > does not, Alt+Shift+B (or the toolbar icon) stops BrainPoint in the tab.
@@ -62,6 +65,7 @@ the last scan and the last click.
 | `esc.js` | The Esc key in every frame from `document_start`: pauses even when an iframe has the focus |
 | `flicker.js` | Frame-indexed luminance, a byte-identical copy of `clients/js/flicker.js` |
 | `brainsync-client.js` | The client SDK (`FlickerState`, `Connection`, `RefreshMeter`), a byte-identical copy of `clients/js/brainsync-client.js` |
+| `cvep.js` | The c-VEP standard (63-bit code, frame rule, confidence text), a byte-identical copy of `clients/js/cvep.js` |
 | `hints.js` | The page's visible clickable elements and the password fields to black out |
 | `clicker.js` | `clickAt(x, y)`: focus and pointer/mouse events at a viewport point |
 | `point_overlay.js` | Canvas patches, HUD, warning, Esc/Resume, refresh meter, onset and frames, gaze |
@@ -103,6 +107,18 @@ the warning was accepted, the socket is open, the phase says flicker, the layout
 and the user has not paused. The page sends `onset` on that first frame and `frames` every
 5 s.
 
+**Code mode (c-VEP).** When the welcome says `paradigm: "code"`, every layout target has a
+`lag` (0, 21 or 42 frames) instead of a frequency. On flicker frame n, counted from the
+layout's first flickering frame at one bit per frame, a patch with lag L is white when bit
+(n - L) mod 63 of the welcome's code is 1 and black when 0 (`cvep.js`); a still patch is
+white. Each cycle's first flip (every 63 frames) sends `cycle` with its Unix time, which the
+decoder lines the EEG up with. In the `train` phase the patch named by `cue` gets a red cue
+box and the banner says "Look at the … patch   cycle k/30"; `trained` shows the template's
+held-out accuracy against chance (33 %). After every `decision` each patch's label becomes a
+label line, `Sign in ███░░░░░ +0.42 <` (bar and correlation, `<` on the best), and the banner
+shows the status line, `lead 0.31   choice: Sign in`. Scores are correlations, not
+percentages.
+
 ## Privacy
 
 - The screenshot covers only the visible part of the tab, and only of the tab where you
@@ -132,11 +148,11 @@ clicks are dispatched as DOM events. The WebSocket needs no permission.
 ## Tests
 
 ```bash
-node --test clients/chrome/test/*.test.mjs                        # 88 tests, no browser
+node --test clients/chrome/test/*.test.mjs                        # 120 tests, no browser
 .venv/bin/python -m pytest -q tests/test_brainpoint_extension.py  # also runs the node tests
 ```
 
 Node 24 reads `--test` arguments as globs, so pass the files, not the folder.
-`tests/test_brainpoint_extension.py` checks the manifest, that `flicker.js` and
-`brainsync-client.js` are byte-identical to `clients/js/` (after changing the SDK, copy both
-here), runs `node --check` on every script and runs the node tests.
+`tests/test_brainpoint_extension.py` checks the manifest, that `flicker.js`,
+`brainsync-client.js` and `cvep.js` are byte-identical to `clients/js/` (after changing the
+SDK, copy them here), runs `node --check` on every script and runs the node tests.

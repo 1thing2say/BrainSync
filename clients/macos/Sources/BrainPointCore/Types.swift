@@ -86,20 +86,33 @@ public struct NormRect: Codable, Equatable, Sendable {
 /// What the overlay draws for one layout target, in global screen points (top-left origin).
 public struct OverlayTarget: Equatable, Sendable {
     public var slot: String
+    /// What is drawn under the patch: the label, or in code mode after a decision its label
+    /// line ("Sign in ███░░░░░ +0.42 <").
     public var label: String
     public var kind: String
     public var freq: Double
     public var phase: Double
     public var rect: CGRect
+    /// The code lag in frames (code mode); nil for a frequency target.
+    public var lag: Int?
+    /// True for the training cue (phase "train"): the patch gets the cue box.
+    public var cue: Bool
 
-    public init(slot: String, label: String, kind: String, freq: Double, phase: Double, rect: CGRect) {
+    public init(slot: String, label: String, kind: String, freq: Double, phase: Double, rect: CGRect,
+                lag: Int? = nil, cue: Bool = false) {
         self.slot = slot; self.label = label; self.kind = kind; self.freq = freq
-        self.phase = phase; self.rect = rect
+        self.phase = phase; self.rect = rect; self.lag = lag; self.cue = cue
+    }
+
+    /// The same patch, stimulus and place, whatever its label or cue: a change of only those
+    /// must not restart the frame count (a decision relabels the patches every cycle).
+    public func sameStimulus(_ o: OverlayTarget) -> Bool {
+        slot == o.slot && kind == o.kind && freq == o.freq && phase == o.phase && rect == o.rect && lag == o.lag
     }
 }
 
 public enum ControlState: String, Sendable {
-    case off, dryRun, calibrating, armed, paused
+    case off, dryRun, calibrating, training, armed, paused
 }
 
 /// Everything ControlGate decides from.

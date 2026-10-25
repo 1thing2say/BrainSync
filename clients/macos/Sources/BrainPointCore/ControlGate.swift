@@ -11,7 +11,8 @@ import Foundation
 /// 5. phase "run".
 /// A simulated board without `allowFakeControl` that passes every other condition is **dryRun**:
 /// it may flicker but never press. Phase "calibrate" with conditions 1, 3 and 4 met is
-/// **calibrating** (still targets). A user or safety pause, or the server's phase "pause", is
+/// **calibrating** (still targets). Phase "train" (the c-VEP standard's training, code mode)
+/// with the same conditions is **training**: the patches flicker, nothing is pressed. A user or safety pause, or the server's phase "pause", is
 /// **paused**; anything else is **off**. The reason is one sentence about the first condition
 /// that failed.
 ///
@@ -69,6 +70,10 @@ public enum ControlGate {
             return GateDecision(state: .armed, mayFlicker: true, mayPress: true,
                                 reason: "Armed: a pick presses the element in the front app.",
                                 headsetLine: headset)
+        case "train":
+            return GateDecision(state: .training, mayFlicker: true, mayPress: false,
+                                reason: "Training: keep looking at the patch with the red box" + note(i.serverNote) + ".",
+                                headsetLine: headset, dryRun: dryRun)
         case "calibrate":
             return GateDecision(state: .calibrating, mayFlicker: false, mayPress: false,
                                 reason: "Calibrating: look at the screen and relax.", headsetLine: headset)

@@ -1,14 +1,21 @@
 """Choose which detected elements flicker, page by page (PROTOCOL-v3.md section 4, rule 4).
 
     sel = TopKSelector(detection.elements, freqs=(15.0, 17.0, 12.0, 20.0), aspect=16 / 9)
+    sel = TopKSelector(detection.elements, lags=(0, 21, 42), aspect=16 / 9)   # c-VEP
     send(layout(layout_id, "pick", sel.targets()))
     stage = sel.pick("b2")            # "pick", "confirm", "done" or "rescan"
     if stage == "done":
         click_at(sel.chosen.cx, sel.chosen.cy)
 
-This is strategy B, top-K plus "more". With K frequencies, a page shows up to K - 1 buttons
-plus one "more" target. The module is pure: no IO and no clock, so the controller and the tests
-share one definition of a page.
+This is strategy B, top-K plus "more". With K targets, a page shows up to K - 1 buttons plus
+one "more" target. The K targets are either K frequencies (``freqs``, SSVEP, K = 4 by default)
+or K code lags in frames (``lags``, the c-VEP standard of docs/CVEP-STANDARD.md: K = 3, lags
+0, 21 and 42). The module is pure: no IO and no clock, so the controller and the tests share
+one definition of a page.
+
+Target index i is what the decoder tells apart: ``freqs[i]`` (with ``phases[i]``) or
+``lags[i]``. ``plan()`` gives each shown target its index; ``targets()`` turns the plan into
+protocol Targets (``code_target`` in code mode).
 
 Rules:
 - Candidates are the elements that are ``enabled`` with ``p_button`` at least ``min_p_button``,
@@ -19,8 +26,9 @@ Rules:
 - Pages are packed greedily in rank order. A candidate joins the current page when its patch
   keeps a gap of at least ``gap`` from the "more" corner and from every patch already on the
   page; otherwise it waits for a later page, keeping its rank.
-- On a page, the candidate ranked highest is slot "b1" on ``freqs[0]``, the next "b2" on
-  ``freqs[1]``, and so on; "more" is on ``freqs[K-1]``.
+- On a page, the candidate ranked highest is slot "b1" on target 0, the next "b2" on target 1,
+  and so on; "more" is on target K - 1. In code mode (K = 3): best candidate, second
+  candidate, More (CVEP-STANDARD section 5).
 - "more" sits in the bottom-right corner. Only when every candidate left collides with that
   corner (an element in the bottom-right, such as a chat's Send button) does a page put "more"
   in the first other corner that leaves room: bottom-left, top-right, then top-left. A
@@ -28,15 +36,18 @@ Rules:
   note on stderr.
 - Picking "more" shows the next page, and on the last page it asks for a fresh scan. Picking a
   button that is not ``risky`` finishes ("done"). A risky one shows the confirm stage first:
-  "Do it" over that button's patch on ``freqs[0]`` and "Back" where "more" was, on
-  ``freqs[1]``. "Back" returns to the same page.
+  "Do it" over that button's patch on target 0 and "Back" where "more" was, on target 1, or
+  on target 2 when K = 3 (the c-VEP standard: "Do it" / "Back" on targets 0 and 2, the two
+  lags furthest apart). "Back" returns to the same page.
+- ``train_targets`` is the layout of the c-VEP training phase in point mode: K patches in a
+  centred row, target 0 first (the cue goes on it).
 """
 from __future__ import annotations
 
 import math
 import sys
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from brainsync.screen.detect import Element
 from brainsync.server.protocol import Rect, Target
@@ -48,6 +59,9 @@ MARGIN = 0.02
 CORNERS = ("bottom-right", "bottom-left", "top-right", "top-left")
 STAGES = ("pick", "confirm", "done", "rescan")
 MORE, CONFIRM, BACK = "more", "confirm", "back"
+TRAIN_LABELS = ("Look here", "Second", "More")   # the c-VEP training row, target 0 first
+TRAIN_SIZE = 0.22      # a training patch's side, in viewport heights
+TRAIN_GAP = 0.12       # between training patches, in viewport heights
 
 
 def _note(text: str) -> None:
@@ -120,6 +134,107 @@ def corner_rect(aspect: float, min_patch: float = MIN_PATCH, margin: float = MAR
     return Rect(x, y, w, h)
 
 
+def stimulus(freqs: Sequence[float] | None, lags: Sequence[int] | None
+             ) -> tuple[tuple[float, ...] | None, tuple[int, ...] | None]:
+    """(freqs, None) or (None, lags), checked: exactly one is given, with at least 2 values.
+
+    An empty ``freqs`` next to ``lags`` counts as not given (a code-mode server's welcome
+    has ``freqs: []``).
+    """
+    no_freqs = freqs is None or (not isinstance(freqs, (str, bytes)) and len(freqs) == 0)
+    if lags is not None:
+        if not no_freqs:
+            raise ValueError("pass freqs (SSVEP) or lags (c-VEP), not both")
+        if isinstance(lags, (str, bytes)):
+            raise ValueError("lags must be a sequence of frames, not a string")
+        ls = tuple(lags)
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in ls):
+            raise ValueError(f"lags must be integer frames >= 0, got {list(ls)}")
+        if len(ls) < 2:
+            raise ValueError(f"point mode needs at least 2 code lags (K - 1 buttons plus "
+                             f"\"more\"), got {len(ls)}")
+        if len(set(ls)) != len(ls):
+            raise ValueError(f"lags must be distinct, got {list(ls)}")
+        return None, tuple(int(v) for v in ls)
+    if freqs is None:
+        raise ValueError("pass freqs (SSVEP frequencies) or lags (c-VEP code lags in frames)")
+    if isinstance(freqs, (str, bytes)):
+        raise ValueError("freqs must be a sequence of numbers, not a string")
+    fs = tuple(_number(f, "freqs[i]") for f in freqs)
+    if len(fs) < 2:
+        raise ValueError(f"point mode needs at least 2 frequencies (K - 1 buttons plus "
+                         f"\"more\"), got {len(fs)}; pass more --freqs")
+    if any(f <= 0 for f in fs) or len(set(fs)) != len(fs):
+        raise ValueError(f"freqs must be positive and distinct, got {list(fs)}")
+    return fs, None
+
+
+class Placement(NamedTuple):
+    """One target to draw, before it gets its frequency or its code lag."""
+
+    slot: str
+    index: int                  # the target index: freqs[index] or lags[index]
+    label: str
+    kind: str
+    rects: tuple[Rect, ...]
+
+
+def code_target(slot: str, lag: int, label: str, kind: str, rects: Sequence[Rect]) -> Target:
+    """A c-VEP layout target: ``lag`` in frames and ``freq`` None (CVEP-STANDARD 4.2).
+
+    Needs a protocol.Target with a ``lag`` field that accepts ``freq=None`` (the server side
+    of the standard). With an older protocol module this raises a ValueError that says so.
+    """
+    if "lag" not in getattr(Target, "__dataclass_fields__", {}):
+        raise ValueError("brainsync.server.protocol.Target has no lag field yet: code-mode "
+                         "point layouts need the c-VEP protocol (docs/CVEP-STANDARD.md 4.2)")
+    return Target(slot=slot, freq=None, phase=0.0, label=label, kind=kind,  # type: ignore[arg-type]
+                  rects=tuple(rects), lag=lag)  # type: ignore[call-arg]
+
+
+def train_rects(k: int, aspect: float, size: float = TRAIN_SIZE, gap: float = TRAIN_GAP
+                ) -> tuple[Rect, ...]:
+    """``k`` patches, square in pixels, of ``size`` viewport heights in one row centred in the
+    viewport, ``gap`` heights apart; all shrunk together when the row would not fit."""
+    a = _aspect(aspect)
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise ValueError(f"k must be a positive number of targets, got {k!r}")
+    size, gap = _number(size, "size"), _number(gap, "gap")
+    if size <= 0 or gap < 0:
+        raise ValueError(f"size must be > 0 and gap >= 0, got {size:g} and {gap:g}")
+    row = k * size + (k - 1) * gap                  # in viewport heights
+    scale = min(1.0, 0.9 * a / row, 0.9 / size)     # at least 5 % margin on each side
+    side, g = size * scale, gap * scale
+    w = side / a
+    x0 = 0.5 - (row * scale / a) / 2
+    y = 0.5 - side / 2
+    return tuple(Rect(x0 + i * (side + g) / a, y, w, side) for i in range(k))
+
+
+def train_targets(aspect: float, *, lags: Sequence[int] | None = None,
+                  freqs: Sequence[float] | None = None,
+                  labels: Sequence[str] | None = None) -> list[Target]:
+    """The point-mode training layout (stage "train"): K patches in a centred row with target
+    0 (slot "b1", where the cue goes) on the left and "more" last, slots named as on a page."""
+    fs, ls = stimulus(freqs, lags)
+    k = len(fs) if fs is not None else len(ls or ())
+    if labels is None:
+        labels = TRAIN_LABELS if k == 3 else tuple(f"{i + 1}" for i in range(k - 1)) + ("More",)
+    labels = tuple(labels)
+    if len(labels) != k or not all(isinstance(t, str) for t in labels):
+        raise ValueError(f"labels needs one string per target ({k}), got {labels!r}")
+    slots = [f"b{i + 1}" for i in range(k - 1)] + [MORE]
+    kinds = ["button"] * (k - 1) + ["more"]
+    out = []
+    for i, r in enumerate(train_rects(k, aspect)):
+        if ls is not None:
+            out.append(code_target(slots[i], ls[i], labels[i], kinds[i], (r,)))
+        else:
+            assert fs is not None
+            out.append(Target(slots[i], fs[i], 0.0, labels[i], kinds[i], (r,)))
+    return out
+
+
 class TopKSelector:
     """The pages of top-K candidates plus "more" for one detection, and the user's place in them.
 
@@ -129,23 +244,21 @@ class TopKSelector:
     one of "pick", "confirm", "done" or "rescan", and ``chosen`` the picked element.
     """
 
-    def __init__(self, elements: Sequence[Element], freqs: Sequence[float], *, aspect: float,
-                 min_p_button: float = MIN_P_BUTTON, min_patch: float = MIN_PATCH,
-                 gap: float = GAP, phases: Sequence[float] | None = None) -> None:
-        if isinstance(freqs, (str, bytes)):
-            raise ValueError("freqs must be a sequence of numbers, not a string")
-        fs = tuple(_number(f, "freqs[i]") for f in freqs)
-        if len(fs) < 2:
-            raise ValueError(f"point mode needs at least 2 frequencies (K - 1 buttons plus "
-                             f"\"more\"), got {len(fs)}; pass more --freqs")
-        if any(f <= 0 for f in fs) or len(set(fs)) != len(fs):
-            raise ValueError(f"freqs must be positive and distinct, got {list(fs)}")
+    def __init__(self, elements: Sequence[Element], freqs: Sequence[float] | None = None, *,
+                 aspect: float, min_p_button: float = MIN_P_BUTTON,
+                 min_patch: float = MIN_PATCH, gap: float = GAP,
+                 phases: Sequence[float] | None = None,
+                 lags: Sequence[int] | None = None) -> None:
+        fs, ls = stimulus(freqs, lags)
+        k = len(fs) if fs is not None else len(ls or ())
         if phases is None:
-            ps = (0.0,) * len(fs)
+            ps = (0.0,) * k
+        elif ls is not None:
+            raise ValueError("phases go with freqs; code targets differ by their lag only")
         else:
             ps = tuple(_number(p, "phases[i]") for p in phases)
-            if len(ps) != len(fs):
-                raise ValueError(f"phases needs one value per frequency ({len(fs)}), got "
+            if len(ps) != k:
+                raise ValueError(f"phases needs one value per frequency ({k}), got "
                                  f"{len(ps)}")
         p_min = _number(min_p_button, "min_p_button")
         if not 0 <= p_min <= 1:
@@ -157,9 +270,10 @@ class TopKSelector:
         if not all(isinstance(e, Element) for e in elements):
             raise ValueError("elements must be brainsync.screen.detect.Element objects; pass "
                              "Detection.elements")
-        self.freqs = fs
+        self.freqs = fs                 # None in code mode
+        self.lags = ls                  # None in freq mode
         self.phases = ps
-        self.k = len(fs)
+        self.k = k
         self.aspect = _aspect(aspect)
         self.min_patch = _min_patch(min_patch)
         self.gap = g
@@ -238,25 +352,46 @@ class TopKSelector:
                 return p
         raise ValueError(f"element {el.id} ({el.label!r}) is not on page {self.page_index}")
 
-    def targets(self) -> list[Target]:
-        """What to draw for the current stage; empty once the stage is "done" or "rescan"."""
+    @property
+    def code(self) -> bool:
+        """True in code mode (c-VEP lags), False with frequencies."""
+        return self.lags is not None
+
+    @property
+    def back_index(self) -> int:
+        """The target "Back" uses on the confirm stage: 2 when K = 3 (c-VEP), else 1."""
+        return 2 if self.k == 3 else 1
+
+    def plan(self) -> list[Placement]:
+        """What to draw for the current stage without its stimulus: (slot, target index,
+        label, kind, rects) each. Empty once the stage is "done" or "rescan"."""
         i = self.page_index
         more_rect = self.more_rects[i]
         if self.stage == "pick":
-            out = [Target(f"b{j + 1}", self.freqs[j], self.phases[j], el.label or el.role,
-                          "button", (p,))
+            out = [Placement(f"b{j + 1}", j, el.label or el.role, "button", (p,))
                    for j, (el, p) in enumerate(zip(self.pages[i], self._patches[i]))]
-            k = self.k - 1
-            out.append(Target(MORE, self.freqs[k], self.phases[k],
-                              "Rescan" if self.last_page else "More", "more", (more_rect,)))
+            out.append(Placement(MORE, self.k - 1, "Rescan" if self.last_page else "More",
+                                 "more", (more_rect,)))
             return out
         if self.stage == "confirm":
             assert self.chosen is not None
             label = self.chosen.label or self.chosen.role
-            return [Target(CONFIRM, self.freqs[0], self.phases[0], f"Do it: {label}", "confirm",
-                           (self.patch(self.chosen),)),
-                    Target(BACK, self.freqs[1], self.phases[1], "Back", "back", (more_rect,))]
+            return [Placement(CONFIRM, 0, f"Do it: {label}", "confirm",
+                              (self.patch(self.chosen),)),
+                    Placement(BACK, self.back_index, "Back", "back", (more_rect,))]
         return []
+
+    def target(self, p: Placement) -> Target:
+        """The protocol Target of ``p``: its frequency and phase, or its code lag."""
+        if self.lags is not None:
+            return code_target(p.slot, self.lags[p.index], p.label, p.kind, p.rects)
+        assert self.freqs is not None
+        return Target(p.slot, self.freqs[p.index], self.phases[p.index], p.label, p.kind,
+                      p.rects)
+
+    def targets(self) -> list[Target]:
+        """What to draw for the current stage; empty once the stage is "done" or "rescan"."""
+        return [self.target(p) for p in self.plan()]
 
     def pick(self, slot: str) -> str:
         """Apply the user's pick of ``slot`` and return the new stage.

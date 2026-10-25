@@ -23,8 +23,10 @@ NODE = shutil.which("node") or next(
     (p for p in ("/usr/local/bin/node", "/opt/homebrew/bin/node") if Path(p).exists()), None)
 needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
-CONTENT_SCRIPTS = ["flicker.js", "brainsync-client.js", "hints.js", "clicker.js",
+CONTENT_SCRIPTS = ["flicker.js", "brainsync-client.js", "cvep.js", "hints.js", "clicker.js",
                    "point_overlay.js", "content.js"]
+# brainsync.vep.codes.m_sequence(63), the c-VEP standard (docs/CVEP-STANDARD.md section 1)
+STANDARD_BITS = "000001111110101011001101110110100100111000101111001010001100001"
 
 
 def _manifest() -> dict:
@@ -79,10 +81,30 @@ def test_options_page_and_toolbar_toggle_exist():
     assert "_execute_action" in m["commands"]
 
 
-@pytest.mark.parametrize("name", ["brainsync-client.js", "flicker.js"])
+@pytest.mark.parametrize("name", ["brainsync-client.js", "flicker.js", "cvep.js"])
 def test_sdk_copies_are_byte_identical_to_clients_js(name):
     assert (EXT / name).read_bytes() == (SDK / name).read_bytes(), (
         f"clients/chrome/{name} is stale: cp clients/js/{name} clients/chrome/")
+
+
+def test_cvep_copy_carries_the_standard_code():
+    # The overlay draws the welcome's bits; cvep.js is the fallback and must be the standard.
+    text = (EXT / "cvep.js").read_text()
+    block = text[text.index("const BITS = Object.freeze(["):text.index("]);")]
+    bits = "".join(re.findall(r"\b[01]\b", block.split("[", 1)[1]))
+    assert bits == STANDARD_BITS
+    from brainsync.vep.codes import m_sequence
+    assert "".join(str(int(b)) for b in m_sequence(63)) == STANDARD_BITS
+
+
+def test_overlay_reads_the_code_messages_of_the_standard():
+    # CVEP-STANDARD 4.2: welcome paradigm/code, layout lag, phase train with cue, client
+    # cycle, server train, trained and decision.
+    overlay = (EXT / "point_overlay.js").read_text()
+    for needle in ('paradigm !== "code"', "t.lag", 'phase === "train"', 'type: "cycle"',
+                   'case "train":', 'case "trained":', 'case "decision":', "t_client",
+                   "K.labelLine", "K.statusLine", "K.bit("):
+        assert needle in overlay, needle
 
 
 def test_background_imports_the_sdk_and_defaults_to_the_local_server():
