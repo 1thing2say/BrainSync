@@ -88,9 +88,14 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
    - Sandboxing and low priority (`Nice=10`, `CPUWeight=50`); memory limits measured on the device.
    - Do not enable `--tools`, `--mcp-*` or router mode.
 4. **The model** ships as its own package, pinned by Hugging Face revision and sha256.
-5. **BCI Voice**: `llm.backends` in `config/default.yaml`, tried in order: local, then Claude, then the fixed lists.
-   - The 4 s timeout will need raising for local inference.
-   - llama-server ignores `strict`, so keep the pydantic validation.
+5. **BCI Voice** (done 2026-10-24, branch `bsos/3d-llm-backends`): `llm.backends` in `config/default.yaml`, tried in order: local, then Claude, then the fixed lists.
+   - `local`: `kind: llama`, `http://127.0.0.1:9931`, key from `BRAINSYNC_LLAMA_API_KEY`, 10 s, `chat_template_kwargs: {enable_thinking: false}`. Without that key the backend is off, so a laptop runs Claude alone as before.
+   - Each backend has its own timeout. A refused connection or a bad key hands over at once; a page takes at most the sum (14 s).
+   - The pydantic checks run for every backend, since llama-server ignores `strict`.
+   - A Claude model that rejects a forced `tool_choice` is a config error.
+   - Status, logs and preflight name the backend; preflight checks `/health` and `/v1/models` on the local server.
+   - Verified with fakes only: a stand-in HTTP server that answers `/v1/messages` the way llama-server does, driven through the real SDK, and a closed port. No real llama-server or model was run.
+   - Still to do: the install step (`85-llama.sh`) must also write the key in llama-server's `--api-key-file` to `/etc/brainsync/secrets.env` as `BRAINSYNC_LLAMA_API_KEY`, and the 10 s needs measuring on the Orin (3e).
 6. **Install steps:** `80-cuda.sh` (Jetson only) and `85-llama.sh`.
 
 ### 3e: integration

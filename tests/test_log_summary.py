@@ -377,6 +377,45 @@ def test_not_caught_warning_names_the_right_cause(keyboard, decoder, expected, a
     assert any(expected in w for w in found) and not any(absent in w for w in found)
 
 
+def test_a_local_backend_handing_over_to_claude_is_not_a_timed_out_page():
+    # Request 1: local times out after 10 s, Claude answers 1.5 s later, the page is shown.
+    # Request 2: local answers itself in 6 s. Request 3: both fail (the last one ends it).
+    events = [ev(0, "llm_request", request_id=1, reason="partner"),
+              ev(10, "llm_failed", request_id=1, backend="local", reason="timeout", attempt=1,
+                 ms=10000, next="claude"),
+              {**llm_ok(11.5, 1, OPTS, ms=1500), "backend": "claude", "page_ms": 11500},
+              page(12, OPTS),
+              ev(20, "llm_request", request_id=2, reason="more"),
+              {**llm_ok(26, 2, OTHER, ms=6000), "backend": "local", "page_ms": 6000},
+              page(26.5, OTHER, "m2"),
+              ev(30, "llm_request", request_id=3, reason="partner"),
+              ev(30, "llm_failed", request_id=3, backend="local", reason="APIConnectionError",
+                 status=None, attempt=1, ms=2, next="claude"),
+              ev(34, "llm_failed", request_id=3, backend="claude", reason="timeout", attempt=2,
+                 ms=4000),
+              ev(34, "llm_page_timeout", state="PREPARING", request_id=3)]
+    summary = summarize(collect(events))
+    llm = summary["llm"]
+    assert llm["outcomes"] == {"shown": 2, "timed out": 1}
+    assert llm["answer_s"]["n"] == 3 and llm["answer_s"]["max"] == pytest.approx(11.5)
+    assert llm["answered_by"] == {"claude": 1, "local": 1}
+    assert llm["ok_ms_by_backend"]["local"]["median"] == 6000
+    assert llm["ok_ms_by_backend"]["claude"]["median"] == 1500
+    assert llm["handovers"] == {"local -> claude": 2}
+    assert llm["attempt_failures"] == {"local: timeout": 1, "local: APIConnectionError": 1,
+                                       "claude: timeout": 1}
+    text = format_report("s", summary)
+    assert "answered by claude 1, local 1" in text and "handed over local -> claude 2" in text
+
+
+def test_a_rejected_local_key_names_the_backend():
+    events = [ev(0, "llm_request", request_id=1, reason="partner"),
+              ev(1, "llm_failed", request_id=1, backend="local", reason="AuthenticationError",
+                 status=401, attempt=1, ms=5, next="claude")]
+    assert any(w.startswith("local rejected the request")
+               for w in summarize(collect(events))["warnings"])
+
+
 def test_a_total_does_not_blame_the_decoder_for_idle_keyboard_sessions():
     total = merge([collect(_not_caught_session(True, False)), collect(_not_caught_session(False, True))])
     found = summarize(total)["warnings"]
