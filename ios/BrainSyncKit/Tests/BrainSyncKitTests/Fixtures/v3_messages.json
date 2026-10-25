@@ -1,0 +1,595 @@
+{
+  "server_to_client": [
+    {
+      "type": "welcome",
+      "protocol": 3,
+      "role": "controller",
+      "mode": "slots",
+      "paradigm": "code",
+      "server": {
+        "name": "brainsync",
+        "version": "0.1.0"
+      },
+      "fake": true,
+      "waveform": "sine",
+      "refresh_hz": 60.0,
+      "refresh_tolerance_hz": 1.0,
+      "freqs": [],
+      "max_slots": 3,
+      "detect": false,
+      "refresh_rates": [
+        60.0
+      ],
+      "code": {
+        "bits": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          0,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1,
+          0,
+          0,
+          1,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1,
+          0,
+          0,
+          0,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "lag_frames": 21,
+        "cycle_frames": 63,
+        "train_cycles": 30,
+        "fill": "#ffffff"
+      }
+    },
+    {
+      "type": "welcome",
+      "protocol": 3,
+      "role": "controller",
+      "mode": "slots",
+      "paradigm": "freq",
+      "server": {
+        "name": "brainsync",
+        "version": "0.1.0"
+      },
+      "fake": false,
+      "waveform": "sine",
+      "refresh_hz": 60.0,
+      "refresh_tolerance_hz": 1.0,
+      "freqs": [
+        15.0,
+        17.0,
+        12.0,
+        20.0
+      ],
+      "max_slots": 4,
+      "detect": true,
+      "refresh_rates": [
+        60.0,
+        90.0,
+        120.0,
+        144.0
+      ]
+    },
+    {
+      "type": "welcome",
+      "protocol": 3,
+      "role": "viewer",
+      "mode": null,
+      "paradigm": "code",
+      "server": {
+        "name": "brainsync",
+        "version": "0.1.0"
+      },
+      "fake": true,
+      "waveform": "sine",
+      "refresh_hz": 60.0,
+      "refresh_tolerance_hz": 1.0,
+      "freqs": [],
+      "max_slots": 3,
+      "detect": false,
+      "code": {
+        "bits": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          0,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1,
+          0,
+          0,
+          1,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1,
+          0,
+          0,
+          0,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "lag_frames": 21,
+        "cycle_frames": 63,
+        "train_cycles": 30,
+        "fill": "#ffffff"
+      }
+    },
+    {
+      "type": "error",
+      "code": "bad_token",
+      "message": "wrong token; paste the token the server printed at startup",
+      "fatal": true
+    },
+    {
+      "type": "error",
+      "code": "busy",
+      "message": "another controller is connected; reconnect with \"takeover\": true to replace it, or connect as a viewer",
+      "fatal": true
+    },
+    {
+      "type": "error",
+      "code": "refresh",
+      "message": "The display refreshes at 120.00 Hz, but the flicker needs 60 ± 1 Hz. Set the display to 60 Hz and reconnect, or start the server with --ignore-refresh.",
+      "fatal": false
+    },
+    {
+      "type": "error",
+      "code": "too_many_slots",
+      "message": "this server has 3 targets, so a client may name at most 3 slots, not 4",
+      "fatal": true
+    },
+    {
+      "type": "phase",
+      "phase": "wait",
+      "flicker": false,
+      "seconds": null,
+      "text": "Waiting for a controller to connect"
+    },
+    {
+      "type": "phase",
+      "phase": "calibrate",
+      "flicker": false,
+      "seconds": 10.0,
+      "text": "Look at the screen and relax"
+    },
+    {
+      "type": "phase",
+      "phase": "train",
+      "flicker": true,
+      "seconds": null,
+      "text": "Look at the T0 square",
+      "cue": "t0",
+      "cycles": 30
+    },
+    {
+      "type": "phase",
+      "phase": "run",
+      "flicker": true,
+      "seconds": null,
+      "text": ""
+    },
+    {
+      "type": "phase",
+      "phase": "pause",
+      "flicker": false,
+      "seconds": null,
+      "text": "Paused; press Resume to go on"
+    },
+    {
+      "type": "phase",
+      "phase": "stop",
+      "flicker": false,
+      "seconds": null,
+      "text": "The BrainSync server stopped"
+    },
+    {
+      "type": "layout",
+      "layout_id": 7,
+      "stage": "slots",
+      "targets": [
+        {
+          "slot": "t0",
+          "freq": null,
+          "phase": 0.0,
+          "label": "t0",
+          "kind": "slot",
+          "rects": [],
+          "lag": 0
+        },
+        {
+          "slot": "t1",
+          "freq": null,
+          "phase": 0.0,
+          "label": "t1",
+          "kind": "slot",
+          "rects": [],
+          "lag": 21
+        },
+        {
+          "slot": "t2",
+          "freq": null,
+          "phase": 0.0,
+          "label": "t2",
+          "kind": "slot",
+          "rects": [],
+          "lag": 42
+        }
+      ]
+    },
+    {
+      "type": "layout",
+      "layout_id": 8,
+      "stage": "train",
+      "targets": [
+        {
+          "slot": "t0",
+          "freq": null,
+          "phase": 0.0,
+          "label": "Left",
+          "kind": "slot",
+          "rects": [
+            {
+              "x": 0.0,
+              "y": 0.38,
+              "w": 0.25,
+              "h": 0.24
+            }
+          ],
+          "lag": 0
+        },
+        {
+          "slot": "t1",
+          "freq": null,
+          "phase": 0.0,
+          "label": "Middle",
+          "kind": "slot",
+          "rects": [
+            {
+              "x": 0.375,
+              "y": 0.38,
+              "w": 0.25,
+              "h": 0.24
+            }
+          ],
+          "lag": 21
+        },
+        {
+          "slot": "t2",
+          "freq": null,
+          "phase": 0.0,
+          "label": "Right",
+          "kind": "slot",
+          "rects": [
+            {
+              "x": 0.75,
+              "y": 0.38,
+              "w": 0.25,
+              "h": 0.24
+            }
+          ],
+          "lag": 42
+        }
+      ]
+    },
+    {
+      "type": "layout",
+      "layout_id": 9,
+      "stage": "slots",
+      "targets": [
+        {
+          "slot": "yes",
+          "freq": 15.0,
+          "phase": 0.0,
+          "label": "yes",
+          "kind": "slot",
+          "rects": []
+        },
+        {
+          "slot": "no",
+          "freq": 17.0,
+          "phase": 0.0,
+          "label": "no",
+          "kind": "slot",
+          "rects": []
+        }
+      ]
+    },
+    {
+      "type": "layout",
+      "layout_id": 10,
+      "stage": "idle",
+      "targets": []
+    },
+    {
+      "type": "train",
+      "cycle": 0,
+      "of": 30
+    },
+    {
+      "type": "train",
+      "cycle": 12,
+      "of": 30
+    },
+    {
+      "type": "trained",
+      "accuracy": 0.83,
+      "chance": 0.333,
+      "cycles": 30
+    },
+    {
+      "type": "trained",
+      "accuracy": null,
+      "chance": 0.333,
+      "cycles": 30
+    },
+    {
+      "type": "decision",
+      "layout_id": 7,
+      "scores": {
+        "t0": 0.42,
+        "t1": 0.11,
+        "t2": -0.03
+      },
+      "raw": "t0",
+      "committed": null,
+      "lead": 0.31,
+      "changed": false
+    },
+    {
+      "type": "decision",
+      "layout_id": 7,
+      "scores": {
+        "t0": 0.42,
+        "t1": 0.11,
+        "t2": -0.03
+      },
+      "raw": "t0",
+      "committed": "t0",
+      "lead": 0.31,
+      "changed": true
+    },
+    {
+      "type": "selection",
+      "selection_id": 12,
+      "layout_id": 7,
+      "slot": "t0",
+      "t_server": 1792809204.9,
+      "score": 0.42,
+      "scores": {
+        "t0": 0.42,
+        "t1": 0.11,
+        "t2": -0.03
+      }
+    },
+    {
+      "type": "status",
+      "board": "streaming",
+      "ok": true,
+      "text": "posterior RMS 14 uV",
+      "rtt_ms": 38
+    },
+    {
+      "type": "status",
+      "board": "no-data",
+      "ok": false,
+      "text": "the headset sends no data",
+      "rtt_ms": null
+    },
+    {
+      "type": "pong",
+      "ping_id": 3,
+      "t_client": 1792809201.0,
+      "t_server": 1792809201.02
+    },
+    {
+      "type": "ping"
+    },
+    {
+      "type": "scan_request",
+      "scan_id": 4,
+      "settle_ms": 800
+    }
+  ],
+  "client_to_server": [
+    {
+      "type": "hello",
+      "protocol": 3,
+      "token": "Zx9-abc_DEF123",
+      "role": "controller",
+      "takeover": false,
+      "client": {
+        "name": "brainsync-ios",
+        "kind": "ios",
+        "version": "1.0",
+        "instance": "8f14e45fceea167a5a36dedd4bea2543"
+      },
+      "mode": "slots",
+      "slots": [
+        "t0",
+        "t1",
+        "t2"
+      ],
+      "refresh_hz": 59.98,
+      "accepted": true,
+      "viewport": {
+        "w": 390.0,
+        "h": 844.0,
+        "dpr": 3.0
+      }
+    },
+    {
+      "type": "hello",
+      "protocol": 3,
+      "token": null,
+      "role": "controller",
+      "takeover": true,
+      "client": {
+        "name": "brainsync-ios",
+        "kind": "ios",
+        "version": "1.0",
+        "instance": "8f14e45fceea167a5a36dedd4bea2543"
+      },
+      "mode": "slots",
+      "slots": [
+        "t0",
+        "t1",
+        "t2"
+      ],
+      "refresh_hz": 59.98,
+      "accepted": true,
+      "viewport": null
+    },
+    {
+      "type": "hello",
+      "protocol": 3,
+      "token": "Zx9-abc_DEF123",
+      "role": "viewer",
+      "takeover": false,
+      "client": {
+        "name": "brainsync-ios",
+        "kind": "ios",
+        "version": "1.0",
+        "instance": "8f14e45fceea167a5a36dedd4bea2543"
+      },
+      "mode": null,
+      "slots": null,
+      "refresh_hz": null,
+      "accepted": false,
+      "viewport": null
+    },
+    {
+      "type": "onset",
+      "layout_id": 7,
+      "t_client": 1792809201.512
+    },
+    {
+      "type": "cycle",
+      "layout_id": 7,
+      "n": 12,
+      "t_client": 1792809213.512
+    },
+    {
+      "type": "frames",
+      "refresh_hz": 59.98,
+      "dropped": 2
+    },
+    {
+      "type": "ping",
+      "ping_id": 3,
+      "t_client": 1792809201.0
+    },
+    {
+      "type": "pause"
+    },
+    {
+      "type": "resume"
+    },
+    {
+      "type": "bye"
+    },
+    {
+      "type": "gaze",
+      "slot": "t1"
+    },
+    {
+      "type": "gaze",
+      "slot": null
+    }
+  ]
+}
