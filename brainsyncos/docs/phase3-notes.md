@@ -136,6 +136,8 @@ scripts/build.sh all --edition vm                    # VM ISO (downloads Ubuntu'
 ```
 
 **Caveats on x86-64:**
+- **WSL: clone under `~`, never on `/mnt/c`.** Windows drives ignore `chmod`, so the repository key would be readable by everyone. `make-repo-key.sh` refuses to write it there and `doctor` reports `file modes` as missing. The Linux filesystem is also much faster for the 4 GiB extractions.
+- **`make`** is not installed on a fresh Ubuntu or WSL (`sudo apt install make`). `scripts/build.sh` works without it; `tests/test_phase3.sh` checks the Makefile and fails without it.
 - **Rootful Docker on Linux** makes `build/` root-owned; see the README's host requirements. Docker Desktop and rootless Docker are fine.
 - **Disk.** Keep about 20 GB free:
   - the Jetson ISO build needs about 7 GiB;

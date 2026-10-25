@@ -49,7 +49,7 @@ bad() { printf '  MISSING  %s\n' "$*"; nbad=$((nbad + 1)); }
 note() { printf '  note     %s\n' "$*"; }
 
 c_doctor() {
-    local iso keys hash avail_kb need
+    local iso keys hash avail_kb need probe mode
     echo "BrainSyncOS $BRAINSYNCOS_VERSION, $edition edition: build prerequisites"
     if ! command -v docker > /dev/null 2>&1; then
         bad "docker: not installed (Docker Desktop on Apple Silicon is the reference host)"
@@ -83,6 +83,15 @@ c_doctor() {
             fi
         )
     fi
+    probe="$(mktemp "$BRAINSYNCOS_ROOT/config/.mode-probe.XXXXXX")"
+    chmod 600 "$probe"
+    mode="$(ls -l "$probe" | cut -c2-10)"
+    rm -f "$probe"
+    if [ "$mode" = rw------- ]; then
+        ok "file modes: kept (the repository key stays private)"
+    else
+        bad "file modes: this checkout's filesystem ignores chmod ($mode after chmod 600), so the repository key would be readable by everyone (WSL: clone under ~, not /mnt/c)"
+    fi
     keys="$BRAINSYNCOS_ROOT/config/authorized_keys"
     hash="$BRAINSYNCOS_ROOT/config/brainsync-password.hash"
     if [ -s "$keys" ] || [ -s "$hash" ]; then
@@ -113,6 +122,7 @@ c_doctor() {
     else
         bad "disk: only $((avail_kb / 1024 / 1024)) GiB free, this build needs about $need (scripts/build.sh clean)"
     fi
+    command -v make > /dev/null 2>&1 || note "make: not installed; use scripts/build.sh directly (tests/test_phase3.sh needs make)"
     (load_build_config; ok "resources: $BUILD_CPUS CPUs, $BUILD_JOBS jobs, $BUILD_MEMORY memory, $BUILD_SCRATCH_SIZE /scratch (config/build.env)")
     echo
     if [ "$nbad" -gt 0 ]; then

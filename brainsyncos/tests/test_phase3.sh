@@ -124,6 +124,7 @@ t_build_sh() {
         *) die "doctor exit code $rc" ;;
     esac
     printf '%s\n' "$out" | grep -q '^  ok       resources: ' || die "doctor did not report resources"
+    command -v make > /dev/null 2>&1 || die "make is not installed, so the Makefile cannot be checked (Debian/Ubuntu: sudo apt install make)"
     (cd "$BRAINSYNCOS_ROOT" && make -n EDITION=vm iso) | grep -qx 'scripts/build.sh iso --edition vm' || die "make iso EDITION=vm"
     (cd "$BRAINSYNCOS_ROOT" && make -n) | grep -qx 'scripts/build.sh all --edition jetson' || die "make (all)"
     (cd "$BRAINSYNCOS_ROOT" && make -n test TESTS="phase2 vm") | grep -qx 'scripts/build.sh test phase2 vm' || die "make test"

@@ -56,6 +56,13 @@ GNUPGHOME="$home" gpg --batch --quiet --armor --export "$fpr" > "$public.tmp" 2>
 [ -s "$secret.tmp" ] && [ -s "$public.tmp" ] || die "could not export the new key"
 chmod 600 "$secret.tmp"
 chmod 644 "$public.tmp"
+# Some filesystems ignore chmod (WSL's /mnt/c, other Windows drives): the secret
+# key would stay readable by everyone, so it is never left there.
+mode="$(stat -c %a "$secret.tmp")"
+[ "$mode" = 600 ] || {
+    rm -f "$secret.tmp" "$public.tmp"
+    die "${out#$BRAINSYNCOS_ROOT/} ignores chmod (mode $mode after chmod 600), so the secret key would be readable by everyone; build from a checkout on a Linux filesystem (WSL: under ~, not /mnt/c)"
+}
 mv -f "$secret.tmp" "$secret"
 mv -f "$public.tmp" "$public"
 
