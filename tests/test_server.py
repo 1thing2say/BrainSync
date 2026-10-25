@@ -73,6 +73,7 @@ def test_partner_page_is_served(client):
         "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
         "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
         "app_link": "", "flicker": True, "waveform": "sine", "refresh_hz": 60.0,
+        "paradigm": "freq", "display": "browser",
         "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg} for s in BASE.stim.slots}}
 
 
