@@ -24,8 +24,8 @@ virtual name (only a Provides in the index) is refused: pin a real package.
 
   lock   download InRelease and the index, resolve the closure afresh and
          write debs.lock; then fetch
-  fetch  check the cached InRelease and index (download them only when a
-         .deb is missing), that the closure equals debs.lock, and download
+  fetch  check the cached InRelease and index (download them again only when
+         they or a .deb are missing or broken), that the closure equals debs.lock, and download
          each missing .deb into --cache, checking its size and sha256
   check  offline: the cached InRelease and index verify, the closure equals
          debs.lock, and every pinned .deb in --debs (default --cache) has its
@@ -356,7 +356,13 @@ def main():
         print("wrote %s" % m.lock_file)
     elif args.command == "fetch":
         locked = m.read_lock()
-        if not all(m.deb_ok(m.cache, e) for e in locked) or not os.path.isfile(os.path.join(m.cache, "InRelease")):
+        try:
+            m.index()
+            cached = all(m.deb_ok(m.cache, e) for e in locked)
+        except SystemExit as e:  # no, or a broken, cached InRelease or index
+            print(e, file=sys.stderr)
+            cached = False
+        if not cached:
             m.fetch_index()
     chosen, external, lines = m.resolve(m.index(), fresh=False)
     m.match_lock(lines)

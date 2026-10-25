@@ -112,6 +112,31 @@ The pins below are the ones the research found; the README section "The package 
    - The signing key is `jetson-ota-public.asc`, fingerprint `3C6D1FF3100C8C3ABB0869C0E6543461A9996195`.
    - Pins: `cuda-cudart-13-2=13.2.86-1`, `libcublas-13-2=13.4.1.3-1`. For building only: `cuda-nvcc-13-2=13.2.86-1`, `cuda-cudart-dev-13-2`, `libcublas-dev-13-2`.
    - The user-space libraries are NVIDIA's SBSA build, re-hosted in that repo. `libcuda` comes from L4T (`nvidia-l4t-cuda-nvgpu`); never depend on `libcuda.so.1`, or apt may pull in the dGPU `libnvidia-compute`.
+
+   **Part 1, the CUDA runtime on the ISO: done 2026-10-25** (branch `bsos/3d-cuda`).
+   - **Mirrored, not vendored.** The ISO is for our own devices, so NVIDIA's debs go into the Jetson repository unchanged, with their EULA in `/usr/share/doc`. This settles contradiction A3 of the research. llama.cpp's CUDA package (part 2) should depend on `cuda-cudart-13-2 (= 13.2.86-1), libcublas-13-2 (= 13.4.1.3-1)`, never on `libcuda.so.1`.
+   - **The mechanism:** `mirror/nvidia-jetson/`. `mirror.env` names the repository, the key fingerprint, the roots and the names nothing may be, provide or depend on (`MIRROR_FORBID`: `libnvidia-compute`, `nvidia-driver-*`, `cuda-drivers`, `cuda-compat`, `libcuda*`). `jetson-ota-public.asc` is the key, and `debs.lock` pins each .deb by size and sha256.
+   - `scripts/fetch-mirror.sh` (`scripts/build.sh mirror`, also run by `all`) caches the debs in `build/downloads/mirror/nvidia-jetson/`. `scripts/mirror.py` does the work: gpgv against that key alone, the index against the signed InRelease, the closure from the signed index, and the size and sha256 of each deb. A filled cache works offline. `--lock` re-resolves the closure and rewrites `debs.lock`.
+   - `scripts/build-repo.sh` copies the pinned debs into the Jetson repository on every build and checks them in the pool again. The VM repository gets none.
+   - **The closure is 5 debs:** `cuda-cudart-13-2`, `libcublas-13-2` and the three `cuda-toolkit*-config-common` 13.2.86-1. Nothing outside NVIDIA's repo is needed. They are 483,944,278 bytes to download and 676 MB installed. libcublas holds `libcublas`, `libcublasLt` (607 MB) and `libnvblas`.
+   - **No ld.so.conf package of ours is needed.** `cuda-toolkit-config-common` and `cuda-toolkit-13-config-common` ship `/etc/ld.so.conf.d/000_cuda.conf` and `987_cuda-13.conf`, which point at `/usr/local/cuda{,-13}/targets/sbsa-linux/lib`. The postinst of `cuda-toolkit-13-2-config-common` points those at `/usr/local/cuda-13.2` with `update-alternatives`, then runs `ldconfig`. cudart and cublas have no maintainer scripts.
+   - **`80-cuda.sh`** (Jetson only; prints `vm-arm64 edition: skipped` on the VM) installs `cuda-cudart-13-2` and `libcublas-13-2` through `lib/apt-repo.sh`. It then checks four things: ldconfig resolves `libcudart.so.13`, `libcublas.so.13` and `libcublasLt.so.13` under `/usr/local/cuda-13.2`; `ldd` finds all their libraries; `/usr/local/cuda` points at 13.2; and no dGPU driver package is installed. It runs no CUDA code, because libcuda is only set up at boot by `nv-load-gpu-libs.service`.
+   - **ISO size:** the repository grows by 0.48 GB, so the Jetson ISO is about 5.52 GB (5.04 + 0.48) plus the apps (about 0.08 GB), before llama.cpp and the model.
+
+   **Verified** (x86-64 WSL2, arm64 builder under qemu, 1 CPU):
+   - `fetch-mirror.sh --lock` against NVIDIA's live repository (InRelease of 23 Oct 2026): signature good, closure of 5, no external relations. The committed key is the one `nvidia-l4t-apt-source` in the base ISO's pool ships, and its sources list names that repository and suite.
+   - The new phase 3 check `cuda`, run on its own against a test repository built by the real `build-repo.sh` (keyring plus mirror):
+     - the cache verifies with no network (`unshare -n`);
+     - the repository index lists every pinned deb at its pinned sha256, and the VM repository has none;
+     - it refuses a tampered InRelease, another key, a stale lock, a `libnvidia-compute` root and a tampered deb, and `build-repo.sh` refuses a tampered cache;
+     - in NVIDIA's real target layer, the hook runs `60-apt-repo.sh` and `80-cuda.sh`. Exactly the 5 debs get installed, their postinsts ran in the chroot, ldconfig resolves the three libraries, nothing provides `libcuda.so`, the target's apt state is unchanged, a re-run installs nothing new, and the VM edition skips.
+   - shellcheck is clean.
+
+   **Not done or not verified:**
+   - CUDA code on an Orin: whether nvgpu's libcuda loads with this cudart (3e acceptance).
+   - The full `tests/test_phase3.sh`, `test_phase2.sh` and `test_vm.sh`. The last two now expect 10 hook steps, and phase 2 checks the CUDA libraries.
+   - An install in UTM or on a Jetson.
+   - The licence (EULA Attachment A) assumes the ISO stays on our own devices.
 2. **llama.cpp v0.7.0**: commit `620d2225cc436ab0b001e3200e590e3b286ef9ab`, tarball sha256 `55d67acf3ad2ad747a9bbeb75f9f0e173dbcc0d1753a471038a90c819421c5e1`.
    - CMake flags: `GGML_BACKEND_DL=ON GGML_CPU_ALL_VARIANTS=ON GGML_NATIVE=OFF BUILD_SHARED_LIBS=ON`, with the install prefix `/opt/brainsyncos/llama` and gcc-14 (gcc-13 fails on the SME variants).
    - CUDA: `GGML_CUDA=ON CMAKE_CUDA_ARCHITECTURES=87-real GGML_CUDA_NO_VMM=ON`.
@@ -130,7 +155,7 @@ The pins below are the ones the research found; the README section "The package 
    - Status, logs and preflight name the backend; preflight checks `/health` and `/v1/models` on the local server.
    - Verified with fakes only: a stand-in HTTP server that answers `/v1/messages` the way llama-server does, driven through the real SDK, and a closed port. No real llama-server or model was run.
    - Still to do: the install step (`85-llama.sh`) must also write the key in llama-server's `--api-key-file` to `/etc/brainsync/secrets.env` as `BRAINSYNC_LLAMA_API_KEY`, and the 10 s needs measuring on the Orin (3e).
-6. **Install steps:** `80-cuda.sh` (Jetson only) and `85-llama.sh`.
+6. **Install steps:** `80-cuda.sh` (Jetson only; done, see 1) and `85-llama.sh`.
 
 ### 3e: integration
 
