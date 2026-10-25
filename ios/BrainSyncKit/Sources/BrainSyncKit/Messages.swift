@@ -102,8 +102,9 @@ public struct ShowPage: Codable, Equatable {
     }
 }
 
+/// `paused`: STOP (or a lost decoder or display) ended the trial; the flicker is off.
 public enum TrialPhase: String, Codable, Equatable {
-    case cue, flicker, rest, baseline
+    case cue, flicker, rest, baseline, paused
 }
 
 public struct Trial: Codable, Equatable {

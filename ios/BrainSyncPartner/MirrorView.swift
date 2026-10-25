@@ -211,6 +211,7 @@ struct PhasePill: View {
             case "flicker": return Palette.look
             case "cue": return Palette.next
             case "baseline": return Palette.warn
+            case "paused": return Palette.danger
             default: return Palette.muted
             }
         }()

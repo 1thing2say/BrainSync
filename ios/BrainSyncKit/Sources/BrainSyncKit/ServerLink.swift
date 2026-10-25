@@ -77,6 +77,24 @@ public struct ServerLink: Equatable, Codable {
         return out.url
     }
 
+    private var origin: (scheme: String, host: String, port: Int?) {
+        let parts = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        return ((parts?.scheme ?? "").lowercased(), (parts?.host ?? "").lowercased(), parts?.port)
+    }
+
+    /// Same scheme, host and port; the key may differ (a restarted server has a new one). A
+    /// quick tunnel gets a new trycloudflare host every start, so that counts as another server.
+    public func sameServer(as other: ServerLink) -> Bool {
+        origin == other.origin
+    }
+
+    /// `host[:port]`, for asking the partner before a link switches servers.
+    public var hostLabel: String {
+        let o = origin
+        if o.host.isEmpty { return baseString }
+        return o.port.map { "\(o.host):\($0)" } ?? o.host
+    }
+
     private var baseString: String {
         var s = base.absoluteString
         while s.hasSuffix("/") { s.removeLast() }

@@ -24,11 +24,12 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -51,9 +52,10 @@ from app.config import (
 from app.log import DEFAULT_LOG_DIR, EventLog
 from app.menus import Create, MenuMaker, first_name
 from app.orchestrator import Orchestrator
-from app.remote import RemoteGate, is_remote, new_key
+from app.remote import RemoteGate, is_remote, key_problem, new_key
 from app.schemas import Message, parse_decoder_to_server, parse_ui_to_server, to_json
 from app.tts import AUDIO_ROUTE, CartesiaTTS
+from app.tunnel import Tunnel, find_cloudflared, stop_process
 
 UI_DIR = REPO_ROOT / "ui"
 TICK_S = 0.02  # how often deadlines are checked; well below the shortest timing in config
@@ -67,6 +69,11 @@ log = logging.getLogger("app.server")
 def ui_client(raw: str | None) -> str:
     """The /ws/ui ``client`` query parameter: "ios" or "browser" (anything else, or none)."""
     return raw if raw in UI_CLIENTS else "browser"
+
+
+def phone_link(base: str, key: str) -> str:
+    """The partner's phone link ``<base>/?key=K``, the key percent-encoded."""
+    return f"{base}/?{urlencode({'key': key})}"
 
 
 def app_link(phone_url: str) -> str:
@@ -92,6 +99,32 @@ def lan_ip() -> str:
         if ip and not ip.startswith(("127.", "0.")):
             return ip
     return ""
+
+
+def run_shutdown(app: FastAPI) -> None:
+    """Run ``app.state.on_shutdown`` (stop the tunnel, the fake decoder), each hook once: they are
+    taken off the list as they run, so the lifespan and ``main``'s finally can both call this.
+    Blocking (a child gets seconds to exit): the lifespan runs it in a thread."""
+    with app.state.shutdown_lock:  # a second caller waits until the children are gone
+        hooks = app.state.on_shutdown
+        while hooks:
+            stop = hooks.pop(0)
+            with contextlib.suppress(Exception):
+                stop()
+
+
+def watch_tunnel(app: FastAPI, tunnel: Tunnel, key: str, wait_s: float = 30.0) -> None:
+    """Wait for the tunnel's address (in a thread, while the server already listens), then set
+    the phone link and print it with the iPhone app link."""
+    url = tunnel.wait(wait_s)
+    if not url:
+        print(f"tunnel: cloudflared printed no address within {wait_s:g} s (no internet?); the "
+              "laptop page still works", file=sys.stderr)
+        return
+    app.state.phone_url = phone_link(url, key)
+    print(f"phone link (secret, works until the server stops): {app.state.phone_url}\n"
+          f"iPhone app link (secret, open it on the iPhone or paste it into the app): "
+          f"{app_link(app.state.phone_url)}", file=sys.stderr)
 
 
 @dataclass
@@ -155,9 +188,11 @@ def create_app(
     ``tts_cache_dir`` keeps Cartesia clips on disk (``main`` passes ``speech.cache_dir``); without
     it they live in memory only, so tests never write to the repo.
     ``access_key``: requests from outside this computer (a phone through ``--tunnel``) need it
-    (app/remote.py); None lets everything through (tests, a server reachable only locally).
-    ``app.state.on_shutdown`` holds callables run when the server stops (the tunnel, the fake
-    decoder): the lifespan runs them, since uvicorn ends the process before ``main``'s finally."""
+    (app/remote.py); with None, requests visibly from outside (a proxy's headers, another
+    address) are refused, since no key can let them in (tests, a server reachable only locally).
+    ``app.state.on_shutdown`` holds callables run once when the server stops (the tunnel, the fake
+    decoder): the lifespan runs them in a thread (``run_shutdown``), since after a SIGTERM uvicorn
+    ends the process before ``main``'s finally, which runs whatever is left."""
     cfg = cfg or load_config()
     intents = intents or load_intents(
         option_count=cfg.menus.option_count,
@@ -206,9 +241,7 @@ def create_app(
             yield
         finally:
             task.cancel()
-            for stop in app.state.on_shutdown:
-                with contextlib.suppress(Exception):
-                    stop()
+            await asyncio.to_thread(run_shutdown, app)  # each child gets seconds to exit
             await menus.stop()
             await tts.stop()
             event_log.log("server_stop")
@@ -217,6 +250,7 @@ def create_app(
     app = FastAPI(title="BCI Voice", lifespan=lifespan)
     app.add_middleware(RemoteGate, key=access_key)
     app.state.on_shutdown = []
+    app.state.shutdown_lock = threading.Lock()
     app.state.phone_url = ""  # the tunnel's link with the key, shown on the laptop's page only
     app.state.orch = orch
     app.state.hub = hub
@@ -417,16 +451,15 @@ def main(argv: list[str] | None = None) -> None:
     local_only = host in ("127.0.0.1", "localhost", "::1") and not args.tunnel
     # Anything reachable from outside this computer needs the key; a new one every start.
     access_key = None if local_only else (os.environ.get("BRAINSYNC_ACCESS_KEY") or new_key())
-    tunnel = None
+    if access_key is not None and (problem := key_problem(access_key)):
+        sys.exit(f"BRAINSYNC_ACCESS_KEY {problem}; unset it for a generated key")
+    binary = None
     if args.tunnel:
-        from app.tunnel import Tunnel, find_cloudflared
-
         binary = find_cloudflared()
         if binary is None:
             sys.exit("--tunnel needs cloudflared: brew install cloudflared (macOS), or the "
                      "cloudflared-linux-amd64 binary from github.com/cloudflare/cloudflared/releases "
                      "as ~/.local/bin/cloudflared (Linux / WSL)")
-        tunnel = Tunnel(cfg.server.port, binary)
     app = create_app(cfg, keyboard_mode=args.keyboard, fake_decoder=args.fake_decoder,
                      access_key=access_key,
                      cartesia_api_key=os.environ.get("CARTESIA_API_KEY"),
@@ -444,51 +477,46 @@ def main(argv: list[str] | None = None) -> None:
     who = ("your profile (profiles/user.yaml)" if app.state.profile_source == "user"
            else "the demo persona (edit at /profile.html)")
     print(f"voice: {voice}\nreplies: {replies}\nprofile: {who}", file=sys.stderr)
-    url_host = "127.0.0.1" if host == "0.0.0.0" else host
-    fake = None
-    if args.fake_decoder:
-        # It retries every second until the server is up, so starting it first is fine.
-        # Its hello uses this server's config, so it passes the handshake check.
-        slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
-        # --parent-pid: it exits once this server is gone, however the server was stopped.
-        fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
-                                 "--parent-pid", str(os.getpid()),
-                                 "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
-                                 "--slots", slots, "--waveform", cfg.stim.waveform,
-                                 "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
-                                cwd=REPO_ROOT)
-        app.state.on_shutdown.append(fake.terminate)
-    print(f"partner page: http://{url_host}:{cfg.server.port}", file=sys.stderr)
-    if tunnel is not None:
-        app.state.on_shutdown.append(tunnel.stop)
-        url = tunnel.wait(30.0)
-        if url:
-            app.state.phone_url = f"{url}/?key={access_key}"
-            print(f"phone link (secret, works until the server stops): {app.state.phone_url}",
-                  file=sys.stderr)
-        else:
-            print("tunnel: cloudflared printed no address within 30 s (no internet?); the laptop "
-                  "page still works", file=sys.stderr)
-    elif access_key is not None:
-        ip = lan_ip() if host in ("0.0.0.0", "::") else host
-        if ip:
-            app.state.phone_url = f"http://{ip}:{cfg.server.port}/?key={access_key}"
-            print(f"phone link (secret; no microphone in a phone browser over http: use --tunnel "
-                  f"or the app): {app.state.phone_url}", file=sys.stderr)
-        else:
-            print(f"other devices: http://<this computer's address>:{cfg.server.port}/?key={access_key} "
-                  "(no microphone on a phone over http: use --tunnel)", file=sys.stderr)
-    if app.state.phone_url:
-        print(f"iPhone app link (secret, open it on the iPhone or paste it into the app): "
-              f"{app_link(app.state.phone_url)}", file=sys.stderr)
+    # "::" listens on IPv6 only (asyncio sets IPV6_V6ONLY), so local clients use [::1] there.
+    url_host = {"0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(host, host)
+    # Children start only once the app exists, and inside the try: every way out stops them.
     try:
+        if binary is not None:
+            tunnel = Tunnel(cfg.server.port, binary)
+            app.state.on_shutdown.append(tunnel.stop)
+            # The server listens at once; the phone link is printed when cloudflared has its address.
+            threading.Thread(target=watch_tunnel, args=(app, tunnel, access_key, cfg.server.tunnel_wait_s),
+                             name="tunnel-address", daemon=True).start()
+        if args.fake_decoder:
+            # It retries every second until the server is up, so starting it first is fine.
+            # Its hello uses this server's config, so it passes the handshake check.
+            slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+            # --parent-pid: it exits once this server is gone, however the server was stopped.
+            fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
+                                     "--parent-pid", str(os.getpid()),
+                                     "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
+                                     "--slots", slots, "--waveform", cfg.stim.waveform,
+                                     "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
+                                    cwd=REPO_ROOT)
+            app.state.on_shutdown.append(lambda: stop_process(fake))
+        print(f"partner page: http://{url_host}:{cfg.server.port}", file=sys.stderr)
+        if binary is None and access_key is not None:
+            ip = lan_ip() if host in ("0.0.0.0", "::") else host
+            if ip:
+                app.state.phone_url = phone_link(f"http://{ip}:{cfg.server.port}", access_key)
+                print(f"phone link (secret; no microphone in a phone browser over http: use --tunnel "
+                      f"or the app): {app.state.phone_url}\n"
+                      f"iPhone app link (secret, open it on the iPhone or paste it into the app): "
+                      f"{app_link(app.state.phone_url)}", file=sys.stderr)
+            else:
+                other = phone_link(f"http://<this computer's address>:{cfg.server.port}", access_key)
+                print(f"other devices: {other} (no microphone on a phone over http: use --tunnel)",
+                      file=sys.stderr)
         import uvicorn
 
         uvicorn.run(app, host=host, port=cfg.server.port, log_level="warning")
     finally:
-        for stop in app.state.on_shutdown:
-            with contextlib.suppress(Exception):
-                stop()
+        run_shutdown(app)  # whatever the lifespan did not stop (it never ran, or was cut short)
 
 
 if __name__ == "__main__":

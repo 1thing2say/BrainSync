@@ -59,7 +59,8 @@ def test_every_variant_the_app_handles_is_there():
     assert any(m["until_stopped"] for m in listens) and any(m["seconds"] > 0 for m in listens)
     assert any(not m["until_stopped"] and m["seconds"] == 0 for m in listens)  # stop
     assert {m["reason"] for m in listens} == set(literal_values(next(m for m in union_models(ServerToUI) if message_type(m) == "listen"), "reason"))
-    assert {m["phase"] for m in by_type["trial"]} == {"cue", "flicker", "rest", "baseline"}
+    trial_model = next(m for m in union_models(ServerToUI) if message_type(m) == "trial")
+    assert {m["phase"] for m in by_type["trial"]} == set(literal_values(trial_model, "phase"))
     assert {m["who"] for m in by_type["transcript"]} == {"partner", "user"}
     assert {m["llm"] for m in by_type["status"]} == {"off", "waiting", "ok", "failed"}
     mic_model = next(m for m in union_models(UIToServer) if message_type(m) == "mic_report")

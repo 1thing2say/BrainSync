@@ -61,6 +61,7 @@ from app.schemas import (
     UISlot,
     UIStatus,
     hello_problems,
+    is_fake_name,
 )
 
 Send = Callable[[Message], None]
@@ -202,8 +203,9 @@ class Orchestrator:
     @property
     def decoder_fake(self) -> bool:
         """Selections are not EEG: started with --fake-decoder, or the acked bridge says it is a
-        fake (tools/fake_decoder.py names itself "fake-decoder" unless --name says otherwise)."""
-        return self.fake_decoder or self.decoder_name.lower().startswith("fake")
+        fake: its name contains "fake" (tools/fake_decoder.py names itself "fake-decoder" unless
+        --name says otherwise)."""
+        return self.fake_decoder or is_fake_name(self.decoder_name)
 
     @property
     def shown(self) -> ShowPage | None:
@@ -695,6 +697,8 @@ class Orchestrator:
         self.picked = None
         self.expected_baseline = None
         self._enter(St.PAUSED, None, detail)
+        # The mirror's phase (and its selection timer) follows Trial messages, not the state.
+        self._send_ui(Trial(trial_id=self.trial_id, phase="paused"))
         self._send_status()  # resume_ready changes
 
     def _pause_session(self, detail: str, reason: str) -> None:

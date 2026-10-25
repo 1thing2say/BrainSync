@@ -300,6 +300,8 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
 @pytest.mark.parametrize("name, flag, fake", [
     ("fake-decoder", False, True),  # tools/fake_decoder.py started by hand
     ("Fake-random", False, True),
+    ("ssvep-fbcca-fake", False, True),  # "fake" anywhere in the name, not only at the start
+    ("FakeSource", False, True),
     ("ssvep-fbcca", False, False),  # the teammate's bridge
     ("ssvep-fbcca", True, True),  # --fake-decoder
 ])
@@ -369,6 +371,67 @@ def test_stop_pauses_and_resume_goes_through_baseline():
     assert r.o.state is St.BASELINE
     r.o.on_ui_message(Stop())
     assert isinstance(r.decoder[-1], Pause)  # outside a trial: pause only
+
+
+def _pause_by_stop(r):
+    r.o.on_ui_message(Stop())
+
+
+def _pause_by_esc(r):
+    r.status(display_ok=False, message="Esc pressed")
+
+
+def _pause_by_decoder_loss(r):
+    r.o.on_decoder_disconnected()
+
+
+def _pause_by_rejected_hello(r):
+    r.o.on_decoder_message(bridge_hello(refresh_hz=120.0))
+
+
+@pytest.mark.parametrize("pause", [_pause_by_stop, _pause_by_esc, _pause_by_decoder_loss,
+                                   _pause_by_rejected_hello])
+@pytest.mark.parametrize("when", ["cue", "flicker", "confirm"])
+def test_every_pause_tells_the_mirror_the_trial_phase_is_paused(pause, when):
+    """The partner page's selection timer runs from phase "flicker" until any other phase; a
+    pause sent only a state, so the timer kept counting after STOP, Esc or a lost decoder."""
+    r = Rig()
+    if when == "confirm":
+        r.pick_and_confirm_screen("s1")
+        r.run_out()
+    else:
+        r.to_trial()
+    if when == "cue":
+        r.o.on_decoder_message(NoSelection(trial_id=r.o.active_trial, reason="low_signal"))
+        r.run_out()  # NOT_CAUGHT -> REST
+        r.run_out()  # REST -> MENU_CUE
+        assert r.o.state is St.MENU_CUE
+    else:
+        r.o.on_decoder_message(StimOnset(trial_id=r.o.active_trial, t_unix=r.clock.t))
+        assert r.last(r.ui, Trial).phase == "flicker"
+    pause(r)
+    assert r.o.state is St.PAUSED
+    assert r.last(r.ui, Trial) == Trial(trial_id=r.o.trial_id, phase="paused")
+
+
+@pytest.mark.parametrize("fail", ["baseline_done", "timeout"])
+def test_a_failed_baseline_tells_the_mirror_the_phase_is_paused(fail):
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    assert r.last(r.ui, Trial).phase == "baseline"
+    if fail == "baseline_done":
+        r.finish_baseline(ok=False, message="O1 contact lost")
+    else:
+        r.advance(CFG.baseline.timeout_s)
+    assert r.o.state is St.PAUSED and r.last(r.ui, Trial).phase == "paused"
+
+
+def test_keyboard_mode_stop_during_a_trial_ends_the_mirror_flicker():
+    r = Rig(keyboard_mode=True, bridge=False)
+    r.to_trial()
+    assert r.last(r.ui, Trial).phase == "flicker"  # no bridge: shown at stim_start
+    r.o.on_ui_message(Stop())
+    assert r.last(r.ui, Trial).phase == "paused"
 
 
 def test_baselines_are_numbered():
