@@ -16,11 +16,13 @@
     <div class="card callout warn">
       <p class="callout-title">Safety</p>
       <h1 id="warning-title">Flicker warning</h1>
-      <p>The user's screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
-        photosensitive seizures, with up to four squares at once. Nobody with photosensitive
+      <p>This screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
+        photosensitive seizures, with up to four boxes at once. Nobody with photosensitive
         epilepsy or flicker sensitivity should look at it.</p>
-      <p><kbd>Esc</kbd> on the flicker display or <strong>Stop</strong> here turns the flicker off
-        immediately.</p>
+      <p><kbd>Esc</kbd> or <strong>Stop</strong> turns the flicker off immediately, and so does
+        leaving this tab.</p>
+      <!-- Filled by app.js when the screen's refresh does not suit the flicker. -->
+      <p id="refresh-note" class="refresh-note" hidden></p>
       <p>While the session runs, the microphone listens to the conversation partner and Chrome
         sends the speech to Google to turn it into text. Press <strong>Mute</strong> any time.</p>
       <button id="accept" class="primary">I understand, start</button>
@@ -110,6 +112,7 @@
   <script src="listen_core.js?v=2"></script>
   <script src="voice_core.js?v=2"></script>
   <script src="view_core.js?v=2"></script>
+  <script src="flicker_core.js?v=2"></script>
   <script src="speech.js?v=2"></script>
   <script src="app.js?v=2"></script>
 </body>

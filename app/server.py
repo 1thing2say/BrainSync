@@ -273,6 +273,11 @@ def create_app(
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
                 "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
                 "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile),
+                # display.flicker browser: the page draws each target's flicker (ui/flicker_core.js).
+                "flicker": cfg.display.flicker == "browser", "waveform": cfg.stim.waveform,
+                "refresh_hz": cfg.display.expected_refresh_hz,
+                "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg}
+                          for s in cfg.stim.slots},
                 # The phone links carry the access key: only this computer's page gets them.
                 "phone_url": "" if remote else app.state.phone_url,
                 "app_link": "" if remote else app_link(app.state.phone_url)}
@@ -413,7 +418,8 @@ def create_app(
         try:
             await receive(ws, parse_ui_to_server, orch.on_ui_message, "ui")
         finally:
-            await detach(conn, "ui")
+            if await detach(conn, "ui"):
+                orch.on_ui_disconnected()
 
     @app.websocket("/ws/decoder")
     async def ws_decoder(ws: WebSocket) -> None:
@@ -545,7 +551,10 @@ def main(argv: list[str] | None = None) -> None:
             # connects once (about 16 s for the Cerelog X8) before its hello.
             bridge = subprocess.Popen(bridge_command(args.bridge,
                                                      f"ws://{url_host}:{cfg.server.port}/ws/decoder",
-                                                     os.getpid(), headless=args.bridge_headless),
+                                                     os.getpid(),
+                                                     # The page draws the flicker: no PsychoPy window.
+                                                     headless=args.bridge_headless
+                                                     or cfg.display.flicker == "browser"),
                                       cwd=REPO_ROOT)
             # SIGTERM ends it like Ctrl-C; its cleanup (display EOF, terminate and kill, up to
             # 3 s; the board thread, 2 s; then the board) must finish before a kill, or the

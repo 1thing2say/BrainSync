@@ -126,58 +126,59 @@ honest claim (section 7) and the README need them.
 ## 3. Start
 
 In the repo root, one command starts the whole system: our server, and the bridge with the
-headset and the PsychoPy display.
+headset and the decoder.
 
 ```
-python -m app.server --bridge cerelog   # server + brainsync.voice_bridge (Cerelog X8 + display)
+python -m app.server --bridge cerelog   # server + brainsync.voice_bridge (Cerelog X8 + decoder)
 ```
+
+**The page in Chrome is the user's screen and draws the flicker** (`display.flicker: browser`,
+the default since 2026-10-25): each answer card flickers at its slot's frequency, the bridge
+runs without its PsychoPy window (`--no-stimulus`, added by the server). With
+`display.flicker: psychopy` the bridge's PsychoPy window flickers instead and the page is a
+still mirror (the steps for that window are in `INTERFACE-v2-draft.md` section 7).
 
 The server prints which voice (`Cartesia sonic-3.5` or `browser speechSynthesis only`), which
-replies (`Claude claude-haiku-5-5` or `fixed lists only`) and which profile it uses, then the
-partner page URL. The demo script (section 6) assumes `profile: the demo persona`; if it says
-`your profile (profiles/user.yaml)`, a saved profile is in use. Open `http://127.0.0.1:8000` in
-Chrome, and leave the flicker warning up until the demo starts (section 6).
+replies (`Claude claude-haiku-5-5` or `fixed lists only`) and which profile it uses, then the page
+URL. The demo script (section 6) assumes `profile: the demo persona`; if it says
+`your profile (profiles/user.yaml)`, a saved profile is in use.
 
-Then the bridge (`python -m brainsync.voice_bridge`, started by the server, its log lines in the
-same terminal under `voice_bridge`):
+1. Open `http://127.0.0.1:8000` in Chrome on the Mac's built-in panel (fixed 60 Hz, ProMotion
+   off), full screen (Cmd-Ctrl-F), nothing else open. The flicker warning measures the screen
+   for a second: an orange line ("runs at 120 Hz", "frames are uneven") means fix the display
+   first; never flicker at another rate.
+2. The bridge (its log lines in the same terminal under `voice_bridge`) connects the board once,
+   about 16 s (the "Handshake verification failed" line is harmless), then sends `hello`.
+3. **I understand, start** starts a fresh session (empty conversation, the home page): a 10 s
+   still baseline, then the first page. (`README.md` phase 3 recommends 30 s for the tuned 1.5 s
+   window; with 10 s the rest spread is noisier, so live accuracy may suffer until
+   `baseline.seconds` is raised, an agreed value to settle with the teammate.)
 
-1. Connects the board once, about 16 s (the "Handshake verification failed" line is harmless).
-2. Opens the display full screen on the built-in panel and checks its refresh. A rate more than
-   1 Hz from 60 Hz stops it there (ProMotion on).
-3. Sends `hello` as soon as the refresh check passed: the partner page shows DECODER OK,
-   DISPLAY OK and BOARD OK while the display is still on its start screen.
-4. **Press Space on the display before pressing I understand, start.** Trials started before
-   Space get no onset and end as not caught; nothing flickers, and the baseline would be
-   recorded on the start screen.
-5. After **I understand, start**: a 10 s still baseline, then the first page. (`README.md`
-   phase 3 recommends 30 s for the tuned 1.5 s window; with 10 s the rest spread is noisier, so
-   live accuracy may suffer until `baseline.seconds` is raised, an agreed value to settle with
-   the teammate.)
-
-What the user's display shows: four squares in a diamond, a small fixation mark at the centre of
-each, and each option's sentence beside its square (the top square's to its right, the left
-one's above it, the right one's below it); "More options" sits beside the bottom square (NEXT).
-Only the active squares flicker, and only during a trial. The confirm screen shows the picked
-sentence at the centre, "Say it" beside the top square and "Back" beside the bottom one, and
-only those two flicker. The picked square gets a box.
+What the user's screen shows: four answer cards in a diamond, each against its own edge of the
+screen (top, left, right; More options at the bottom). Only during a trial do they flicker, each
+at its own frequency (13, 15, 17 and 11 Hz); the text stays white with a black outline. The
+confirm screen shows the picked sentence in the still centre, Say it at the top and Back at the
+bottom, and only those two flicker. Esc, Stop, or leaving the tab turns the flicker off at once;
+closing or reloading the page pauses the session (a new page flickers only after its own start
+button).
 
 Rehearsal without the headset:
 
 ```
-python -m app.server --bridge fake                     # fake EEG, the real PsychoPy display
-python -m app.server --bridge fake --bridge-headless   # fake EEG, no window: watch the mirror
+python -m app.server --bridge fake      # fake EEG; the page flickers (display.flicker: browser)
 ```
 
-The fake bridge's name starts with "fake", so the partner page shows FAKE DECODER and preflight
-warns. Its picks are a random active square per trial (a selection about 4.3 s after the onset),
+The fake bridge's name starts with "fake", so preflight and the log say fake decoder (the page
+itself shows no badge). Its picks are a random active square per trial (a selection about 4.3 s after the onset),
 so never present them as the user's choices.
 
 To run the bridge in its own terminal (to read its log apart, or restart it while the server
 keeps running), start the server without `--bridge` and then:
 
 ```
-python -m brainsync.voice_bridge            # headset + display
-python -m brainsync.voice_bridge --fake     # fake EEG, real display; --no-stimulus: no window
+python -m brainsync.voice_bridge --no-stimulus          # headset; the page draws the flicker
+python -m brainsync.voice_bridge --fake --no-stimulus   # fake EEG
+python -m brainsync.voice_bridge                        # headset + PsychoPy window (display.flicker: psychopy)
 ```
 
 A restarted bridge connects the board again (about 16 s); the server pauses meanwhile and

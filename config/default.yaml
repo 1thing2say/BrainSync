@@ -9,6 +9,8 @@ server:
 
 display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)
+  flicker: browser             # browser: the session page flickers the targets (the user's screen);
+                               # psychopy: the bridge's PsychoPy window does, the page is a still mirror
 
 stim:
   # Mirrors the teammate's stimulus config (ssvep four_diamond.toml); the bridge's hello must match.

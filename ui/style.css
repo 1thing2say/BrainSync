@@ -1,4 +1,5 @@
-/* The session page (index.html) and the profile page. Nothing here flashes: the only flicker is on the teammate's PsychoPy display.
+/* The session page (index.html) and the profile page. Only the targets flicker, driven by app.js
+   (ui/flicker_core.js, display.flicker: browser); nothing in the CSS itself animates.
    Every colour is a variable here, so a new palette only changes this block. The values are the
    shared tokens: the iPhone app's Palette uses the same hex values, so both clients match.
    Near-black, 1 px borders, colour only for status. */
@@ -110,8 +111,8 @@ a { color: var(--text); }
 .centre-text:empty, .centre-text[hidden], .state:empty { display: none; }
 /* Nothing to show: no box at all, so a phone's list has no extra gap. */
 .target-centre:not(:has(.centre-text:not(:empty):not([hidden]), .state:not(:empty))) { display: none; }
-/* A target is a card: 1 px border, steady fills only. */
-.target { width: 260px; max-width: 100%; min-height: 7.5rem; border-radius: 12px; display: flex;
+/* A target is a card: 1 px border. While it flickers, its .flicker layer does (below). */
+.target { position: relative; isolation: isolate; overflow: hidden; width: 260px; max-width: 100%; min-height: 7.5rem; border-radius: 12px; display: flex;
   flex-direction: column; justify-content: center; align-items: center; gap: 0.45rem; padding: 1rem;
   border: 1px solid var(--line); background: var(--surface); text-align: center; color: var(--text);
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
@@ -126,7 +127,14 @@ a { color: var(--text); }
 .target.next .target-text, .target.back .target-text { color: var(--next); }
 .target.say .target-text { color: var(--say); }
 .target-key { color: var(--muted); font-size: 0.7rem; }
-.target.active { background: var(--surface-hi); border-color: var(--line-strong); }
+/* Flickering: a black card under a white layer whose opacity app.js sets every frame (0 = black,
+   1 = white). The text above it is white with a black outline, so it reads on every frame, from
+   black through mid-grey to white. */
+.flicker { position: absolute; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; }
+.target > :not(.flicker) { position: relative; }
+.target.active { background: #000000; border-color: var(--line-strong); }
+.target.active > :not(.flicker) { color: #ffffff;
+  text-shadow: 0 0 2px #000000, 0 0 2px #000000, 0 0 3px #000000, 1px 1px 0 #000000, -1px -1px 0 #000000; }
 /* The one shadow on the page: a ring round the picked box. */
 .target.picked { border-color: var(--pick); box-shadow: 0 0 0 1px var(--pick), 0 0 0 5px rgba(255, 211, 77, 0.16); }
 
@@ -234,6 +242,8 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
 .card h1 { margin: 0.6rem 0 0.25rem; font-size: 1.5rem; font-weight: 600; }
 .card p { color: #d4d4d4; }  /* 13:1: long reading text, a step under the headings */
 .card button { margin-top: 0.4rem; }
+.refresh-note { color: var(--warn); font-weight: 600; }
+.refresh-note[hidden] { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }

@@ -192,6 +192,25 @@ pull requests.
   prints "BrainSync page: …"), and `ui/` is served with `Cache-Control: no-cache`, so a browser
   never runs a cached old `app.js` against a new `index.html` (that left the page stuck on
   "Connecting…").
+- **The page draws the flicker (2026-10-25, branch `feat/user-display`; Elijah's decision):** the
+  session page in Chrome is the user's screen and flickers the answer cards itself
+  (`display.flicker: browser`, the new default); the PsychoPy window stays as
+  `display.flicker: psychopy`, with the page then a still mirror. This replaces "Flicker:
+  settled" (section 13, item 1) and the System design's PsychoPy display. `ui/flicker_core.js`
+  (node-tested) computes each card's luminance like `brainsync/stimulus/flicker.py`,
+  0.5 * (1 + sin(2 pi f n / refresh + phase)), with the frame index n from the
+  requestAnimationFrame timestamp rounded to the measured frame period, so a dropped frame never
+  shifts the phase; each card is black under a white layer whose opacity follows it, the text
+  white with a black outline. The flicker warning measures the refresh and flags a rate more than
+  1 Hz off `display.expected_refresh_hz` or uneven frames. The page flickers only between the
+  server's flicker and the next phase, and only after its own start button; Esc, Stop, a lost
+  connection or a hidden tab stop it on the page at once (a hidden tab also sends Stop). The
+  server pauses when the page closes mid-session, and when a new page connects mid-session
+  ("New screen: press start"), so the decoder never picks from a still screen. `app.server
+  --bridge` runs the bridge with `--no-stimulus` then; its `stim_onset` is its own clock at
+  `stim_start` (logging only: the decoder slides over the stream). Not yet measured: the SSVEP
+  from a Chrome flicker on the headset, and Chrome's frame timing on the demo Mac. Known gap:
+  the iPhone app connecting takes over the one page connection, which pauses the session.
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a

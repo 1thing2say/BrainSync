@@ -72,7 +72,8 @@ def test_partner_page_is_served(client):
         "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
         "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
         "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
-        "app_link": ""}
+        "app_link": "", "flicker": True, "waveform": "sine", "refresh_hz": 60.0,
+        "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg} for s in BASE.stim.slots}}
 
 
 def test_a_connecting_page_gets_the_mic_state(kb_client):

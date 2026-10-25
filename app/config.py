@@ -73,6 +73,10 @@ class ServerConfig(Strict):
 
 class DisplayConfig(Strict):
     expected_refresh_hz: float = Field(gt=0)
+    # Who draws the flicker the user looks at: "browser" (the session page, ui/flicker_core.js;
+    # the bridge runs without its PsychoPy window) or "psychopy" (the bridge's display window;
+    # the page is then a still mirror).
+    flicker: Literal["browser", "psychopy"] = "browser"
 
 
 class ConfirmSlots(Strict):

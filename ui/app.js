@@ -34,6 +34,7 @@ function connect() {
   };
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = (ev) => {
+    stopFlicker();  // no server, no trial: never flicker on (INTERFACE rule 3)
     setConnected(false);
     Listener.stop("disconnected");  // the server re-sends the mic state when we are back
     if (ev.code === REPLACED) {
@@ -88,7 +89,9 @@ function renderPage(msg) {
     el.dataset.slot = s.slot;
     // The sentence is what gets spoken, so it is the big text; the short label is its tag.
     // Targets without a sentence (More options, Say it, Back) show the label big instead.
-    el.innerHTML = `<span class="target-tag"></span><span class="target-text"></span><span class="target-key"></span>`;
+    // .flicker is the white layer whose opacity the flicker loop drives (display.flicker: browser).
+    el.innerHTML = `<span class="flicker" aria-hidden="true"></span><span class="target-tag"></span>`
+      + `<span class="target-text"></span><span class="target-key"></span>`;
     const sentence = s.utterance && s.utterance.trim();
     el.querySelector(".target-tag").textContent = sentence ? s.label : "";
     el.querySelector(".target-text").textContent = sentence || s.label;
@@ -118,6 +121,8 @@ function renderPhase(next) {
   if (next === "flicker" && phase !== "flicker") startTimer();
   if (next !== "flicker") stopTimer();
   phase = next;
+  if (phase === "flicker") startFlicker();
+  else stopFlicker();
   document.querySelectorAll(".target").forEach((t) => {
     t.classList.toggle("active", phase === "flicker");
     if (phase === "cue") t.classList.remove("picked");
@@ -125,8 +130,61 @@ function renderPhase(next) {
   });
 }
 
+// --- the flicker (display.flicker: browser) ---------------------------------------------------
+// Every target on screen flickers at its slot's frequency from the server's flicker phase until
+// any other phase. Only the server starts it; Stop, Esc, a lost connection or a hidden tab stop it
+// here at once, without waiting for the server.
+
+let flickerOn = false;     // from /api/config: this page draws the flicker
+let waveform = "sine";
+let slotFreqs = {};        // slot -> {freq_hz, phase_deg}
+let expectedHz = 60;
+let refreshHz = 60;        // measured at load; frame counts use it
+let flickerFrame = null;   // the requestAnimationFrame id while flickering
+let onsetMs = 0;
+
+function startFlicker() {
+  if (!flickerOn || !accepted || document.hidden || flickerFrame !== null) return;
+  onsetMs = 0;
+  flickerFrame = requestAnimationFrame(drawFlicker);
+}
+
+function drawFlicker(ms) {
+  if (onsetMs === 0) onsetMs = ms;
+  const n = FlickerCore.frameIndex(ms - onsetMs, 1000 / refreshHz);
+  document.querySelectorAll(".target").forEach((t) => {
+    const slot = slotFreqs[t.dataset.slot];
+    const layer = t.querySelector(".flicker");
+    if (slot && layer) {
+      layer.style.opacity = FlickerCore.luminance(slot.freq_hz, slot.phase_deg, n, refreshHz, waveform);
+    }
+  });
+  flickerFrame = requestAnimationFrame(drawFlicker);
+}
+
+function stopFlicker() {
+  if (flickerFrame !== null) cancelAnimationFrame(flickerFrame);
+  flickerFrame = null;
+  document.querySelectorAll(".target .flicker").forEach((l) => { l.style.opacity = 0; });
+}
+
+// The screen's real refresh, from a second of frames at load (the warning is still up then).
+function measureRefresh() {
+  const stamps = [];
+  const step = (ms) => {
+    stamps.push(ms);
+    if (stamps.length < 90) { requestAnimationFrame(step); return; }
+    const m = FlickerCore.measure(stamps);
+    if (m) refreshHz = m.hz;
+    const problem = flickerOn ? FlickerCore.refreshProblem(m, expectedHz) : "";
+    $("refresh-note").textContent = problem;
+    $("refresh-note").hidden = !problem;
+  };
+  requestAnimationFrame(step);
+}
+
 // The selection timer: how long the user has been looking, out of stim.max_trial_s. A steady
-// fill, updated a few times a second; nothing on this page flashes.
+// fill, updated a few times a second.
 let maxTrialS = 10;  // from /api/config
 let timer = null;
 let trialStarted = 0;
@@ -290,6 +348,7 @@ $("accept").addEventListener("click", () => {
   send({ type: "resume", start: true });
 });
 $("stop").addEventListener("click", () => {
+  stopFlicker();
   if (!send({ type: "stop" })) $("state").textContent = "Not connected: press Esc on the display";
 });
 $("resume").addEventListener("click", () => {
@@ -322,6 +381,9 @@ $("mute").addEventListener("click", () => send({ type: "mic_set", muted: !mic.mu
 document.addEventListener("pointerdown", () => { if (Listener.state === "needs_tap") Listener.kick(); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    // A hidden tab draws nothing: stop the trial, so the decoder never picks from a still screen.
+    if (flickerFrame !== null) send({ type: "stop" });
+    stopFlicker();
     micState = "hidden";
     micText = "";
     renderMic();
@@ -335,7 +397,7 @@ if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", () => Listener.kick());  // lapel plugged in
 }
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") { send({ type: "stop" }); return; }
+  if (ev.key === "Escape") { stopFlicker(); send({ type: "stop" }); return; }
   if (ev.repeat || !accepted) return;
   const key = ev.key.toLowerCase();
   if (key === "c" || key === "w") judge(key);
@@ -349,6 +411,11 @@ fetch("/api/config")
     if (c.listen_window_s) listenWindow = c.listen_window_s;
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
+    flickerOn = Boolean(c.flicker);
+    if (c.waveform) waveform = c.waveform;
+    if (c.slots) slotFreqs = c.slots;
+    if (c.refresh_hz) expectedHz = refreshHz = c.refresh_hz;
+    measureRefresh();
     if (c.user_name) userName = c.user_name;
     if (c.app_link) {
       $("app-url").textContent = c.app_link;

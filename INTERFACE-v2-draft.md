@@ -14,6 +14,12 @@ teammate. The teammate's own bridge, if they build one, must pass the same
 `tools/contract_check.py`. Background: `PLAN.md` sections 12–14 and System design. Elijah's decisions of 2026-10-23
 (`PLAN.md` section 13) are already written in.
 
+**Since 2026-10-25 the flicker the user looks at is drawn by our page in Chrome**
+(`display.flicker: browser` in `config/default.yaml`, `PLAN.md` status), not by the PsychoPy
+display. The protocol is unchanged: the bridge runs with `--no-stimulus`, still gets `display`,
+`stim_start` and `stim_stop`, and answers `stim_onset` from its own clock at `stim_start`; the
+display commands of section 7 apply only with `display.flicker: psychopy`.
+
 ## Open questions for the teammate (SYNC 1)
 
 > **Claude session on the decoder side:** if you are working for the teammate (the `ssvep` repo or

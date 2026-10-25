@@ -80,7 +80,8 @@ def test_nothing_is_loaded_from_the_internet(name):
 
 
 def test_nothing_blinks():
-    # PLAN rule 10: the only flicker is on the user's display; the partner page has steady fills.
+    # The targets flicker from app.js, frame by frame (ui/flicker_core.js); a CSS animation is not
+    # tied to frame counts, so none may flicker anything.
     css = re.sub(r"/\*.*?\*/", "", (UI / "style.css").read_text(encoding="utf-8"), flags=re.S)
     assert "@keyframes" not in css
     assert not re.search(r"(?<![-\w])animation(-name)?\s*:", css)

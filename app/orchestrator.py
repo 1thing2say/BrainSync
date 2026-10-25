@@ -170,6 +170,7 @@ class Orchestrator:
         self.roles = dict(cfg.stim.roles)
         self.option_slots = [slot for slot in self.slots if self.roles[slot] == "option"]
         self.state = St.IDLE
+        self.state_detail = ""
         self.deadline: float | None = None
 
         self.trial_id = 0
@@ -351,13 +352,25 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- events: browser
 
+    def on_ui_disconnected(self) -> None:
+        """The page closed or lost its connection. When the page draws the flicker
+        (display.flicker: browser) nothing flickers any more: pause, as for a lost display, so the
+        decoder never picks from a still screen."""
+        self._record("ui_disconnected")
+        if self.cfg.display.flicker == "browser" and self.state not in (St.IDLE, St.PAUSED):
+            self._pause_session("Screen closed", "screen_closed")
+
     def on_ui_connected(self) -> None:
-        """A partner page connected: bring it up to date."""
+        """A page connected: bring it up to date."""
         self._record("ui_connected")
+        if self.cfg.display.flicker == "browser" and self.state not in (St.IDLE, St.PAUSED):
+            # A new page (one replacing the old, a reload) flickers only after its own start
+            # button: until then nothing flickers, so the session waits paused.
+            self._pause_session("New screen: press start", "screen_replaced")
         self._send_status()
         if self.shown is not None:
             self._send_ui(self.shown)
-        self._send_state()
+        self._send_state(self.state_detail)
         # A reloaded or reconnected page gets the mic state again and resumes by itself.
         if self.cfg.speech.stt_mode == "always":
             self._sync_mic(force=True, reason="reconnect")
@@ -509,6 +522,7 @@ class Orchestrator:
 
     def _enter(self, state: St, seconds: float | None, detail: str = "") -> None:
         self.state = state
+        self.state_detail = detail  # sent again to a page that connects later
         self.deadline = None if seconds is None else self.clock() + seconds
         self._send_state(detail)
         self._sync_mic()  # every way into SPEAKING or PAUSED closes the mic, every way out opens it
