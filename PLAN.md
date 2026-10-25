@@ -170,8 +170,10 @@ pull requests.
   compiled.
 - **The laptop page is the user's screen (2026-10-25, branch `feat/user-display`):** only the
   user sees it, so it lost the "Partner" label, the typed text box and the operator footer
-  (health line and its details, Correct / Wrong, keyboard hint), and the banner's pills (FAKE
-  DECODER / KEYBOARD, the trial phase). The C / W keys still mark the last reply; a fake decoder
+  (health line and its details, Correct / Wrong, keyboard hint), the banner with its pills (FAKE
+  DECODER / KEYBOARD, the trial phase) and the "Page N · …" heading. The state line now sits in the
+  diamond's still centre and says something only when the user is not picking (Waiting to start,
+  Paused — why, Didn't catch that); `ViewCore.status`. The C / W keys still mark the last reply; a fake decoder
   or keyboard mode shows in the terminal, `/api/health`, `tools/preflight.py` and the log; the iPhone app link shows only with `--tunnel` or on the LAN, and the
   iPhone app keeps its own text box. Laid out for SSVEP: each target sits against its own edge of
   the mirror (top, bottom, left, right; at most 28 % of its width) and the empty middle takes the

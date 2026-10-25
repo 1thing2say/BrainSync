@@ -48,9 +48,6 @@
 
   <main class="layout">
     <section class="mirror" aria-label="User's screen (mirror, no flicker)">
-      <header id="banner" class="banner tone-idle">
-        <span id="state" class="state" role="status" aria-live="polite">Connecting…</span>
-      </header>
       <!-- The sentence being spoken, big, while it plays. -->
       <div id="speaking" class="speaking" hidden>
         <span class="speaking-tag">Speaking</span>
@@ -62,11 +59,18 @@
         <span id="progress-text" class="progress-text"></span>
       </div>
       <div id="option" class="option">
-        <div id="option-count" class="option-count"></div>
         <div id="option-text" class="option-text"></div>
       </div>
       <ol id="list" class="option-list" hidden></ol>
-      <div id="targets" class="targets diamond"></div>
+      <!-- The targets in a diamond. Its still centre holds the confirm screen's sentence and the
+           state line, which says something only when the user is not picking (Paused, Didn't
+           catch that, …). -->
+      <div id="targets" class="targets diamond">
+        <div id="centre" class="target-centre">
+          <span id="centre-text" class="centre-text"></span>
+          <span id="state" class="state" role="status" aria-live="polite">Connecting…</span>
+        </div>
+      </div>
     </section>
 
     <aside class="panel">

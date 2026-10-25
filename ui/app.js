@@ -66,24 +66,18 @@ function handle(msg) {
 
 // Diamond positions by slot (s1 top, s2 left, s3 right, s4 bottom, as on the user's screen).
 const POSITIONS = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
-const HEADINGS = { page: "Pick a reply", confirm: "Say this?", list: "Highlighted reply" };
 
 function renderPage(msg) {
   shown = msg;
-  $("option-count").textContent = msg.mode === "list"
-    ? `Page ${msg.page} · option ${msg.highlight_index + 1} of ${msg.options.length}`
-    : `Page ${msg.page} · ${HEADINGS[msg.mode]}`;
   // The confirm screen's sentence sits in the empty centre of the diamond, between Say it (top)
   // and Back (bottom), as on the flicker display; list mode keeps it above the targets.
   $("option-text").textContent = msg.mode === "list" ? msg.text : "";
   renderList(msg);
   const targets = $("targets");
   targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
-  const centre = document.createElement("div");
-  centre.className = "target-centre";
-  centre.textContent = msg.mode === "confirm" ? msg.text : "";
-  centre.hidden = stateName === "SPEAKING";  // the Speaking box shows it then
-  targets.replaceChildren(centre, ...msg.slots.map((s) => {
+  $("centre-text").textContent = msg.mode === "confirm" ? msg.text : "";
+  $("centre-text").hidden = stateName === "SPEAKING";  // the Speaking box shows it then
+  targets.replaceChildren($("centre"), ...msg.slots.map((s) => {
     // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
     const key = s.slot.replace("s", "");
@@ -160,15 +154,15 @@ function markPicked(slot) {
 
 function renderState(msg) {
   stateName = msg.name;
-  const b = ViewCore.banner(msg.name, msg.detail, shown && shown.mode);
-  $("state").textContent = b.text;
-  $("banner").className = `banner tone-${b.tone}`;
+  const st = ViewCore.status(msg.name, msg.detail, shown && shown.mode);
+  $("state").textContent = st.text;
+  $("state").className = `state tone-${st.tone}`;
   const box = $("speaking");
   box.hidden = msg.name !== "SPEAKING";
   if (msg.name === "SPEAKING") $("speaking-text").textContent = `“${msg.detail}”`;
   // The sentence is in the Speaking box then.
   $("option").hidden = msg.name === "SPEAKING";
-  document.querySelectorAll(".target-centre").forEach((c) => { c.hidden = msg.name === "SPEAKING"; });
+  $("centre-text").hidden = msg.name === "SPEAKING";
   if (msg.name === "PAUSED" || msg.name === "IDLE") {
     Speech.cancel();
     speaking = false;  // a cancelled clip never reports its end: without this the mic stayed off
