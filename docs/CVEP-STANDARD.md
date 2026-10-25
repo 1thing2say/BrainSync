@@ -7,7 +7,8 @@ shown live under each square.
 
 Reference code: `brainsync/vep/live.py` (Python: constants, `CodeVepDecoder`, confidence
 helpers, `standard_fake_board`) and `clients/js/cvep.js` (browser: the same bits, frame
-rule, bar and label text). The PsychoPy stimulus config is `cvep_3`.
+rule, bar and label text; byte-identical copies in `clients/chrome`, `extension`,
+`web/brainchess` and `ui`). The PsychoPy stimulus config is `cvep_3`.
 
 ## 1. Stimulus
 
@@ -108,6 +109,11 @@ without `paradigm` is the old frequency bridge): hello `paradigm: "code"` with s
 `lag_frames`; server → bridge `train` instead of `baseline`; bridge → server `train_progress`,
 `trained` and a per-decision `decision`; selection scores are correlations. They need the
 teammate's agreement before the teammate's own bridge speaks them; our bridge already does.
+When the session page draws the code (`display.flicker: browser`, the default), the page sends
+`cycle {phase, trial_id, n, t_client}` and `clock {t_client, refresh_hz}` over `/ws/ui`, and the
+server maps the page time onto its clock and relays `cycle {train_id or trial_id, n, t_unix}`
+to the headless bridge, which decodes on it (section 9.7). `display.flicker: psychopy` keeps
+the PsychoPy window, whose own `cycle:<n>` markers the bridge reads instead.
 
 ## 5. Mapping each app onto three targets
 

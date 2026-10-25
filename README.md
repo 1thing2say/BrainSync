@@ -127,7 +127,7 @@ then shown against 33 % chance), and **live confidence** under each square after
 | BrainChess | group A / group B / Back | `python -m brainsync.brainchess --fake --fast --no-stimulus` |
 | Server + reference page | YES / NO / HELP | `python -m brainsync.server --board fake --no-auth` (open the printed URL) |
 | BrainPoint (Chrome, Desktop) | best / second / More | the server above, then load `clients/chrome` or build `clients/macos` |
-| BCI Voice | option 1 / option 2 / More options | `python -m app.server --fake-decoder`; headset: `python -m app.server --bridge cerelog` |
+| BCI Voice | option 1 / option 2 / More options | `python -m app.server --fake-decoder`; headset: `python -m app.server --bridge cerelog` (the Chrome session page draws the code; `display.flicker: psychopy` for the PsychoPy window) |
 
 Drop `--fake` (and `--fast`, `--no-stimulus`) for the Cerelog X8. `--template FILE` /
 `--save-template FILE` reuse a template for the same wearer and fit. **`--paradigm freq`**

@@ -314,6 +314,13 @@ pull requests.
   (Chrome and Desktop) and the demos keep `--paradigm freq`. Synthetic board only so far; at
   margin 0 the decoder never abstains (false actions while reading or watching), to tune on
   headset data.
+- **The session page draws the c-VEP code (2026-10-25, branch `cvep3/voice-page`):** with
+  `display.flicker: browser`, now the default for code mode, the session page draws the three
+  squares from `ui/cvep.js` and reports each cycle's first flip; the server relays it as
+  `cycle {train_id|trial_id, n, t_unix}` (INTERFACE-v2-draft 9.7) to the headless bridge, which
+  decodes on it, so `--bridge cerelog` runs without a PsychoPy window. A page measuring a
+  refresh more than 1 Hz from 60 Hz cannot start. `psychopy` remains available. Chrome flip
+  jitter against the board on the demo Mac is not measured yet.
 
 ## System design
 
