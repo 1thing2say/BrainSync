@@ -65,7 +65,7 @@ def test_fake_single_target_saves_trials_file(tmp_path: Path,
     assert rec.kind == "trials"
     np.testing.assert_allclose(rec.freqs, [15.0])
     assert len(cut_windows(rec)) == 3
-    assert "python -m brainsync." in out
+    assert record.score_command(files[0], 1) in out          # "python.exe -m" on Windows
 
 
 def test_trials_round_up_to_whole_blocks(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -328,8 +328,17 @@ def test_score_command_uses_this_interpreter(tmp_path: Path, capsys: pytest.Capt
     assert code == 0
     path = list_recordings(directory=tmp_path)[0]
     assert f"score it with: {sys.executable} -m brainsync.score_cued {path}" in out
-    assert record.score_command(Path("/a b/x.npz"), 1, python="/v/bin/python") == \
-        "/v/bin/python -m brainsync.select_freqs '/a b/x.npz'"
+
+def test_score_command_quotes_for_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = Path("/a b/x.npz")
+    monkeypatch.setattr(record.sys, "platform", "darwin")
+    assert record.score_command(path, 1, python="/v/bin/python") == \
+        f"/v/bin/python -m brainsync.select_freqs '{path}'"
+    monkeypatch.setattr(record.sys, "platform", "win32")    # PowerShell: double quotes
+    assert record.score_command(path, 2, python=r"C:\v\python.exe") == \
+        rf'C:\v\python.exe -m brainsync.score_cued "{path}"'
+    assert record.score_command(path, 2, python=r"C:\Jo Doe\python.exe") == \
+        rf'& "C:\Jo Doe\python.exe" -m brainsync.score_cued "{path}"'   # call operator
 
 
 @pytest.mark.skipif(sys.platform == "win32" or __import__("os").geteuid() == 0,

@@ -7,6 +7,7 @@ dist/
 
 # Environments and secrets (ANTHROPIC_API_KEY lives in the environment, never in the repo)
 .venv/
+.venv-win/
 venv/
 .env
 .env.*

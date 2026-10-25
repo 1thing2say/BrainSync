@@ -50,6 +50,8 @@ KEY_NAME = "CARTESIA_API_KEY"
 # players that take a WAV file and block until it has played, in order of preference
 PLAYERS = (("afplay",), ("paplay",), ("aplay", "-q"),
            ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"))
+# Windows has none of those; PowerShell's SoundPlayer plays a WAV and blocks the same way
+WINDOWS_PLAYER = ("powershell", "-NoProfile", "-NonInteractive", "-Command")
 
 Post = Callable[[dict, dict], bytes]
 Play = Callable[[Path], None]
@@ -100,6 +102,11 @@ def player_command(path: Path, which: Callable[[str], str | None] = shutil.which
     for cmd in PLAYERS:
         if which(cmd[0]):
             return [*cmd, str(path)]
+    if sys.platform == "win32" and which(WINDOWS_PLAYER[0]):
+        # a PowerShell single-quoted string: doubling a quote escapes it, and PowerShell
+        # also ends the string at the typographic single quotes U+2018 to U+201B
+        quoted = "".join(c * 2 if c in "'‘’‚‛" else c for c in str(path))
+        return [*WINDOWS_PLAYER, f"(New-Object Media.SoundPlayer '{quoted}').PlaySync()"]
     return None
 
 
@@ -284,7 +291,8 @@ class CartesiaSpeaker:
             return
         cmd = player_command(path)
         if cmd is None:
-            self._note_once("no audio player found (afplay, paplay, aplay or ffplay); "
+            self._note_once("no audio player found (afplay, paplay, aplay, ffplay or "
+                            "PowerShell); "
                             "prompts are printed only")
             return
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
