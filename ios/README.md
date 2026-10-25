@@ -1,4 +1,61 @@
-# BCI Voice partner app (iOS)
+# BrainSync on the iPhone (iOS)
+
+A suite of small apps driven by c-VEP, plus Voice, the BCI Voice partner app.
+
+- **Home, Camera, Reels** (the suite): the iPhone is the screen the user looks at. It draws
+  three white squares showing the c-VEP code (`docs/CVEP-STANDARD.md`), and `brainsync.server`
+  (`PROTOCOL-v3.md`, code mode) reads the headset and says which square the user looked at.
+  Each app gives the three squares its own meaning. See "The c-VEP suite" below.
+- **Voice**: the partner app below, unchanged; it talks to `app.server` instead.
+
+## The c-VEP suite
+
+| App | Left (t0) | Middle (t1) | Right (t2) |
+| --- | --- | --- | --- |
+| Home | Camera | Reels | Voice |
+| Camera, viewfinder | Shutter | Flip camera | Gallery |
+| Camera, gallery | Next photo | Back to camera | Delete (then Delete / Keep) |
+| Reels | Up | Like / pause (a paused reel: Play) | Down |
+
+In Reels the squares are stacked on the right (Up on top). Home (top left) goes back by touch.
+
+1. Start the headset server on the Mac or the Jetson: `python -m brainsync.server` (Cerelog
+   X8; c-VEP is the default), or `python -m brainsync.server --board fake --no-auth` to try it
+   without a headset (the Simulator reaches it at `http://127.0.0.1:8765/`). It prints a link,
+   `http://…:8765/#token=…`; the Jetson's tunnel link is in `~/brainsync-link.txt`.
+2. In the app, paste that link on Home and press Pair (or open a `brainsync://v3?url=…&token=…`
+   link). A link to another server asks before it replaces the saved one.
+3. Read the flicker warning and press **I understand, start**. The app asks for the camera now,
+   so no permission prompt interrupts the flicker later, checks for 2.5 s that the screen runs
+   at 60 Hz (the code shows one bit a frame; Low Power Mode or a hot phone can lower it), then
+   connects.
+4. Training: the left square has a blue box; look at it for about 32 s (30 code cycles). The
+   status line shows `training: keep looking at …`, then `template ready: 83 % on held-out
+   cycles (chance 33 %)`. The server keeps the template for 10 minutes, across apps.
+5. Look at a square to pick it. Under each square: its confidence bar and score, `<` on the
+   decoder's current best; the status line shows `lead … choice: …`. A pick rings the square
+   yellow.
+
+- **Stop** (top right) turns the flicker off at once and pauses the server; **Resume** brings it
+  back (after a pause of 2 minutes or more the server trains again). Leaving the app, a lost
+  connection, Voice and the Settings sheet also stop the flicker.
+- A look still held on a square right after it opened an app does not count in the new app
+  (2.5 s), so opening Camera never takes a photo by itself.
+- With `--board fake`, tapping a square points the fake EEG at it (a dashed ring), so the whole
+  loop can be tried by touch. With a headset, taps on the squares do nothing.
+- Settings (Home): forget the server, dim the reel while choosing (on: moving pictures next to
+  the squares weaken the response), copy photos to Photos, and the **Flicker lab** (three squares
+  with the measured refresh, late frames and cycle times, to check a phone's timing).
+- Photos stay in the app (Application Support/Photos) unless the Photos copy is on.
+- Simulator smoke run without taps (DEBUG builds; `SuiteDebugLaunch.swift`):
+  `xcrun simctl launch booted org.calhacks.brainsync.partner -debugSuiteLink
+  http://127.0.0.1:8765/ -debugSuiteAccept YES -debugSuiteApp reels -debugSuiteGaze t2`
+  trains on the fake board, then scrolls Reels down every few seconds while the gaze holds.
+
+Not yet done: a run with the headset on the phone (the c-VEP response to a phone-sized square,
+and iOS frame timing on a device, are unmeasured).
+
+## Voice: the BCI Voice partner app
 
 A native iPhone app that replaces the partner page in Safari. It connects to the BrainSync
 server's `/ws/ui` socket like the web page does (`PLAN.md` section 6) and does the same jobs: it
@@ -11,10 +68,15 @@ cancellation while listening, no tab to keep visible, and the screen stays awake
 ```
 ios/
   BrainSyncPartner.xcodeproj   the app project (Xcode 16+)
-  BrainSyncPartner/            app sources (SwiftUI) and Assets.xcassets
-  BrainSyncPartner-Info.plist  mic / speech / local network texts, the brainsync:// scheme
-  BrainSyncKit/                Swift package: links, messages, the socket, ListenCore and the
-                               setup order (tested)
+  BrainSyncPartner/            app sources (SwiftUI) and Assets.xcassets; the suite is
+                               SuiteModel / SuiteViews, CodeFlicker (the 60 Hz squares),
+                               Camera*, PhotoStore, Reel*
+  BrainSyncPartner-Info.plist  camera / photos / mic / speech / local network texts, the
+                               brainsync:// scheme
+  BrainSyncKit/                Swift package: links, messages, the sockets (V3Connection for
+                               brainsync.server, UIConnection for app.server), CodeVep and
+                               FrameClock (the c-VEP code and frame timing), the suite's app
+                               cores, ListenCore and the setup order (tested)
 ```
 
 ## Requirements
@@ -156,4 +218,10 @@ The project is hand-written for Xcode 16 (folder-synchronized groups). If Xcode 
 
 The package builds on macOS and on Linux (`swift test` in `ios/BrainSyncKit`). Its tests decode
 `Tests/BrainSyncKitTests/Fixtures/ui_messages.json`, every message the server sends and accepts,
-written from `app/schemas.py`, so a change on the server side shows up there.
+written from `app/schemas.py`, so a change on the server side shows up there. The same holds for
+the suite: `v3_messages.json` comes from `brainsync/server/protocol.py`
+(`python tools/ios_v3_fixture.py`, checked by `tests/test_ios_v3_fixture.py`) and
+`cvep_frames.json` from `brainsync.vep.live` and `clients/js/cvep.js`
+(`python tools/ios_cvep_fixture.py`, needs `node`). Each tool's `--check` exits 1 when its
+fixture is stale. With a server running, `BRAINSYNC_V3_LINK=http://127.0.0.1:8765/ swift test
+--filter V3LiveServerTests` checks the real socket end to end.

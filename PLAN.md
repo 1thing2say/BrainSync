@@ -285,6 +285,18 @@ pull requests.
     checklist), `INTERFACE-v2-draft.md` (our bridge's answer under each open question), the
     README's BCI Voice section and honest claim, and `docs/DEVPOST.md` (the write-up draft).
 
+- **iPhone c-VEP suite (2026-10-25, branch `feat/ios-cvep-wt`):** the iOS app is now a suite:
+  Home, Camera and Reels driven by c-VEP, plus Voice (the partner app, unchanged). The phone is
+  the screen the user looks at and a PROTOCOL-v3 slots-mode controller of `brainsync.server`
+  (code mode, merged here from `cvep3/server`): three squares `t0`/`t1`/`t2` at lags 0/21/42
+  drawn by one 60 Hz `CADisplayLink` (`CodeFlicker.swift`), `cycle` times sent from each
+  cycle's flip, training once on t0 for all apps. Home: Camera / Reels / Voice; Camera:
+  Shutter / Flip / Gallery (real photos, a generated scene in the Simulator); Reels: Up /
+  Like-pause / Down over a generated feed (ported from the `cvep3/reels` mock). BrainSyncKit
+  holds the v3 client, `CodeVep` / `FrameClock` and the app cores, tested against fixtures from
+  the Python server and `clients/js/cvep.js`. Checked in the iOS Simulator against `--board
+  fake` (pair, train, Home → Reels, Reels down twice, two photos). Not yet run on a device or
+  with the headset; the response to a phone-sized square is unmeasured. `ios/README.md`.
 - **EOG gaze prior (2026-10-25, branch `electrode-downloads`):** the C3/C4 pins never reach
   the scalp, so their leads go to gel pads at the left and right outer canthus (channels `LO`,
   `RO`; montage `EOG_MONTAGE` in `brainsync/recordings.py`). REF stays on the mastoid and DRL

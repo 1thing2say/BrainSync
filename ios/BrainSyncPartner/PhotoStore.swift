@@ -86,7 +86,9 @@ final class PhotoStore {
         photos.append(url)
         photos.sort { $0.lastPathComponent < $1.lastPathComponent }
         if savesToPhotoLibrary {
-            await addToLibrary { request in request.addResource(with: .photo, data: data, options: nil) }
+            // In the background: the index is final now, and a permission prompt must not hold
+            // the caller (the camera counts the photo as soon as it is on disk).
+            Task { await addToLibrary { request in request.addResource(with: .photo, data: data, options: nil) } }
         }
         return photos.firstIndex(of: url)
     }
