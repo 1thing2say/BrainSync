@@ -7,6 +7,7 @@ stores them column by column (9.25, 11.25, 13.25, 9.75, ...). ``load`` returns t
 ascending frequency order.
 
     python -m brainsync.nakanishi --windows 1 2 4
+    python -m brainsync.nakanishi --windows 0.5 1 --methods cca etrca etrca-sf mscca   # trained, held out
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import paths
-from .classify import NAMES, TRAINED, make
+from .classify import NAMES, SPATIAL_FILTERS, TRAINED, make
 from .metrics import accuracy
 from .signal import Band, default_bands, preprocess
 from .templates import cross_val_predict
@@ -118,15 +119,16 @@ def subject_accuracy(ds: Dataset, method: str, window_s: float, harmonics: int =
                      template: str = "harmonic") -> float:
     """Accuracy over all of a subject's trials.
 
-    Training-free classifiers score every trial directly. Trained ones (``classify.TRAINED``)
+    Training-free classifiers score every trial directly. Trained ones (the template
+    classifiers ``classify.TRAINED`` and the spatial filters ``classify.SPATIAL_FILTERS``)
     use the paper's leave-one-block-out: each block is scored by a classifier fitted on the
     other blocks, or on ``train_blocks`` of them chosen in order when that is given (to see
     how little calibration data is enough). ``bands`` turns on the filter bank for FBCCA
-    and the trained classifiers.
+    and the template classifiers (the spatial filters have none).
     """
     X = epochs(ds, window_s)
     kw = dict(freqs=ds.freqs, fs=ds.fs, harmonics=harmonics, phases=ds.phases)
-    if bands is not None and method != "cca":
+    if bands is not None and method != "cca" and method not in SPATIAL_FILTERS:
         kw["bands"] = list(bands)
     if method in TRAINED:
         kw["template"] = template
@@ -148,7 +150,11 @@ def subject_accuracy(ds: Dataset, method: str, window_s: float, harmonics: int =
             fold.fit(X[train], ds.y[train], ds.latency)
             pred[test] = fold.predict(X[test], ds.latency)
         return accuracy(ds.y, pred)
-    return accuracy(ds.y, cross_val_predict(factory, X, ds.y, blocks, ds.latency).pred)
+    try:
+        cv = cross_val_predict(factory, X, ds.y, blocks, ds.latency)
+    except ValueError as exc:
+        raise ValueError(f"{method} held out by block ({ds.n_blocks} blocks): {exc}") from None
+    return accuracy(ds.y, cv.pred)
 
 
 def accuracy_table(subjects: Sequence[int], windows: Sequence[float],
@@ -186,11 +192,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="window lengths in seconds (default 1 2 4)")
     ap.add_argument("--subjects", type=int, nargs="+", default=list(range(1, N_SUBJECTS + 1)))
     ap.add_argument("--methods", nargs="+", default=["cca", "fbcca"], choices=list(NAMES),
-                    help="training-free (cca, fbcca) or trained, scored leave-one-block-out "
-                         "(itcca, ecca, trca, etrca, etrcar)")
+                    help="training-free (cca, fbcca) or trained, scored leave-one-block-out: "
+                         "template classifiers (itcca, ecca, trca, etrca, etrcar, sfcca) and "
+                         "spatial filters (trca-sf, trca-r-sf, etrca-sf, etrca-r-sf, mscca)")
     ap.add_argument("--harmonics", type=int, default=3)
     ap.add_argument("--fb-bands", metavar="N:UPPER",
-                    help="filter bank for fbcca and the trained methods: N sub-bands (8m Hz "
+                    help="filter bank for fbcca and the template classifiers: N sub-bands (8m Hz "
                          "to UPPER Hz); default: none for the trained methods")
     ap.add_argument("--template", choices=("harmonic", "raw"), default="harmonic",
                     help="trained methods: harmonic-projected templates (usable at any window "

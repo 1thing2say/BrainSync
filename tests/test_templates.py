@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from brainsync.classify import ABSTAIN, CCA, NAMES, TRAINED, make, references
+from brainsync.classify import ABSTAIN, CCA, NAMES, SPATIAL_FILTERS, TRAINED, make, references
 from brainsync.metrics import accuracy
 from brainsync.signal import default_bands, preprocess
 from brainsync.synthetic import rest_trials, ssvep_trials
@@ -92,7 +92,7 @@ def test_sfcca_is_phase_free(task) -> None:
 
 
 def test_registry_and_flags() -> None:
-    assert set(NAMES) == {"cca", "fbcca", *TRAINED}
+    assert set(NAMES) == {"cca", "fbcca", *TRAINED, *SPATIAL_FILTERS}   # + classify.Trained's
     for cls in CLASSES:
         assert cls.name in TRAINED and cls.needs_fit
         assert cls.uses_offset == (cls is not SFCCA)
