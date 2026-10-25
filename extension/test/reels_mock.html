@@ -31,12 +31,15 @@
   .reel .bar { position: absolute; left: 0; width: 100%; height: 6vh; top: 0;
                background: rgba(255,255,255,0.18); animation: sweep 2.4s linear infinite; }
   .reel .caption { position: absolute; left: 16px; bottom: 20px; color: #fff; font-size: 15px; }
+  .reel.paused .bar { animation-play-state: paused; }
+  .reel.paused .num::after { content: " (paused)"; font-size: 5vh; }
   @keyframes sweep { from { transform: translateY(-6vh); } to { transform: translateY(100vh); } }
 </style>
 </head>
 <body>
 <div id="feed" aria-label="Reels"></div>
 <script src="../flicker.js"></script>
+<script src="../cvep.js"></script>
 <script src="../scroller.js"></script>
 <script src="../overlay.js"></script>
 <script>
@@ -103,7 +106,15 @@
       const r = await BrainScrollScroller.scroll(dir);
       return { ok: r.ok, method: r.method };
     };
-    window.brainScroll = BrainScrollOverlay.create({ transport, scroller, agent: "page" });
+    // The mock's videos have nothing loaded, so play() would refuse: pause / play stops
+    // and restarts the reel's sweeping bar instead.
+    const toggler = async () => {
+      const reel = feed.children[currentReel() - 1];
+      if (!reel) return { ok: false, playing: null, method: "none" };
+      const paused = reel.classList.toggle("paused");
+      return { ok: true, playing: !paused, method: "video" };
+    };
+    window.brainScroll = BrainScrollOverlay.create({ transport, scroller, toggler, agent: "page" });
     transport.connect();
   })();
 </script>

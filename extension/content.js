@@ -2,7 +2,8 @@
  * BrainScroll content script: the Instagram glue between the overlay, the Reels feed and
  * the service worker.
  *
- * Loaded on https://www.instagram.com/* after flicker.js, scroller.js and overlay.js. The
+ * Loaded on https://www.instagram.com/* after flicker.js, cvep.js, scroller.js and
+ * overlay.js. The
  * overlay starts once the page is on /reels/ or /reel/<id> and stays until Escape or a
  * reload. Instagram is a single-page app, so the path is checked once a second: while it
  * is anywhere else (Home, Messages, a profile) the squares are hidden and scrolls are
@@ -18,6 +19,9 @@
  * (the first reel, for up), the worker presses ArrowUp / ArrowDown as a trusted key
  * through chrome.debugger and the ack says method "debugger"; if even that cannot be
  * sent, ok false and method "none".
+ *
+ * Toggler (the c-VEP middle square): BrainScrollScroller.togglePlay pauses or plays the
+ * most visible reel video; no debugger fallback.
  */
 (function () {
   "use strict";
@@ -136,6 +140,7 @@
     if (!onReels) return;
     const transport = portTransport();
     overlay = globalThis.BrainScrollOverlay.create({ transport, scroller: makeScroller(transport),
+                                                     toggler: () => S.togglePlay(),
                                                      agent: "extension" });
     transport.connect();
   }

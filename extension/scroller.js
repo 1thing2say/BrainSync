@@ -2,6 +2,7 @@
  * BrainScroll scroller: find the Reels feed's scroll container and move one reel.
  *
  *     await BrainScrollScroller.scroll("down")   // -> {ok, method, edge}
+ *     await BrainScrollScroller.togglePlay()      // -> {ok, playing, method}
  *     BrainScrollScroller.find()                  // -> {el, method} or null
  *
  * Shared by the content script on instagram.com and by test/reels_mock.html. Candidates
@@ -23,6 +24,10 @@
  * is tried and the result carries edge: true, so the content script does not fall back to
  * a debugger key press that cannot help. With no video below yet (Instagram loads reels
  * as you go) it scrolls one clientHeight, which makes Instagram load the next one.
+ *
+ * togglePlay() pauses the most visible <video>, or plays it when paused: the c-VEP
+ * layout's middle square. It calls the element's own pause() / play(), the same as
+ * clicking the reel, and touches nothing else on the page.
  */
 (function (root) {
   "use strict";
@@ -170,8 +175,32 @@
     return { ok, method: target.method, edge: false };
   }
 
+  /**
+   * Pause or play the reel showing: the most visible <video>. Resolves {ok, playing,
+   * method}: method "video" when there was one (ok false if play() was refused, for
+   * example a video with nothing loaded), "none" when no video is on screen.
+   */
+  async function togglePlay(opts) {
+    opts = opts || {};
+    const doc = opts.doc || root.document;
+    const win = opts.win || doc.defaultView || root;
+    const video = mostVisibleVideo(doc, win);
+    if (!video) return { ok: false, playing: null, method: "none" };
+    if (video.paused) {
+      try {
+        await video.play();
+      } catch (e) {
+        return { ok: false, playing: false, method: "video" };
+      }
+      return { ok: !video.paused, playing: !video.paused, method: "video" };
+    }
+    video.pause();
+    return { ok: video.paused, playing: !video.paused, method: "video" };
+  }
+
   const api = Object.freeze({ VERIFY_MS, candidates, find, mostVisibleVideo, snapshot, moved,
-                              neighbour, waitMoved, atEdge, visibleArea, delay, scroll });
+                              neighbour, waitMoved, atEdge, visibleArea, delay, scroll,
+                              togglePlay });
   root.BrainScrollScroller = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

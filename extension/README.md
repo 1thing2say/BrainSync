@@ -1,14 +1,23 @@
 # BrainScroll
 
-A Chrome extension (Manifest V3) that scrolls Instagram Reels with SSVEP. It draws two
-flickering squares to the right of the reel: the top one, "up", at 15 Hz goes to the
-previous reel, the bottom one, "down", at 17 Hz goes to the next. The BrainSync decoder
-(`brainsync.online.Decoder`, see the main README) decides which square you are looking
-at and drives the extension over a WebSocket on `ws://127.0.0.1:8765`.
+A Chrome extension (Manifest V3) that scrolls Instagram Reels with the BrainSync c-VEP
+standard (`docs/CVEP-STANDARD.md`). It draws three white squares on black, stacked to the
+right of the reel: the top one, UP, goes to the previous reel; the middle one, PAUSE,
+pauses or plays the reel showing; the bottom one, DOWN, goes to the next. All three show
+one 63-bit m-sequence, each 21 frames (350 ms) behind the one above. The BrainSync decoder
+(`python -m brainsync.reels`, `brainsync.vep.live.CodeVepDecoder`) trains on your own EEG
+for about 32 s, then decides which square you are looking at and drives the extension
+over a WebSocket on `ws://127.0.0.1:8765`. Under each square the overlay writes its label,
+a confidence bar and the decoder's score.
+
+`python -m brainsync.reels --paradigm freq` runs the older f-VEP pair instead: two grey
+squares, "up" at 15 Hz and "down" at 17 Hz, decoded by `brainsync.online.Decoder` after a
+rest baseline. The extension draws whichever the server's config asks for.
 
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
-> trigger a seizure in people with photosensitive epilepsy. Both squares (15 and 17 Hz)
-> lie inside it. Ask about epilepsy before every session. Stop at once if anyone feels
+> trigger a seizure in people with photosensitive epilepsy. The coded squares change up to
+> 60 times a second, which covers that band, and both f-VEP squares (15 and 17 Hz) lie
+> inside it. Ask about epilepsy before every session. Stop at once if anyone feels
 > unwell. The overlay shows this warning before anything flickers and draws nothing
 > until you press Start. Escape stops it at any time.
 
@@ -31,10 +40,15 @@ the Instagram tab.
    the overlay takes the window height as the screen height.
 3. Open <https://www.instagram.com/reels/>. The warning appears once the page is on
    `/reels/` (or `/reel/<id>`). Read it, ask about epilepsy, press Start.
-4. Start the Python side (the bridge in `brainsync/reels.py`; see its `--help`). It sends
-   the config, calibrates the rest baseline while you watch the reel with the squares
-   flickering (or held still with `--calibrate-on still`), then decodes and sends a
-   scroll each time the decoder commits a target.
+4. Start the Python side (`python -m brainsync.reels`; see its `--help`). It sends the
+   config, then trains: the squares flicker with a white box around the top one and the
+   banner says "training: keep looking at UP   cycle 12/30". Keep looking at the top
+   square for the 30 cycles (about 32 s). The banner then shows the template's accuracy on
+   held-out cycles against chance (33 %), and decoding starts: every cycle (1.05 s) the
+   labels under the squares show each one's confidence, the banner the lead and the
+   choice, and each commit scrolls up, scrolls down or pauses / plays the reel. With
+   `--paradigm freq` it calibrates a rest baseline instead (squares flickering while you
+   watch the reel, or held still with `--calibrate-on still`) and then scrolls.
 5. Press Escape to stop: the flicker stops, the squares go away, and the server is told
    (`bye`) and ends the run. Reload the page to start again.
 
@@ -64,12 +78,26 @@ To use another address: in the service worker console (chrome://extensions > Bra
 | File | Role |
 |---|---|
 | `manifest.json` | MV3 manifest |
-| `flicker.js` | Exact port of `brainsync/stimulus/flicker.py` `luminance()` |
-| `scroller.js` | Finds the Reels scroll container and moves one reel, verified |
-| `overlay.js` | Canvas squares and cue box, vsync frame counter, refresh meter, HUD, warning, protocol state machine |
+| `flicker.js` | Exact port of `brainsync/stimulus/flicker.py` `luminance()` (f-VEP) |
+| `cvep.js` | Byte-for-byte copy of `clients/js/cvep.js`: the standard's bits, frame rule, bar and label text |
+| `scroller.js` | Finds the Reels scroll container and moves one reel, verified; pauses or plays the most visible video |
+| `overlay.js` | Canvas squares and cue box, vsync frame counter, cycle reports, refresh meter, label lines, HUD, warning, protocol state machine |
 | `content.js` | Instagram glue: port transport to the worker, debugger fallback for scrolling |
 | `background.js` | Service worker: one WebSocket per Instagram tab; trusted key presses |
 | `test/` | Mock Reels page, node tests, the flicker fixture and its generator |
+
+In code mode frame n of target k is white when `bits[(n - lag_k) mod 63]` is 1 and black
+when 0, one bit per frame; still squares are white. On every cycle's first frame
+(n mod 63 == 0) the overlay sends `{"type": "cycle", "n": <cycle>, "t": <Unix s>}`, the
+rAF timestamp of that frame on the wall clock (`Date.now() - performance.now()`, the max
+over the last 64 frames, not `performance.timeOrigin`, which drifts after the Mac
+sleeps). If that frame was dropped, the cycle is reported at its place on the vsync grid
+when the overlay is at most 2 frames past it, and skipped after a longer stall. The
+decoder cuts its epochs at these times on the board's clock; a constant offset (the flip
+lands a frame after the rAF timestamp) is learnt into the template. A second tab showing
+the squares sends its own cycles, which the server ignores while it follows the first.
+Cycles must be within 5 s of the board's newest sample, so the browser and Python must
+run on the same machine.
 
 Flicker timing follows the PsychoPy stimulus: luminance depends on the frame index, never
 on wall-clock time. The frame index is the vsync count since flicker onset,
@@ -82,6 +110,12 @@ instagram.com, so 60 Hz intervals are 16.6 or 16.7 ms and their median reads 59.
 While the measured refresh is more than the tolerance off, the squares are held still. Frames whose rAF
 interval exceeds 1.5 periods count as dropped, and every 5 s of flicker the overlay
 reports the refresh and drop count to the server.
+
+The c-VEP squares are 0.2 screen heights at x = 0.58, y = +0.3, 0 and -0.3, right of a
+9:16 video (which spans x = +/-0.28). Each label line sits under its square's cue box, in
+the 0.1 between squares. Pause / play calls the most visible `<video>`'s own `pause()` or
+`play()` and acks `{"type": "toggled", "id", "ok", "playing", "method": "video"}`; the
+decoder fires it once per look (dwelling does not toggle it back and forth).
 
 The cue box is a white outline 0.006 screen heights thick, 0.03 outside the square, or
 closer where the screen edge leaves less room. With the reels layout (squares 0.3 high
@@ -123,8 +157,9 @@ script's port (`port.sender.tab.id`). The WebSocket to 127.0.0.1 needs no permis
 
 `test/reels_mock.html` is a stand-in for desktop Reels that needs no login: a centred 9:16
 column of 20 coloured reels that snaps one per screen, each with a `<video>` element. It
-loads `flicker.js`, `scroller.js` and `overlay.js` directly and talks to the bridge over
-its own WebSocket (agent `page`, no debugger fallback).
+loads `flicker.js`, `cvep.js`, `scroller.js` and `overlay.js` directly and talks to the
+bridge over its own WebSocket (agent `page`, no debugger fallback). Its videos have
+nothing loaded, so pause / play stops and restarts the reel's sweeping bar instead.
 
 ```bash
 .venv/bin/python -m http.server -d extension 8000
@@ -143,6 +178,11 @@ node --test extension/test/*.test.mjs                 # flicker port + overlay/s
 ```
 
 Node 24 reads `--test` arguments as globs, so pass the files, not the folder.
+`cvep.test.mjs` covers code mode: the config, the per-frame bits against `cvep.js`, the
+cycle reports and their times, training and confidence lines, pause / play, and that the
+squares and labels fit beside the video. `tests/test_extension.py` also checks that
+`cvep.js` is still the same bytes as `clients/js/cvep.js` and that the overlay's built-in
+c-VEP layout matches the `reels_cvep` config.
 `flicker.test.mjs` checks `flicker.js` against values computed by
 `brainsync.stimulus.flicker.luminance` (15, 17 and 12 Hz, phases 0 and pi/2, frames
 0..240, sine and square, modulation depths 1 and 0.5) to within 1e-9. `tests/test_extension.py` rebuilds that fixture

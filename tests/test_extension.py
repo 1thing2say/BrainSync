@@ -59,7 +59,7 @@ def test_make_fixture_check_flag(capsys, tmp_path):
 @needs_node
 def test_node_unit_tests_pass():
     tests = sorted(str(p.relative_to(ROOT)) for p in TEST_DIR.glob("*.test.mjs"))
-    assert len(tests) >= 3   # flicker, overlay, background
+    assert len(tests) >= 4   # flicker, overlay, background, cvep
     # Node 24 reads --test arguments as globs, so a bare directory does not work: list files.
     proc = subprocess.run([NODE, "--test", *tests], cwd=ROOT, capture_output=True, text=True,
                           timeout=120)
@@ -83,8 +83,8 @@ def test_manifest_is_mv3_and_references_files_that_exist():
     [cs] = m["content_scripts"]
     assert cs["matches"] == ["https://www.instagram.com/*"]
     assert cs["run_at"] == "document_idle"
-    # flicker and scroller before the overlay that uses them, the glue last
-    assert cs["js"] == ["flicker.js", "scroller.js", "overlay.js", "content.js"]
+    # flicker, the c-VEP code and scroller before the overlay that uses them, the glue last
+    assert cs["js"] == ["flicker.js", "cvep.js", "scroller.js", "overlay.js", "content.js"]
     for name in cs["js"]:
         assert (EXT / name).is_file(), name
     assert set(m["permissions"]) <= {"debugger", "tabs", "storage"}
@@ -102,7 +102,7 @@ def test_mock_page_references_files_that_exist():
     page = TEST_DIR / "reels_mock.html"
     html = page.read_text()
     srcs = re.findall(r'<script src="([^"]+)"', html)
-    assert srcs == ["../flicker.js", "../scroller.js", "../overlay.js"]
+    assert srcs == ["../flicker.js", "../cvep.js", "../scroller.js", "../overlay.js"]
     for src in srcs:
         assert (page.parent / src).resolve().is_file(), src
     # the container heuristic needs a snapping scroll column with a <video> per reel
@@ -121,3 +121,28 @@ def test_extension_defaults_match_the_shared_protocol():
                     'label: "down", freq: 17.0, phase: 0.0, x: 0.55, y: -0.325, size: 0.3',
                     "refresh_hz: 60.0", "refresh_tolerance_hz: 1.0"):
         assert snippet in overlay, snippet
+
+
+def test_cvep_js_is_the_shared_renderer():
+    # the extension keeps its own copy (content scripts load files from the extension folder)
+    assert (EXT / "cvep.js").read_bytes() == (ROOT / "clients" / "js" / "cvep.js").read_bytes(), \
+        "copy clients/js/cvep.js to extension/cvep.js"
+
+
+@needs_node
+def test_overlay_code_layout_matches_the_reels_cvep_config():
+    from brainsync.bridge import config_message
+    from brainsync.stimulus import load_config
+
+    script = ("const O = require('./extension/overlay.js');"
+              "console.log(JSON.stringify(O.CODE_CONFIG));")
+    proc = subprocess.run([NODE, "-e", script], cwd=ROOT, capture_output=True, text=True,
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    js = json.loads(proc.stdout)
+    py = config_message(load_config("reels_cvep"))
+    assert js["paradigm"] == py["paradigm"] == "code" and js["name"] == py["name"]
+    assert js["code"] == py["code"]
+    assert js["targets"] == py["targets"]
+    assert (js["refresh_hz"], js["refresh_tolerance_hz"]) == (py["refresh_hz"],
+                                                              py["refresh_tolerance_hz"])

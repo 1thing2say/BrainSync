@@ -1,13 +1,38 @@
-"""Scroll Instagram Reels in Chrome by looking at one of two flickering squares.
+"""Scroll Instagram Reels in Chrome by looking at one of three coded squares (c-VEP).
 
     python -m brainsync.reels                                     # Cerelog X8 + Chrome extension
-    python -m brainsync.reels --fake --fast --no-browser          # synthetic board, scrolls printed
-    python -m brainsync.reels --manual                            # u/d on stdin, to test the extension
+    python -m brainsync.reels --fake --fast --no-browser          # synthetic board, actions printed
+    python -m brainsync.reels --manual                            # u/d/p on stdin, to test the extension
+    python -m brainsync.reels --paradigm freq                     # the old two-square f-VEP pair
 
-The Chrome extension under extension/ draws two squares over instagram.com/reels: target
-0, "up" (15 Hz), goes to the previous reel and target 1, "down" (17 Hz), to the next
-(config ``reels``). This program decodes the EEG and drives the extension over a
-localhost WebSocket (ws://127.0.0.1:8765, protocol in brainsync/bridge.py).
+The Chrome extension under extension/ draws the c-VEP standard's three white squares
+(docs/CVEP-STANDARD.md) in the right margin of instagram.com/reels, config ``reels_cvep``:
+target 0 at the top, "up", goes to the previous reel; target 1 in the middle, "pause",
+pauses or plays the reel showing; target 2 at the bottom, "down", goes to the next. All
+three show one 63-bit m-sequence, 21 frames (350 ms) apart. This program decodes the EEG
+with ``vep.live.CodeVepDecoder`` and drives the extension over a localhost WebSocket
+(ws://127.0.0.1:8765, protocol in brainsync/bridge.py).
+
+Code mode (--paradigm code, the default) trains itself: after the hello the squares
+flicker with the cue box on the top square and the viewer looks at it for --train-cycles
+cycles (default 30, about 32 s); the overlay counts them ("cycle 12/30") and then shows
+the template's accuracy on held-out cycles against chance (33 %). From then on every
+cycle (1.05 s) gives a decision: the overlay writes each square's label, a confidence bar
+and its score under it, and a lead / choice line. A commit after --votes (2) agreeing
+decisions acts once (scroll up, scroll down, or pause / play), --cooldown s follow, then
+only the votes are reset: dwelling on up or down scrolls every 4 cycles (4.2 s), while
+pause toggles once per look (brainsync/scroll.py). --template FILE reuses a template
+saved with --save-template (same wearer, same headset fit) and skips training. The cycle
+times are the browser's: it sends the Unix time of every cycle's first flip, which goes to
+the decoder unchanged, because the board's sample times are Unix time on the same
+machine's clock (see CycleFeed). --fake plays the standard's fake board (vep.live): the
+fake viewer looks at the top square while training, then at down, up and pause in turn
+for --switch s each, and the cycle times come from that board.
+
+--paradigm freq keeps the two-square f-VEP pair (config ``reels``): target 0, "up"
+(15 Hz), goes to the previous reel and target 1, "down" (17 Hz), to the next. The rest of
+this text describes that mode where they differ; --calibrate, --calibrate-on, --classifier,
+--window, --step, --threshold and --harmonics apply to it only.
 
 Sequence: start the WebSocket server and look for the board's USB receiver. Without one
 the terminal and the overlay both say "No EEG device connected" and the program waits
@@ -45,7 +70,7 @@ hello, the refresh was wrong, the port was taken, calibration failed or the boar
 2 for bad arguments or config; 130 when interrupted before decoding started.
 
 --manual needs neither board nor decoder: after the hello it reads stdin lines, u
-scrolls up, d down, q or end of input quits.
+scrolls up, d down, p pauses or plays (with a pause target), q or end of input quits.
 """
 from __future__ import annotations
 
@@ -62,9 +87,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+import numpy as np
+
 from .board import FS, CerelogBoard, FakeBoard, detect_serial_port, serial_search_note
-from .bridge import (HOST, PORT, Bridge, config_message, cue_message, eeg_message,
-                     phase_message, scroll_message)
+from .bridge import (HOST, PORT, Bridge, config_message, cue_message, decision_message,
+                     eeg_message, phase_message, scroll_message, toggle_message,
+                     train_message, trained_message)
 from .classify import ABSTAIN, make
 from .demo import CALIBRATE_S, STALL_S, Tally, _channels, _names, _status, run
 from .launch import speak
@@ -73,7 +101,19 @@ from .recordings import MONTAGE, POSTERIOR
 from .scroll import COOLDOWN_S, Action, ScrollGate
 from .stimulus import load_config
 from .stimulus.config import StimulusConfig
+from .vep.cvep import Template
+from .vep.live import (CYCLES as CODE_CYCLES, LAG_FRAMES, LENGTH, N_TARGETS, TRAIN_CYCLES,
+                       VOTES as CODE_VOTES, CodeVepDecoder, confidence, confidence_line,
+                       standard_fake_board)
 
+PARADIGMS = ("code", "freq")
+DEFAULT_CONFIGS = {"code": "reels_cvep", "freq": "reels"}
+CODE_PAD_S = 0.5     # vep.live's default: filter pad around each cycle
+FREQ_PAD_S = 2.0
+FAKE_GAZE = (2, 0, 1)   # code mode --fake: down, up, pause in turn, --switch s each
+CYCLE_SKEW_S = 5.0   # a browser cycle this far from the board's newest sample is dropped
+CYCLE_QUIET_S = 10.0  # no cycle for this long while the squares are in view: say so
+FOLLOW_S = 3.0       # another tab's cycles are taken once the followed one is quiet this long
 WAIT_BROWSER_S = 120.0
 WAIT_DEVICE_S = 120.0
 DEVICE_POLL_S = 0.5
@@ -86,31 +126,51 @@ POLL_S = 0.1
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.reels", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("-c", "--config", default="reels",
-                   help="stimulus config name or .toml path; labels must be up/down "
-                        "(default reels)")
-    p.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
-                   help=f"default {TUNED.classifier}")
-    p.add_argument("--window", type=float, default=TUNED.window_s,
-                   help=f"window seconds (default {TUNED.window_s:g})")
-    p.add_argument("--step", type=float, default=TUNED.step_s,
-                   help=f"seconds between decisions (default {TUNED.step_s:g})")
-    p.add_argument("--votes", type=int, default=TUNED.votes,
-                   help=f"consecutive agreeing windows needed to commit (default {TUNED.votes})")
-    p.add_argument("--margin", type=float, default=TUNED.margin,
-                   help="abstain unless the best target leads by this many rest spreads "
-                        f"(default {TUNED.margin:g})")
-    p.add_argument("--threshold", type=threshold_arg, default=TUNED.threshold,
-                   help="abstain unless the best target is this many rest spreads above its "
-                        f"rest level, or 'none' (default {TUNED.threshold})")
-    p.add_argument("--pad", type=float, default=2.0,
-                   help="seconds filtered before each window and dropped (default 2)")
-    p.add_argument("--harmonics", type=int, default=3, help="template harmonics (default 3)")
-    p.add_argument("--calibrate", type=float, default=CALIBRATE_S,
-                   help=f"seconds of rest baseline (default {CALIBRATE_S:g})")
-    p.add_argument("--calibrate-on", choices=("watch", "still"), default="watch",
-                   help="baseline while watching the reel with the squares flickering "
-                        "(watch, default) or with them held still (still)")
+    p.add_argument("--paradigm", choices=PARADIGMS, default="code",
+                   help="code: the c-VEP standard's three squares, self-trained (default); "
+                        "freq: the two-square f-VEP pair at 15 / 17 Hz")
+    p.add_argument("-c", "--config", default=None,
+                   help="stimulus config name or .toml path; every label must be up, down "
+                        "or pause (default " + ", ".join(f"{k}: {v}" for k, v in
+                                                         DEFAULT_CONFIGS.items()) + ")")
+    p.add_argument("--votes", type=int, default=None,
+                   help="consecutive agreeing decisions needed to commit (default: code "
+                        f"{CODE_VOTES}, freq {TUNED.votes})")
+    p.add_argument("--margin", type=float, default=None,
+                   help="abstain unless the best target leads the runner-up by this much "
+                        "(code: correlation, default 0, the standard; freq: rest spreads, "
+                        f"default {TUNED.margin:g})")
+    p.add_argument("--pad", type=float, default=None,
+                   help="seconds filtered around each window or cycle and dropped (default: "
+                        f"code {CODE_PAD_S:g}, freq {FREQ_PAD_S:g})")
+    code = p.add_argument_group("c-VEP (--paradigm code)")
+    code.add_argument("--train-cycles", type=int, default=TRAIN_CYCLES,
+                      help="cycles recorded while looking at the top square before decoding "
+                           f"(default {TRAIN_CYCLES}, about 32 s; at least 2)")
+    code.add_argument("--cycles", type=int, default=CODE_CYCLES,
+                      help=f"cycles averaged per decision (default {CODE_CYCLES})")
+    code.add_argument("--template", type=Path, default=None,
+                      help="a saved template (same wearer, same headset fit) instead of "
+                           "training")
+    code.add_argument("--save-template", type=Path, default=None,
+                      help="save the trained template to this .npz file")
+    freq = p.add_argument_group("f-VEP (--paradigm freq)")
+    freq.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
+                      help=f"default {TUNED.classifier}")
+    freq.add_argument("--window", type=float, default=TUNED.window_s,
+                      help=f"window seconds (default {TUNED.window_s:g})")
+    freq.add_argument("--step", type=float, default=TUNED.step_s,
+                      help=f"seconds between decisions (default {TUNED.step_s:g})")
+    freq.add_argument("--threshold", type=threshold_arg, default=TUNED.threshold,
+                      help="abstain unless the best target is this many rest spreads above "
+                           f"its rest level, or 'none' (default {TUNED.threshold})")
+    freq.add_argument("--harmonics", type=int, default=3,
+                      help="template harmonics (default 3)")
+    freq.add_argument("--calibrate", type=float, default=CALIBRATE_S,
+                      help=f"seconds of rest baseline (default {CALIBRATE_S:g})")
+    freq.add_argument("--calibrate-on", choices=("watch", "still"), default="watch",
+                      help="baseline while watching the reel with the squares flickering "
+                           "(watch, default) or with them held still (still)")
     p.add_argument("--cooldown", type=float, default=COOLDOWN_S,
                    help=f"seconds after a scroll in which decisions are ignored "
                         f"(default {COOLDOWN_S:g})")
@@ -138,13 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--no-browser", action="store_true",
                      help="no WebSocket server: scrolls are only printed")
     web.add_argument("--manual", action="store_true",
-                     help="no board or decoder: stdin lines u/d scroll up/down, q quits")
+                     help="no board or decoder: stdin lines u/d scroll up/down, p pauses or "
+                          "plays (code configs), q quits")
     fake = p.add_argument_group("synthetic board")
     fake.add_argument("--fake", action="store_true", help="FakeBoard instead of the Cerelog X8")
     fake.add_argument("--fast", action="store_true",
                       help="with --fake: virtual time, as fast as the decoder runs")
     fake.add_argument("--switch", type=float, default=10.0,
-                      help="with --fake: seconds before the attended target changes (default 10)")
+                      help="with --fake: seconds before the fake viewer looks at another "
+                           "square (default 10); code mode looks at down, up, pause in turn")
     fake.add_argument("--seed", type=int, default=0, help="with --fake: noise seed")
     p.add_argument("--log", type=Path, default=None,
                    help="write JSON lines (decisions, scrolls, browser reports) to this file")
@@ -152,9 +214,36 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve(args: argparse.Namespace) -> None:
+    """Fill the paradigm-dependent defaults (config, votes, margin, pad)."""
+    code = args.paradigm == "code"
+    if args.config is None:
+        args.config = DEFAULT_CONFIGS[args.paradigm]
+    if args.votes is None:
+        args.votes = CODE_VOTES if code else TUNED.votes
+    if args.margin is None:
+        args.margin = 0.0 if code else TUNED.margin
+    if args.pad is None:
+        args.pad = CODE_PAD_S if code else FREQ_PAD_S
+
+
 def _check(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    _resolve(args)
     if args.fast and not args.fake:
         p.error("--fast needs --fake")
+    if args.paradigm == "code" and args.no_browser and not args.fake and not args.manual:
+        p.error("--paradigm code needs the browser: the cycle times come from its flicker "
+                "(or use --fake)")
+    if args.paradigm != "code" and (args.template is not None
+                                    or args.save_template is not None):
+        p.error("--template and --save-template are for --paradigm code")
+    if args.template is not None and args.save_template is not None:
+        p.error("--save-template needs a training stage; drop --template")
+    if args.train_cycles < 2:
+        p.error(f"--train-cycles must be >= 2 (leave-one-out needs two), got "
+                f"{args.train_cycles}")
+    if args.cycles < 1:
+        p.error(f"--cycles must be >= 1, got {args.cycles}")
     if args.manual and (args.no_browser or args.fake):
         p.error("--manual drives the browser by hand; it takes neither --no-browser nor --fake")
     for flag, value in (("--seconds", args.seconds), ("--calibrate", args.calibrate),
@@ -210,7 +299,7 @@ class Link:
     log: JsonLog
     cfg: StimulusConfig | None = None      # to check the refresh of every later hello
     ignore_refresh: bool = False
-    scrolls: list[Action] = field(default_factory=list)
+    scrolls: list[Action] = field(default_factory=list)   # every action: scrolls, toggles
     # scroll id -> ok. Every client gets every scroll, so a second Instagram tab or the
     # mock page left open answers each id too: an id counts once, ok if any client moved.
     acks: dict[int, bool] = field(default_factory=dict)
@@ -221,6 +310,13 @@ class Link:
     hidden_at: float | None = None         # decision time the squares went out of view
     hidden_s: float = 0.0                  # decoding seconds with the squares out of view
     hidden_spells: int = 0
+    # code mode: (t, "cycle", n) of the followed tab, waiting for take_cycles()
+    cycles: list[tuple[float, str, int]] = field(default_factory=list)
+    cycle_client: int | None = None        # the tab whose cycles are followed
+    cycle_heard: float | None = None       # time.monotonic() of its last cycle
+    cycles_seen: int = 0                   # every valid cycle report, any tab
+    cycles_other: int = 0                  # reports from another tab, not used
+    _cycle_t: float = -math.inf            # newest cycle time taken from the followed tab
 
     @property
     def showing(self) -> bool:
@@ -257,11 +353,45 @@ class Link:
             self.bridge.send(msg)
 
     def scroll(self, action: Action) -> None:
+        """Send one action: a scroll up or down, or a pause / play toggle ("pause")."""
         self.scrolls.append(action)
-        self.send(scroll_message(action.dir, action.id))
-        print(f"{action.time:7.2f} s  scroll {action.dir} #{action.id}", flush=True)
+        if action.dir == "pause":
+            self.send(toggle_message(action.id))
+            print(f"{action.time:7.2f} s  play/pause #{action.id}", flush=True)
+        else:
+            self.send(scroll_message(action.dir, action.id))
+            print(f"{action.time:7.2f} s  scroll {action.dir} #{action.id}", flush=True)
         self.log.write("scroll", t=action.time, dir=action.dir, target=action.target,
                        id=action.id)
+
+    def _cycle(self, ev: dict[str, Any]) -> None:
+        """Follow one tab's cycle reports: the first to send, until it is quiet for
+        FOLLOW_S, so two open tabs never mix their frame grids."""
+        self.cycles_seen += 1
+        client, now = ev.get("_client"), time.monotonic()
+        if client != self.cycle_client:
+            quiet = self.cycle_heard is None or now - self.cycle_heard >= FOLLOW_S
+            if not quiet:
+                self.cycles_other += 1
+                if self.cycles_other == 1:
+                    print("warning: two tabs report flicker cycles; following the first",
+                          file=sys.stderr)
+                return
+            if self.cycle_client is not None:
+                print("following another tab's flicker cycles", file=sys.stderr)
+            self.cycle_client = client
+            self._cycle_t = -math.inf
+        self.cycle_heard = now
+        t = float(ev["t"])
+        if t <= self._cycle_t:   # repeated or out of order: a cycle is reported once
+            return
+        self._cycle_t = t
+        self.cycles.append((t, "cycle", int(ev["n"])))
+
+    def take_cycles(self) -> list[tuple[float, str, int]]:
+        """The followed tab's cycle events since the last call (Unix flip times)."""
+        out, self.cycles = self.cycles, []
+        return out
 
     @property
     def acks_ok(self) -> int:
@@ -277,7 +407,9 @@ class Link:
 
     def _ack(self, ev: dict[str, Any]) -> None:
         sid, ok = ev.get("id"), ev.get("ok") is True
-        self.log.write("ack", id=sid, ok=ev.get("ok"), method=ev.get("method"))
+        what = "pause or play" if ev["type"] == "toggled" else "scroll"
+        self.log.write("ack", id=sid, ok=ev.get("ok"), method=ev.get("method"),
+                       **({"playing": ev.get("playing")} if ev["type"] == "toggled" else {}))
         if isinstance(sid, bool) or not isinstance(sid, int) or not 1 <= sid <= len(self.scrolls):
             print(f"browser acked scroll {sid!r}, which was never sent; ignored",
                   file=sys.stderr)
@@ -286,7 +418,7 @@ class Link:
         else:
             self.acks[sid] = ok
             if not ok:
-                print(f"warning: the browser could not scroll #{sid} "
+                print(f"warning: the browser could not {what} #{sid} "
                       f"(method {ev.get('method')!r})", file=sys.stderr)
 
     def poll(self) -> str | None:
@@ -298,8 +430,10 @@ class Link:
             if kind == "bye":
                 self.quit = True
                 self.log.write("bye")
-            elif kind == "scrolled":
+            elif kind in ("scrolled", "toggled"):
                 self._ack(ev)
+            elif kind == "cycle":
+                self._cycle(ev)
             elif kind == "view":
                 self.log.write("view", showing=ev.get("showing"))
             elif kind == "frames":
@@ -420,6 +554,30 @@ def _await_samples(board: Any, link: Link, port: str, timeout: float | None = No
     link.send(eeg_message("streaming", f"{port}, {board.fs:g} Hz"))
 
 
+def _open_cerelog(link: Link, args: argparse.Namespace, voice: bool) -> Any:
+    """Find, open and check the Cerelog X8 (it is opened only once its USB receiver is
+    there, see _await_device); the open board, streaming."""
+    port = args.port or _await_device(link, args, voice)
+    print(f"connecting to the Cerelog X8 on {port} (can take 15 s)...", file=sys.stderr)
+    link.send(phase_message("wait", False, None, f"Connecting to the EEG board on {port}..."))
+    link.send(eeg_message("connecting", port))
+    board = CerelogBoard(serial_port=port, ch_names=args.names, verbose=args.verbose)
+    try:
+        board.open()
+    except RuntimeError:
+        link.stop_text = ("Could not connect to the EEG board. Is the headset switched "
+                          "on? Restart BrainSync to try again.")
+        link.send(eeg_message("error", port))
+        raise
+    link.send(eeg_message("connected", port))
+    try:
+        _await_samples(board, link, port)
+    except BaseException:
+        board.close()
+        raise
+    return board
+
+
 def _await_browser(link: Link, args: argparse.Namespace, cfg: StimulusConfig) -> None:
     """Start the server, wait for the hello and check its refresh; RuntimeError on failure,
     ViewerQuit when the viewer pressed Escape first."""
@@ -503,17 +661,22 @@ def _finish(link: Link, ended: str) -> None:
 # -- summary --------------------------------------------------------------------------------
 
 def _summary(tally: Tally, link: Link, labels: tuple[str, ...], ended: str,
-             manual: bool = False) -> list[str]:
+             manual: bool = False, unit: str = "windows") -> list[str]:
     up = sum(a.dir == "up" for a in link.scrolls)
-    down = len(link.scrolls) - up
+    down = sum(a.dir == "down" for a in link.scrolls)
+    pauses = sum(a.dir == "pause" for a in link.scrolls)
     head = "reels:"
     if not manual:
         rate = f"{100 * tally.abstained / tally.windows:.0f}%" if tally.windows else "n/a"
-        head += (f" {tally.seconds:.1f} s decoded, {tally.windows} windows, {rate} "
+        head += (f" {tally.seconds:.1f} s decoded, {tally.windows} {unit}, {rate} "
                  "abstained,")
-    lines = [f"{head} {len(link.scrolls)} scrolls (up {up}, down {down}); ended: {ended}"]
+    acts = f"{up + down} scrolls (up {up}, down {down})"
+    if "pause" in labels:
+        acts += f", {pauses} play/pause"
+    lines = [f"{head} {acts}; ended: {ended}"]
     if link.scrolls:
-        lines.append("  scrolls: " + "  ".join(f"{a.time:.1f}s->{a.dir}" for a in link.scrolls))
+        lines.append("  actions: " if "pause" in labels else "  scrolls: ")
+        lines[-1] += "  ".join(f"{a.time:.1f}s->{a.dir}" for a in link.scrolls)
     if link.hidden_spells:
         lines.append(f"  squares out of view {link.hidden_s:.1f} s in {link.hidden_spells} "
                      f"spell{'s' if link.hidden_spells != 1 else ''}: decisions then were "
@@ -533,7 +696,8 @@ def _summary(tally: Tally, link: Link, labels: tuple[str, ...], ended: str,
 
 # -- manual mode ----------------------------------------------------------------------------
 
-MANUAL_KEYS = {"u": "up", "up": "up", "d": "down", "down": "down"}
+MANUAL_KEYS = {"u": "up", "up": "up", "d": "down", "down": "down", "p": "pause",
+               "pause": "pause"}
 
 
 def _read_lines(stream: IO[str], out: queue.Queue[str | None]) -> None:
@@ -553,13 +717,15 @@ def _manual(args: argparse.Namespace, cfg: StimulusConfig, link: Link) -> int:
         _await_browser(link, args, cfg)
         link.send(phase_message("run", True, None,
                                 "Manual test: scrolls come from the BrainSync terminal."))
-        print("manual: type u (up), d (down) or q (quit), then Enter", file=sys.stderr)
+        keys = "u (up), d (down)" + (", p (pause / play)" if "pause" in cfg.labels else "")
+        print(f"manual: type {keys} or q (quit), then Enter", file=sys.stderr)
         ended = "started"
         lines: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=_read_lines, args=(sys.stdin, lines), daemon=True).start()
         began = time.monotonic()
         while True:
             quit_reason = link.poll()
+            link.take_cycles()   # nothing decodes in manual mode
             if quit_reason:
                 ended = quit_reason
                 break
@@ -574,12 +740,12 @@ def _manual(args: argparse.Namespace, cfg: StimulusConfig, link: Link) -> int:
             if word in ("q", "quit"):
                 ended = "quit"
                 break
-            if word in MANUAL_KEYS:
+            if word in MANUAL_KEYS and MANUAL_KEYS[word] in cfg.labels:
                 elapsed = time.monotonic() - began
                 link.scroll(Action(dir=MANUAL_KEYS[word], target=-1, id=len(link.scrolls) + 1,
                                    time=elapsed))
             elif word:
-                print(f"manual: ignored {word!r}; type u, d or q", file=sys.stderr)
+                print(f"manual: ignored {word!r}; type {keys} or q", file=sys.stderr)
         link.drain_acks()
     except ViewerQuit:
         ended = "viewer quit"
@@ -599,6 +765,341 @@ def _manual(args: argparse.Namespace, cfg: StimulusConfig, link: Link) -> int:
     if ended != "not started":
         _print_summary(_summary(Tally(), link, cfg.labels, ended, manual=True))
     return code
+
+
+# -- c-VEP run ------------------------------------------------------------------------------
+
+ACTION_WORDS = {"up": "for the previous reel", "pause": "to pause or play",
+                "down": "for the next reel"}
+ACTION_SPOKEN = {"up": "to go back", "pause": "to pause or play", "down": "for the next reel"}
+
+
+def _shown(label: str) -> str:
+    """A label as the overlay writes it under its square."""
+    return label.upper()
+
+
+def _listing(parts: list[str]) -> str:
+    if len(parts) <= 2:
+        return " or ".join(parts)
+    return ", ".join(parts[:-1]) + ", or " + parts[-1]
+
+
+def code_prompts(cfg: StimulusConfig, train_cycles: int) -> dict[str, str]:
+    """Overlay texts and spoken prompts for the c-VEP training and run phases."""
+    first = _shown(cfg.labels[0])
+    cycle_s = cfg.code.cycle_frames / cfg.refresh if cfg.code is not None else 1.05
+    return {
+        "train": (f"Training: look at the {first} square and keep looking at it "
+                  f"({train_cycles} cycles, about {train_cycles * cycle_s:.0f} s)."),
+        "train_spoken": f"Look at the {cfg.labels[0]} square and keep looking at it.",
+        "run": ("Look at " + _listing([f"{_shown(lab)} {ACTION_WORDS[lab]}"
+                                       for lab in cfg.labels]) + ". Escape quits."),
+        "run_spoken": ("Look at " + _listing([f"{lab} {ACTION_SPOKEN[lab]}"
+                                              for lab in cfg.labels]) + "."),
+    }
+
+
+def _code_status(d: Decision, elapsed: float, labels: tuple[str, ...],
+                 truth: int | None) -> str:
+    scores = "  ".join(f"{lab} {s:+.3f}" for lab, s in zip(labels, d.scores))
+    raw = "-" if d.raw == ABSTAIN else labels[d.raw]
+    line = f"{elapsed:7.2f} s  {scores}  raw {raw:<5}  {confidence_line(d, labels)}"
+    if truth is not None:
+        line += f"  (true {'-' if truth == ABSTAIN else labels[truth]})"
+    return line
+
+
+def _check_standard(cfg: StimulusConfig) -> None:
+    """--fake plays the standard's codes (vep.live.standard_fake_board): the config must
+    show them too."""
+    code = cfg.code
+    if (code is None or cfg.n_targets != N_TARGETS or code.length != LENGTH
+            or code.lag_frames != LAG_FRAMES or code.frames_per_bit != 1):
+        raise ValueError(f"--fake plays the c-VEP standard ({N_TARGETS} targets, a "
+                         f"{LENGTH}-bit code, {LAG_FRAMES}-frame lags); config {cfg.name!r} "
+                         "differs")
+
+
+class CycleFeed:
+    """One poll of a c-VEP run: the browser's messages, a board read and the cycle events.
+
+    The cycle times are the browser's flip times (``performance`` time mapped to Unix
+    seconds in the overlay), handed to the decoder as they are: the board's samples carry
+    Unix times from the same machine's clock (BrainFlow timestamps), the same assumption
+    the f-VEP bridge already makes when it times scrolls. A constant offset between the
+    two (the flip lands a frame after its rAF timestamp, the board's USB latency) is
+    learnt into the template during training, so only jitter costs accuracy. A cycle more
+    than CYCLE_SKEW_S from the board's newest sample is on another clock and dropped.
+    With --fake the fake board's own cycle events are used and the browser's ignored (its
+    virtual time is not the browser's).
+    """
+
+    def __init__(self, board: Any, link: Link, fake: bool, sleep: Callable[[float], None],
+                 clock: Callable[[], float]) -> None:
+        self.board, self.link, self.fake = board, link, fake
+        self.sleep, self.clock = sleep, clock
+        self.heard = self.cycle_at = clock()
+        self.board_t: float | None = None   # Unix time of the newest sample
+        self.n = 0                          # samples read
+        self.cycles = 0                     # cycle events handed to the decoder
+        self.skewed = 0                     # dropped: on another clock
+        self.quiet = False                  # warned about missing cycles
+
+    def step(self) -> tuple[np.ndarray, np.ndarray, list[tuple[float, str, int]]] | str:
+        """(X, t, cycle events), or why the run must end ("viewer quit", "board stalled")."""
+        why = self.link.poll()
+        if why:
+            return why
+        self.sleep(POLL_S)
+        X, t = self.board.read()
+        now = self.clock()
+        if X.shape[1]:
+            self.heard = now
+            self.board_t = float(t[-1])
+            self.n += X.shape[1]
+        elif now - self.heard >= STALL_S:
+            return "board stalled"
+        browser = self.link.take_cycles()
+        events = ([e for e in self.board.read_events() if e[1] == "cycle"] if self.fake
+                  else browser)
+        events = self._on_clock(events)
+        if events:
+            self.cycle_at, self.quiet = now, False
+        elif (not self.quiet and self.link.showing and self.link.bridge is not None
+              and now - self.cycle_at >= CYCLE_QUIET_S):
+            self.quiet = True
+            print(f"warning: no flicker cycles from the browser for {CYCLE_QUIET_S:g} s while "
+                  "its squares are in view; is the overlay's refresh off?", file=sys.stderr)
+        self.cycles += len(events)
+        return X, t, events
+
+    def _on_clock(self, events: list[tuple[float, str, int]]) -> list[tuple[float, str, int]]:
+        if self.board_t is None:
+            return events
+        kept = [e for e in events if abs(e[0] - self.board_t) <= CYCLE_SKEW_S]
+        if len(kept) < len(events):
+            if not self.skewed:
+                bad = next(e for e in events if e not in kept)
+                print(f"warning: a cycle time is {bad[0] - self.board_t:+.1f} s from the "
+                      f"board's clock; cycles more than {CYCLE_SKEW_S:g} s off are dropped "
+                      "(both must be Unix time on this machine)", file=sys.stderr)
+            self.skewed += len(events) - len(kept)
+        return kept
+
+
+def _code_main(args: argparse.Namespace, cfg: StimulusConfig, link: Link, gate: ScrollGate,
+               voice: bool) -> int:
+    """The c-VEP run: train on target 0 (unless --template), then decode."""
+    log = link.log
+    labels = cfg.labels
+    assert cfg.code is not None
+    board: Any = None
+    try:
+        template = Template.load(args.template) if args.template is not None else None
+        if args.fake:
+            _check_standard(cfg)
+            board = standard_fake_board(fixated=0, seed=args.seed, refresh=cfg.refresh,
+                                        clock=None if args.fast else time.time)
+        fs = board.fs if args.fake else FS
+        dec = CodeVepDecoder(fs, n_targets=cfg.n_targets, lag_frames=cfg.code.lag_frames,
+                             cycle_frames=cfg.code.cycle_frames, refresh=cfg.refresh,
+                             channels=args.channels, ch_names=args.names, votes=args.votes,
+                             cycles=args.cycles, margin=args.margin, pad_s=args.pad,
+                             train_cycles=args.train_cycles, train_target=0,
+                             template=template)
+    except (ValueError, KeyError, FileNotFoundError, OSError) as exc:
+        log.close()
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    fast = args.fake and args.fast
+    sleep: Callable[[float], None] = board.advance if fast else time.sleep
+    clock: Callable[[], float] = (lambda: board.elapsed) if fast else time.monotonic
+    channels = [dec.ch_names[i] for i in dec.rows]
+    print(f"{'fake board' if args.fake else 'Cerelog X8'} at {fs:g} Hz; c-VEP, "
+          f"{cfg.n_targets} targets {cfg.code.lag_frames} frames apart in a "
+          f"{cfg.code.cycle_frames}-frame cycle; channels {','.join(channels)}; "
+          f"{args.cycles} cycles per decision, {args.votes} votes, margin {args.margin:g}; "
+          f"cooldown {args.cooldown:g} s", file=sys.stderr)
+    log.write("settings", paradigm="code", lag_frames=cfg.code.lag_frames,
+              cycle_frames=cfg.code.cycle_frames, votes=args.votes, cycles=args.cycles,
+              margin=args.margin, pad_s=args.pad, channels=channels,
+              cooldown_s=args.cooldown, train_cycles=args.train_cycles,
+              template=None if args.template is None else str(args.template),
+              labels=list(labels), fake=args.fake)
+    prompts = code_prompts(cfg, args.train_cycles)
+
+    tally = Tally()
+    ended = "not started"
+    code = 0
+    feed: CycleFeed | None = None
+    trained: str | None = None
+    try:
+        _start_bridge(link)   # first, so the overlay can show a missing device
+        if not args.fake:
+            board = _open_cerelog(link, args, voice)
+        else:
+            link.send(eeg_message("streaming", "simulated board (--fake)"))
+        with board:
+            if link.bridge is not None:
+                _await_browser(link, args, cfg)
+            feed = CycleFeed(board, link, args.fake, sleep, clock)
+            link.take_cycles()   # reported before this run's flicker: they time nothing
+            if args.fake:
+                board.set_target(0)       # the fake viewer looks at the training square
+                board.start_flicker()
+            if dec.training:
+                link.send(cue_message(0))
+                link.send(phase_message("train", True, None, prompts["train"]))
+                speak(prompts["train_spoken"], voice)
+                print(f"training: look at the {labels[0]} square for {args.train_cycles} "
+                      "cycles", file=sys.stderr)
+                trained = _code_train(dec, feed, link)
+            else:
+                trained = f"loaded from {args.template}"
+                print(f"template {trained}", file=sys.stderr)
+                link.send(trained_message(math.nan, dec.chance, dec.template.n_cycles))
+            if args.save_template is not None:
+                path = dec.template.save(args.save_template)
+                print(f"template saved to {path}", file=sys.stderr)
+                log.write("template", path=str(path))
+
+            link.send(cue_message(ABSTAIN))
+            link.send(phase_message("run", True, None, prompts["run"]))
+            speak(prompts["run_spoken"], voice)
+            run_t0 = feed.board_t if feed.board_t is not None else time.time()
+            start_n = feed.n
+            limit = int(round(args.seconds * fs))
+            ended = "started"
+            stale_end = -1   # decisions scored at or before this many samples predate a reset
+            decoder = dec.decoder
+            assert decoder is not None
+
+            def rearm() -> None:
+                nonlocal stale_end
+                decoder.voter.reset()   # votes only: the cycle buffer stays
+                stale_end = decoder.n_seen
+                link.send(cue_message(ABSTAIN))
+                log.write("rearm")
+
+            gate.rearm = rearm
+
+            def on_decision(d: Decision) -> None:
+                elapsed = d.time - run_t0
+                truth = board.fixated if args.fake else None
+                tally.add(d, elapsed, truth)
+                hidden = link.hidden_at is not None
+                stale = d.end <= stale_end
+                print(_code_status(d, elapsed, labels, truth), file=sys.stderr, flush=True)
+                link.send(decision_message(confidence(d, labels)))
+                log.write("decision", t=round(elapsed, 4), time=d.time,
+                          scores=[round(float(x), 5) for x in d.scores], raw=d.raw,
+                          committed=d.committed, changed=d.changed,
+                          lead=round(d.gap, 4) if math.isfinite(d.gap) else None,
+                          truth=truth, stale=stale, hidden=hidden)
+                if stale or hidden:   # neither draws a cue nor reaches the gate
+                    return
+                if d.changed:
+                    link.send(cue_message(d.committed))
+                action = gate.push(d, elapsed)
+                if action is not None:
+                    link.scroll(action)
+
+            try:
+                ended = "time up"
+                while feed.n - start_n < limit:
+                    now_s = (feed.board_t or run_t0) - run_t0
+                    if args.fake:
+                        board.set_target(FAKE_GAZE[int(now_s // args.switch) % len(FAKE_GAZE)])
+                    view = link.track_view(now_s)
+                    if view == "hidden":
+                        link.send(cue_message(ABSTAIN))
+                    elif view == "back":
+                        # votes cast before the squares went away: start afresh
+                        decoder.voter.reset()
+                        stale_end = decoder.n_seen
+                    step = feed.step()
+                    if isinstance(step, str):
+                        ended = step
+                        break
+                    for d in dec.feed(*step):
+                        on_decision(d)
+            except KeyboardInterrupt:
+                ended = "interrupted"
+            link.end_view(tally.seconds)
+            if ended == "board stalled":
+                print(f"error: the board sent nothing for {STALL_S:g} s", file=sys.stderr)
+                link.stop_text = "The EEG board stopped sending data."
+                link.send(eeg_message("no-data", f"nothing for {STALL_S:g} s"))
+                code = 1
+            link.drain_acks()
+    except ViewerQuit:
+        ended = "viewer quit"
+    except KeyboardInterrupt:
+        if ended == "not started":   # connecting, waiting for the browser or training
+            print("interrupted before decoding started", file=sys.stderr)
+            code = 130
+        else:
+            ended = "interrupted"
+    except (ValueError, OSError, RuntimeError, ImportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        ended = "error"
+        code = 1
+    finally:
+        _finish(link, ended)
+        log.write("end", ended=ended, seconds=tally.seconds, windows=tally.windows,
+                  scrolls=len(link.scrolls), acks_ok=link.acks_ok,
+                  acks_failed=link.acks_failed)
+        log.close()
+    if ended != "not started":
+        lines = _summary(tally, link, labels, ended, unit="decisions")
+        if trained is not None:
+            lines.append(f"  template: {trained}")
+        if feed is not None and link.bridge is not None:
+            extra = (f", {link.cycles_other} from another tab ignored"
+                     if link.cycles_other else "")
+            extra += f", {feed.skewed} off the board's clock dropped" if feed.skewed else ""
+            lines.append(f"  browser cycles: {link.cycles_seen} reported{extra}"
+                         + (" (not used with --fake)" if args.fake else ""))
+        _print_summary(lines)
+    return code
+
+
+def _code_train(dec: CodeVepDecoder, feed: CycleFeed, link: Link) -> str:
+    """Record cycles until the template is trained; its accuracy line. ViewerQuit when the
+    viewer pressed Escape, RuntimeError when the board went quiet or training failed."""
+    shown = -1
+    while dec.training:
+        step = feed.step()
+        if step == "viewer quit":
+            raise ViewerQuit
+        if isinstance(step, str):
+            link.stop_text = "The EEG board stopped sending data during training."
+            link.send(eeg_message("no-data", f"nothing for {STALL_S:g} s"))
+            raise RuntimeError(f"the board sent nothing for {STALL_S:g} s during training")
+        try:
+            dec.feed(*step)
+        except RuntimeError:
+            link.stop_text = ("Training failed: the cycle times did not match the EEG. "
+                              "Restart BrainSync to try again.")
+            raise
+        k, of = dec.progress
+        if k != shown:
+            shown = k
+            link.send(train_message(k, of))
+            if k % 5 == 0 or k == of:
+                print(f"training: cycle {k}/{of}", file=sys.stderr)
+    acc, chance = dec.train_accuracy, dec.chance
+    line = (f"{100 * acc:.0f} % on held-out training cycles (chance {100 * chance:.0f} %)"
+            if math.isfinite(acc) else "trained (no held-out accuracy)")
+    print(f"template ready: {line}", file=sys.stderr)
+    if math.isfinite(acc) and acc <= chance:
+        print("warning: the template does no better than chance; check the headset contact "
+              "and that the viewer looked at the top square", file=sys.stderr)
+    link.send(trained_message(acc, chance, dec.train_cycles))
+    link.log.write("trained", accuracy=round(acc, 4) if math.isfinite(acc) else None,
+                   chance=round(chance, 4), cycles=dec.train_cycles)
+    return line
 
 
 # -- decoding run ---------------------------------------------------------------------------
@@ -631,6 +1132,11 @@ def _main(argv: list[str] | None) -> int:
     except (ValueError, KeyError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if cfg.paradigm != args.paradigm:
+        print(f"error: config {cfg.name!r} is a {cfg.paradigm} config, not "
+              f"--paradigm {args.paradigm} (its default config is "
+              f"{DEFAULT_CONFIGS[args.paradigm]})", file=sys.stderr)
+        return 2
     try:
         gate = ScrollGate(cfg.labels, cooldown_s=args.cooldown, votes=args.votes)
     except ValueError as exc:
@@ -649,7 +1155,8 @@ def _main(argv: list[str] | None) -> int:
         print(f"error: cannot write --log: {exc}", file=sys.stderr)
         return 2
     try:
-        bridge = None if args.no_browser else Bridge(args.host, args.ws_port, config_message(cfg))
+        bridge = None if args.no_browser else Bridge(
+            args.host, args.ws_port, config_message(cfg, train_cycles=args.train_cycles))
     except ValueError as exc:
         log.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -658,6 +1165,8 @@ def _main(argv: list[str] | None) -> int:
     log.write("start", config=cfg.name, argv=list(sys.argv[1:] if argv is None else argv))
     if args.manual:
         return _manual(args, cfg, link)
+    if args.paradigm == "code":
+        return _code_main(args, cfg, link, gate, voice)
 
     # The Cerelog X8 is opened only once its USB receiver is there (see _await_device).
     board: Any = None
@@ -698,26 +1207,7 @@ def _main(argv: list[str] | None) -> int:
     try:
         _start_bridge(link)   # first, so the overlay can show a missing device
         if not args.fake:
-            port = args.port or _await_device(link, args, voice)
-            print(f"connecting to the Cerelog X8 on {port} (can take 15 s)...",
-                  file=sys.stderr)
-            link.send(phase_message("wait", False, None,
-                                    f"Connecting to the EEG board on {port}..."))
-            link.send(eeg_message("connecting", port))
-            board = CerelogBoard(serial_port=port, ch_names=args.names, verbose=args.verbose)
-            try:
-                board.open()
-            except RuntimeError:
-                link.stop_text = ("Could not connect to the EEG board. Is the headset switched "
-                                  "on? Restart BrainSync to try again.")
-                link.send(eeg_message("error", port))
-                raise
-            link.send(eeg_message("connected", port))
-            try:
-                _await_samples(board, link, port)
-            except BaseException:
-                board.close()
-                raise
+            board = _open_cerelog(link, args, voice)
         else:
             link.send(eeg_message("streaming", "simulated board (--fake)"))
         with board:
