@@ -109,7 +109,8 @@ scripts/build.sh test phase3           # tests: phase1 phase2 phase3 vm
 The steps of `all` also run one at a time:
 - `packages` builds the edition's packages into `build/debs/EDITION/`.
 - `wheels` (not part of `all` yet) builds the Python wheels into `build/wheels/`. It is the same for both editions and skips a wheel that is up to date.
-- `repo` signs them into `build/repo/EDITION/`.
+- `mirror` fetches the third-party debs the edition's repository carries (NVIDIA's CUDA runtime, Jetson only, about 0.5 GB) into `build/downloads/mirror/`. It is offline once they are there.
+- `repo` signs them into `build/repo/EDITION/`, with the mirrored debs checked against their pins.
 - `iso` writes the installer ISO. Its options go to `build-iso.sh` / `build-vm-iso.sh`, e.g. `scripts/build.sh iso --name test`.
 
 **Back up `config/repo-signing-key.asc`.** An installed device trusts only the key its ISO was signed with. Updates for it (Phase 6) can only be signed with that same key.
@@ -467,6 +468,8 @@ brainsyncos/
     brainsync-udev/                udev rules for the Cerelog X8's serial port (both editions)
     brainsync-runtime/       the apps' Python venv, /opt/brainsyncos/venv (scripts/venv.sh)
     brainsync/               the apps: their wheel in that venv, /usr/bin links, /etc/brainsync, /usr/share/brainsync
+  mirror/NAME/               third-party .debs shipped unchanged: mirror.env, the source's key, debs.lock (sha256 pins)
+    nvidia-jetson/           NVIDIA's CUDA 13.2 runtime (cudart, cuBLAS) for the Jetson repository
   python/                    the venv's inputs: brainsync.in, brainsync.lock.txt (hash-locked wheels),
                              psychopy-excludes.txt, pip.env (pinned pip), local-wheels.txt, check-lock.py
   wheels/NAME/               one folder per Python wheel BrainSyncOS compiles: wheel.env + build.sh
@@ -486,7 +489,9 @@ brainsyncos/
     build-wheels.sh          wheels/*/build.sh -> build/wheels/ (+ manifest, SHA256SUMS, requirements.txt)
     pack-wheel.py            a reproducible wheel from a staged tree
     build-packages.sh        packages/*/build.sh -> build/debs/EDITION/
-    build-repo.sh            build/debs/EDITION -> signed apt repository build/repo/EDITION
+    fetch-mirror.sh          mirror/*: fetch and verify the pinned third-party .debs -> build/downloads/mirror/
+    mirror.py                its signed-index, closure, lock and sha256 checks (also used by build-repo.sh)
+    build-repo.sh            build/debs/EDITION + mirrored .debs -> signed apt repository build/repo/EDITION
     verify-base-iso.sh       size, volume id, sha256 (cached), .disk/info, kernel layer (--edition vm)
     fetch-vm-base.sh         VM edition: download + verify the Ubuntu ISO (host, resumable)
     extract-iso.sh           atomic, idempotent extraction + boot metadata
@@ -512,7 +517,7 @@ brainsyncos/
     vm-checks.sh             its in-container checks
     test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository, wheel (host side)
     phase3-checks.sh         its in-container checks: apt helper, BrainSync debs, md5 maps, hook + 60/70,
-                             board packages, 75-usb-serial.sh, the BrainFlow wheel
+                             board packages, 75-usb-serial.sh, the CUDA mirror + 80-cuda.sh, the BrainFlow wheel
     runtime-checks.sh        the BrainSync packages installed and run (runtime test container)
     runtime/*.py             its Xvfb smoke scripts and the import-everything check
     boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
@@ -530,7 +535,8 @@ brainsyncos/
     wheelhouse/, pip/        the downloaded wheels and pip (scripts/venv.sh), for offline rebuilds
     repo/{jetson,vm}/        signed apt repositories (scripts/build-repo.sh), mapped onto the ISOs
     downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg);
-                             brainflow-cerelog.git (sparse partial clone of the fork)
+                             brainflow-cerelog.git (sparse partial clone of the fork);
+                             mirror/NAME/ (InRelease, Packages.gz and the pinned .debs)
     wheels/                  built wheels, NAME.env manifests, SHA256SUMS, requirements.txt
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
     test-logs/{phase1,phase2,phase3,vm}/  one log per test check
@@ -657,6 +663,27 @@ packages.
   - no dpkg pty and no `needrestart`, because the installer's chroot has neither a terminal nor services.
 - `60-apt-repo.sh` is the first such step, on both editions. It installs `brainsyncos-archive-keyring` and requires the installed keyring (`/usr/share/keyrings/brainsyncos-archive-keyring.gpg`) to verify the repository by itself. The device keeps that keyring for later updates. No apt source is left behind.
 - `70-brainsync.sh` installs `brainsync-runtime` and `brainsync` the same way, on both editions. It then checks that the venv imports the apps and that `brainsync-voice --help` runs, and lists any display libraries the system lacks.
+- `80-cuda.sh` installs NVIDIA's CUDA runtime the same way, on the Jetson only (see below). On the VM it prints that it skipped.
+
+**Mirrored third-party packages (Phase 3d).** Some debs come unchanged from another apt repository instead of `packages/`. Each source is a folder `mirror/NAME/`:
+- `mirror.env` gives the repository URL, suite and component, the fingerprint of its signing key, the packages wanted (`MIRROR_ROOTS`) and the names nothing may be, provide or depend on (`MIRROR_FORBID`).
+- The key file sits beside it.
+- `debs.lock` pins every deb of the closure by size and sha256.
+- `scripts/build.sh mirror` (`fetch-mirror.sh`, run by `all` too) fills `build/downloads/mirror/NAME/`. `scripts/mirror.py` does the checks:
+  - InRelease must verify with `gpgv` against that one key, and only its signed text is read;
+  - the Packages index must match InRelease;
+  - `debs.lock` must equal the closure of the roots in that index, with nothing forbidden;
+  - every deb must have its pinned size and sha256.
+- A filled cache works offline: the index is downloaded only when a deb is missing. `fetch-mirror.sh --lock` re-resolves against the live repository and rewrites `debs.lock`; review the change and commit it.
+- `build-repo.sh` copies the edition's mirrored debs into the pool on every build and checks them there again. A missing or changed deb fails the build.
+
+**NVIDIA's CUDA runtime (Jetson only).** `mirror/nvidia-jetson` takes CUDA 13.2 from `https://repo.download.nvidia.com/jetson/common r39.2`, the repository a stock JetPack 7.2.1 install configures. Its key is `jetson-ota-public.asc` (`3C6D1FF3…A9996195`), the one in the ISO's `nvidia-l4t-apt-source`.
+- The roots are `cuda-cudart-13-2=13.2.86-1` and `libcublas-13-2=13.4.1.3-1`. Their closure adds the three `cuda-toolkit*-config-common` 13.2.86-1, 5 debs in all: 0.48 GB on the ISO, 676 MB installed. libcublas holds `libcublas`, `libcublasLt` and `libnvblas`.
+- Never a toolkit, nvcc, `-dev` package, cuDNN or TensorRT. `sudo apt install nvidia-jetpack` still works on the device through NVIDIA's repository.
+- The libraries live in `/usr/local/cuda-13.2/targets/sbsa-linux/lib`. NVIDIA's config-common packages add `/usr/local/cuda{,-13}/targets/sbsa-linux/lib` to `/etc/ld.so.conf.d` and point `/usr/local/cuda` at 13.2 with `update-alternatives`. Their postinsts work in the installer's chroot.
+- `libcuda.so.1` is not part of it. On a Jetson it comes from L4T (`nvidia-l4t-cuda-nvgpu`) and is set up at boot by `nv-load-gpu-libs.service`. `MIRROR_FORBID` keeps out the dGPU stack (`libnvidia-compute`, which provides `libcuda.so.1`, `nvidia-driver-*`, `cuda-drivers`, `cuda-compat`).
+- `80-cuda.sh` then checks four things: ldconfig resolves `libcudart.so.13`, `libcublas.so.13` and `libcublasLt.so.13` under `/usr/local/cuda-13.2`; `ldd` finds their own libraries; `/usr/local/cuda` points at 13.2; and no dGPU driver package is installed. It runs no CUDA code, because libcuda is not set up in the chroot.
+- The debs keep NVIDIA's EULA in `/usr/share/doc`. Redistributing them is meant for your own devices only (`docs/phase3-notes.md`).
 
 **The BrainSync apps (Phase 3b).** Two packages, the same on both editions:
 - **`brainsync-runtime`** (79 MB, 434 MB installed) is a Python 3.12 venv at `/opt/brainsyncos/venv` with the third-party packages the apps need. A venv works only at the path it was made at, so `scripts/venv.sh` builds it in the builder at that exact path:
@@ -683,7 +710,7 @@ packages.
   - The venv build fails when a listed wheel is missing or does not match `SHA256SUMS`, and refuses unlisted ones. Their own dependencies must already be in the lock.
   - The `runtime` check requires BrainFlow in the installed venv to report the Cerelog X8 at 250 Hz.
 
-**Verified by `tests/test_phase3.sh`** (15 checks):
+**Verified by `tests/test_phase3.sh`** (17 checks):
 - the container really runs at the configured CPU and memory caps;
 - the key, packages and repositories for both editions; every package, the venv included, is byte-identical between the two editions' separate builds;
 - `app-debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
@@ -693,11 +720,12 @@ packages.
 - the apt helper refuses: a tampered index, a tampered `.deb`, an unsigned repository, the wrong key, a missing repository;
 - the board packages: contents, the exact kernel Depends, and `ch341.ko` against the ISO's own kernel (vermagic, and every modversion CRC against the headers' `Module.symvers` and against the CRCs NVIDIA's 1352 modules import); the udev rules pass `udevadm verify`;
 - `75-usb-serial.sh` in NVIDIA's target layer with `nvidia-l4t-kernel` from the pool: modprobe resolves `ch341` to `updates/ch341.ko` after `usbserial.ko`, a re-run works, a purge takes it out of `modules.dep`, and the VM edition gets the rules only;
-- the BrainFlow wheel: manifest, contents, a `--require-hashes` install into a fresh venv that reports 250 Hz and EEG channels 1 to 8, and a tampered copy refused.
+- the BrainFlow wheel: manifest, contents, a `--require-hashes` install into a fresh venv that reports 250 Hz and EEG channels 1 to 8, and a tampered copy refused;
+- `mirror` and `cuda`: the CUDA cache verifies with no network, and the Jetson repository has exactly the pinned debs at their pinned sha256 (the VM one none). They refuse a tampered InRelease, another key, a stale lock, a `libnvidia-compute` root, a tampered deb, and `build-repo.sh` with a tampered cache. In NVIDIA's target layer, `80-cuda.sh` installs exactly the 5 debs, their postinsts run, ldconfig resolves the libraries, nothing provides `libcuda.so`, and a re-run installs nothing. The VM edition skips the step.
 
 **Not tested here:** anything on hardware. Nobody has loaded the module on an Orin, plugged in a board, or streamed from BrainFlow on Linux.
 
-`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all nine steps in each edition's target.
+`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all ten steps in each edition's target.
 
 **The EEG board (Phase 3c).** The Cerelog X8 is a USB serial device: V1 boards have a CH340 bridge (vendor `1a86`, driver `ch341`, `/dev/ttyUSB*`), V2 boards an ESP32-S3 (vendor `303a`, driver `cdc_acm`, `/dev/ttyACM*`).
 - `brainsyncos-ch341-tegra` (Jetson only) is the CH340 driver. NVIDIA's kernel leaves `CONFIG_USB_SERIAL_CH341` unset.

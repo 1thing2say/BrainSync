@@ -17,7 +17,10 @@
 # (bare, then with the account and espeak-ng's libraries from the pool: the
 # offline voice and secrets.env); the
 # board packages (brainsyncos-ch341-tegra against NVIDIA's kernel,
-# brainsync-udev) and 75-usb-serial.sh installing them there. In a test-only
+# brainsync-udev) and 75-usb-serial.sh installing them there; NVIDIA's CUDA
+# runtime mirrored into the jetson repository (mirror/nvidia-jetson: fetched
+# into build/downloads/mirror unless cached, signature and sha256 pins checked
+# offline) and 80-cuda.sh installing it there. In a test-only
 # Ubuntu container with Xvfb (tests/runtime-checks.sh): the two BrainSync
 # packages installed, imported, PsychoPy drawing, every command, and
 # brainsync-voice serving its page offline. Then the BrainFlow wheel in
@@ -142,6 +145,8 @@ t_build_sh() {
     (cd "$BRAINSYNCOS_ROOT" && make -n EDITION=vm iso) | grep -qx 'scripts/build.sh iso --edition vm' || die "make iso EDITION=vm"
     (cd "$BRAINSYNCOS_ROOT" && make -n) | grep -qx 'scripts/build.sh all --edition jetson' || die "make (all)"
     (cd "$BRAINSYNCOS_ROOT" && make -n test TESTS="phase2 vm") | grep -qx 'scripts/build.sh test phase2 vm' || die "make test"
+    (cd "$BRAINSYNCOS_ROOT" && make -n mirror) | grep -qx 'scripts/build.sh mirror --edition jetson' || die "make mirror"
+    expect_fail 'takes no arguments' "$S/build.sh" mirror --fast
     echo "build.sh: help, refusals, doctor (rc=$rc); Makefile targets map to build.sh"
 }
 
@@ -202,6 +207,17 @@ t_packages() {
     expect_fail 'no repository signing key' "$B" run scripts/build-packages.sh --edition vm --key "$TD/none.asc" --out "$TD/x"
     expect_fail 'no package named nope' "$B" run scripts/build-packages.sh --edition vm --only nope --key "$KEY" --out "$TD/x"
     echo "$n packages in both editions, byte-identical (SOURCE_DATE_EPOCH); keyring root-owned, md5sums OK, holds $fpr"
+}
+
+# The mirrored third-party .debs: build/downloads/mirror is a cache like
+# build/wheels, so a filled one is only checked (offline); a first run
+# downloads NVIDIA's CUDA runtime (about 0.5 GB).
+t_mirror() {
+    "$B" run scripts/fetch-mirror.sh --edition jetson
+    "$B" run scripts/fetch-mirror.sh --edition vm 2>&1 | tee "$TMP_DIR/mirror.out"
+    grep -q 'no mirrored packages for vm' "$TMP_DIR/mirror.out" || die "the vm edition mirrors something"
+    expect_fail 'no mirror named nope' "$B" run scripts/fetch-mirror.sh --only nope
+    expect_fail 'unknown argument: --fast' "$B" run scripts/fetch-mirror.sh --fast
 }
 
 # The BrainFlow wheel: build/wheels is a cache like the builder image, so an
@@ -271,6 +287,7 @@ check build-sh             t_build_sh
 check repo-key             t_repo_key
 if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
 check packages             t_packages
+check mirror               t_mirror
 check repo                 t_repo
 if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check apt-helper       in_builder apt
@@ -281,6 +298,7 @@ if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check offline-voice    in_builder voice
     check board-debs       in_builder debs
     check usb-serial       in_builder usbserial
+    check cuda             in_builder cuda
 fi
 check wheel                t_wheel
 check shellcheck           t_shellcheck

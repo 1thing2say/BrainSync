@@ -52,6 +52,22 @@
 #             ch341 to updates/ch341.ko with usbserial, a re-run works, removal
 #             takes it out of modules.dep again; then the step on the vm
 #             edition installs brainsync-udev only
+#   cuda      the mirrored CUDA runtime (mirror/nvidia-jetson): the committed
+#             key has the pinned fingerprint and is the one NVIDIA's own
+#             install trusts (nvidia-l4t-apt-source in the base ISO's pool,
+#             which also lists that repository and suite); the filled cache
+#             verifies with no network (InRelease signed by that key, the
+#             index, debs.lock = the closure of the roots, nothing forbidden);
+#             the jetson test repository holds exactly the pinned .debs, its
+#             index with the pinned sha256, the vm one none; refuses a
+#             tampered InRelease, another key, a stale lock, a forbidden root
+#             and a tampered .deb, and build-repo.sh refuses a tampered cache;
+#             payload/hook.sh with 00, 60 and 80-cuda.sh in NVIDIA's target
+#             base layer: exactly the pinned packages installed, their postinsts
+#             ran (/usr/local/cuda alternative, ld.so.conf.d), ldconfig resolves
+#             libcudart, libcublas and libcublasLt, nothing provides
+#             libcuda.so.1, the target's apt state is unchanged, a re-run
+#             works; the step skips on the vm edition
 #   wheel     build/wheels (scripts/build-wheels.sh, TESTDIR unused): the
 #             manifest matches wheel.env and the file, the wheel holds only
 #             brainflow/*.py, three aarch64 libraries and its dist-info, pip
@@ -667,6 +683,156 @@ c_usbserial() {
     echo "vm edition: brainsync-udev only"
 }
 
+# mirror_py CMD MIRROR CACHE KEYRING [ARGS...]: scripts/mirror.py, output in $W/mirror.out.
+mirror_py() {
+    local cmd="$1" m="$2" c="$3" k="$4"
+    shift 4
+    python3 -I "$BRAINSYNCOS_ROOT/scripts/mirror.py" "$cmd" --mirror "$m" --cache "$c" --keyring "$k" "$@" > "$W/mirror.out" 2>&1
+}
+
+# expect_mirror_fail LABEL PATTERN CMD MIRROR CACHE KEYRING [ARGS...]
+expect_mirror_fail() {
+    local label="$1" pat="$2"
+    shift 2
+    if mirror_py "$@"; then cat "$W/mirror.out"; die "$label: accepted"; fi
+    grep -Eq "$pat" "$W/mirror.out" || { cat "$W/mirror.out"; die "$label: refused for another reason"; }
+    echo "refuses $label: $(grep -Em1 "$pat" "$W/mirror.out")"
+}
+
+# cache_copy SRC DEST: DEST = the cache SRC, small files copied and the large
+# .debs as symlinks (never hard links: cleaning up truncates large files).
+cache_copy() {
+    local f
+    mkdir -p "$2"
+    for f in "$1"/*; do
+        if [ "$(file_size "$f")" -gt 1048576 ]; then ln -s "$f" "$2/"; else cp "$f" "$2/"; fi
+    done
+}
+
+in_t() { "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$1" -- "${@:2}"; }
+
+c_cuda() {
+    local m="$BRAINSYNCOS_ROOT/mirror/nvidia-jetson" cache="$MIRROR_CACHE/nvidia-jetson" k="$W/nvidia.gpg"
+    local fpr x="$W/aptsrc" f n names new pool="$REPO/pool/$REPO_COMPONENT" t="$W/target" p="$W/hp"
+    local log="$W/target/var/log/brainsyncos/install.log" key="$T/key/repo-signing-key.asc"
+    [ "$(mirror_names jetson)" = nvidia-jetson ] && [ -z "$(mirror_names vm)" ] \
+        || die "mirrors: jetson '$(mirror_names jetson)', vm '$(mirror_names vm)'"
+    fpr="$(sed -n 's/^MIRROR_KEY_FPR=//p' "$m/mirror.env")"
+    (load_mirror nvidia-jetson; mirror_keyring nvidia-jetson "$k")
+    # The key and the source NVIDIA's own install configures (nvidia-l4t-apt-source).
+    xorriso -osirrox on -indev "$(resolve_base_iso)" -extract /pool/main/n/nvidia-l4t-apt-source "$W/aptsrc-debs" \
+        > /dev/null 2>&1 || die "cannot read nvidia-l4t-apt-source from the base ISO"
+    dpkg-deb -x "$(ls "$W"/aptsrc-debs/nvidia-l4t-apt-source_*_arm64.deb)" "$x"
+    [ "$(key_fingerprint "$x/etc/apt/trusted.gpg.d/jetson-ota-public.asc")" = "$fpr" ] || die "NVIDIA's ISO trusts another key"
+    grep -qx "deb $(sed -n 's/^MIRROR_URL=//p' "$m/mirror.env") $(sed -n 's/^MIRROR_SUITE=//p' "$m/mirror.env") main" \
+        "$x/etc/apt/sources.list.d/nvidia-l4t-apt-source.list" || die "the stock install configures another repository"
+    if cmp -s "$x/etc/apt/trusted.gpg.d/jetson-ota-public.asc" "$m/jetson-ota-public.asc"; then f="the same file"; else f="the same key"; fi
+    echo "key $fpr: $f as nvidia-l4t-apt-source's, whose sources list has the mirrored repository and suite"
+
+    # The filled cache, with no network at all.
+    unshare -n python3 -I "$BRAINSYNCOS_ROOT/scripts/mirror.py" fetch --mirror "$m" --cache "$cache" --keyring "$k" \
+        > "$W/mirror.out" 2>&1 || { cat "$W/mirror.out"; die "the cached mirror does not verify offline"; }
+    cat "$W/mirror.out"
+    ! grep -q '^downloading' "$W/mirror.out" && [ "$(grep -c '^cached: ' "$W/mirror.out")" = 5 ] || die "want 5 cached .debs"
+    grep -q 'relations left to the target system: none' "$W/mirror.out" || die "the closure needs packages from elsewhere"
+
+    # The test repositories: exactly the pinned .debs on the jetson one, none on the vm one.
+    names="$(sed -n 's/^\([a-z0-9][^ ]*\) .*/\1/p' "$m/debs.lock" | LC_ALL=C sort | tr '\n' ' ')"
+    [ "$names" = "cuda-cudart-13-2 cuda-toolkit-13-2-config-common cuda-toolkit-13-config-common cuda-toolkit-config-common libcublas-13-2 " ] \
+        || die "debs.lock pins: $names"
+    n=0
+    for f in $(python3 -I "$BRAINSYNCOS_ROOT/scripts/mirror.py" files --mirror "$m" --cache "$cache" --keyring "$k"); do
+        cmp "$pool/$f" "$cache/$f" || die "$f in the repository differs from the cache"
+        n=$((n + 1))
+    done
+    python3 -I - "$m/debs.lock" "$REPO/dists/$REPO_SUITE/$REPO_COMPONENT/binary-arm64/Packages" "$REPO_COMPONENT" <<'PY'
+import os, sys
+lock, index, comp = sys.argv[1:]
+st = {}
+for s in open(index).read().split("\n\n"):
+    d = dict(l.split(": ", 1) for l in s.splitlines() if ": " in l and not l.startswith(" "))
+    if d:
+        st[d["Package"]] = d
+for line in open(lock):
+    if line.strip() and not line.startswith("#"):
+        pkg, ver, arch, size, sha, fn = line.split()
+        d = st.get(pkg)
+        want = {"Version": ver, "Architecture": arch, "Size": size, "SHA256": sha,
+                "Filename": "pool/%s/%s" % (comp, os.path.basename(fn))}
+        if d is None or any(d.get(k) != v for k, v in want.items()):
+            sys.exit("the repository index has %s other than pinned: %s" % (pkg, d))
+print("repository index: every pinned .deb at its pinned version, size and sha256")
+PY
+    ! ls "$T/repo/vm/pool/$REPO_COMPONENT"/cuda-* "$T/repo/vm/pool/$REPO_COMPONENT"/libcublas* > /dev/null 2>&1 \
+        || die "the vm repository has CUDA .debs"
+    echo "jetson repository: the $n pinned .debs, the same bytes as the cache, $(du -sm "$pool" | cut -f1) MB pool; vm repository: none"
+
+    # Refusals, on copies.
+    cache_copy "$cache" "$W/c"
+    sed -i 's/^Date: .*/Date: Sat, 24 Oct 2026 00:00:00 UTC/' "$W/c/InRelease"
+    expect_mirror_fail "a tampered InRelease" 'does not verify' check "$m" "$W/c" "$k"
+    expect_mirror_fail "another key" 'does not verify' check "$m" "$cache" "$REPO/repo-key.gpg"
+    cp -R "$m" "$W/m-stale"
+    sed -i 's/^\(cuda-cudart-13-2 [^ ]* [^ ]* [^ ]* \)[0-9a-f]\{64\}/\10000000000000000000000000000000000000000000000000000000000000000/' \
+        "$W/m-stale/debs.lock"
+    expect_mirror_fail "a stale debs.lock" 'debs.lock differs from the closure' check "$W/m-stale" "$cache" "$k"
+    cp -R "$m" "$W/m-forbid"
+    sed -i 's/^MIRROR_ROOTS=.*/MIRROR_ROOTS=libnvidia-compute=595.71.05-1ubuntu1/' "$W/m-forbid/mirror.env"
+    expect_mirror_fail "a dGPU root" 'MIRROR_FORBID rules out' check "$W/m-forbid" "$cache" "$k"
+    force_rm_tree "$W/c"
+    cache_copy "$cache" "$W/c/nvidia-jetson"
+    f="$(ls "$W"/c/nvidia-jetson/cuda-cudart-13-2_*.deb)"
+    printf 'x' >> "$f"
+    expect_mirror_fail "a tampered .deb" 'not the pinned size and sha256' check "$m" "$W/c/nvidia-jetson" "$k"
+    if BSOS_MIRROR_CACHE="$W/c" "$BRAINSYNCOS_ROOT/scripts/build-repo.sh" --edition jetson --debs "$T/debs/jetson" \
+            --key "$key" --out "$W/r" > "$W/repo.out" 2>&1; then
+        die "build-repo.sh accepted a tampered mirror cache"
+    fi
+    grep -q 'the mirrored .debs do not match their pins' "$W/repo.out" || { cat "$W/repo.out"; die "build-repo.sh failed for another reason"; }
+    [ ! -e "$W/r" ] && [ ! -e "$W/r.new" ] || die "the refused build-repo.sh left output"
+    echo "refuses build-repo.sh with a tampered cache: $(grep -m1 'do not match' "$W/repo.out")"
+    force_rm_tree "$W/c"
+
+    # 80-cuda.sh through the hook in NVIDIA's target base layer.
+    target_layer "$t"
+    in_t "$t" dpkg-query -W -f '${Package}\n' | LC_ALL=C sort > "$W/pkgs-before"
+    apt_state "$t" > "$W/apt-before"
+    hook_payload "$p" 80-cuda.sh
+    run_hook "$p" "$t" "$REPO" || { tail -30 "$W/live.log"; die "hook failed"; }
+    grep -q 'BrainSyncOS layer installed (3 steps)' "$log" || die "log lacks the summary"
+    ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
+    sed -n '/== 80-cuda.sh/,$p' "$log" | grep -E '80-cuda.sh|alternatives'
+    grep -q '^80-cuda.sh: installed cuda-cudart-13-2 13.2.86-1, libcublas-13-2 13.4.1.3-1; new packages: ' "$log" \
+        || die "80-cuda.sh did not finish"
+    in_t "$t" dpkg-query -W -f '${Package}\n' | LC_ALL=C sort > "$W/pkgs-after"
+    new="$(LC_ALL=C comm -13 "$W/pkgs-before" "$W/pkgs-after" | tr '\n' ' ')"
+    [ "$new" = "brainsyncos-archive-keyring $names" ] || die "installed other packages than the keyring and the pinned ones: $new"
+    grep -qx "80-cuda.sh: installed .*; new packages: ${names% }" "$log" || die "80-cuda.sh installed other packages than the pinned ones"
+    [ "$(readlink "$t/usr/local/cuda")" = /etc/alternatives/cuda ] && [ "$(readlink "$t/etc/alternatives/cuda")" = /usr/local/cuda-13.2 ] \
+        || die "the /usr/local/cuda alternative is not set"
+    grep -qx /usr/local/cuda/targets/sbsa-linux/lib "$t/etc/ld.so.conf.d/000_cuda.conf" \
+        && grep -qx /usr/local/cuda-13/targets/sbsa-linux/lib "$t/etc/ld.so.conf.d/987_cuda-13.conf" || die "ld.so.conf.d lacks the CUDA paths"
+    in_t "$t" ldconfig -p > "$W/ldconfig.out"
+    grep -E 'libcudart|libcublas' "$W/ldconfig.out"
+    ! grep -q 'libcuda\.so' "$W/ldconfig.out" || die "something in the target provides libcuda.so"
+    in_t "$t" ldd /usr/local/cuda-13.2/targets/sbsa-linux/lib/libcublas.so.13 | sed 's/^/  /'
+    apt_state "$t" > "$W/apt-after"
+    diff "$W/apt-before" "$W/apt-after" || die "the target's apt sources or lists changed"
+    no_mount_left "$t"
+    echo "jetson: 80-cuda.sh installed exactly the pinned packages (${names% }); their postinsts set the alternatives and ld.so.conf.d; no libcuda"
+    run_hook "$p" "$t" "$REPO" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
+    grep -q '^80-cuda.sh: installed .*; new packages: none$' "$log" || die "re-run installed something"
+    echo "re-run: OK, nothing new"
+
+    # The vm edition: the step skips before it touches apt.
+    sed -i 's/^BSOS_EDITION=.*/BSOS_EDITION=vm-arm64/' "$t/opt/brainsyncos/installer/device.env"
+    in_t "$t" env BSOS_INSTALL_DIR=/opt/brainsyncos/installer BSOS_REPO_DIR=/tmp/no-such-repo \
+        /bin/bash /opt/brainsyncos/installer/install.d/80-cuda.sh > "$W/vm.out" 2>&1 \
+        || { cat "$W/vm.out"; die "80-cuda.sh failed on the vm edition"; }
+    cat "$W/vm.out"
+    grep -qx '80-cuda.sh: vm-arm64 edition: skipped (no NVIDIA GPU, no CUDA)' "$W/vm.out" || die "vm: no skip message"
+}
+
 c_wheel() {
     local d="$BUILD_DIR/wheels" m="$BUILD_DIR/wheels/brainflow-cerelog.env" whl v="$W/venv" out
     [ -f "$m" ] || die "no $m (scripts/build-wheels.sh)"
@@ -732,6 +898,7 @@ case "$1" in
     voice) c_voice ;;
     debs) c_debs ;;
     usbserial) c_usbserial ;;
+    cuda) c_cuda ;;
     wheel) c_wheel ;;
     *) die "unknown check: $1 (see --help)" ;;
 esac
