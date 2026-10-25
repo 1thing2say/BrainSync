@@ -314,7 +314,8 @@ no-gain result as the offline table in Phase 2.
 
 The server (`python -m brainsync.server --trained <cued.npz> [--trained-method etrca]`)
 fits the model once at start (`online.trained_from_recording`: every artifact-free trial of
-the recording over P7, P8, O1, O2), checks that the recording's rate matches the board
+the recording over P7, P8, O1, O2, the first `--trained-window` seconds of each, default
+2 s), checks that the recording's rate matches the board
 and that every `--freqs` frequency is a trained target, prints a summary line, and gives
 each layout the model's subset for its targets (`Trained.for_freqs`): a 2-target confirm
 layout uses the filters trained on all four. The still-screen calibration still supplies
@@ -866,7 +867,10 @@ sets which elements are shown. `--trained CUED_NPZ` (with `--trained-method`, de
 `etrca`) decodes with a spatial filter fitted on that cued recording instead of FBCCA
 (Phase 3 above); while it runs, every pick the user then confirms is added to the filter's
 training set and the filter is refitted (a `learned` log record), so it adapts during the
-session. `--log PATH` appends a JSON-lines record of the session
+session. The learnt window runs from the pick's gate for the training-window length and is
+skipped when it would reach past the pick's commit, since the screen changes after it:
+with the default 2 s window and a commit about 2.25 s after the gate it fits, with a longer
+`--trained-window` it never does. `--log PATH` appends a JSON-lines record of the session
 (phases, layouts, onsets, selections, scans, clicks; never the token or a screenshot).
 Screenshots are kept only with `--log-scans DIR`, in the format `tools/screen_eval.py`
 reads. Ctrl-C or SIGTERM tells every client `phase stop` and exits 0; a port in use or a

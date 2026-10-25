@@ -64,6 +64,7 @@ class Settings:
 TUNED = Settings()
 
 REJECT_FACTOR = 3.0   # calibration windows louder than this x median RMS are left out
+TRAIN_WINDOW_S = 2.0  # training window for trained_from_recording (see its docstring)
 
 
 class RingBuffer:
@@ -602,9 +603,18 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
         on, y, keep = _training_windows(rec, decoder, lat, reject)
         if y.size != len(spans):
             raise ValueError(f"{rec.path}: {y.size} training windows for {len(spans)} trials")
-    calib: Calibration | None = None
-    if not trained:
-        calib = fit_rest(decoder, still_windows, reject)
+    def refit(k: int) -> Calibration:
+        """Fit the trained classifier without trial k, then its baseline on the still windows."""
+        train = keep[keep != k]
+        try:
+            clf.fit(on[train], y[train])
+        except ValueError as exc:
+            raise ValueError(f"{rec.path}: {clf.name} with trial {k} held out: {exc}") from None
+        return fit_rest(decoder, still_windows, reject)
+
+    # fold 0 is fitted before any data is fed: the lead-in before the first trial can be
+    # longer than window + pad, and an unfitted classifier cannot score those windows
+    calib = refit(0) if trained else fit_rest(decoder, still_windows, reject)
     decoder.reset()
     decoder.align(None)
     chunk = max(1, int(round(chunk_s * rec.fs)))
@@ -617,17 +627,9 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
                                           rec.t[a:min(a + chunk, stop)]))
         pos = stop
         if k < len(spans):
-            if trained:
-                train = keep[keep != k]
-                try:
-                    clf.fit(on[train], y[train])
-                except ValueError as exc:
-                    raise ValueError(f"{rec.path}: {clf.name} with trial {k} held out: "
-                                     f"{exc}") from None
-                fold = fit_rest(decoder, still_windows, reject)
-                calib = fold if calib is None else calib
+            if trained and k > 0:
+                refit(k)
             decoder.align(rec.t[stop])
-    assert calib is not None
     return spans, still, calib, decisions
 
 
@@ -803,14 +805,19 @@ def trained_from_recording(path: str | Path | Recording, classifier: str = "etrc
                            channels: Sequence[str | int] | None = POSTERIOR, harmonics: int = 3,
                            margin: float = TUNED.margin, threshold: float | None = TUNED.threshold,
                            shrink: float = 0.0, reject: float = REJECT_FACTOR,
-                           latency: float | None = None) -> Trained:
+                           latency: float | None = None,
+                           window_s: float | None = TRAIN_WINDOW_S) -> Trained:
     """Fit a trained classifier on every artifact-free trial of a cued recording.
 
     The flicker windows are cut as score_cued cuts them (the whole recording preprocessed
-    with its own band and notch, ``rec.window_s`` long, from stim_on + latency) over
-    ``channels`` in that order. The baseline is left unfitted: the live still-screen
-    calibration provides it. The result's ``fs``, ``freqs`` and channel count must match
-    the live board and layout; ``Trained.for_freqs`` picks a layout's subset.
+    with its own band and notch, from stim_on + latency) over ``channels`` in that order,
+    ``window_s`` long (default 2 s, clipped to the recorded window; None = the recorded
+    window). 2 s keeps at least one steady-state period for any-offset scoring and is short
+    enough that a pick's window, from its gate to its commit (about 2.25 s with the TUNED
+    settings), can be learnt later (``DecoderBank.learn``). The baseline is left unfitted:
+    the live still-screen calibration provides it. The result's ``fs``, ``freqs`` and
+    channel count must match the live board and layout; ``Trained.for_freqs`` picks a
+    layout's subset.
     """
     if not is_trained(classifier):
         raise ValueError(f"{classifier!r} is not a trained classifier; choose from "
@@ -820,7 +827,10 @@ def trained_from_recording(path: str | Path | Recording, classifier: str = "etrc
         raise ValueError(f"{rec.path}: a trained classifier needs at least 2 targets, the "
                          f"recording has {rec.freqs.tolist()}")
     lat = rec.latency if latency is None else float(latency)
-    w = cut_windows(rec, window_s=rec.window_s, latency=lat, band=rec.band, notch_hz=rec.notch)
+    if window_s is not None and (not np.isfinite(window_s) or window_s <= 0):
+        raise ValueError(f"window_s must be positive or None, got {window_s}")
+    length = rec.window_s if window_s is None else min(float(window_s), rec.window_s)
+    w = cut_windows(rec, window_s=length, latency=lat, band=rec.band, notch_hz=rec.notch)
     if len(w) == 0:
         raise ValueError(f"{rec.path}: no complete trials in {len(rec.markers)} markers")
     picked = w.pick(channels)

@@ -532,3 +532,28 @@ def test_cli_trained_classifier_reports_held_out(synthetic_recording, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "mscca" in out and "inside the last trial" in out
+
+
+def test_replay_trained_classifier_survives_a_long_lead_in(tmp_path):
+    """Windows fall due during a lead-in longer than window + pad; the trained classifier
+    must already be fitted (fold 0) when the first one is scored."""
+    labels = [0, 1] * 6
+    X, t, text = fake_session(FREQS, labels, amp=3.0, seed=9)
+    lead = int(6.0 * FS)                                  # 6 s of still screen first
+    X2 = np.concatenate([X[:, :lead] * 0 + X[:, :lead].mean(axis=1, keepdims=True), X], axis=1)
+    t2 = np.concatenate([t[0] - (lead - np.arange(lead)) / FS, t])
+    path = save_recording(tmp_path / "2026-01-01_000001_cued.npz", X2, t2, FS, MONTAGE, FREQS, text)
+    res = replay(path, classifier="etrca", margin=0.0, threshold=None, votes=2)
+    assert res.n_trials == 12 and res.params["held_out"] is True
+    assert res.correct >= 0.75 * res.n_trials
+
+
+def test_trained_from_recording_window_length(synthetic_recording):
+    clf = online.trained_from_recording(synthetic_recording)             # default 2 s
+    assert clf.templates.shape[-1] == int(2.0 * FS)
+    full = online.trained_from_recording(synthetic_recording, window_s=None)
+    assert full.templates.shape[-1] == int(round(load_recording(synthetic_recording).window_s * FS))
+    clipped = online.trained_from_recording(synthetic_recording, window_s=99.0)
+    assert clipped.templates.shape[-1] == full.templates.shape[-1]
+    with pytest.raises(ValueError, match="window_s"):
+        online.trained_from_recording(synthetic_recording, window_s=0.0)

@@ -430,3 +430,21 @@ def test_learn_adds_a_confirmed_trial_and_rebuilds_the_decoder(calib):
         bank.learn(15.0, math.nan)
     with pytest.raises(ValueError, match="no trained classifier"):
         make_bank(calib).learn(15.0, T0)
+
+
+def test_learn_refuses_a_window_that_reaches_past_the_commit(calib):
+    """The learnt window must end before the pick's commit, else it holds the next screen."""
+    model = trained_model()                                  # 2 s templates
+    bank = make_bank(calib, trained=model)
+    board = FakeBoard(FREQS, seed=4, t0=T0 + 6.0)
+    board.set_target(-1)
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    stream(bank, board, 3.0)
+    bank.set_onset(T0 + 9.0)
+    board.set_target(0)
+    stream(bank, board, 5.0)
+    gate = bank.gate
+    assert bank.learn(15.0, gate, t_end=gate + 1.5) is False     # committed too early: not learnt
+    assert model.n_train.tolist() == [4, 4, 4, 4]
+    assert bank.learn(15.0, gate, t_end=gate + 2.5) is True      # the window fits before the commit
+    assert model.n_train.tolist() == [5, 4, 4, 4]

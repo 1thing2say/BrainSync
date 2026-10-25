@@ -316,15 +316,18 @@ class DecoderBank:
 
     # -- learning from confirmed picks (a trained classifier only) -------------------------
 
-    def learn(self, freq: float, t_start: float) -> bool:
+    def learn(self, freq: float, t_start: float, t_end: float | None = None) -> bool:
         """Teach the trained classifier a trial the user confirmed: the window that began at
         ``t_start`` (that trial's gate, onset + latency) was a look at the target at ``freq``.
 
         The window is cut from the history at the templates' length, preprocessed like a
         decoder window (pad before it, dropped after filtering), added to the training set
         and the classifier refitted. Cached decoders are rebuilt from it, the active one in
-        place with its baseline, alignment and gate kept. Returns False when the history no
-        longer covers the window (too long ago, or before this process saw data).
+        place with its baseline, alignment and gate kept. ``t_end`` is the last moment the
+        user was certainly still looking at that target (the pick's commit time): a window
+        reaching past it would hold the next screen's flicker, so it is not learnt. Returns
+        False when the window is not learnt: it reaches past ``t_end``, or the history no
+        longer covers it (too long ago, or before this process saw data).
         """
         if self.trained is None:
             raise ValueError("no trained classifier to teach; start the bank with trained=")
@@ -343,6 +346,8 @@ class DecoderBank:
         n_pad = int(round(PAD_S * self.fs))
         a, b = first - n_pad, first + self.trained.templates.shape[-1]
         if a < 0 or b > k:
+            return False
+        if t_end is not None and times[b - 1] > float(t_end):
             return False
         probe = self._probe
         segment = self._hist.last(k)[probe.rows, a:b]
