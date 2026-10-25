@@ -173,9 +173,12 @@ pull requests.
   (health line and its details, Correct / Wrong, keyboard hint). The C / W keys still mark the
   last reply; FAKE DECODER / KEYBOARD stay on the mirror; health is in `/api/health` and
   `tools/preflight.py`; the iPhone app link shows only with `--tunnel` or on the LAN, and the
-  iPhone app keeps its own text box. The targets sit further apart: wider diamond gaps, and the
-  confirm screen keeps the diamond's empty middle row, so Say it (top) and Back (bottom) are about
-  230 px apart instead of 30 px (phones: side by side, 3 rem apart).
+  iPhone app keeps its own text box. Laid out for SSVEP: each target sits against its own edge of
+  the mirror (top, bottom, left, right; at most 28 % of its width) and the empty middle takes the
+  rest, so the targets are as far apart as the window allows; the confirm screen's sentence sits
+  in that still centre between Say it (top) and Back (bottom), as on the flicker display. The page
+  itself never scrolls when a conversation line arrives (only the list does). Phones: a list,
+  2 rem between cards, Say it and Back side by side 3 rem apart.
   It is no longer called the partner page (the profile page links back to "Session"; the server
   prints "BrainSync page: …"), and `ui/` is served with `Cache-Control: no-cache`, so a browser
   never runs a cached old `app.js` against a new `index.html` (that left the page stuck on

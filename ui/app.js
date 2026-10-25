@@ -7,6 +7,7 @@ const REPLACED = 4000;  // close code: another page took over (app/server.py)
 
 let ws = null;
 let shown = null;        // last show_page
+let stateName = "";      // last state name
 let phase = "";          // last trial phase
 let accepted = false;    // flicker warning accepted
 let keyboardMode = false;
@@ -72,11 +73,17 @@ function renderPage(msg) {
   $("option-count").textContent = msg.mode === "list"
     ? `Page ${msg.page} · option ${msg.highlight_index + 1} of ${msg.options.length}`
     : `Page ${msg.page} · ${HEADINGS[msg.mode]}`;
-  $("option-text").textContent = msg.mode === "page" ? "" : msg.text;
+  // The confirm screen's sentence sits in the empty centre of the diamond, between Say it (top)
+  // and Back (bottom), as on the flicker display; list mode keeps it above the targets.
+  $("option-text").textContent = msg.mode === "list" ? msg.text : "";
   renderList(msg);
   const targets = $("targets");
   targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
-  targets.replaceChildren(...msg.slots.map((s) => {
+  const centre = document.createElement("div");
+  centre.className = "target-centre";
+  centre.textContent = msg.mode === "confirm" ? msg.text : "";
+  centre.hidden = stateName === "SPEAKING";  // the Speaking box shows it then
+  targets.replaceChildren(centre, ...msg.slots.map((s) => {
     // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
     const key = s.slot.replace("s", "");
@@ -155,13 +162,16 @@ function markPicked(slot) {
 }
 
 function renderState(msg) {
+  stateName = msg.name;
   const b = ViewCore.banner(msg.name, msg.detail, shown && shown.mode);
   $("state").textContent = b.text;
   $("banner").className = `banner tone-${b.tone}`;
   const box = $("speaking");
   box.hidden = msg.name !== "SPEAKING";
   if (msg.name === "SPEAKING") $("speaking-text").textContent = `“${msg.detail}”`;
-  $("option").hidden = msg.name === "SPEAKING";  // the sentence is in the Speaking box then
+  // The sentence is in the Speaking box then.
+  $("option").hidden = msg.name === "SPEAKING";
+  document.querySelectorAll(".target-centre").forEach((c) => { c.hidden = msg.name === "SPEAKING"; });
   if (msg.name === "PAUSED" || msg.name === "IDLE") {
     Speech.cancel();
     speaking = false;  // a cancelled clip never reports its end: without this the mic stayed off
@@ -245,7 +255,8 @@ function addLine(who, text) {
   list.append(li);
   // Only the latest lines: the partner needs what was just said, not the whole log.
   while (list.children.length > CONVERSATION_LINES) list.firstElementChild.remove();
-  li.scrollIntoView({ block: "nearest" });
+  // Scroll the list only: scrollIntoView also scrolled the page, carrying the targets off screen.
+  list.scrollTop = list.scrollHeight;
 }
 
 function renderStatus(s) {

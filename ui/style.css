@@ -64,7 +64,7 @@ a { color: var(--text); }
 .topbar-nav a { color: var(--muted); text-decoration: none; font-size: 0.875rem; padding: 0.35rem 0.1rem; }
 .topbar-nav a:hover { color: var(--text); }
 
-.layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; flex: 1; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; flex: 1; }
 
 /* Mirror of the user's screen */
 .mirror { display: flex; flex-direction: column; padding: 1.25rem 2rem 1.5rem; gap: 1rem; min-width: 0; }
@@ -110,22 +110,31 @@ a { color: var(--text); }
 .targets { flex: 1; gap: 0.9rem; }
 .targets.row { display: flex; justify-content: space-around; align-items: center; }
 /* Page and confirm screens: the diamond the user sees (s1 top, s2 left, s3 right, s4 bottom).
-   Wide gaps keep the targets apart, as the squares are on the flicker display. The middle row
-   keeps its height on the confirm screen too (no left or right target there), so "Say it" (top)
-   and "Back" (bottom) stay as far apart as on a page. */
-.targets.diamond { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: auto minmax(7.5rem, auto) auto;
-  grid-template-areas: ". top ." "left . right" ". bottom ."; align-items: center; justify-items: center;
-  align-content: center; gap: clamp(1.5rem, 6vh, 4rem) clamp(1.5rem, 4vw, 4rem); }
-.pos-top { grid-area: top; } .pos-left { grid-area: left; }
-.pos-right { grid-area: right; } .pos-bottom { grid-area: bottom; }
+   Built for SSVEP: the targets are as far apart as the area allows, so looking at one never puts
+   a neighbour near the centre of gaze. Each sits against its own edge (top, bottom, left, right)
+   and the empty middle row and column take all the space left over. On the confirm screen there
+   is no left or right target, so "Say it" (top) and "Back" (bottom) are the whole height apart. */
+.targets.diamond { display: grid; container-type: inline-size;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(4rem, 1fr) auto;
+  grid-template-areas: ". top ." "left centre right" ". bottom ."; }
+.targets.diamond .pos-top { grid-area: top; justify-self: center; align-self: start; }
+.targets.diamond .pos-bottom { grid-area: bottom; justify-self: center; align-self: end; }
+.targets.diamond .pos-left { grid-area: left; justify-self: start; align-self: center; }
+.targets.diamond .pos-right { grid-area: right; justify-self: end; align-self: center; }
+/* The confirm screen's sentence, in the still centre between Say it and Back. */
+.target-centre { grid-area: centre; align-self: center; justify-self: center; text-align: center;
+  font-size: clamp(1.8rem, 4vw, 3rem); font-weight: 600; line-height: 1.15; letter-spacing: -0.03em;
+  padding: 1rem; }
+.target-centre:empty, .target-centre[hidden], .targets.row .target-centre { display: none; }
 /* A target is a card: 1 px border, steady fills only. */
-/* Never wider than its grid cell: at 901-1150 px a third of the mirror is under 260 px. */
-.target { width: min(21vw, 260px); max-width: 100%; min-height: 7.5rem; border-radius: 12px; display: flex;
+.target { width: 260px; max-width: 100%; min-height: 7.5rem; border-radius: 12px; display: flex;
   flex-direction: column; justify-content: center; align-items: center; gap: 0.45rem; padding: 1rem;
   border: 1px solid var(--line); background: var(--surface); text-align: center; color: var(--text);
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
 /* The sentence (what gets spoken) is the big text; the short label is a tag above it. */
+/* In the diamond, at most 28 % of its width, so the top target always clears the side ones. */
+.targets.diamond .target { width: min(28cqw, 260px); }
 .target-tag { font-size: 0.7rem; font-weight: 500; color: var(--say); }
 .target-tag:empty, .target-key:empty { display: none; }
 .target-text { font-size: clamp(1.05rem, 1.55vw, 1.35rem); font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
@@ -269,8 +278,6 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
   .option-text { font-size: clamp(1.5rem, 3vw, 2.3rem); }
   .target { min-height: 5.5rem; padding: 0.6rem 0.8rem; }
   .targets { gap: 0.6rem; }
-  .targets.diamond { grid-template-rows: auto minmax(5.5rem, auto) auto;
-    gap: clamp(1.25rem, 4.5vh, 2.5rem) clamp(1.25rem, 3.5vw, 3rem); }
   .panel { padding: 0.75rem 1rem 0.9rem; gap: 0.6rem; }
   .controls button { min-height: 2.6rem; }
   .mic-card { padding: 0.6rem 0.8rem; gap: 0.4rem; }
@@ -283,7 +290,8 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
 @media (max-width: 900px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
   .panel { border-left: none; border-top: 1px solid var(--line); }
-  .target { width: 100%; }
+  /* One column: the page scrolls, so the diamond needs a height of its own to spread over. */
+  .targets.diamond { min-height: clamp(24rem, 55vh, 34rem); }
   /* Room for the bar (two lines of the "Not connected" label) and the iPhone's home bar. */
   body { padding-bottom: calc(5.5rem + env(safe-area-inset-bottom)); }
   .controls { position: fixed; top: auto; bottom: 0; left: 0; right: 0; padding: 0.6rem 1rem;
@@ -305,10 +313,11 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
   .banner { flex-wrap: wrap; padding: 0.6rem 0.8rem; }
   /* The page as a list of big phrase cards, top to bottom (s1, s2, s3, then More options smaller),
      as in the iPhone app. The confirm screen's Say it and Back share one row, well apart. */
-  .targets.diamond { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 1.25rem 3rem; }
+  .targets.diamond { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 2rem 3rem; min-height: 0; }
   .targets.diamond .target { flex: 1 1 100%; width: auto; min-height: 4.75rem; padding: 0.9rem 1rem;
     align-items: flex-start; text-align: left; }
   .targets.diamond .target-text { font-size: 1.3rem; line-height: 1.25; }
+  .targets.diamond .target-centre { flex: 1 1 100%; order: -1; padding: 0; font-size: 1.6rem; }
   .targets.diamond .target.next { min-height: 3.25rem; padding: 0.6rem 1rem; align-items: center; text-align: center; }
   .targets.diamond .target.next .target-text { font-size: 1.05rem; }
   .targets.diamond .target.say, .targets.diamond .target.back { flex: 1 1 0; min-width: 0; min-height: 5.5rem;
