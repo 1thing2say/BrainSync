@@ -31,12 +31,65 @@ None of the 3b-finish or 3d work was reviewed: the review stage never ran.
 | `bsos/3b-runtime` | `brainsync-runtime`, `brainsync`, `70-brainsync.sh` and the BrainFlow wheel in the venv: done, 12 phase 3 checks passed. Plus one WIP commit, not built: `secrets.env`, the espeak-ng package, checks updated for the new steps. |
 | `bsos/3d-cuda` | NVIDIA's CUDA 13.2 runtime mirrored into the Jetson repository (`mirror/nvidia-jetson/`, `scripts/fetch-mirror.sh`, `scripts/mirror.py`, sha256-pinned `debs.lock`), `80-cuda.sh`, and their checks. One WIP commit (docs, `mirror.py`) not re-run. |
 | `bsos/3d-model` | The model package (Qwen3.5-2B Q4_K_M from `unsloth/Qwen3.5-2B-GGUF`, pinned in `config/model.env`), `86-model.sh`, and an ISO size limit (`ISO_MAX_BYTES`). One WIP commit (checks, docs); its suite run was stopped. |
-| `bsos/3d-llama` | All WIP. `scripts/build-llama.sh` and `llama/llama.env` (llama.cpp v0.7.0, all CPU variants, CUDA sm_87), the `brainsyncos-llama` packages, the sandboxed `brainsyncos-llama.service` and `85-llama.sh`. On the laptop the CPU part cross-compiled (408 steps, 653 s at 4 jobs). The CUDA part was stopped mid-compile. Nothing packaged or tested. |
+| `bsos/3d-llama` | llama.cpp **compiled and checked on the laptop** (see "Prebuilt on the laptop" below): `scripts/build-llama.sh`, `llama/llama.env` (v0.7.0, all CPU variants, CUDA sm_87), `scripts/pack-llama-release.sh`. Still WIP and untested: the `brainsyncos-llama` packages, the sandboxed `brainsyncos-llama.service` and `85-llama.sh`. |
 | `bsos/build-speed` | A native tools container for packing, `.pyc` and ISO work on x86-64 hosts. Stopped early. Not needed on the Mac. |
 | `bsos/3c-board`, `bsos/3d-llm-backends` | Already merged. |
 
 The three 3d branches start from `bsos/3b-runtime` at `de467a6`, so merging
 them brings in 3b too.
+
+## Prebuilt on the laptop (2026-10-25)
+
+The compiles that suit x86-64 were done on the laptop, so the Mac does not
+repeat them. `nvcc` and the cross gcc run natively there, and building the
+CPU and CUDA parts in one run keeps their `libggml-base` byte-identical.
+
+**`brainsyncos-prebuilt-2026-10-25.tar.xz`**, 23,677,916 bytes, sha256
+`732c0a8e36399195750d1fa208c17c741ad1be80260e6ead19e61b0b29112eb0`. It is in
+the laptop's `C:\Users\ecart\Downloads` (and `~/BrainSyncOS/brainsyncos/build/out/` in WSL). Copy
+it to the Mac by any means: the sha256 above, committed in git, is what
+makes the copy trustworthy. It holds:
+
+| Path | What | Pins |
+|---|---|---|
+| `brainsyncos/build/llama/` | llama.cpp v0.7.0 for aarch64: `cpu/` (the tree for `/opt/brainsyncos/llama`, all 8 CPU variants) and `cuda/libggml-cuda.so` (sm_87, 39.7 MB), with `llama.env` and `check.env` | `SHA256SUMS` sha256 `a0fdca0eb38239dcc2611fefa51c595335af224bc1e97ac9e1dac367f927a76e`; `INPUTS_SHA256=a9cc0075b6460fa7cac538fc399eae9378f93200a8e86b62952f75ee3ea27a66`; `PARTS=cpu,cuda` |
+| `brainsyncos/build/wheels/` | the BrainFlow Cerelog wheel from 3c (47 minutes to build under emulation) | `SHA256SUMS` sha256 `29ae543aafe25ddbce5f729dda3f8839aca01b1a53703625fde498fd7a65b736`; wheel sha256 `6ed6d54c54007c44551a3e2170c67af2cf23ecb256450c4ae2d281b72dc46e74` |
+
+How it was built and checked (`bsos/3d-llama`, commit `b0e68aa`):
+- Compiled in the amd64 cross-builder: CPU 408 steps in 376 s, CUDA 145 objects in 881 s, 5 jobs, gcc 14.2.0, nvcc 13.2.86.
+- `scripts/build-llama.sh check` in the arm64 builder (qemu) passed:
+  - all 36 ELF files resolve; they need only glibc 2.38 and libstdc++;
+  - `--version` reports build 11669 / `620d222`;
+  - 8 tokens from `/completion`, and `/v1/messages` answers;
+  - the CUDA backend resolves against NVIDIA's Jetson `cuda-cudart-13-2` and `libcublas-13-2`, never `libcuda.so.1`, and loads with no GPU.
+- On emulated Cortex-A76 and Neoverse-N1 cores (Orin-class: ARMv8.2, dotprod, fp16), llama.cpp loads `libggml-cpu-armv8.2_2.so`; on a Cortex-A57, `armv8.0_1`. Not yet in a script: Phase 4 below.
+
+On the Mac, after the merge (Phase 1):
+
+```sh
+shasum -a 256 brainsyncos-prebuilt-2026-10-25.tar.xz    # must print 732c0a8e…12eb0
+tar -xJf brainsyncos-prebuilt-2026-10-25.tar.xz -C <the BrainSync checkout>
+cd <the BrainSync checkout>/brainsyncos
+(cd build/llama && shasum -a 256 -c SHA256SUMS) && (cd build/wheels && shasum -a 256 -c SHA256SUMS)
+scripts/build.sh llama     # "compiled for these inputs": skips the cross-builder, runs check natively
+```
+
+`scripts/build.sh` (`llama`, `all`) now checks on the host whether
+`build/llama` is compiled for the current inputs (`llama_compiled`), so the
+amd64 cross-builder never starts on the Mac. That holds while `llama/`, the compile part of
+`scripts/build-llama.sh` (above its `# --- check` line) and
+`docker/Dockerfile.cross-builder` are unchanged. If one of them changes, build/llama
+must be rebuilt: on the laptop, or add a native arm64 compile path to
+`build-llama.sh`. `build-wheels.sh` likewise keeps the wheel while its inputs
+are unchanged.
+
+Release archives, made from `build/llama` by `scripts/pack-llama-release.sh`
+(reproducible: two runs gave the same bytes; on macOS it needs `brew install gnu-tar`):
+- `llama.cpp-0.7.0-b11669-linux-aarch64-cpu.tar.xz`, 4,708,164 bytes;
+- `llama.cpp-0.7.0-b11669-linux-aarch64-cuda-sm87.tar.xz`, 22,264,324 bytes;
+- their `SHA256SUMS` hashes to `d55d7a64a4ac3e654c533e33c1a741b655ef7316da2fdd7ad20677ed5734641b`.
+
+A rerun on the Mac should give the same bytes, which also checks GNU tar there.
 
 ## On the Mac: setup
 
@@ -66,7 +119,8 @@ key, 70 apps, 75 USB serial, 80 CUDA, 85 llama, 86 model.
 
 ## Phase 2: build the Jetson packages once
 
-- **llama.cpp natively.** The laptop compiled through an amd64 cross-builder (`scripts/builder.sh --cross`, `docker/Dockerfile.cross-builder`). On the Mac that image would itself be emulated. Make `build-llama.sh` use the arm64 builder on an arm64 host, with NVIDIA's aarch64 `cuda-nvcc-13-2=13.2.86-1`, `cuda-cudart-dev-13-2` and `libcublas-dev-13-2` (build only, never shipped). Keep the cross path for x86-64 hosts.
+- **llama.cpp: no compile.** Use the prebuilt `build/llama` (above); `scripts/build.sh llama` only runs its check. Only if its inputs change: rebuild on the laptop, or make `build-llama.sh` compile in the arm64 builder on an arm64 host with NVIDIA's aarch64 `cuda-nvcc-13-2=13.2.86-1`, `cuda-cudart-dev-13-2` and `libcublas-dev-13-2` (build only, never shipped). The amd64 cross-builder would be emulated on the Mac.
+- **BrainFlow: no compile.** The prebuilt `build/wheels` goes into `brainsync-runtime`.
 - Build: `scripts/build.sh packages --edition jetson`, then the repository. The Jetson edition only for now.
 - Check: `scripts/build.sh test phase3`. Then review the merged diff, as the stopped workflow would have: correctness, and trust/packaging (pins, signatures, secrets, sandboxing, maintainer scripts).
 
