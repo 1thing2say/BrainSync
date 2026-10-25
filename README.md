@@ -42,6 +42,24 @@ cp -R /Users/school/Documents/ssvep/third_party/brainflow-cerelog "$BF"
 The check prints `250` (plus a `pkg_resources` deprecation warning, which is harmless).
 The fork's native libraries are macOS arm64 only.
 
+### Windows (an extra platform, optional)
+
+Windows support is an **addition** from the `feat/windows-setup` branch. It does not
+replace or change anything above: the demo Mac stays the main machine, macOS and Linux
+keep this setup and `deploy/jetson`, and every code path they use is unchanged. On a
+Windows laptop the SSVEP side runs in native Windows Python (not WSL: only Windows sees
+the board's COM port, and only a native window flickers at a steady 60 Hz):
+
+```powershell
+py install 3.12                                                      # PsychoPy 2026.2 needs 3.10-3.12
+powershell -ExecutionPolicy Bypass -File deploy\windows\setup.ps1   # .venv-win, PsychoPy, BrainFlow
+powershell -ExecutionPolicy Bypass -File deploy\windows\check.ps1   # charger, USB, COM port, 60 Hz
+.venv-win\Scripts\python.exe -m brainsync.demo
+```
+
+The board's port is found by itself (`COM5` and so on). Details, including building the
+Cerelog BrainFlow fork with Visual Studio: `deploy/windows/INSTALL.md`.
+
 ## Data
 ```bash
 export BRAINSYNC_DATA_DIR=/Users/school/Documents/ssvep/data

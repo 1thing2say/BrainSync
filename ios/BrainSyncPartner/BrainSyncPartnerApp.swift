@@ -47,5 +47,15 @@ struct RootView: View {
             }
         }
         .animation(reduceMotion ? nil : .default, value: model.accepted)
+        // A link from outside the app to another server: switch only on Pair (AppModel.open).
+        .alert("Pair with \(model.pendingLink?.hostLabel ?? "")?",
+               isPresented: Binding(get: { model.pendingLink != nil },
+                                    set: { if !$0 { model.cancelPending() } }),
+               presenting: model.pendingLink) { newLink in
+            Button("Pair") { model.pair(with: newLink) }
+            Button("Cancel", role: .cancel) { model.cancelPending() }
+        } message: { _ in
+            Text("This replaces \(model.link?.hostLabel ?? "the saved server").")
+        }
     }
 }

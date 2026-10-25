@@ -118,6 +118,11 @@
       "phase": "baseline"
     },
     {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "paused"
+    },
+    {
       "type": "highlight",
       "slot": "s1"
     },

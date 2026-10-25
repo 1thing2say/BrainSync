@@ -157,7 +157,8 @@ def test_bad_arguments(argv: list[str], match: str, capsys: pytest.CaptureFixtur
     assert match in err and "Traceback" not in err
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0,
+                    reason="root can write anywhere; chmod cannot make a Windows folder read-only")
 def test_unwritable_save_dir_fails_before_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                     capsys: pytest.CaptureFixture) -> None:
     ro = tmp_path / "ro"

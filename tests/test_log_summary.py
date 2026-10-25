@@ -418,6 +418,16 @@ def test_unconfirmed_picks_and_missing_marks_with_a_real_decoder():
         events + [ev(30, "judgment", utterance_id="u1", correct=True)]))["warnings"])
 
 
+@pytest.mark.parametrize("name, fake", [
+    ("fake-decoder", True), ("ssvep-fbcca-fake", True), ("FakeSource", True), ("ssvep-fbcca", False)])
+def test_a_bridge_with_fake_in_its_name_is_a_fake_decoder(name, fake):
+    events = [ev(0, "from_decoder", state="IDLE", message={"type": "hello", "name": name}),
+              *pick_and_say(10, 20, OPTS[0], "u1", rank=1)]
+    summary = summarize(collect(events))
+    assert ("fake decoder" in format_report("s", summary)) is fake
+    assert any("no C/W marks" in w for w in summary["warnings"]) is not fake  # only real EEG
+
+
 # -- several sessions, text and the CLI ------------------------------------------------------------
 
 

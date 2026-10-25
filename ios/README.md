@@ -75,7 +75,11 @@ The laptop runs the server; the app needs its address and access key.
    (`https://…/?key=…`), both work.
 
 The app keeps the last server. The access key changes every time the server starts, so after a
-restart the app shows **"Link expired — pair again"**: open the new app link.
+restart the app shows **"Link expired — pair again"**: open the new app link. A link opened from
+outside the app that points to another server than the saved one (a stranger's link, or a new
+`trycloudflare.com` address, which changes every start) asks **"Pair with <host>?"** first;
+only **Pair** switches. A new key for the same server, or a link pasted on the pair screen,
+pairs at once.
 
 ## One partner page at a time
 

@@ -89,6 +89,7 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
         s.parse_server_to_ui,
     ),
     (s.Trial(trial_id=7, phase="flicker"), s.parse_server_to_ui),
+    (s.Trial(trial_id=7, phase="paused"), s.parse_server_to_ui),
     (s.Highlight(slot="s2"), s.parse_server_to_ui),
     (s.Speak(text="Yes, let's go outside.", utterance_id="u1"), s.parse_server_to_ui),
     (s.Listen(seconds=10.0, delay_s=0.5, reason="turn"), s.parse_server_to_ui),
@@ -414,3 +415,14 @@ def test_invalid_mic_messages(parse, raw):
         return
     with pytest.raises(ValidationError):
         parse(raw)
+
+
+@pytest.mark.parametrize("name, fake", [
+    ("fake-decoder", True),  # tools/fake_decoder.py
+    ("ssvep-fbcca-fake", True),  # the bridge with --fake: "fake" anywhere in the name
+    ("FakeSource", True),
+    ("ssvep-fbcca", False),  # the teammate's bridge on the headset
+    ("", False),
+])
+def test_is_fake_name(name: str, fake: bool) -> None:
+    assert s.is_fake_name(name) is fake

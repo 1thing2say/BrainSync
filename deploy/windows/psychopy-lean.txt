@@ -1,0 +1,19 @@
+# What brainsync.stimulus needs from PsychoPy on Windows. setup.ps1 installs
+# `psychopy==2026.2.4 --no-deps` and then this list. PsychoPy's full requirement list adds
+# pyqt6, opencv, pyarrow, tables, MeshPy and more (hundreds of MB, some built from
+# source), none of which the stimulus uses; setup.ps1 -FullPsychoPy installs those
+# instead. macOS and Linux keep `pip install -e ".[dev,display]"` from the README.
+pyglet==1.4.11            # PsychoPy pins this version on Windows
+pillow>=10.1
+pyserial>=3.5             # imported by PsychoPy's pyglet backend
+python-bidi
+arabic-reshaper
+freetype-py
+i18next
+json-tricks
+future
+pandas
+requests
+packaging>=24.0
+pyyaml
+six

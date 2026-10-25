@@ -397,10 +397,51 @@ async def test_a_duplicate_in_the_page_is_dropped_and_the_rest_keep_their_rank(e
     assert llm_events(event_log)[-1]["dropped"] == ["option_2: duplicate of option_1"]
 
 
-async def test_a_duplicate_label_is_dropped():
+async def test_a_duplicate_label_gives_way_to_a_spare_with_its_own_label(event_log):
     same_label = {"label": "let's go!", "utterance": "Sure, I'd like that.", "intent_id": "yes"}
-    options = await maker(FakeClaude(reply({**WITH_SPARE, "option_3": same_label}))).make_page(request())
+    options = await maker(FakeClaude(reply({**WITH_SPARE, "option_3": same_label})),
+                          event_log).make_page(request())
     assert utterances(options) == ["Yes, let's go outside.", "Not right now, thanks.", "Maybe a bit later."]
+    assert llm_events(event_log)[-1]["dropped"] == [
+        """option_3: same label as option_1 ("let's go!"), dropped for a spare"""]
+
+
+# The reviewer's case: two different sentences whose labels both shorten to "Not right now".
+NOT_NOW_1 = {"label": "Not right now thanks", "utterance": "Not right now, thanks.", "intent_id": "later"}
+NOT_NOW_2 = {"label": "Not right now, maybe later", "utterance": "Not right now, maybe later.",
+             "intent_id": "later"}
+
+
+async def test_labels_that_shorten_alike_keep_both_sentences_when_no_spare_is_left(event_log):
+    fake = FakeClaude(reply({**WITH_SPARE, "option_2": NOT_NOW_1, "option_3": NOT_NOW_2,
+                             "option_4": {**SPARE, "intent_id": "teleport"}}))
+    options = await maker(fake, event_log).make_page(request())
+    assert len(fake.calls) == 1  # no retry: a label clash alone does not cost the page
+    # Rank order kept, and the sentences (what the user reads and what is spoken) untouched.
+    assert utterances(options) == ["Yes, let's go outside.", "Not right now, thanks.",
+                                   "Not right now, maybe later."]
+    assert [o.label for o in options] == ["Let's go", "Not right now", "Not right now"]
+    ok = llm_events(event_log)[-1]
+    assert ok["dropped"] == ["option_4: unknown intent 'teleport'",
+                             "option_3: same label as option_2 ('Not right now'), kept: no spare "
+                             "with its own label"]
+    assert ok["labels_shortened"] == ["'Not right now thanks' -> 'Not right now'",
+                                      "'Not right now, maybe later' -> 'Not right now'"]
+
+
+async def test_labels_that_shorten_alike_prefer_a_spare_with_its_own_label(event_log):
+    fake = FakeClaude(reply({**WITH_SPARE, "option_2": NOT_NOW_1, "option_3": NOT_NOW_2}))
+    options = await maker(fake, event_log).make_page(request())
+    assert utterances(options) == ["Yes, let's go outside.", "Not right now, thanks.", "Maybe a bit later."]
+    assert llm_events(event_log)[-1]["labels_shortened"] == ["'Not right now thanks' -> 'Not right now'"]
+
+
+async def test_labels_that_shorten_alike_without_spares_keep_the_page():
+    fake = FakeClaude(reply({**GOOD, "option_2": NOT_NOW_1, "option_3": NOT_NOW_2}))
+    options = await maker(fake, spare_options=0).make_page(request())
+    assert len(fake.calls) == 1
+    assert utterances(options) == ["Yes, let's go outside.", "Not right now, thanks.",
+                                   "Not right now, maybe later."]
 
 
 async def test_an_unused_spare_is_left_out_and_an_invalid_one_is_not_checked(event_log):

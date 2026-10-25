@@ -22,6 +22,9 @@ final class AppModel {
     private(set) var link: ServerLink?
     /// The pair screen is shown on top of a saved link (the Pair button, a bad key).
     var showPairing = false
+    /// A link opened from outside the app to a different server than the saved one; nothing
+    /// changes until the partner confirms it (RootView's alert).
+    private(set) var pendingLink: ServerLink?
     private(set) var connected = false
     /// Why the connection stopped for good: another partner page took over, or the key is wrong.
     private(set) var stopReason: UIConnection.StopReason?
@@ -32,7 +35,8 @@ final class AppModel {
     // MARK: What the server said
 
     private(set) var page: ShowPage?
-    /// The trial phase name ("cue", "flicker", "rest", "baseline"), "" before the first trial.
+    /// The trial phase name ("cue", "flicker", "rest", "baseline", "paused"), "" before the first
+    /// trial.
     private(set) var phase = ""
     private(set) var pickedSlot: String?
     private(set) var stateName = ""
@@ -91,11 +95,21 @@ final class AppModel {
 
     // MARK: Pairing
 
-    /// brainsync://pair?url=...&key=... (or a web phone link) opened from outside the app.
+    /// brainsync://pair?url=...&key=... (or a web phone link) opened from outside the app. A link
+    /// to another server than the saved one waits for the partner's Pair (`pendingLink`): anyone
+    /// can send a link, and pairing would send the conversation to that server.
     func open(_ url: URL) {
-        if let newLink = ServerLink(pairURL: url) ?? ServerLink(string: url.absoluteString) {
-            pair(with: newLink)
+        guard let newLink = ServerLink(pairURL: url) ?? ServerLink(string: url.absoluteString) else { return }
+        if let current = link, !current.sameServer(as: newLink) {
+            pendingLink = newLink
+            return
         }
+        pair(with: newLink)
+    }
+
+    /// Cancel on the confirmation: the saved server stays.
+    func cancelPending() {
+        pendingLink = nil
     }
 
     /// Pairs with a link typed or pasted on the pair screen. Returns false if it is not a link.
@@ -106,7 +120,9 @@ final class AppModel {
         return true
     }
 
+    /// Pairs at once (the pair screen, or Pair on the confirmation of `pendingLink`).
     func pair(with newLink: ServerLink) {
+        pendingLink = nil
         if let data = try? JSONEncoder().encode(newLink) {
             UserDefaults.standard.set(data, forKey: Self.linkDefaultsKey)
         }

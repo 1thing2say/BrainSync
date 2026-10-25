@@ -68,6 +68,7 @@ class SlotConfig(SlotSpec):
 class ServerConfig(Strict):
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65535)
+    tunnel_wait_s: float = Field(default=30.0, gt=0)  # --tunnel: wait this long for cloudflared's address
 
 
 class DisplayConfig(Strict):

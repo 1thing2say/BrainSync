@@ -684,7 +684,7 @@ def test_no_device_says_so_and_exits_1(monkeypatch, capsys):
     assert reels.main(["--no-browser", "--no-voice", "--wait-device", "0.1"]) == 1
     err = capsys.readouterr().err
     assert "no EEG device connected: plug in the Cerelog X8 USB receiver" in err
-    assert "/dev/cu.usbserial-*" in err
+    assert reels.serial_search_note() in err   # /dev/cu.usbserial-* ..., or COM ports on Windows
     assert "error: no EEG device connected after 0.1 s" in err
     assert "connecting to the Cerelog X8" not in err   # BrainFlow is never asked
 

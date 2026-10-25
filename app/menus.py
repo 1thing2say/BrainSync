@@ -14,8 +14,10 @@ last. Lengths, intents, duplicates and repeats of options already shown are chec
 each candidate on its own (strict schemas cannot express them): the page is the first
 ``menus.option_count`` usable candidates in rank order, so one bad candidate costs a spare, not the
 page. Duplicates and repeats are compared without case, punctuation or extra spaces ("Yes,
-please." repeats "yes please"). A label that is too long is shortened rather than rejected: it is
-only the short tag beside a square, and the utterance (what is spoken) is never changed.
+please." repeats "yes please"), and on the sentence: two sentences whose labels match (often only
+after shortening) both stay unless a spare with its own label can take the second one's place. A
+label that is too long is shortened rather than rejected: it is only the short tag beside a
+square, and the utterance (what is spoken) is never changed.
 
 Each page gets at most three calls, all inside ``llm.timeout_s``: the first; a second, identical
 one (the hedge) if the first has not answered after ``llm.hedge_after_s``, since a call stuck on a
@@ -325,9 +327,12 @@ class MenuMaker:
         Each candidate (``option_1`` .. ``option_N``, N = option_count + spare_options) is checked
         on its own; the page is the first ``option_count`` usable ones in rank order. A candidate
         is dropped if it breaks a length or intent rule, repeats an earlier kept candidate's
-        sentence or label, or repeats an option already shown. With too few usable candidates the
-        page is None and the problems are what the retry is told; otherwise the problems name the
-        candidates dropped (logged). Only the label is ever shortened, never the utterance.
+        sentence, or repeats an option already shown. Duplicates are judged on the sentence (the
+        big text on the user's screen): a candidate whose (shortened) label matches an earlier one
+        gives way to a spare with its own label, but is kept when no such spare is left. With too
+        few usable candidates the page is None and the problems are what the retry is told;
+        otherwise the problems name the candidates dropped, and the label clashes kept (logged).
+        Only the label is ever shortened, never the utterance.
         """
         if getattr(msg, "stop_reason", None) == "refusal":
             return None, ["refused"], []
@@ -338,12 +343,14 @@ class MenuMaker:
             return None, [f"no {TOOL_NAME} call (stop_reason {getattr(msg, 'stop_reason', None)})"], []
         problems: list[str] = []
         shortened: list[str] = []
-        options: list[Option] = []
+        options: list[tuple[int, Option]] = []  # (rank, option), each with its own label
+        clashing: list[tuple[int, Option, str, str]] = []  # a label already kept: (rank, option,
+        # note, shortened note), kept only if no spare with its own label fills the page
         known = set(self.intents.intent_ids)
         shown = {normalized(u) for u in req.shown}
         kept_utterances: dict[str, str] = {}  # normalized utterance -> the rank key that has it
         kept_labels: dict[str, str] = {}
-        for key in rank_keys(self.menus.option_count + self.menus.spare_options):
+        for rank, key in enumerate(rank_keys(self.menus.option_count + self.menus.spare_options)):
             if len(options) == self.menus.option_count:
                 break  # the page is full: later spares are not needed
             try:
@@ -364,18 +371,32 @@ class MenuMaker:
                 found.append(f"repeats an option already shown ({option.utterance!r})")
             elif utterance in kept_utterances:
                 found.append(f"duplicate of {kept_utterances[utterance]}")
-            elif short in kept_labels:
-                found.append(f"duplicate label of {kept_labels[short]} ({label!r})")
             if found:
                 problems += [f"{key}: {p}" for p in found]
                 continue
-            if label != written:
-                shortened.append(f"{written!r} -> {label!r}")
-            kept_utterances[utterance], kept_labels[short] = key, key
-            options.append(option)
-        if len(options) < self.menus.option_count:
+            short_note = f"{written!r} -> {label!r}" if label != written else ""
+            kept_utterances[utterance] = key
+            if short in kept_labels:
+                # A different sentence with the same label: a spare with its own label may take
+                # its place; if none does, it is kept below (the sentence is what the user reads).
+                clashing.append((rank, option, f"{key}: same label as {kept_labels[short]} "
+                                               f"({label!r})", short_note))
+                continue
+            kept_labels[short] = key
+            options.append((rank, option))
+            shortened += [short_note] if short_note else []
+        missing = self.menus.option_count - len(options)
+        for rank, option, note, short_note in clashing:
+            if missing > 0:
+                options.append((rank, option))
+                problems.append(f"{note}, kept: no spare with its own label")
+                shortened += [short_note] if short_note else []
+                missing -= 1
+            else:
+                problems.append(f"{note}, dropped for a spare")
+        if missing > 0:
             return None, problems, shortened
-        return options, problems, shortened
+        return [option for _, option in sorted(options, key=lambda ro: ro[0])], problems, shortened
 
     def _log(self, event: str, **fields: object) -> None:
         if self.log is not None:

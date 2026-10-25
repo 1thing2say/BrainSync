@@ -205,6 +205,13 @@ class Pause(Message):
 # ---------------------------------------------------------------------------
 
 
+def is_fake_name(name: str) -> bool:
+    """A bridge whose hello name contains "fake" (any case) is not EEG: "fake-decoder"
+    (tools/fake_decoder.py), "ssvep-fbcca-fake", "FakeSource". Shared by the orchestrator and
+    tools/log_summary.py."""
+    return "fake" in name.lower()
+
+
 def hello_problems(
     hello: DecoderHello,
     slots: list[SlotSpec],
@@ -275,11 +282,12 @@ class ShowPage(Message):
 
 
 class Trial(Message):
-    """Trial phase change, for the mirror."""
+    """Trial phase change, for the mirror. ``paused``: the session paused (STOP, display Esc,
+    decoder lost, baseline failed), so nothing flickers and a selection timer stops."""
 
     type: Literal["trial"] = "trial"
     trial_id: int
-    phase: Literal["cue", "flicker", "rest", "baseline"]
+    phase: Literal["cue", "flicker", "rest", "baseline", "paused"]
 
 
 class Highlight(Message):
@@ -350,7 +358,8 @@ class UIStatus(Message):
     ``decoder_ok``: the bridge's hello passed and its last status was ok. ``decoder_message``: why
     not (a rejected hello), or the bridge's own status message. ``resume_ready``: Resume would
     start a session now. ``fake_decoder``: selections are not EEG (``--fake-decoder``, or the acked
-    hello's name starts with "fake"). ``decoder_name``: the acked hello's name, "" before an ack.
+    hello's name contains "fake", ``is_fake_name``). ``decoder_name``: the acked hello's name, ""
+    before an ack.
     ``llm_ok``: Claude's last page came in time and valid. ``llm``: the same, telling "not asked
     yet" apart from "failed": ``off`` (no key, or ``menus.dynamic`` false), ``waiting`` (no page
     yet), ``ok``, ``failed`` (the last page fell back to the fixed list).
