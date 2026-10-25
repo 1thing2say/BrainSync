@@ -53,8 +53,9 @@ pull requests.
     `brainsync/` package (board, recording, CCA/FBCCA, PsychoPy stimulus, `select_freqs`,
     `score_cued`). Mostly uncommitted; no online decoder or bridge yet. Its re-analysis of the
     recordings is what section 14 reports.
-  - `custom-operating-brain-seperate`: BrainSyncOS, a Jetson appliance OS (phase 1: base ISO
-    extract/repack only). See section 10.
+  - `custom-operating-brain-seperate`: BrainSyncOS, a Jetson appliance OS (installer ISO, VM
+    edition, signed package repository; Phase 3 in progress on branch `bsos/jetson`). See
+    section 10.
 - **Next up:** the 4-target gate recording (section 14) and SYNC 1 to settle section 13 and agree
   `INTERFACE-v2-draft.md` (teammate: please read System design, sections 12, 13 and 14, and the
   draft), then Cartesia TTS (V2 items 3–4), V3 (LLM option ranking) and V4 (partner speech
@@ -682,8 +683,12 @@ Take shifts with the teammate. Commit a working state before sleeping.
   contract does not change. The vendored BrainFlow would need Linux ARM builds first.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
   so a Jetson boots straight into BrainSync. JetPack 7 supports AGX Thor, AGX Orin and Orin
-  NX/Nano only, not the original Jetson Nano. Only phase 1 (verified base ISO, extract, no-op
-  repack) exists; nothing on the demo path depends on it.
+  NX/Nano only, not the original Jetson Nano. Phases 1, 2, 2.5 and a UTM VM edition are
+  done; Phase 3 (the BrainSync apps, board driver, CUDA runtime, local llama-server and
+  model as signed debs, then an install bundle for a stock JetPack 7.2.1 Orin before the
+  ISO) is in progress on branch `bsos/jetson` (`brainsyncos/docs/phase3-handoff.md`,
+  2026-10-25). It ships no cloudflared tunnel: the only service it enables is the local
+  `llama-server` on localhost. Nothing on the demo path depends on it.
 
 ## 11. Commands
 
