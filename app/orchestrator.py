@@ -22,13 +22,22 @@ reads it), with a "Training: ..." detail. The first training of a session asks f
 template (``retrain``); after a pause the bridge may reuse the one it has. During a trial every
 ``decision`` from the bridge goes to the partner page as ``confidence`` (the bars under each
 option).
+
+When the session page draws the code (``display.flicker: browser``, the default), the page
+reports the first flip of every cycle of its training or trial flicker (``cycle``); the server
+maps the page's time onto its own clock (``PageClockOffset``, from the page's ``clock``
+messages) and relays it to the bridge as ``cycle`` {train_id or trial_id, n, t_unix}, which a
+headless bridge epochs on (INTERFACE-v2-draft.md section 9.7). A page that measures a refresh
+more than 1 Hz from ``display.expected_refresh_hz`` cannot start a session.
 """
 
 from __future__ import annotations
 
 import itertools
 import re
+import statistics
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -41,6 +50,7 @@ from app.schemas import (
     Baseline,
     BaselineDone,
     Confidence,
+    Cycle,
     Decision,
     DecoderHello,
     DecoderStatus,
@@ -54,7 +64,10 @@ from app.schemas import (
     MicSet,
     Message,
     NoSelection,
+    REFRESH_TOLERANCE_HZ,
     Option,
+    PageClock,
+    PageCycle,
     PartnerText,
     Pause,
     ProtocolError,
@@ -100,6 +113,35 @@ NEXT_PAGE_LABEL = "More options"
 SAY_IT, BACK = "Say it", "Back"
 LIST_LABELS = {"say": "SAY", "next": "NEXT"}
 LIST_MORE_LABEL = "MORE"  # list mode: NEXT on the last option asks for new options
+PAGE_OFFSETS = 8  # page clock offsets in the median (as brainsync/server's N_OFFSETS)
+CYCLE_SLACK_S = 0.05  # a page cycle stamped this much before its flicker was asked for still counts
+
+
+class PageClockOffset:
+    """Maps the session page's clock onto the server's (the board's): ``t_client + offset``,
+    the offset the median of the last ``PAGE_OFFSETS`` receipt-time minus ``t_client`` of the
+    page's ``clock`` messages (the receipt time while there is none), never later than the
+    receipt, as brainsync/server does with its pings. On the same Mac the offset is the
+    message's delivery time, a millisecond or so; on another device it is the clock difference
+    too."""
+
+    def __init__(self, size: int = PAGE_OFFSETS) -> None:
+        self._offsets: deque[float] = deque(maxlen=size)
+
+    def add(self, t_client: float, t_recv: float) -> None:
+        self._offsets.append(float(t_recv) - float(t_client))
+
+    def clear(self) -> None:
+        self._offsets.clear()
+
+    @property
+    def offset(self) -> float | None:
+        return statistics.median(self._offsets) if self._offsets else None
+
+    def unix(self, t_client: float, t_recv: float) -> float:
+        offset = self.offset
+        t = float(t_recv) if offset is None else float(t_client) + offset
+        return min(t, float(t_recv))
 
 
 class St(str, Enum):
@@ -222,6 +264,11 @@ class Orchestrator:
         self.paradigm = cfg.stim.paradigm
         self.expected_train: int | None = None
         self.train_accuracy: float | None = None
+        # display.flicker browser: the page's clock, its measured refresh (None until it reports
+        # one) and when its current flicker (training or trial) was asked for.
+        self.page_clock = PageClockOffset()
+        self.page_refresh_hz: float | None = None
+        self.page_flicker_at = float("-inf")
 
     @property
     def decoder_fake(self) -> bool:
@@ -321,7 +368,7 @@ class Orchestrator:
         elif isinstance(msg, StimOnset):
             # Logged above (his offline analysis uses it); the mirror shows the flicker from here.
             if self._is_current(msg.trial_id):
-                self._send_ui(Trial(trial_id=msg.trial_id, phase="flicker"))
+                self._page_flicker(msg.trial_id, "flicker")
 
     def _on_hello(self, hello: DecoderHello) -> None:
         """Check the bridge's hello against config: hello_ack, or error and stay paused."""
@@ -405,6 +452,9 @@ class Orchestrator:
 
     def resume_problem(self) -> str:
         """Why Resume would not start a session now; empty if it would."""
+        refresh = self.page_refresh_problem()
+        if refresh:
+            return refresh
         if self.keyboard_mode and not self.acked:
             return ""  # keyboard mode runs without a bridge
         if self.decoder_error:
@@ -414,6 +464,59 @@ class Orchestrator:
         if not self.display_ok:
             return "Display closed: restart it, then Resume"
         return ""
+
+    def page_refresh_problem(self) -> str:
+        """The page draws the flicker from frame counts (one code bit per frame), so its screen
+        must run at the config's rate, as the bridge's hello must; empty when it does or the
+        page has not measured it yet."""
+        hz, want = self.page_refresh_hz, self.cfg.display.expected_refresh_hz
+        if self.cfg.display.flicker != "browser" or hz is None:
+            return ""
+        if abs(hz - want) > REFRESH_TOLERANCE_HZ:
+            return (f"This screen runs at {hz:.0f} Hz: set it to {want:g} Hz (ProMotion off), "
+                    "then reload the page")
+        return ""
+
+    # ------------------------------------------------------- the page's flicker (browser)
+
+    def _page_flicker(self, trial_id: int, phase: str) -> None:
+        """Tell the page to flicker (``train``: every square; ``flicker``: the trial's)."""
+        self.page_flicker_at = self.clock()
+        self._send_ui(Trial(trial_id=trial_id, phase=phase))
+
+    def _on_page_clock(self, msg: PageClock) -> None:
+        self.page_clock.add(msg.t_client, self.clock())
+        if msg.refresh_hz is not None and msg.refresh_hz != self.page_refresh_hz:
+            before = self.page_refresh_problem()
+            self.page_refresh_hz = msg.refresh_hz
+            self._record("page_refresh", refresh_hz=msg.refresh_hz)
+            problem = self.page_refresh_problem()
+            if problem != before:
+                self._send_status()  # resume_ready changes
+                if problem and self.state in (St.IDLE, St.PAUSED):
+                    self._send_state(problem)
+
+    def _on_page_cycle(self, msg: PageCycle) -> None:
+        """A cycle's first flip on the page: relayed to the bridge, on the server's clock, when
+        it belongs to the training or trial in progress (code mode, the page drawing it)."""
+        if self.cfg.display.flicker != "browser" or self.paradigm != "code":
+            self._record("cycle_ignored", why="the page does not draw the code")
+            return
+        t = self.page_clock.unix(msg.t_client, self.clock())
+        if t < self.page_flicker_at - CYCLE_SLACK_S:
+            why = "before its flicker was asked for"
+        elif msg.phase == "train":
+            if (self.state is St.BASELINE and self.expected_train is not None
+                    and msg.trial_id == self.trial_id):
+                self._send_decoder(Cycle(train_id=self.expected_train, n=msg.n, t_unix=t))
+                return
+            why = "no training in progress"
+        elif self._is_current(msg.trial_id):
+            self._send_decoder(Cycle(trial_id=msg.trial_id, n=msg.n, t_unix=t))
+            return
+        else:
+            why = "not the trial in progress"
+        self._record("cycle_ignored", why=why, trial_id=msg.trial_id, phase=msg.phase, n=msg.n)
 
     # ---------------------------------------------------------------- events: browser
 
@@ -428,6 +531,9 @@ class Orchestrator:
     def on_ui_connected(self) -> None:
         """A page connected: bring it up to date."""
         self._record("ui_connected")
+        # A new page has its own clock and screen: it reports both again.
+        self.page_clock.clear()
+        self.page_refresh_hz = None
         if self.cfg.display.flicker == "browser" and self.state not in (St.IDLE, St.PAUSED):
             # A new page (one replacing the old, a reload) flickers only after its own start
             # button: until then nothing flickers, so the session waits paused.
@@ -443,8 +549,13 @@ class Orchestrator:
             self._send_ui(Listen(seconds=0.0, muted=self.mic_muted, reason="reconnect"))
 
     def on_ui_message(self, msg: Message) -> None:
+        if isinstance(msg, PageClock):
+            self._on_page_clock(msg)  # every few seconds: logged only when the refresh changes
+            return
         self._record("from_ui", message=msg)
-        if isinstance(msg, Resume):
+        if isinstance(msg, PageCycle):
+            self._on_page_cycle(msg)
+        elif isinstance(msg, Resume):
             if self.state in (St.IDLE, St.PAUSED):
                 problem = self.resume_problem()
                 if problem:
@@ -621,7 +732,7 @@ class Orchestrator:
         self.expected_baseline = None
         self.expected_train = self.baseline_id
         self._enter(St.BASELINE, self.cfg.train.timeout_s, self._train_detail(0, code.train_cycles))
-        self._send_ui(Trial(trial_id=self.trial_id, phase="train"))
+        self._page_flicker(self.trial_id, "train")
         self._send_ui(Training(slot=slot, label=label, cycle=0, of=code.train_cycles))
         self._send_decoder(Train(train_id=self.baseline_id, slot=slot, label=label,
                                  cycles=code.train_cycles, retrain=fresh))
@@ -673,7 +784,7 @@ class Orchestrator:
         self._send_decoder(StimStart(trial_id=self.trial_id, active_slots=list(self.screen.roles)))
         if not self.acked:
             # No bridge (keyboard mode): nothing will report an onset, so show the trial now.
-            self._send_ui(Trial(trial_id=self.trial_id, phase="flicker"))
+            self._page_flicker(self.trial_id, "flicker")
 
     def _stop_trial(self, reason: str) -> None:
         if self.active_trial is None:

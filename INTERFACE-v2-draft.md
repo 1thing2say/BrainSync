@@ -25,7 +25,9 @@ bars. Everything above stays valid for a frequency-coded bridge; our server runs
 unchanged: the bridge runs with `--no-stimulus`, still gets `display`, `stim_start` and
 `stim_stop`, and answers `stim_onset` from its own clock at `stim_start`; the display commands
 of section 7 apply only with `display.flicker: psychopy`. Code mode needs each cycle's flip
-time from whoever draws the flicker, so the default code-mode config uses the PsychoPy display.
+time from whoever draws the flicker: the page reports it, and the server relays it to the
+bridge as `cycle` (section 9.7, proposed), so the default code-mode config draws the code in
+the page too.
 
 ## Open questions for the teammate (SYNC 1)
 
@@ -463,6 +465,7 @@ labels are the two sentences and "More options". Stimulus config: `voice_cvep3`.
 | `train_progress` {train_id, cycle, of} | bridge → server | new |
 | `trained` {train_id, ok, accuracy, chance, cycles, message} | bridge → server | instead of `baseline_done` |
 | `decision` {trial_id, scores, raw, committed, lead, changed} | bridge → server | new, beside `selection` |
+| `cycle` {train_id or trial_id, n, t_unix} | server → bridge | new, only when the page draws the code (9.7) |
 
 ### 9.1 Handshake
 
@@ -594,3 +597,45 @@ bridge launches `python -m brainsync.stimulus -c voice_cvep3 --free --feedback s
   hello is checked against `config/fvep_page.yaml` as in section 8; `--config` picks one for
   both. Our bridge: `python -m brainsync.voice_bridge --fake --fast --no-stimulus` (code) or
   `--paradigm freq` (sections 1–8).
+- `python tools/contract_check.py --page-cycles` also plays the page of section 9.7: a `cycle`
+  per cycle during each training and each trial (from its `stim_onset`). The fake decoder counts
+  them; our fake-board bridge ignores them (its board makes its own cycles).
+
+### 9.7 Proposed: the session page draws the code (`display.flicker: browser`)
+
+**Status: proposed (2026-10-25), additive; the default of our server and bridge.** When the
+user's screen is our session page in Chrome rather than the PsychoPy display, the page draws the
+three squares from the same bits (`ui/cvep.js`, a copy of `clients/js/cvep.js`: square k of
+slot lag L is white on flicker frame n when `BITS[(n - L) mod 63]` is 1), counting n from the
+first flickering frame of each training and each trial, and stamps the flip of every cycle's
+first frame (n mod 63 == 0). The bridge runs headless (`--no-stimulus`) and has no display
+markers, so the server relays those times:
+
+```json
+{"type": "cycle", "train_id": 3, "n": 12, "t_unix": 1792809214.112}
+{"type": "cycle", "trial_id": 42, "n": 0, "t_unix": 1792809201.512}
+```
+
+- Server → bridge, one per cycle (about 1.05 s apart), exactly one of `train_id` (during a
+  `train`, from its start) or `trial_id` (during a trial, after its `stim_onset`: the page
+  starts flickering when the server has the onset). `n` counts cycles from 0 within that
+  training or trial; `t_unix` is the flip on the server's clock, which is the board's
+  (same Mac).
+- The bridge treats each one like a display's `cycle:<n>` marker: the decoder epochs on
+  `t_unix`. It ignores a `cycle` for a training or trial that is not in progress, and one with
+  both or neither id. A bridge that draws the code itself (a PsychoPy display) ignores every
+  `cycle`; so does a fake board, which makes its own.
+- `stim_onset` stays the bridge's own clock at `stim_start` (logging only); the cycles carry
+  the timing. A training that gets no cycles fails after its time limit with "no template in
+  time (are the page's cycle messages arriving?)".
+- Where they come from (server ↔ page, not part of this contract): the page sends
+  `{"type": "cycle", "phase": "train" | "flicker", "trial_id": <its trial message's>, "n": 12,
+  "t_client": <Unix s>}` per cycle, `t_client` the requestAnimationFrame timestamp on the wall
+  clock (`Date.now() - performance.now()`, the maximum over recent samples, plus the rAF time,
+  as the BrainScroll extension does), and `{"type": "clock", "t_client": …, "refresh_hz": …}`
+  every 5 s. The server maps page times with the median offset of the last 8 clock messages
+  (receipt minus `t_client`, as `brainsync/server` does with its pings), never later than the
+  receipt, and drops a cycle stamped before its flicker was asked for. A page that measures a
+  refresh more than 1 Hz from 60 Hz cannot start a session (one bit per frame).
+- Not measured yet: Chrome's flip-time jitter against the board on the demo Mac (`PLAN.md` V5);
+  a constant offset is learnt into the template, jitter is not.

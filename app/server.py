@@ -297,6 +297,12 @@ def create_app(
                 "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg,
                                    "lag_frames": s.lag_frames}
                           for s in cfg.stim.slots},
+                # Code mode: the m-sequence the page draws (ui/cvep.js holds the bits; it
+                # refuses to flicker if they do not match) and the training's cycle count.
+                "code": (None if cfg.stim.code is None else
+                         {"length": cfg.stim.code.length,
+                          "cycle_frames": cfg.stim.code.cycle_frames,
+                          "train_cycles": cfg.stim.code.train_cycles}),
                 # The phone links carry the access key: only this computer's page gets them.
                 "phone_url": "" if remote else app.state.phone_url,
                 "app_link": "" if remote else app_link(app.state.phone_url)}

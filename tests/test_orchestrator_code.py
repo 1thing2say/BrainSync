@@ -10,17 +10,20 @@ from __future__ import annotations
 import pytest
 
 from app.config import FVEP_PAGE_CONFIG_PATH, load_config, load_intents
-from app.orchestrator import Orchestrator, St
+from app.orchestrator import Orchestrator, PageClockOffset, St
 from app.schemas import (
     PROTOCOL,
     Baseline,
     BaselineDone,
     CodeParams,
     Confidence,
+    Cycle,
     Decision,
     DecoderHello,
     Display,
     HelloAck,
+    PageClock,
+    PageCycle,
     Pause,
     ProtocolError,
     Resume,
@@ -315,3 +318,107 @@ def test_a_lost_bridge_resumes_with_a_training_that_may_reuse_the_template():
 def test_fallback_pages_show_the_first_two_ranked_options():
     r = Rig()
     assert [o.utterance for o in r.o.options.options] == [o.utterance for o in HOME[:2]]
+
+
+# ---------------------------------------------------------------------------
+# The session page draws the code (display.flicker: browser; draft section 9.7)
+# ---------------------------------------------------------------------------
+
+BROWSER = CFG.model_copy(update={"display": CFG.display.model_copy(update={"flicker": "browser"})})
+PSYCHOPY = CFG.model_copy(update={"display": CFG.display.model_copy(update={"flicker": "psychopy"})})
+
+
+def test_the_page_clock_offset_is_the_median_and_never_after_receipt():
+    c = PageClockOffset(size=3)
+    assert c.offset is None and c.unix(5.0, 9.0) == 9.0  # no clock message yet: the receipt
+    for t_client, t_recv in ((100.0, 100.002), (101.0, 101.010), (102.0, 102.003)):
+        c.add(t_client, t_recv)
+    assert c.offset == pytest.approx(0.003)
+    assert c.unix(103.5, 104.0) == pytest.approx(103.503)
+    assert c.unix(103.5, 103.501) == 103.501  # capped at the receipt
+    c.add(103.0, 103.5)  # the oldest of 3 drops out: 0.010, 0.003, 0.5
+    assert c.offset == pytest.approx(0.010)
+    c.clear()
+    assert c.offset is None
+
+
+def page_cycle(r: Rig, phase: str, n: int, t: float, trial_id: int | None = None) -> None:
+    trial = r.shown(Trial)[-1].trial_id if trial_id is None else trial_id
+    r.o.on_ui_message(PageCycle(phase=phase, trial_id=trial, n=n, t_client=t))
+
+
+def test_the_pages_training_cycles_go_to_the_bridge_on_the_servers_clock():
+    r = Rig(BROWSER)
+    r.o.on_ui_connected()
+    r.o.on_ui_message(PageClock(t_client=r.clock.t - 0.002, refresh_hz=60.0))
+    r.o.on_ui_message(Resume(start=True))
+    train = r.sent(Train)[-1]
+    assert r.shown(Trial)[-1].phase == "train"
+    r.clock.t += 0.5
+    page_cycle(r, "train", 0, r.clock.t - 0.3)
+    r.clock.t += 1.05
+    page_cycle(r, "train", 1, r.clock.t - 0.3)
+    page_cycle(r, "flicker", 2, r.clock.t)  # no trial runs
+    cycles = r.sent(Cycle)
+    assert [(c.train_id, c.trial_id, c.n) for c in cycles] == [(train.train_id, None, 0),
+                                                               (train.train_id, None, 1)]
+    assert cycles[1].t_unix == pytest.approx(r.clock.t - 0.298)  # + the 2 ms clock offset
+    r.o.on_decoder_message(Trained(train_id=train.train_id, ok=True, accuracy=0.8, cycles=30))
+    page_cycle(r, "train", 3, r.clock.t)  # the training is over
+    assert len(r.sent(Cycle)) == 2
+
+
+def test_the_pages_trial_cycles_go_to_the_bridge_for_the_trial_in_progress_only():
+    r = Rig(BROWSER)
+    r.train()
+    start = r.to_trial()
+    assert r.shown(Trial)[-1] == Trial(trial_id=start.trial_id, phase="flicker")
+    r.clock.t += 0.1
+    page_cycle(r, "flicker", 0, r.clock.t)
+    page_cycle(r, "flicker", 0, r.clock.t, trial_id=start.trial_id - 1)  # an old trial
+    page_cycle(r, "train", 0, r.clock.t)  # not training
+    (cycle,) = r.sent(Cycle)
+    assert (cycle.trial_id, cycle.train_id, cycle.n) == (start.trial_id, None, 0)
+    assert cycle.t_unix == r.clock.t  # no clock message: the receipt time
+    r.select("s1")  # the trial ends
+    page_cycle(r, "flicker", 1, r.clock.t, trial_id=start.trial_id)
+    assert len(r.sent(Cycle)) == 1
+
+
+def test_a_cycle_stamped_before_its_flicker_was_asked_for_is_dropped():
+    r = Rig(BROWSER)
+    r.train()
+    start = r.to_trial()
+    page_cycle(r, "flicker", 0, r.clock.t - 1.0, trial_id=start.trial_id)
+    r.o.on_ui_message(PageClock(t_client=r.clock.t))  # offset 0: the page's time is believed
+    page_cycle(r, "flicker", 0, r.clock.t - 1.0, trial_id=start.trial_id)
+    assert len(r.sent(Cycle)) == 1  # the first used the receipt time; the second is too early
+
+
+def test_with_psychopy_drawing_the_code_page_cycles_are_ignored():
+    r = Rig(PSYCHOPY)
+    r.o.on_ui_message(Resume())
+    page_cycle(r, "train", 0, r.clock.t)
+    assert not r.sent(Cycle)
+
+
+def test_a_page_at_the_wrong_refresh_cannot_start_and_a_new_page_measures_again():
+    r = Rig(BROWSER)
+    r.o.on_ui_connected()
+    r.o.on_ui_message(PageClock(t_client=r.clock.t, refresh_hz=120.0))
+    problem = "This screen runs at 120 Hz: set it to 60 Hz (ProMotion off), then reload the page"
+    assert r.o.resume_problem() == problem and not r.o.status().resume_ready
+    assert r.shown(State)[-1].detail == problem
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.IDLE and not r.sent(Train)
+    r.o.on_ui_connected()  # a reload, on a 60 Hz screen
+    assert r.o.resume_problem() == ""
+    r.o.on_ui_message(PageClock(t_client=r.clock.t, refresh_hz=59.9))
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.BASELINE and r.sent(Train)
+
+
+def test_with_psychopy_drawing_the_page_refresh_does_not_matter():
+    r = Rig(PSYCHOPY)
+    r.o.on_ui_message(PageClock(t_client=r.clock.t, refresh_hz=120.0))
+    assert r.o.resume_problem() == ""

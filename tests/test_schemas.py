@@ -528,3 +528,39 @@ def test_a_hello_of_the_other_paradigm_names_the_config_to_use() -> None:
                        "config/default.yaml)")
     (problem,) = s.hello_problems(hello(), CODE_SLOTS, "sine", 60.0, paradigm="code", code=CODE)
     assert "start it with --config config/fvep_page.yaml" in problem
+
+
+# -- the page's cycles (display.flicker: browser; draft section 9.7) ---------------------------
+
+
+def test_a_cycle_to_the_bridge_names_exactly_one_of_train_and_trial():
+    train = s.Cycle(train_id=3, n=12, t_unix=1792809201.512)
+    assert json.loads(s.to_json(train)) == {"type": "cycle", "train_id": 3, "n": 12,
+                                            "t_unix": 1792809201.512}
+    trial = s.parse_server_to_decoder({"type": "cycle", "trial_id": 42, "n": 0, "t_unix": 1.5})
+    assert isinstance(trial, s.Cycle) and trial.train_id is None
+    assert json.loads(s.to_json(trial)) == {"type": "cycle", "trial_id": 42, "n": 0, "t_unix": 1.5}
+    for bad in ({"n": 0, "t_unix": 1.0}, {"trial_id": 1, "train_id": 1, "n": 0, "t_unix": 1.0},
+                {"trial_id": 1, "n": -1, "t_unix": 1.0}, {"trial_id": 1, "n": 0, "t_unix": "x"}):
+        with pytest.raises(ValidationError):
+            s.parse_server_to_decoder({"type": "cycle", **bad})
+
+
+def test_the_pages_flicker_reports_parse_but_are_not_iphone_messages():
+    cycle = s.parse_ui_to_server({"type": "cycle", "phase": "train", "trial_id": 0, "n": 4,
+                                  "t_client": 1792809201.5})
+    assert isinstance(cycle, s.PageCycle) and cycle.phase == "train"
+    clock = s.parse_ui_to_server({"type": "clock", "t_client": 1792809201.5})
+    assert isinstance(clock, s.PageClock) and clock.refresh_hz is None
+    assert s.parse_ui_to_server({"type": "clock", "t_client": 1.0, "refresh_hz": 59.9}).refresh_hz == 59.9
+    for bad in ({"type": "cycle", "phase": "rest", "trial_id": 0, "n": 0, "t_client": 1.0},
+                {"type": "clock", "t_client": 1.0, "refresh_hz": 0}):
+        with pytest.raises(ValidationError):
+            s.parse_ui_to_server(bad)
+    # The iPhone app never draws the flicker: its message set (and fixture) stays as it was.
+    import typing
+
+    def types(union) -> set[str]:
+        return {m.model_fields["type"].default for m in typing.get_args(typing.get_args(union)[0])}
+
+    assert types(s.PageToServer) - types(s.UIToServer) == {"cycle", "clock"}

@@ -5,6 +5,7 @@ as confidence, and an option is spoken only after its confirm trial on s1 / s3."
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,3 +97,43 @@ def test_a_code_session_trains_shows_confidence_and_speaks_after_confirm(client)
         dec.send_text(to_json(Selection(trial_id=start["trial_id"], slot="s1", t_unix=0.0)))
         speak = recv_until(ui, "speak")
         assert speak["text"] == shown["slots"][1]["utterance"]
+
+
+def browser_config():
+    cfg = fast_config()
+    return cfg.model_copy(update={"display": cfg.display.model_copy(update={"flicker": "browser"})})
+
+
+def test_the_pages_cycles_reach_the_bridge_with_their_ids(tmp_path):
+    """display.flicker browser: the page's cycle flips go to the bridge as cycle messages, the
+    training's with its train_id and a trial's (after its onset) with its trial_id."""
+    with TestClient(create_app(browser_config(), log_dir=tmp_path)) as c, \
+            c.websocket_connect("/ws/ui") as ui, c.websocket_connect("/ws/decoder") as dec:
+        assert c.get("/api/config").json()["code"] == {"length": 63, "cycle_frames": 63,
+                                                        "train_cycles": 30}
+        recv_until(ui, "status")
+        dec.send_text(to_json(HELLO))
+        recv_until(dec, "hello_ack")
+        ui.send_text(json.dumps({"type": "clock", "t_client": time.time(), "refresh_hz": 60.0}))
+        ui.send_text(json.dumps({"type": "resume", "start": True}))
+        train = recv_until(dec, "train")
+        phase = recv_until(ui, "trial")
+        assert phase["phase"] == "train"
+        t0 = time.time()
+        ui.send_text(json.dumps({"type": "cycle", "phase": "train", "trial_id": phase["trial_id"],
+                                 "n": 0, "t_client": t0}))
+        cycle = recv_until(dec, "cycle")
+        assert cycle["train_id"] == train["train_id"] and cycle["n"] == 0 and "trial_id" not in cycle
+        assert t0 - 0.05 <= cycle["t_unix"] <= time.time()
+        dec.send_text(to_json(Trained(train_id=train["train_id"], ok=True, accuracy=0.8,
+                                      chance=0.333, cycles=30)))
+        start = recv_until(dec, "stim_start")
+        dec.send_text(to_json(StimOnset(trial_id=start["trial_id"], t_unix=time.time())))
+        flicker = recv_until(ui, "trial")
+        while flicker["phase"] != "flicker":
+            flicker = recv_until(ui, "trial")
+        assert flicker["trial_id"] == start["trial_id"]
+        ui.send_text(json.dumps({"type": "cycle", "phase": "flicker", "trial_id": start["trial_id"],
+                                 "n": 0, "t_client": time.time()}))
+        cycle = recv_until(dec, "cycle")
+        assert cycle["trial_id"] == start["trial_id"] and "train_id" not in cycle

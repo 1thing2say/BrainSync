@@ -75,7 +75,8 @@ def test_partner_page_is_served(client):
         "paradigm": "freq", "layout": "diamond", "slot_order": ["s1", "s2", "s3", "s4"],
         "app_link": "", "flicker": True, "waveform": "sine", "refresh_hz": 60.0,
         "slots": {s.slot: {"freq_hz": s.freq_hz, "phase_deg": s.phase_deg, "lag_frames": None}
-                  for s in BASE.stim.slots}}
+                  for s in BASE.stim.slots},
+        "code": None}
 
 
 def test_a_connecting_page_gets_the_mic_state(kb_client):

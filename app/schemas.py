@@ -12,7 +12,10 @@ Code mode (the c-VEP standard, docs/CVEP-STANDARD.md; draft section 9, proposed)
 ``paradigm: "code"`` whose slots carry ``lag_frames`` instead of ``freq_hz``, the ``train`` /
 ``train_progress`` / ``trained`` exchange in place of ``baseline`` / ``baseline_done``, and a
 ``decision`` message (per-slot correlations) after every decoder decision in a trial. The
-frequency-coded protocol is unchanged: a hello without ``paradigm`` is ``"freq"``.
+frequency-coded protocol is unchanged: a hello without ``paradigm`` is ``"freq"``. When the
+session page draws the code (``display.flicker: browser``) it reports each cycle's first flip
+(``PageCycle``, with ``PageClock`` for the clock offset), and the server relays it to the bridge
+as ``cycle`` (draft section 9.7).
 
 Sections:
 - Decoder (bridge) -> server.
@@ -271,6 +274,35 @@ class Train(Message):
     label: str = ""
     cycles: int = Field(default=30, ge=2)
     retrain: bool = False
+
+
+class Cycle(Message):
+    """Code mode with the flicker drawn by the session page (``display.flicker: browser``;
+    draft section 9.7, proposed): the Unix time, on the board's clock, of the first flip of
+    cycle ``n`` (frame n x cycle_frames, counted from the first flickering frame) of a training
+    (``train_id``) or a trial (``trial_id``). A bridge without a display of its own epochs on
+    these instead of its display's ``cycle:<n>`` markers; one that draws the code itself ignores
+    them."""
+
+    type: Literal["cycle"] = "cycle"
+    trial_id: int | None = None
+    train_id: int | None = None
+    n: int = Field(ge=0)
+    t_unix: float
+
+    @model_validator(mode="after")
+    def _one_owner(self) -> Cycle:
+        if (self.trial_id is None) == (self.train_id is None):
+            raise ValueError("a cycle belongs to exactly one of trial_id and train_id")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _leave_out_the_other_id(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        for key in ("trial_id", "train_id"):
+            if key in data and data[key] is None:
+                del data[key]
+        return data
 
 
 class Display(Message):
@@ -613,6 +645,32 @@ class Judgment(Message):
     correct: bool
 
 
+class PageCycle(Message):
+    """Browser only: the session page draws the flicker (``display.flicker: browser``; the
+    iPhone app never does, so this is not in its message fixture). The first flip of code cycle
+    ``n`` of the flicker the page started on the ``trial`` message with ``trial_id`` and
+    ``phase`` (``train`` or ``flicker``). ``t_client``: Unix seconds on the page's clock (the
+    requestAnimationFrame timestamp on the wall clock); the server maps it onto its own clock
+    with the ``PageClock`` offset and relays it to the bridge as ``cycle``."""
+
+    type: Literal["cycle"] = "cycle"
+    phase: Literal["train", "flicker"]
+    trial_id: int
+    n: int = Field(ge=0)
+    t_client: float
+
+
+class PageClock(Message):
+    """Browser only: the page's clock now (``t_client``, the clock of ``PageCycle.t_client``),
+    every few seconds, so the server can map page times onto its own (the board's) clock; with
+    the screen's measured refresh once the page has measured it (one code bit per frame, so it
+    must be the config's)."""
+
+    type: Literal["clock"] = "clock"
+    t_client: float
+    refresh_hz: float | None = Field(default=None, gt=0)
+
+
 # ---------------------------------------------------------------------------
 # Shared menu option
 # ---------------------------------------------------------------------------
@@ -665,7 +723,7 @@ DecoderToServer = Annotated[
     Field(discriminator="type"),
 ]
 ServerToDecoder = Annotated[
-    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause, Train],
+    Union[HelloAck, ProtocolError, Baseline, Display, StimStart, StimStop, Pause, Train, Cycle],
     Field(discriminator="type"),
 ]
 ShowPage.model_rebuild()
@@ -679,11 +737,18 @@ UIToServer = Annotated[
     Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment, MicSet, MicReport],
     Field(discriminator="type"),
 ]
+# What the server accepts on /ws/ui: every UIToServer message (the iPhone app's too) plus the
+# session page's flicker reports, which only a page that draws the flicker sends.
+PageToServer = Annotated[
+    Union[TTSDone, PartnerText, Key, Stop, Resume, Judgment, MicSet, MicReport, PageCycle,
+          PageClock],
+    Field(discriminator="type"),
+]
 
 _decoder_to_server: TypeAdapter[Any] = TypeAdapter(DecoderToServer)
 _server_to_decoder: TypeAdapter[Any] = TypeAdapter(ServerToDecoder)
 _server_to_ui: TypeAdapter[Any] = TypeAdapter(ServerToUI)
-_ui_to_server: TypeAdapter[Any] = TypeAdapter(UIToServer)
+_ui_to_server: TypeAdapter[Any] = TypeAdapter(PageToServer)
 
 
 def _parse(adapter: TypeAdapter[Any], raw: dict[str, Any] | str | bytes) -> Message:
@@ -708,7 +773,8 @@ def parse_server_to_ui(raw: dict[str, Any] | str | bytes) -> Message:
 
 
 def parse_ui_to_server(raw: dict[str, Any] | str | bytes) -> Message:
-    """Parse a browser -> server message. Raises pydantic.ValidationError if invalid."""
+    """Parse a browser -> server message (``PageToServer``: the page's flicker reports too).
+    Raises pydantic.ValidationError if invalid."""
     return _parse(_ui_to_server, raw)
 
 
@@ -755,6 +821,7 @@ __all__ = [
     "StimStop",
     "Pause",
     "Train",
+    "Cycle",
     "hello_problems",
     "UISlot",
     "ShowPage",
@@ -775,12 +842,15 @@ __all__ = [
     "Judgment",
     "MicSet",
     "MicReport",
+    "PageCycle",
+    "PageClock",
     "Option",
     "validate_option",
     "DecoderToServer",
     "ServerToDecoder",
     "ServerToUI",
     "UIToServer",
+    "PageToServer",
     "parse_decoder_to_server",
     "parse_server_to_decoder",
     "parse_server_to_ui",
