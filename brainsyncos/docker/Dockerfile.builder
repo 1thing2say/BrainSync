@@ -8,7 +8,8 @@
 # Phase 3c compiles in here: git, cmake and g++ for the BrainFlow fork
 # (scripts/build-wheels.sh), make and kmod for the ch341 module against NVIDIA's
 # kernel headers, udev for `udevadm verify`, and python3-venv, -numpy and
-# -setuptools to install and import the wheel in a test venv.
+# -setuptools to install and import the wheel in a test venv. Phase 3d: curl,
+# for scripts/build-llama.sh check (the test model and llama-server's API).
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 ARG DEBIAN_FRONTEND=noninteractive
