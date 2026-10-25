@@ -266,7 +266,7 @@ command -v curl >/dev/null 2>&1 || fail 2 "curl not found; sudo apt-get install 
 cd "$BRAINSYNC_DIR"   # the server's working directory; relative paths below resolve here
 [[ -x "$PYTHON" ]] || fail 2 "PYTHON $PYTHON is not an executable (make the venv, see deploy/jetson/README.md)"
 if health; then
-    fail 1 "something already answers on 127.0.0.1:$PORT (brainsync-server.service?); it must be free"
+    fail 1 "something already answers on 127.0.0.1:$PORT (an old brainsync-server.service?); it must be free"
 fi
 
 read -r -a extra <<<"$SERVER_ARGS" || true

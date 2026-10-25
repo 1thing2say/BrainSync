@@ -19,12 +19,13 @@ run the script with a fake `cloudflared`, on macOS and in an Ubuntu 22.04 arm64 
 
 ## Install
 
-Do this once, on the Jetson, after steps 1 and 2 of [../README.md](../README.md) (Python,
-the venv, the BrainFlow wheel):
+`sudo deploy/jetson/install.sh` ([../README.md](../README.md), Quick start) does it all:
+Python, the venv, the BrainFlow wheel, then this script as its last step. To run only this
+part, on the Jetson, after steps 1 and 2 of [../README.md](../README.md):
 
 ```bash
 cd /opt/brainsync
-sudo deploy/jetson/cloudflare/install.sh            # as the login user, through sudo
+sudo deploy/jetson/cloudflare/install.sh --board cerelog   # as the login user, through sudo
 ```
 
 It does the following, and running it again is safe:
@@ -32,9 +33,11 @@ It does the following, and running it again is safe:
 - installs `cloudflared` (the official arm64 `.deb`, after checking that it is arm64) and
   `qrencode`;
 - adds you to `dialout` (the headset's serial port) and `tty` (the serial consoles);
-- writes `/etc/brainsync/tunnel.env` and installs and starts `brainsync-tunnel.service` as
+- writes `/etc/brainsync/tunnel.env` (`--board cerelog` or `--board fake` sets its `BOARD=`
+  line and keeps your other settings) and installs and starts `brainsync-tunnel.service` as
   your user;
-- turns off `brainsync-server.service`, the Tailscale setup, because both use port 8765.
+- stops and removes an old `brainsync-server.service` from an earlier version, which used
+  the same port 8765.
 
 `sudo deploy/jetson/cloudflare/install.sh --uninstall` removes the tunnel service again.
 
@@ -63,7 +66,7 @@ Settings go in `/etc/brainsync/tunnel.env`, one `KEY=VALUE` per line. After a ch
 
 | setting | default | for |
 | --- | --- | --- |
-| `BOARD` | `cerelog` | `fake` tries everything without the headset |
+| `BOARD` | `cerelog` | `fake` tries everything without the headset; `install.sh --board` sets it |
 | `SERVER_ARGS` | | more server flags, e.g. `--no-detect` |
 | `CLOUDFLARED_PROTOCOL` | cloudflared's (QUIC, UDP 7844) | `http2` when the venue blocks UDP |
 | `SERIAL_DEVICES` | `/dev/ttyGS0 /dev/ttyTCU0` | which consoles get the link |
@@ -91,6 +94,7 @@ For point mode, put `ANTHROPIC_API_KEY=...` in `/etc/brainsync/env` (root-only).
 | no link after a few minutes; the journal says "no trycloudflare address" | no internet yet. A captive-portal login page blocks it: log in once with a monitor attached, or use a phone hotspot |
 | the journal shows QUIC errors | set `CLOUDFLARED_PROTOCOL=http2` |
 | "refuses a quick tunnel" | `~/.cloudflared/config.yml` exists (it is meant for named tunnels); rename it |
-| "something already answers on 127.0.0.1:8765" | `brainsync-server.service` or another server is running: `sudo systemctl disable --now brainsync-server` |
+| "something already answers on 127.0.0.1:8765" | an old `brainsync-server.service` or another server is running: `sudo systemctl disable --now brainsync-server`, or run `sudo deploy/jetson/install.sh` again, which removes it |
 | nothing on serial | check that `/dev/ttyGS0` exists while the USB-C cable is in, and that you are in group `tty` (`id -nG`) |
+| the link changes every half minute; the journal says "server exited (status 1)" after an error about the board | `BOARD=cerelog` and no headset: the server opens the board after the link is out, exits when that fails, and each restart gets a new address. Plug the headset in, or set `BOARD=fake` |
 | an old link shows a Cloudflare error page | the tunnel restarted, so the address changed; open the new link from the file or serial |

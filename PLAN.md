@@ -698,8 +698,15 @@ Take shifts with the teammate. Commit a working state before sleeping.
 - Fallback: the web page in iPhone Safari or Android Chrome through the `--tunnel` phone link.
 - Remote requests always need the per-start access key (`app/remote.py`, 403 / 4403);
   `/ws/decoder` is never remote.
-- The decoder could later run on a Jetson and connect to `/ws/decoder` over the network; the
-  contract does not change. The vendored BrainFlow would need Linux ARM builds first.
+- **Jetson Orin Nano (started 2026-10-24, branch `feat/jetson`):** it runs the headset and
+  FBCCA as `python -m brainsync.server` (`PROTOCOL-v3.md`); the laptop that shows the flicker,
+  Mac or Windows, is only a client. `sudo deploy/jetson/install.sh` sets a fresh JetPack 6/7
+  board up in one command (Python 3.12, the Cerelog BrainFlow wheel built natively, venv,
+  then `brainsync-tunnel.service`: the server as the login user behind a Cloudflare quick
+  tunnel, link in `~/brainsync-link.txt` and on the serial console); `deploy/jetson/README.md`
+  has it and the SSH setup. Cloudflare quick tunnels are the only way other machines reach
+  the server (no account, works with client isolation); Tailscale is gone. Tested in arm64
+  containers only, not yet on the Jetson or with the headset.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
   so a Jetson boots straight into BrainSync. JetPack 7 supports AGX Thor, AGX Orin and Orin
   NX/Nano only, not the original Jetson Nano. Only phase 1 (verified base ISO, extract, no-op

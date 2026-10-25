@@ -23,11 +23,11 @@
  * After close code 4000, 4001 or 4002 it stops and says what to do. The token comes from the
  * address (#token=...) or a prompt and is never shown.
  *
- * On a phone (https://<jetson>.<tailnet>.ts.net/#token=...) the squares go in a column when
- * the screen is portrait, keep out of the notch, the HUD and the buttons, and are laid out
- * again on resize and rotation. The page holds a screen wake lock while the phase is run and
- * it is not paused, and a Full screen button appears where the browser allows it. Both are
- * feature-detected and their failures are ignored.
+ * On a phone (https://<name>.trycloudflare.com/#token=..., through the cloudflared tunnel)
+ * the squares go in a column when the screen is portrait, keep out of the notch, the HUD and
+ * the buttons, and are laid out again on resize and rotation. The page holds a screen wake
+ * lock while the phase is run and it is not paused, and a Full screen button appears where
+ * the browser allows it. Both are feature-detected and their failures are ignored.
  *
  * The pure parts (hash parsing, square geometry, hit testing, the page model, the wake lock
  * and the HUD text) are exported for clients/js/test/web_app.test.mjs.
