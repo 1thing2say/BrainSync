@@ -121,9 +121,6 @@ function renderPhase(next) {
   if (next === "flicker" && phase !== "flicker") startTimer();
   if (next !== "flicker") stopTimer();
   phase = next;
-  const el = $("phase");
-  el.textContent = phase === "flicker" ? "flickering" : phase;
-  el.className = `phase ${phase}`;
   document.querySelectorAll(".target").forEach((t) => {
     t.classList.toggle("active", phase === "flicker");
     if (phase === "cue") t.classList.remove("picked");
@@ -262,14 +259,8 @@ function addLine(who, text) {
 function renderStatus(s) {
   const modeChanged = keyboardMode !== s.keyboard_mode;
   keyboardMode = s.keyboard_mode;
-  // A fake decoder or keyboard mode is always shown on the mirror, so nobody mistakes the demo
-  // for live EEG. The server's health is in /api/health and tools/preflight.py.
-  $("flags").replaceChildren(...ViewCore.health(s).flags.map((f) => {
-    const b = document.createElement("span");
-    b.className = "badge flag";
-    b.textContent = f;
-    return b;
-  }));
+  // A fake decoder or keyboard mode shows in the server's terminal, /api/health,
+  // tools/preflight.py and the log, not on the user's screen.
   const resume = $("resume");
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";

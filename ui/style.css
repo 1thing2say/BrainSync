@@ -49,8 +49,8 @@ kbd, code { font-family: var(--font-mono); font-size: 0.85em; }
 kbd { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 4px; padding: 0 0.3rem; }
 a { color: var(--text); }
 
-/* Mono labels: small, uppercase, spaced (pills, tags, section titles). */
-.phase, .badge, .target-tag, .target-key, .speaking-tag, .option-count, .panel h2, .conversation .who,
+/* Mono labels: small, uppercase, spaced (tags, section titles). */
+.target-tag, .target-key, .speaking-tag, .option-count, .panel h2, .conversation .who,
 .topbar-label, .callout-title, .profile-page legend, .preview h2 {
   font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
 
@@ -74,7 +74,6 @@ a { color: var(--text); }
   padding: 0.75rem 1rem; border-radius: 10px; background: var(--panel);
   border: 1px solid var(--line); border-left: 3px solid var(--line-strong); }
 .banner .state { font-size: clamp(1.15rem, 1.8vw, 1.5rem); font-weight: 600; letter-spacing: -0.02em; }
-.banner-side { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
 .banner.tone-idle .state { color: var(--muted); }
 .banner.tone-cue { border-left-color: var(--text); }
 .banner.tone-look { border-left-color: var(--look); }
@@ -87,11 +86,6 @@ a { color: var(--text); }
 .banner.tone-warn .state { color: var(--warn); }
 .banner.tone-stop { border-left-color: var(--danger); }
 .banner.tone-stop .state { color: var(--danger); }
-.flags { display: flex; gap: 0.4rem; }
-.phase { font-size: 0.72rem; padding: 0.2rem 0.55rem; border-radius: 999px; border: 1px solid var(--line);
-  color: var(--muted); background: var(--surface); }
-.phase:empty { display: none; }
-.phase.flicker { border-color: var(--look); color: var(--look); }
 
 /* The selection timer: a steady fill, never a blink. */
 .progress { display: flex; align-items: center; gap: 0.75rem; }
@@ -229,9 +223,6 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
 .callout.warn .callout-title { color: var(--warn); }
 .callout.warn .callout-title::before { content: "!"; }
 
-.badge { font-size: 0.68rem; font-weight: 500; padding: 0.18rem 0.5rem; border-radius: 999px;
-  border: 1px solid var(--line-strong); color: var(--muted); background: var(--bg); white-space: nowrap; }
-.badge.flag { border-color: rgba(245, 165, 36, 0.6); color: var(--warn); }
 .copied { color: var(--say); }
 .phone-link { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .phone-link[hidden] { display: none; }

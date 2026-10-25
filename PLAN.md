@@ -170,9 +170,9 @@ pull requests.
   compiled.
 - **The laptop page is the user's screen (2026-10-25, branch `feat/user-display`):** only the
   user sees it, so it lost the "Partner" label, the typed text box and the operator footer
-  (health line and its details, Correct / Wrong, keyboard hint). The C / W keys still mark the
-  last reply; FAKE DECODER / KEYBOARD stay on the mirror; health is in `/api/health` and
-  `tools/preflight.py`; the iPhone app link shows only with `--tunnel` or on the LAN, and the
+  (health line and its details, Correct / Wrong, keyboard hint), and the banner's pills (FAKE
+  DECODER / KEYBOARD, the trial phase). The C / W keys still mark the last reply; a fake decoder
+  or keyboard mode shows in the terminal, `/api/health`, `tools/preflight.py` and the log; the iPhone app link shows only with `--tunnel` or on the LAN, and the
   iPhone app keeps its own text box. Laid out for SSVEP: each target sits against its own edge of
   the mirror (top, bottom, left, right; at most 28 % of its width) and the empty middle takes the
   rest, so the targets are as far apart as the window allows; the confirm screen's sentence sits
