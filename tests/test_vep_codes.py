@@ -143,7 +143,7 @@ def test_flash_rate_and_bad_schedule_values():
 # -- config tables ---------------------------------------------------------------------------
 
 def test_shipped_paradigm_configs():
-    assert {"cvep_4", "cvep_16", "tvep_4", "fvep_6"} <= set(available_configs())
+    assert {"cvep_2", "cvep_3", "cvep_4", "cvep_16", "tvep_4", "fvep_6"} <= set(available_configs())
     c4 = load_config("cvep_4")
     assert c4.paradigm == "code" and c4.coded and c4.n_targets == 4
     assert c4.code.length == 63 and c4.code.lag_frames == 16 and c4.code.cycle_frames == 63

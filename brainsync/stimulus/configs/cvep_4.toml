@@ -1,6 +1,6 @@
 # c-VEP (Bin et al. 2009) with four targets in the diamond of the four-target SSVEP
-# studies (top, left, right, bottom; the Nakanishi et al. 2013 layout: red squares on
-# black, the centre free): one 63-bit m-sequence, every square shows it delayed by
+# studies (top, left, right, bottom; the Nakanishi et al. 2013 layout, the centre free;
+# white squares here, red in the paper's figure): one 63-bit m-sequence, every square shows it delayed by
 # k * 16 frames (267 ms apart, the widest spacing four lags allow in a 63-frame cycle),
 # so a one-frame timing slip costs nothing. Each cycle lasts 63 frames = 1.05 s at 60 Hz;
 # the decoder correlates every cycle with one trained template shifted per target.
@@ -26,7 +26,7 @@ spacing_x = 0.55  # left and right squares from the centre (a 1.54:1 screen has 
 
 [stimulus]
 hold_cue = true
-fill = [1.0, 0.0, 0.0]   # red on black, as in the figure; [1, 1, 1] (grey) has more contrast
+fill = [1.0, 1.0, 1.0]   # white; [1, 0, 0] is red on black, as in the four-target studies
 
 [display]
 refresh_hz = 60.0   # ProMotion off

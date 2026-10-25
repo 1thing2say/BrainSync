@@ -848,7 +848,7 @@ def test_free_frames_carry_polled_labels():
 
 def test_diamond_layout_and_fill():
     cfg = load_config("cvep_4")
-    assert cfg.shape == "diamond" and cfg.fill == (1.0, 0.0, 0.0)
+    assert cfg.shape == "diamond" and cfg.fill == (1.0, 1.0, 1.0)
     assert [t.pos for t in cfg.targets] == [(0.0, 0.32), (-0.55, 0.0), (0.55, 0.0),
                                             (0.0, -0.32)]
     from brainsync.stimulus.config import diamond_positions, parse_config
@@ -877,6 +877,19 @@ def test_status_goes_above_when_labels_leave_no_room_below():
     y, anchor = status_pos(load_config("cvep_4"), labels=True)
     assert anchor == "center" and y == 0.0
     y, anchor = status_pos(load_config("cvep_2"), labels=True)
-    assert anchor == "top" and -0.35 < y < -0.3
+    assert anchor == "top" and -0.36 < y < -0.32
     y, anchor = status_pos(load_config("cvep_2"), labels=False)
     assert anchor == "top" and -0.3 < y < -0.27
+
+
+def test_cvep_3_is_a_white_row_of_three_with_the_widest_lags():
+    from brainsync.stimulus.display import status_pos
+    from brainsync.vep.codes import min_lag_distance
+    cfg = load_config("cvep_3")
+    assert cfg.labels == ("YES", "NO", "HELP") and cfg.fill == (1.0, 1.0, 1.0)
+    assert [t.pos for t in cfg.targets] == [(-0.55, 0.0), (0.0, 0.0), (0.55, 0.0)]
+    assert cfg.code.lag_frames == 21
+    assert min_lag_distance(3, 21, cfg.code.cycle_frames) == 21
+    assert 0.55 + cfg.reach <= cfg.display.aspect / 2
+    y, anchor = status_pos(cfg, labels=True)
+    assert anchor == "top" and -0.3 < y < -0.24

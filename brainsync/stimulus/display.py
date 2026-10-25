@@ -375,7 +375,7 @@ def status_pos(cfg: StimulusConfig, labels: bool) -> tuple[float, str]:
     bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
     if labels:
         lowest = min(label_pos(cfg, t.index, LIVE_LABEL_HEIGHT)[1] for t in cfg.targets)
-        bottom = lowest - LIVE_LABEL_HEIGHT / 2.0 - TEXT_GAP / 2.0
+        bottom = lowest - LIVE_LABEL_HEIGHT / 2.0 - TEXT_GAP
     if bottom - TEXT_HEIGHT * 1.2 < -0.5:
         return 0.0, "center"
     return bottom, "top"
@@ -463,12 +463,16 @@ class PsychoPyRenderer:
                     stim.font = "Menlo"
                 self.labels.append(stim)
                 self._label_texts.append(t.label)
-        bottom, anchor = status_pos(cfg, bool(labels) and not cards)
+        live = bool(labels) and not cards
+        bottom, anchor = status_pos(cfg, live)
         top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
         self.status = visual.TextStim(self.win, text="", pos=(0.0, bottom), height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.75), font="Menlo",
                                       wrapWidth=1.5, anchorVert=anchor,
-                                      alignText="left" if anchor == "top" else "center")
+                                      # a cued session's status table lines up on the left;
+                                      # the live demo's one-line status is centred
+                                      alignText="left" if anchor == "top" and not live
+                                      else "center")
         self.prompt = visual.TextStim(self.win, text="", pos=(0.0, top), height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.9), font="Menlo",
                                       wrapWidth=1.5, anchorVert="bottom")

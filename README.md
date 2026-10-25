@@ -976,6 +976,7 @@ each on the same board and PsychoPy display:
 
 # live: Cerelog X8 + the PsychoPy display (train on the first square, then decode)
 .venv/bin/python -m brainsync.vep --paradigm code                # 4 squares in a diamond, cvep_4 (YES / NO / HELP / WATER)
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_3      # 3 white squares in a row (YES / NO / HELP), 350 ms lags
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2      # 2 squares, labels + confidence line
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --cycles 3 --votes 2 --margin 0.1 --train-cycles 40 --seconds 120
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --template data/spectrum_checks/<stamp>_cvep_template.npz
@@ -1029,8 +1030,8 @@ It runs the stimulus as `--free --feedback stdin --labels --status stdin`, with
 redrawing the text on every flicker frame dropped 1 frame in 7592 on the demo Mac.
 The 4-square demo (`cvep_4`) uses the diamond of the four-target SSVEP studies (top,
 left, right, bottom, `[layout] shape = "diamond"`, `spacing` up and down and a wider
-`spacing_x` to the sides, red squares on black through `[stimulus] fill = [1, 0, 0]`;
-grey, the default, has more luminance contrast) with the signage YES / NO / HELP /
+`spacing_x` to the sides, white squares on black; `[stimulus] fill = [1, 0, 0]` gives the
+figure's red) with the signage YES / NO / HELP /
 WATER: each square's label line carries its bar and score, and the lead / choice line
 sits in the free centre, because the bottom square's label leaves no room below and a
 MacBook's notch hides the top edge. `--fake` swaps the board
