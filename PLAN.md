@@ -1015,6 +1015,33 @@ questions for the teammate"), with a note asking the teammate's Claude session t
     - *Stretch:* every confirmed "Say it" is a labelled trial; log its EEG window with the label
       and retrain between turns, so accuracy can improve during the demo.
 
+    **Built 2026-10-25 (branch `201-200-research-interface`, plan in
+    `.claude/plans/trained-ssvep-decoder.plan.md`, from the 19 papers in the research
+    archive).** `brainsync/templates.py` adds the calibration-trained classifiers behind the
+    CCA API: `itcca`, `ecca` (Nakanishi 2015), `trca` / `etrca` (Nakanishi 2018), `etrcar`
+    (Wong 2020) and `sfcca` (learned filter, phase-free score). Every scorer takes the window's
+    offset from the stimulus onset; `Decoder.set_onset` (set by the server bank, the demo and
+    replay) locks the templates to it. `python -m brainsync.calibrate -c four_diamond` records
+    the gate session, prints the gate verdict and saves a model for `demo --model` and
+    `brainsync.server --decoder-model`. Results, held out:
+    - Nakanishi 2015 benchmark (12 targets, wet, 8 ch, 1 s): CCA 57 %, ITCCA 81 %, eCCA 94 %
+      (paper: 55 / 81 / 93 %), eTRCA 98 %; with the onset-free harmonic templates needed
+      online eTRCA-R 92 %, and 86 % from only 2 training blocks. The methods work.
+    - The three dry-electrode 15/17 Hz files (4 posterior channels, 10 trials per target):
+      nothing trained beats FBCCA (pooled 50 trials, FBCCA 66/80/80/70 % at 1/1.5/2/3 s,
+      eCCA 70/70/78/72 %, eTRCA-R 58-60 %, SFCCA 56-60 %; FBCCA's abstain rules were tuned on
+      these files, so even the tie is flattering). The SSVEP is barely phase-locked to the
+      `stim_on` marker there: leave-one-out phase-locking 0.11-0.62 against a 0.27 noise
+      floor and 0.75-0.91 for a locked response at that SNR; only 162029 at 17 Hz locks at
+      all, at the level of a 10 ms response scatter. The display timing is exact (60.000 Hz,
+      0 dropped frames); the Cerelog/BrainFlow stamps lag the host clock by a constant 0-1 s
+      per connection (fixed in `CerelogBoard` by rebasing onto the host clock), which hurt
+      every live onset but not the within-file templates. Fixes with a chance: posterior
+      electrodes on Oz/POz, gel on O1/O2, then the four-target `calibrate` session. Until
+      then FBCCA stays the live default.
+    - Harmonics 5 or a filter bank to 88 Hz did not help FBCCA on these files (66-80 % either
+      way at 1.5-2 s); the 45 Hz, 3-harmonic default stays.
+
 ## 14. Frequency choice (re-analysis 2026-10-23)
 
 Source: `python -m brainsync.select_freqs` and `python -m brainsync.score_cued` (desktop worktree)

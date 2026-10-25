@@ -384,6 +384,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--freqs", default=",".join(f"{f:g}" for f in DEFAULT_FREQS),
                    help="stimulus frequencies in Hz, best first (default 15,17,12,20); point "
                         "mode shows len-1 buttons plus \"more\"")
+    p.add_argument("--decoder-model", metavar="FILE", default=None,
+                   help="trained SSVEP classifier saved by brainsync.calibrate, instead of FBCCA; "
+                        "every layout's targets must be the ones it was trained for (same "
+                        "frequencies and phases), or activating that layout fails")
     p.add_argument("--calibrate-s", type=float, default=CALIBRATE_S,
                    help=f"rest-baseline seconds for each new controller (default "
                         f"{CALIBRATE_S:g}; at least about 3.75)")
@@ -517,7 +521,8 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
     archive: ScanArchive | None = None
     try:
         gaze = GazeDecoder(board.fs, board.ch_names) if args.eog else None
-        bank = DecoderBank(board.fs, ch_names=board.ch_names, gaze=gaze)
+        bank = DecoderBank(board.fs, ch_names=board.ch_names, model=args.decoder_model,
+                           gaze=gaze)
         if gaze is not None:
             _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
         if detector is None:

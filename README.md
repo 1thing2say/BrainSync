@@ -323,6 +323,79 @@ Per subject (CCA, FBCCA at 1/2/4 s) the results go to stderr. Subject 1 is the h
 (CCA 24/44/64%), subject 8 the easiest (CCA 91/100/100%). Starting the window at sample 0
 instead drops subject 8's 1 s CCA accuracy from 90.6% to 48.9%.
 
+## Phase 1b: trained classifiers
+
+`brainsync/templates.py` adds the classifiers that learn from the user's own cued trials,
+behind the same API as CCA and FBCCA (baseline, margin, threshold, `make()`): `itcca` and
+`ecca` (Nakanishi 2015), `trca` / `etrca` (Nakanishi 2018), `etrcar` (TRCA with a sine/cosine
+projection, Wong 2020) and `sfcca` (a learned spatial filter scored like CCA, so it ignores
+the phase). Each target's template is its trial average projected onto its own harmonics,
+which makes it defined at any time after the stimulus onset: the online decoder scores every
+sliding window at its offset from `Decoder.set_onset(t)` (the display's first flickering
+frame). `--template raw` uses the plain averages instead, for windows inside the calibration
+epochs. Trained methods are always scored leave-one-block-out (`*` in the tables).
+
+```bash
+.venv/bin/python -m brainsync.nakanishi --methods cca itcca ecca etrca etrcar --windows 0.5 1
+.venv/bin/python -m brainsync.nakanishi --methods itcca ecca etrca --windows 1 --template raw
+.venv/bin/python -m brainsync.score_cued --methods fbcca ecca etrcar sfcca --windows 1 1.5 2
+.venv/bin/python -m brainsync.online <file>_cued.npz --classifier etrcar --train-blocks 4
+.venv/bin/python -m brainsync.calibrate -c four_diamond        # record, score, gate, save model
+```
+
+Nakanishi 2015 (12 targets, 10 subjects, 14 training blocks, mean accuracy):
+
+| Method | 0.5 s | 1 s | Paper, 1 s |
+|---|---|---|---|
+| CCA | 23 % | 57 % | 55 % |
+| ITCCA, raw templates | 60 % | 81 % | 81 % |
+| eCCA, raw templates | 81 % | 94 % | 93 % |
+| eTRCA, raw templates | 91 % | 98 % | - |
+| eCCA, harmonic templates | 64 % | 83 % | - |
+| eTRCA-R, harmonic templates | 79 % | 92 % | - |
+| eTRCA-R, harmonic, 2 training blocks | - | 86 % | - |
+
+On the three dry-electrode 15/17 Hz recordings (4 posterior channels, 10 trials per target,
+50 trials pooled after artifact rejection) the trained methods, scored leave-one-block-out,
+do not beat FBCCA, which is scored on every trial with abstain rules that were tuned on these
+same files (`brainsync/online.py` `TUNED`):
+
+| Window | FBCCA | eCCA | eTRCA | eTRCA-R | SFCCA |
+|---|---|---|---|---|---|
+| 1 s | 66 % | 70 % | 62 % | 58 % | 56 % |
+| 1.5 s | 80 % | 70 % | 62 % | 60 % | 58 % |
+| 2 s | 80 % | 78 % | 58 % | 58 % | 60 % |
+| 3 s | 70 % | 72 % | 72 % | 60 % | 58 % |
+
+With 50 trials, gaps under about 15 points are noise; eCCA ties FBCCA, the TRCA family is
+near chance. Replayed through the online decoder after a fit on the first 4 blocks (36
+held-out trials, FBCCA's window, votes, margin and threshold for every classifier), FBCCA
+commits 19 with 0 wrong, eCCA 6 with 6 wrong, eTRCA-R 8 with 4 wrong.
+
+Why: a leave-one-out phase-locking value of the SSVEP to the `stim_on` marker (common CCA
+filter from the other trials, phase of the filtered 2 s window at the flicker frequency) is
+0.49 and 0.62 on 162029, 0.34 and 0.24 on 172130, 0.11 and 0.43 on 161131, against a
+no-signal floor of 0.27 (10th-90th percentile 0.11-0.53) and 0.75-0.91 for a perfectly
+onset-locked response at the same CCA correlation. So only 162029 at 17 Hz shows locking at
+all, and even it matches a response-phase scatter of about 10 ms (SD) rather than a locked
+one. (A phase-locking value computed with a filter fitted on the same trials, as an earlier
+draft of this section did, has a floor of 0.47 and says nothing.) Per-trial best-lag
+estimates spread over the whole flicker period, like the still-screen windows do. Meanwhile
+the timing bookkeeping is clean on the display side (60.000 Hz, 0 dropped frames, markers
+within 0.1 ms of the flip) but not on the board side: the Cerelog/BrainFlow sample stamps
+are the board's millisecond counter plus the whole seconds of the host clock at the
+handshake, so they lag the host markers by a constant 0-1 s that differs per connection
+(0.45-0.9 s on these files). Within one recording the offset is constant and a template
+absorbs it, so it does not explain the weak locking there; but it made every live onset (the
+server's gate, a template's phase) wrong by a random fraction of a second after each
+reconnect. `CerelogBoard` now rebases its stamps onto the host clock (`stamp_offset`).
+
+What would change the answer: a cleaner response (posterior electrodes on Oz/POz, gel on
+O1/O2) and the four-target session itself, recorded with `brainsync.calibrate`, which scores
+FBCCA and the saved classifier on held-out blocks and prints the gate verdict. FBCCA stays
+the live default; `demo --model` and the server's `--decoder-model` take a saved model once
+one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
+
 ## Phase 2: two-target cued trials
 
 Each cued session has 20 trials: a 1 s cue, 4 s of 15 and 17 Hz flicker with the cue box

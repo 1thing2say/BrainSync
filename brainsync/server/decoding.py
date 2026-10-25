@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import numpy as np
 
@@ -40,7 +41,8 @@ from ..board import FS
 from ..classify import make
 from ..eog import GazeDecoder
 from ..online import TUNED, Calibration, Decision, Decoder, RingBuffer, fit_rest
-from ..recordings import MONTAGE, POSTERIOR
+from ..recordings import MONTAGE, POSTERIOR, channel_indices
+from ..templates import load_model
 from .protocol import LATENCY_S
 
 __all__ = ["DecoderBank", "build_decoder", "PAD_S", "PROBE_DIVISOR"]
@@ -52,14 +54,41 @@ DecoderFactory = Callable[[tuple[float, ...], tuple[float, ...]], Decoder]
 
 
 def build_decoder(freqs: Sequence[float], phases: Sequence[float], fs: float = FS,
-                  ch_names: Sequence[str] = MONTAGE) -> Decoder:
+                  ch_names: Sequence[str] = MONTAGE, model: str | Path | None = None,
+                  channels: Sequence[str | int] | None = POSTERIOR) -> Decoder:
     """The live demo's decoder: swipe_web.build_decoder's recipe (TUNED FBCCA, 3 harmonics,
     the POSTERIOR channels, a 2 s pad), written here so the server does not import the
-    BrainSwipe page and its dependencies."""
-    clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
-               margin=TUNED.margin, threshold=TUNED.threshold)
+    BrainSwipe page and its dependencies.
+
+    With ``model`` (a file from ``brainsync.calibrate``) the classifier is the saved, trained
+    one instead; its targets must be these ``freqs`` and ``phases`` (within 0.01 Hz) and its
+    channel count must match ``channels``. The saved margin and threshold are replaced by the
+    TUNED ones so the abstain rules stay the same as for FBCCA.
+    """
+    if model is None:
+        clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
+                   margin=TUNED.margin, threshold=TUNED.threshold)
+    else:
+        clf = load_model(model)
+        f, ph = np.asarray(freqs, float), np.asarray(phases, float)
+        if (clf.freqs.size != f.size or np.any(np.abs(clf.freqs - f) > 0.01)
+                or np.any(np.abs(np.angle(np.exp(1j * (clf.phases - ph)))) > 1e-6)):
+            raise ValueError(f"model {model} was trained for {clf.freqs.tolist()} Hz, phases "
+                             f"{clf.phases.tolist()}, not {f.tolist()} Hz, {ph.tolist()}")
+        if abs(clf.fs - fs) > 1e-6:
+            raise ValueError(f"model {model} was trained at {clf.fs} Hz, the board runs at {fs}")
+        names = tuple(str(c) for c in ch_names)
+        selected = [names[i] for i in channel_indices(names, channels)]
+        if clf.n_ch != len(selected):
+            raise ValueError(f"model {model} was trained on {clf.n_ch} channels, the decoder "
+                             f"selects {len(selected)}")
+        trained_on = clf.meta.get("channels") if isinstance(clf.meta, dict) else None
+        if trained_on and list(trained_on) != selected:
+            raise ValueError(f"model {model} was trained on channels {list(trained_on)}, the "
+                             f"decoder selects {selected}")
+        clf.margin, clf.threshold = TUNED.margin, TUNED.threshold
     return Decoder(clf, fs, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,
-                   channels=POSTERIOR, pad_s=PAD_S, ch_names=ch_names)
+                   channels=channels, pad_s=PAD_S, ch_names=ch_names)
 
 
 def _key(freqs: Sequence[float], phases: Sequence[float], fs: float) -> tuple[tuple[float, ...],
@@ -104,6 +133,7 @@ class DecoderBank:
     def __init__(self, fs: float = FS, *, ch_names: Sequence[str] = MONTAGE,
                  latency_s: float = LATENCY_S,
                  factory: DecoderFactory | None = None,
+                 model: str | Path | None = None,
                  gaze: GazeDecoder | None = None) -> None:
         fs = float(fs)
         if not math.isfinite(fs) or fs <= 0:
@@ -117,6 +147,9 @@ class DecoderBank:
             raise ValueError(f"ch_names must be unique board channel names, got "
                              f"{list(self.ch_names)}")
         self.latency_s = latency_s
+        self.model = None if model is None else Path(model)
+        # the probe (a single off-target frequency) only learns the window geometry, so the
+        # default factory applies the saved model to real layouts only
         if gaze is not None:
             if not isinstance(gaze, GazeDecoder):
                 raise ValueError(f"gaze must be a brainsync.eog.GazeDecoder, got "
@@ -129,7 +162,9 @@ class DecoderBank:
         self.gaze = gaze
         self._gaze_on = False   # positions known for the active layout
         self._factory: DecoderFactory = factory or (
-            lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names))
+            lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names,
+                                       model=None if len(f) == 1 and f[0] == fs / PROBE_DIVISOR
+                                       else self.model))
         self._decoders: dict[tuple[tuple[float, ...], tuple[float, ...]], Decoder] = {}
         self._probe = self._make((fs / PROBE_DIVISOR,), (0.0,))
         n = self._probe.needed
@@ -298,6 +333,7 @@ class DecoderBank:
         if k > 0:
             dec.feed(self._hist.last(k), self._times.last(k)[0])
         dec.voter.reset()
+        dec.set_onset(now)           # refined by set_onset() when the client reports its frame
         self._active = key
         self._gate = now + self.latency_s
         self.dropped = 0
@@ -318,6 +354,7 @@ class DecoderBank:
         if gate > self._gate:
             dec.voter.reset()
         self._gate = gate
+        dec.set_onset(t_onset)       # trained classifiers lock their templates to this time
 
     def deactivate(self) -> None:
         """Stop deciding (a layout without targets, or not running); history keeps filling."""
