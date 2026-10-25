@@ -51,7 +51,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..classify import TRAINED
 from ..envfile import load_env_file
+from ..online import trained_from_recording
+from ..recordings import POSTERIOR
 from . import protocol as P
 from .decoding import DecoderBank
 from .session import Session
@@ -359,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibrate-s", type=float, default=CALIBRATE_S,
                    help=f"rest-baseline seconds for each new controller (default "
                         f"{CALIBRATE_S:g}; at least about 3.75)")
+    p.add_argument("--trained", metavar="CUED_NPZ", type=Path, default=None,
+                   help="decode with a spatial filter fitted on this cued recording (its "
+                        "targets must include every --freqs frequency, same phases and rate) "
+                        "instead of the training-free FBCCA")
+    p.add_argument("--trained-method", default="etrca", choices=list(TRAINED),
+                   help="which trained classifier --trained fits (default etrca)")
     p.add_argument("--refresh-rates", metavar="HZ,...",
                    default=",".join(f"{r:g}" for r in P.REFRESH_RATES),
                    help=f"display refresh rates a controller may have, each within "
@@ -488,7 +497,18 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         return 1
     archive: ScanArchive | None = None
     try:
-        bank = DecoderBank(board.fs, ch_names=board.ch_names)
+        trained = None
+        if args.trained is not None:
+            trained = trained_from_recording(args.trained, args.trained_method, channels=POSTERIOR)
+            if abs(trained.fs - board.fs) > 1e-6:
+                raise ValueError(f"{args.trained}: recorded at {trained.fs:g} Hz, the board runs "
+                                 f"at {board.fs:g} Hz")
+            trained.for_freqs(freqs)        # every layout frequency must be a trained target
+            print(f"trained {trained.name} from {args.trained.name}: {int(trained.n_train.sum())} "
+                  f"trials over {', '.join(f'{f:g}' for f in trained.freqs)} Hz, channels "
+                  f"{','.join(POSTERIOR)}" + (", periodic templates" if trained.cycle is not None
+                                               else ""), file=sys.stderr)
+        bank = DecoderBank(board.fs, ch_names=board.ch_names, trained=trained)
         if detector is None:
             detector = make_detector(args)
         elif args.no_detect:
@@ -513,8 +533,9 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
                           point_factory=point_factory, calibrate_s=args.calibrate_s,
                           refresh_hz=args.refresh_rates[0], refresh_rates=args.refresh_rates,
                           ignore_refresh=args.ignore_refresh, clock=time.time, log=log)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        print(f"error: {msg}", file=sys.stderr)
         return 2
     try:
         transport.start()

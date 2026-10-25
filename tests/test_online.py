@@ -463,3 +463,72 @@ def test_demo_calibration_length_pins_the_rest_offset():
     rms = {s: float(np.sqrt(np.mean(np.square(e)))) / spread for s, e in errs.items()}
     assert rms[CALIBRATE_S] < 0.8 * rms[10.0], rms   # about 0.3 vs 0.45 spreads
     assert rms[CALIBRATE_S] < TUNED.margin, rms
+
+
+# -- trained classifiers: onset alignment, held-out replay, loading --------------------------
+
+from brainsync.synthetic import ssvep_trials  # noqa: E402
+
+
+def _trained_clf(seed: int = 11):
+    X, y = ssvep_trials(FREQS, FS, n_per_target=6, seconds=3.0, snr_db=0.0, seed=seed)
+    X = preprocess(X, FS)
+    return make("etrca", freqs=FREQS, fs=FS).fit(X[..., :500], y), X, y
+
+
+def test_align_passes_the_window_offset_to_a_trained_classifier():
+    clf, X, y = _trained_clf()
+    names = ("a", "b", "c", "d")
+    dec = Decoder(clf, FS, window_s=2.0, step_s=0.5, votes=1, pad_s=1.0, channels=None,
+                  ch_names=names)
+    assert dec.uses_offsets and not dec.aligned
+    assert dec.offset_for(123.0) == 0                 # unaligned: no offset
+    dec.align(100.0)
+    assert dec.aligned and dec.offset_for(101.0) == 250 and dec.offset_for(99.5) == -125
+    with pytest.raises(ValueError, match="finite"):
+        dec.align(float("nan"))
+    trial = X[0]                                      # response aligned at t = 100.0
+    t = 100.0 + np.arange(trial.shape[1]) / FS
+    out = dec.feed(trial, t)
+    assert len(out) == 1
+    window = dec.prepare(trial)                       # the pad is the first second
+    np.testing.assert_allclose(out[0].scores, clf.scores(window, offset=250)[0])
+    assert out[0].raw == y[0]
+    # a calibration-free decoder ignores the alignment
+    plain = make_decoder(window_s=2.0, pad_s=1.0, votes=1)
+    plain.align(100.0)
+    assert not plain.uses_offsets and plain.offset_for(101.0) == 0
+
+
+def test_replay_trained_classifier_is_refitted_per_trial(synthetic_recording):
+    res = replay(synthetic_recording, classifier="etrca", margin=0.0, threshold=None, votes=2)
+    assert res.params["held_out"] is True and res.params["classifier"] == "etrca"
+    assert res.decoder.classifier.fitted and res.decoder.aligned
+    assert res.decoder.classifier.has_baseline
+    assert res.correct >= 0.75 * res.n_trials and res.wrong <= 2
+    plain = replay(synthetic_recording, classifier="cca", margin=0.0, threshold=None, votes=2)
+    assert plain.params["held_out"] is False
+    agree = consistency(res)
+    assert agree["same"][1] == 1.0 and agree["same"][0] > 0
+
+
+def test_trained_from_recording(synthetic_recording):
+    clf = online.trained_from_recording(synthetic_recording)
+    assert clf.name == "etrca" and clf.fitted and clf.freqs.tolist() == list(FREQS)
+    assert clf.templates.shape[1] == 4 and clf.cycle is not None and not clf.has_baseline
+    assert clf.margin == TUNED.margin and clf.threshold == TUNED.threshold
+    sub = clf.for_freqs([17.0, 15.0])
+    assert sub.freqs.tolist() == [17.0, 15.0]
+    other = online.trained_from_recording(synthetic_recording, "mscca", channels=["O1", "O2"])
+    assert other.name == "mscca" and other.templates.shape[1] == 2
+    with pytest.raises(ValueError, match="not a trained classifier"):
+        online.trained_from_recording(synthetic_recording, "cca")
+    with pytest.raises(KeyError):
+        online.trained_from_recording(synthetic_recording, channels=["Oz"])
+
+
+def test_cli_trained_classifier_reports_held_out(synthetic_recording, capsys):
+    rc = online.main([str(synthetic_recording), "--classifier", "mscca", "--trials"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mscca" in out and "inside the last trial" in out

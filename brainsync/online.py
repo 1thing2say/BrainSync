@@ -12,6 +12,13 @@ abstentions withdraw the commitment.
 
     python -m brainsync.online <cued.npz>...          # replay recordings with the demo defaults
     python -m brainsync.online --grid <cued.npz>...   # small tuning grid
+    python -m brainsync.online --classifier etrca <cued.npz>   # trained filter, held out per trial
+
+A trained classifier (``brainsync.classify.Trained``) needs the time the flicker's response
+began: ``Decoder.align(t)`` sets it (the server does from the client's onset), and every
+window is then scored at its offset from that moment, since the steady-state templates
+repeat every common period. ``trained_from_recording`` fits one on a cued recording for
+the live server.
 """
 from __future__ import annotations
 
@@ -27,14 +34,14 @@ from pathlib import Path
 import numpy as np
 
 from .board import Board, record
-from .classify import ABSTAIN, CCA, make, min_samples
-from .recordings import (MONTAGE, POSTERIOR, Recording, channel_indices, load_recording,
-                         pair_trials)
+from .classify import ABSTAIN, CCA, METHODS, Trained, is_trained, make, min_samples
+from .recordings import (MONTAGE, POSTERIOR, Recording, channel_indices, cut_windows,
+                         load_recording, pair_trials, reject_artifacts)
 from .signal import Band, preprocess
 
 __all__ = ["ABSTAIN", "TUNED", "Settings", "RingBuffer", "Decision", "Voter", "Decoder", "Calibration",
            "calibrate", "fit_rest", "replay", "replay_grid", "ReplayResult", "TrialOutcome", "consistency",
-           "Idle", "idle"]
+           "Idle", "idle", "trained_from_recording"]
 
 # Demo defaults from ``python -m brainsync.online --grid`` on 2026-10-22_162029 and
 # 2026-10-22_172130. Window 1.5 s at a 0.25 s hop was the best region for FBCCA, and 4 votes
@@ -197,6 +204,7 @@ class Decoder:
         self.voter = Voter(votes)
         self._data = RingBuffer(len(self.rows), self.needed)
         self._times = RingBuffer(1, self.needed)
+        self._align: float | None = None
         self.reset()
 
     @property
@@ -227,6 +235,40 @@ class Decoder:
         self._times.clear()
         self.voter.reset()
         self._next_due = self.needed
+
+    # -- onset alignment (trained classifiers) -----------------------------------------
+
+    @property
+    def aligned(self) -> bool:
+        """True once ``align`` gave the time the trained templates are locked to."""
+        return self._align is not None
+
+    @property
+    def uses_offsets(self) -> bool:
+        """Whether the classifier can score a window at an offset from the stimulus onset
+        (a trained classifier with periodic templates)."""
+        return getattr(self.classifier, "cycle", None) is not None
+
+    def align(self, t_unix: float | None) -> None:
+        """Tell the decoder when the flicker's response began (onset + latency), in the
+        same clock as the fed timestamps, or None to forget it.
+
+        A trained classifier's templates start at that moment; every later window is then
+        scored with its offset from it, so the sliding window no longer has to line up
+        with the stimulus. Calibration-free classifiers ignore it.
+        """
+        if t_unix is not None:
+            t_unix = float(t_unix)
+            if not np.isfinite(t_unix):
+                raise ValueError(f"alignment time must be finite or None, got {t_unix}")
+        self._align = t_unix
+
+    def offset_for(self, t_first: float) -> int:
+        """Samples between the alignment and a window whose first sample is at ``t_first``
+        (0 when unaligned or the classifier does not use offsets)."""
+        if self._align is None or not self.uses_offsets:
+            return 0
+        return int(round((float(t_first) - self._align) * self.fs))
 
     # -- windows -----------------------------------------------------------------------
 
@@ -306,7 +348,8 @@ class Decoder:
 
     def _score(self) -> Decision:
         window = self.prepare(self._data.last(self.needed))
-        pred, scores = self.classifier.decide(window)
+        offset = self.offset_for(self._times.last(self.n_window)[0, 0])
+        pred, scores = self.classifier.decide(window, offset=offset)
         gap = float(self.classifier.gaps(scores)[0])
         level = float(self.classifier.levels(scores)[0])
         raw = int(pred[0])
@@ -521,9 +564,27 @@ def default_decoder(rec: Recording, classifier: str = TUNED.classifier,
                    pad_s=pad_s, band=rec.band, notch_hz=rec.notch, ch_names=rec.ch_names)
 
 
+def _training_windows(rec: Recording, decoder: Decoder, lat: float,
+                      reject: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Flicker windows (trials, decoder channels, n), labels and the artifact-free trial
+    indices, cut like score_cued does (whole recording preprocessed, rec.window_s long)."""
+    w = cut_windows(rec, window_s=rec.window_s, latency=lat, band=decoder.band,
+                    notch_hz=decoder.notch_hz)
+    on, off = w.on[:, decoder.rows], w.off[:, decoder.rows]
+    keep = reject_artifacts(on, off, factor=reject, ch_names=decoder.channel_names)
+    return on, w.labels, keep
+
+
 def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
             reject: float) -> tuple[list, list, Calibration, list[Decision]]:
-    """Calibrate on the still screens, then feed the recording in chunks."""
+    """Calibrate on the still screens, then feed the recording in chunks.
+
+    At every flicker response's start the decoder is aligned to it (``Decoder.align``), as
+    the live server does from the client's onset. A trained classifier is refitted there
+    on the recording's other trials, with its baseline on the still windows again, so each
+    trial is decoded by a filter that never saw it (leave-one-trial-out), and the
+    reported calibration is the first fold's.
+    """
     if chunk_s <= 0:
         raise ValueError(f"chunk_s must be positive, got {chunk_s}")
     spans = _trial_spans(rec, lat)
@@ -534,12 +595,39 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
     # baseline: windows (after the pad) wholly on a still screen
     starts = [s for a, b in still for s in decoder.segment_starts(b, max(0, a - decoder.n_pad))
               if s + decoder.n_pad >= a]
-    calib = fit_rest(decoder, decoder.windows(rec.X, starts), reject)
+    still_windows = decoder.windows(rec.X, starts)
+    clf = decoder.classifier
+    trained = isinstance(clf, Trained)
+    if trained:
+        on, y, keep = _training_windows(rec, decoder, lat, reject)
+        if y.size != len(spans):
+            raise ValueError(f"{rec.path}: {y.size} training windows for {len(spans)} trials")
+    calib: Calibration | None = None
+    if not trained:
+        calib = fit_rest(decoder, still_windows, reject)
     decoder.reset()
+    decoder.align(None)
     chunk = max(1, int(round(chunk_s * rec.fs)))
     decisions: list[Decision] = []
-    for a in range(0, n_total, chunk):
-        decisions.extend(decoder.feed(rec.X[:, a:a + chunk], rec.t[a:a + chunk]))
+    cuts = [a for a, _, _ in spans] + [n_total]
+    pos = 0
+    for k, stop in enumerate(cuts):
+        for a in range(pos, stop, chunk):
+            decisions.extend(decoder.feed(rec.X[:, a:min(a + chunk, stop)],
+                                          rec.t[a:min(a + chunk, stop)]))
+        pos = stop
+        if k < len(spans):
+            if trained:
+                train = keep[keep != k]
+                try:
+                    clf.fit(on[train], y[train])
+                except ValueError as exc:
+                    raise ValueError(f"{rec.path}: {clf.name} with trial {k} held out: "
+                                     f"{exc}") from None
+                fold = fit_rest(decoder, still_windows, reject)
+                calib = fold if calib is None else calib
+            decoder.align(rec.t[stop])
+    assert calib is not None
     return spans, still, calib, decisions
 
 
@@ -590,7 +678,8 @@ def _evaluate(rec: Recording, decoder: Decoder, lat: float, spans: list, still: 
         still_commits += _first_commit(on_still, votes) is not None
     used = {"classifier": decoder.classifier.name, "window_s": decoder.window_s,
             "step_s": decoder.step_s, "votes": votes, "margin": margin,
-            "threshold": threshold, "pad_s": decoder.pad_s}
+            "threshold": threshold, "pad_s": decoder.pad_s,
+            "held_out": isinstance(decoder.classifier, Trained)}
     return ReplayResult(path=rec.path, params=used, trials=trials, decisions=decisions,
                         calibration=calib, still_windows=still_windows,
                         still_abstain=still_abstain, still_commits=still_commits,
@@ -681,20 +770,68 @@ def consistency(result: ReplayResult) -> dict[str, tuple[int, float]]:
     first (as score_cued and cut_windows do) and cuts the window from that: the real
     online-vs-offline comparison. They differ because zero-phase filtering of a live
     segment has an edge transient at its newest end, which no pad can remove.
-    Returns {mode: (n_windows, fraction agreeing)}.
+    Returns {mode: (n_windows, fraction agreeing)}. A trained classifier was refitted for
+    every trial during the replay, so only the last trial's windows can be re-scored with
+    the classifier as it now stands; the others are left out of the count.
     """
     dec, rec = result.decoder, result.recording
-    picked = [d for d in result.decisions
-              if any(a <= d.end - dec.n_window and d.end <= b for a, b, _ in result.spans)]
+    spans = result.spans
+    if isinstance(dec.classifier, Trained) and spans:
+        spans = spans[-1:]
+    picked = [(d, a) for d in result.decisions for a, b, _ in spans
+              if a <= d.end - dec.n_window and d.end <= b]
     if not picked:
         return {"same": (0, math.nan), "whole": (0, math.nan)}
-    raw = np.array([d.raw for d in picked])
-    same = dec.windows(rec.X, [d.end - dec.needed for d in picked])
+    raw = np.array([d.raw for d, _ in picked])
+    offsets = [d.end - dec.n_window - a for d, a in picked]
+    same = dec.windows(rec.X, [d.end - dec.needed for d, _ in picked])
     Y = preprocess(rec.X[dec.rows], rec.fs, band=dec.band, notch_hz=dec.notch_hz)
-    whole = np.stack([Y[:, d.end - dec.n_window:d.end] for d in picked])
+    whole = np.stack([Y[:, d.end - dec.n_window:d.end] for d, _ in picked])
     clf = dec.classifier
-    return {"same": (len(picked), float(np.mean(clf.predict(same) == raw))),
-            "whole": (len(picked), float(np.mean(clf.predict(whole) == raw)))}
+
+    def agree(windows: np.ndarray) -> float:
+        if dec.uses_offsets:
+            pred = np.array([clf.predict(w, offset=o)[0] for w, o in zip(windows, offsets)])
+        else:
+            pred = clf.predict(windows)
+        return float(np.mean(pred == raw))
+
+    return {"same": (len(picked), agree(same)), "whole": (len(picked), agree(whole))}
+
+
+def trained_from_recording(path: str | Path | Recording, classifier: str = "etrca",
+                           channels: Sequence[str | int] | None = POSTERIOR, harmonics: int = 3,
+                           margin: float = TUNED.margin, threshold: float | None = TUNED.threshold,
+                           shrink: float = 0.0, reject: float = REJECT_FACTOR,
+                           latency: float | None = None) -> Trained:
+    """Fit a trained classifier on every artifact-free trial of a cued recording.
+
+    The flicker windows are cut as score_cued cuts them (the whole recording preprocessed
+    with its own band and notch, ``rec.window_s`` long, from stim_on + latency) over
+    ``channels`` in that order. The baseline is left unfitted: the live still-screen
+    calibration provides it. The result's ``fs``, ``freqs`` and channel count must match
+    the live board and layout; ``Trained.for_freqs`` picks a layout's subset.
+    """
+    if not is_trained(classifier):
+        raise ValueError(f"{classifier!r} is not a trained classifier; choose from "
+                         f"{[m for m in METHODS if is_trained(m)]}")
+    rec = path if isinstance(path, Recording) else load_recording(path)
+    if rec.n_targets < 2:
+        raise ValueError(f"{rec.path}: a trained classifier needs at least 2 targets, the "
+                         f"recording has {rec.freqs.tolist()}")
+    lat = rec.latency if latency is None else float(latency)
+    w = cut_windows(rec, window_s=rec.window_s, latency=lat, band=rec.band, notch_hz=rec.notch)
+    if len(w) == 0:
+        raise ValueError(f"{rec.path}: no complete trials in {len(rec.markers)} markers")
+    picked = w.pick(channels)
+    keep = reject_artifacts(picked.on, picked.off, factor=reject, ch_names=picked.ch_names)
+    clf = make(classifier, freqs=rec.freqs, fs=rec.fs, harmonics=harmonics, phases=rec.phases,
+               margin=margin, threshold=threshold, shrink=shrink)
+    try:
+        clf.fit(picked.on[keep], picked.labels[keep])
+    except ValueError as exc:
+        raise ValueError(f"{rec.path}: {exc}") from None
+    return clf
 
 
 # -- CLI -------------------------------------------------------------------------------
@@ -737,7 +874,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.online", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("paths", nargs="+", type=Path, help="*_cued.npz recordings")
-    p.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"))
+    p.add_argument("--classifier", default=TUNED.classifier, choices=METHODS,
+                   help="cca / fbcca, or a trained one (trca, trca-r, etrca, etrca-r, mscca), "
+                        "which is refitted on the other trials before each trial (held out)")
     p.add_argument("--window", type=float, default=TUNED.window_s, help="window seconds")
     p.add_argument("--step", type=float, default=TUNED.step_s, help="hop seconds")
     p.add_argument("--votes", type=int, default=TUNED.votes, help="agreeing windows to commit")
@@ -803,7 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             lines = res.report()
             print("\n".join(lines if args.trials else lines[:4]))
             agree = consistency(res)
-            print(f"  offline agreement on {agree['same'][0]} windows inside flicker: "
+            scope = ("the last trial" if res.params.get("held_out") else "flicker")
+            print(f"  offline agreement on {agree['same'][0]} windows inside {scope}: "
                   f"whole-recording preprocessing (as score_cued) {_pct(agree['whole'][1])}, "
                   f"self-check {_pct(agree['same'][1])}")
             for q in args.idle:

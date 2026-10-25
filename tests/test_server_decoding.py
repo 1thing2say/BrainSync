@@ -351,3 +351,52 @@ def test_rearm_resets_only_the_voter(calib):
 
 def test_default_channel_names_are_the_montage():
     assert DecoderBank().ch_names == tuple(MONTAGE)
+
+
+# -- trained classifiers --------------------------------------------------------------------
+
+from brainsync.classify import ETRCA  # noqa: E402
+from brainsync.signal import preprocess  # noqa: E402
+from brainsync.synthetic import ssvep_trials  # noqa: E402
+
+
+def trained_model(periodic: bool | None = None):
+    X, y = ssvep_trials(FREQS, FS, n_per_target=4, seconds=2.0, snr_db=0.0, seed=3)
+    return make("etrca", freqs=FREQS, fs=FS, periodic=periodic).fit(preprocess(X, FS), y)
+
+
+def test_build_decoder_with_a_trained_model():
+    model = trained_model()
+    dec = build_decoder((17.0, 15.0), (0.0, 0.0), trained=model)
+    clf = dec.classifier
+    assert isinstance(clf, ETRCA) and clf.freqs.tolist() == [17.0, 15.0]
+    assert clf.margin == TUNED.margin and clf.threshold == TUNED.threshold
+    assert dec.uses_offsets and dec.window_s == TUNED.window_s
+    assert model.n_targets == 4                          # the model itself is untouched
+    with pytest.raises(ValueError, match="not one of the trained"):
+        build_decoder((15.0, 11.0), (0.0, 0.0), trained=model)
+    with pytest.raises(ValueError, match="phases"):
+        build_decoder((15.0, 17.0), (0.0, 1.0), trained=model)
+    with pytest.raises(ValueError, match="Hz but the board"):
+        build_decoder((15.0,), (0.0,), fs=256.0, trained=model)
+    raw = trained_model(periodic=False)                  # 500-sample templates, 375-sample window
+    with pytest.raises(ValueError, match="templates are 500 samples"):
+        build_decoder((15.0, 17.0), (0.0, 0.0), trained=raw)
+
+
+def test_bank_with_trained_model_aligns_to_the_onset(calib):
+    model = trained_model()
+    bank = make_bank(calib, trained=model)
+    assert bank.calibrated and bank.trained is model   # the probe is a plain CCA decoder
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    dec = bank.decoder
+    assert isinstance(dec.classifier, ETRCA) and dec.classifier.has_baseline
+    assert dec.aligned and dec._align == pytest.approx(T0 + 6.0 + LATENCY_S)
+    bank.set_onset(T0 + 6.5)
+    assert dec._align == pytest.approx(T0 + 6.5 + LATENCY_S)
+    board = FakeBoard(FREQS, seed=1, t0=T0 + 6.0)
+    board.set_target(0)
+    out = stream(bank, board, 4.0)
+    assert out and all(d.scores.shape == (2,) for d in out)
+    with pytest.raises(ValueError, match="either a decoder factory or a trained"):
+        DecoderBank(factory=lambda f, p: build_decoder(f, p), trained=model)

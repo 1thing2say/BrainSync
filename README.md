@@ -300,6 +300,26 @@ baseline. The decoder abstains unless the best target both leads the runner-up b
 rest spreads and sits 0.5 rest spreads above its own rest level. A target is committed
 after 4 agreeing windows in a row.
 
+**Trained spatial filter online.** `python -m brainsync.online --classifier etrca <cued.npz>`
+replays with eTRCA (or `trca`, `trca-r`, `etrca-r`, `mscca`) instead of FBCCA. The filter is
+refitted on the recording's other trials at the start of every trial, so each trial is
+decoded held out, and the decoder is aligned to each flicker's onset (`Decoder.align`), as
+the server aligns it to the client's onset: a trained template starts at onset + latency,
+and every window is scored at its offset from that moment (the steady-state response
+repeats every 1 s for integer frequencies at 250 Hz). The offline-agreement line then
+covers only the last trial, the one the final fit belongs to. On the reference recording
+eTRCA commits 4/20 correct against FBCCA's 12/20 with the same votes, margin and
+threshold (which are in rest-spread units and were tuned for FBCCA scores), the same
+no-gain result as the offline table in Phase 2.
+
+The server (`python -m brainsync.server --trained <cued.npz> [--trained-method etrca]`)
+fits the model once at start (`online.trained_from_recording`: every artifact-free trial of
+the recording over P7, P8, O1, O2), checks that the recording's rate matches the board
+and that every `--freqs` frequency is a trained target, prints a summary line, and gives
+each layout the model's subset for its targets (`Trained.for_freqs`): a 2-target confirm
+layout uses the filters trained on all four. The still-screen calibration still supplies
+the baseline. The 10 Hz probe decoder that measures the calibration stays plain CCA.
+
 The lead rule alone was not enough. Two independent rest scores differ by about 1.4
 spreads, so a 0.5-spread lead abstained on only about a third of still-screen windows,
 and with eyes closed too. The level rule asks whether there is any response at the
