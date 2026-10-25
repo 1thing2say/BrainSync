@@ -45,18 +45,24 @@ CLOSE_BUSY = 4002
 CLOSE_HELLO_FIRST = 4003
 CLOSE_HELLO_TIMEOUT = 4008
 
-PHASES = ("wait", "calibrate", "run", "pause", "stop")
-STAGES = ("slots", "pick", "confirm", "idle")
+PHASES = ("wait", "calibrate", "train", "run", "pause", "stop")
+FLICKER_PHASES = ("train", "run")    # the phases whose flicker may be true
+STAGES = ("slots", "pick", "confirm", "idle", "train")
 KINDS = ("slot", "button", "more", "confirm", "back")
 BOARD_STATES = ("unknown", "connecting", "streaming", "no-data", "error")
 ROLES = ("controller", "viewer")
 MODES = ("slots", "point")
+# The stimulus paradigm (docs/CVEP-STANDARD.md): "code" (c-VEP: one m-sequence, a lag per
+# target; the default) or "freq" (f-VEP: a frequency per target, as PROTOCOL-v3 began).
+PARADIGMS = ("code", "freq")
+CODE_MAX_SLOTS = 3           # the c-VEP standard's three targets
+CODE_FILL = "#ffffff"        # the colour of a lit (bit 1) square; bit 0 is black
 MEDIA_TYPES = ("image/jpeg", "image/png")
 ERROR_CODES = frozenset({"bad_token", "busy", "bad_hello", "refresh", "too_many_slots",
                          "protocol", "not_allowed", "detect_unavailable", "scan_failed",
                          "internal"})
-CLIENT_TYPES = frozenset({"hello", "onset", "frames", "ping", "pause", "resume", "bye", "gaze",
-                          "scan", "clicked", "rescan"})
+CLIENT_TYPES = frozenset({"hello", "onset", "cycle", "frames", "ping", "pause", "resume", "bye",
+                          "gaze", "scan", "clicked", "rescan"})
 VIEWER_TYPES = frozenset({"ping", "bye"})
 
 LATENCY_S = 0.14
@@ -85,7 +91,7 @@ EPS = 1e-6                   # float slack for rects that end exactly at the vie
 
 # Which target kinds each layout stage may hold.
 _STAGE_KINDS = {"slots": ("slot",), "pick": ("button", "more"), "confirm": ("confirm", "back"),
-                "idle": ()}
+                "idle": (), "train": ("slot", "button", "more")}
 _STAGE_KINDS_TEXT = {k: ", ".join(v) for k, v in _STAGE_KINDS.items()}
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _MAGIC = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n"}
@@ -276,7 +282,7 @@ def parse_hello(msg: Mapping[str, Any], max_slots: int) -> Hello:
                                       f"{max_slots} names, such as [\"yes\", \"no\"]")
         if len(raw_slots) > max_slots:
             raise ProtocolError("too_many_slots",
-                                f"this server has {max_slots} frequencies, so a client may "
+                                f"this server has {max_slots} targets, so a client may "
                                 f"name at most {max_slots} slots, not {len(raw_slots)}")
         slots = tuple(_slot_name(s, f"hello.slots[{i}]", code) for i, s in enumerate(raw_slots))
         if len(set(slots)) != len(slots):
@@ -395,6 +401,14 @@ def _check_onset(m: Mapping[str, Any], code: str) -> dict[str, Any]:
             "t_client": _num(_need(m, "t_client", "onset", code), "onset.t_client", code)}
 
 
+def _check_cycle(m: Mapping[str, Any], code: str) -> dict[str, Any]:
+    return {"type": "cycle",
+            "layout_id": _int(_need(m, "layout_id", "cycle", code), "cycle.layout_id", code,
+                              minimum=0),
+            "n": _int(_need(m, "n", "cycle", code), "cycle.n", code, minimum=0),
+            "t_client": _num(_need(m, "t_client", "cycle", code), "cycle.t_client", code)}
+
+
 def _check_frames(m: Mapping[str, Any], code: str) -> dict[str, Any]:
     return {"type": "frames",
             "refresh_hz": _num(_need(m, "refresh_hz", "frames", code), "frames.refresh_hz",
@@ -462,7 +476,7 @@ def _check_bare(m: Mapping[str, Any], code: str) -> dict[str, Any]:
     return {"type": m["type"]}
 
 
-_CHECKS = {"onset": _check_onset, "frames": _check_frames, "ping": _check_ping,
+_CHECKS = {"onset": _check_onset, "cycle": _check_cycle, "frames": _check_frames, "ping": _check_ping,
            "pause": _check_bare, "resume": _check_bare, "bye": _check_bare,
            "gaze": _check_gaze, "scan": _check_scan, "clicked": _check_clicked,
            "rescan": _check_bare}
@@ -584,23 +598,34 @@ class Rect:
 
 @dataclass(frozen=True)
 class Target:
-    """One flickering target of a layout; ``rects`` is empty in slots mode."""
+    """One flickering target of a layout; ``rects`` is empty in slots mode.
+
+    A frequency target has ``freq`` (Hz) and no ``lag``; a code target (c-VEP, v3.2) has
+    ``freq`` None and ``lag``, the frames its copy of the m-sequence is delayed by.
+    """
 
     slot: str
-    freq: float
+    freq: float | None
     phase: float
     label: str
     kind: str
     rects: tuple[Rect, ...] = ()
+    lag: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.slot, str) or not 1 <= len(self.slot) <= SLOT_CHARS:
             raise ValueError(f"Target.slot must be a string of 1-{SLOT_CHARS} characters, "
                              f"got {self.slot!r}")
-        freq = _builder_float(self.freq, "Target.freq")
-        if freq <= 0:
-            raise ValueError(f"Target.freq must be positive, got {freq:g}")
-        object.__setattr__(self, "freq", freq)
+        if self.lag is not None:
+            if self.freq is not None:
+                raise ValueError(f"Target {self.slot!r} has both a frequency and a lag; a code "
+                                 f"target has freq None")
+            object.__setattr__(self, "lag", _builder_int(self.lag, "Target.lag"))
+        else:
+            freq = _builder_float(self.freq, "Target.freq")
+            if freq <= 0:
+                raise ValueError(f"Target.freq must be positive, got {freq:g}")
+            object.__setattr__(self, "freq", freq)
         object.__setattr__(self, "phase", _builder_float(self.phase, "Target.phase"))
         if not isinstance(self.label, str):
             raise ValueError(f"Target.label must be a string, got {self.label!r}")
@@ -612,8 +637,11 @@ class Target:
         object.__setattr__(self, "rects", rects)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"slot": self.slot, "freq": self.freq, "phase": self.phase, "label": self.label,
-                "kind": self.kind, "rects": [r.to_dict() for r in self.rects]}
+        out = {"slot": self.slot, "freq": self.freq, "phase": self.phase, "label": self.label,
+               "kind": self.kind, "rects": [r.to_dict() for r in self.rects]}
+        if self.lag is not None:
+            out["lag"] = self.lag
+        return out
 
 
 # -- server -> client -------------------------------------------------------------------------
@@ -629,17 +657,26 @@ def dumps(msg: Mapping[str, Any]) -> str:
 def welcome(role: str, mode: str | None, *, fake: bool, waveform: str, refresh_hz: float,
             refresh_tolerance_hz: float, freqs: Sequence[float], max_slots: int, detect: bool,
             version: str = "0.1.0",
-            refresh_rates: Sequence[float] | None = None) -> dict[str, Any]:
+            refresh_rates: Sequence[float] | None = None, paradigm: str = "freq",
+            code: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The answer to a valid hello; ``mode`` is None for a viewer that named none.
 
     ``refresh_rates`` (the accepted display rates, nominal first) adds the "refresh_rates"
-    field; None leaves it out.
+    field; None leaves it out. ``paradigm`` "code" (v3.2) needs ``code``, the object
+    ``code_spec`` builds, and has no frequencies; "freq" has no ``code``.
     """
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}, got {role!r}")
     if mode is not None and mode not in MODES:
         raise ValueError(f"mode must be one of {MODES} or None, got {mode!r}")
+    if paradigm not in PARADIGMS:
+        raise ValueError(f"paradigm must be one of {PARADIGMS}, got {paradigm!r}")
+    if (paradigm == "code") != (code is not None):
+        raise ValueError("a code welcome needs the code object, and a freq welcome has none")
+    if paradigm == "code" and list(freqs):
+        raise ValueError("a code welcome has no frequencies (freqs [])")
     msg = {"type": "welcome", "protocol": PROTOCOL, "role": role, "mode": mode,
+           "paradigm": paradigm,
            "server": {"name": "brainsync", "version": str(version)}, "fake": bool(fake),
            "waveform": str(waveform), "refresh_hz": _builder_float(refresh_hz, "refresh_hz"),
            "refresh_tolerance_hz": _builder_float(refresh_tolerance_hz,
@@ -652,7 +689,33 @@ def welcome(role: str, mode: str | None, *, fake: bool, waveform: str, refresh_h
         if not rates or min(rates) <= 0:
             raise ValueError(f"refresh_rates must be positive numbers of Hz, got {rates}")
         msg["refresh_rates"] = rates
+    if code is not None:
+        msg["code"] = copy_code(code)
     return msg
+
+
+def code_spec(bits: Sequence[int], lag_frames: int, cycle_frames: int, train_cycles: int,
+              fill: str = CODE_FILL) -> dict[str, Any]:
+    """The welcome's "code" object (v3.2): the m-sequence, one bit per frame, the lag between
+    targets, the frames per cycle, the training cycles and the lit colour."""
+    b = [_builder_int(v, "bits[i]") for v in bits]
+    if not b or any(v not in (0, 1) for v in b):
+        raise ValueError(f"bits must be a non-empty list of 0 and 1, got {_show(list(bits))}")
+    lag = _builder_int(lag_frames, "lag_frames", minimum=1)
+    cycle = _builder_int(cycle_frames, "cycle_frames", minimum=1)
+    if cycle != len(b):
+        raise ValueError(f"cycle_frames {cycle} must equal the {len(b)} bits (one bit a frame)")
+    if not isinstance(fill, str) or not fill:
+        raise ValueError(f"fill must be a CSS colour such as \"#ffffff\", got {fill!r}")
+    return {"bits": b, "lag_frames": lag, "cycle_frames": cycle,
+            "train_cycles": _builder_int(train_cycles, "train_cycles", minimum=2),
+            "fill": fill}
+
+
+def copy_code(code: Mapping[str, Any]) -> dict[str, Any]:
+    """A checked copy of a code object (``code_spec`` again)."""
+    return code_spec(code["bits"], code["lag_frames"], code["cycle_frames"],
+                     code["train_cycles"], code.get("fill", CODE_FILL))
 
 
 def error(code: str, message: str, fatal: bool = False) -> dict[str, Any]:
@@ -663,15 +726,27 @@ def error(code: str, message: str, fatal: bool = False) -> dict[str, Any]:
 
 
 def phase(name: str, flicker: bool, seconds: float | None = None,
-          text: str = "") -> dict[str, Any]:
-    """A "phase"; only "run" may flicker (PROTOCOL-v3 section 3 table)."""
+          text: str = "", *, cue: str | None = None,
+          cycles: int | None = None) -> dict[str, Any]:
+    """A "phase"; only "run" and "train" may flicker (PROTOCOL-v3 section 3 table).
+
+    "train" (v3.2) names the ``cue`` slot the user looks at and the ``cycles`` it records;
+    the other phases have neither field.
+    """
     if name not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, got {name!r}")
-    if flicker and name != "run":
-        raise ValueError(f"phase {name!r} must not flicker; only \"run\" has flicker true")
-    return {"type": "phase", "phase": name, "flicker": bool(flicker),
-            "seconds": None if seconds is None else _builder_float(seconds, "seconds"),
-            "text": str(text)}
+    if flicker and name not in FLICKER_PHASES:
+        raise ValueError(f"phase {name!r} must not flicker; only \"run\" and \"train\" have "
+                         f"flicker true")
+    if (name == "train") != (cue is not None) or (cue is None) != (cycles is None):
+        raise ValueError("a train phase names its cue slot and cycles; other phases neither")
+    msg = {"type": "phase", "phase": name, "flicker": bool(flicker),
+           "seconds": None if seconds is None else _builder_float(seconds, "seconds"),
+           "text": str(text)}
+    if cue is not None:
+        msg["cue"] = str(cue)
+        msg["cycles"] = _builder_int(cycles, "cycles", minimum=1)
+    return msg
 
 
 def layout(layout_id: int, stage: str, targets: Sequence[Target]) -> dict[str, Any]:
@@ -702,7 +777,14 @@ def layout(layout_id: int, stage: str, targets: Sequence[Target]) -> dict[str, A
             raise ValueError(f"point-mode target {t.slot!r} needs at least one rect")
     if len({t.slot for t in targets}) != len(targets):
         raise ValueError("layout targets must have unique slots")
-    if len({t.freq for t in targets}) != len(targets):
+    coded = [t.lag is not None for t in targets]
+    if any(coded) and not all(coded):
+        raise ValueError("a layout's targets are all code targets (lag) or all frequency "
+                         "targets (freq), not a mix")
+    if all(coded):
+        if len({t.lag for t in targets}) != len(targets):
+            raise ValueError("layout targets must have unique lags")
+    elif len({t.freq for t in targets}) != len(targets):
         raise ValueError("layout targets must have unique frequencies")
     for i, a in enumerate(targets):
         for b in targets[i + 1:]:
@@ -721,6 +803,43 @@ def selection(selection_id: int, layout_id: int, slot: str, t_server: float, sco
             "t_server": _builder_float(t_server, "t_server"),
             "score": _builder_float(score, "score"),
             "scores": {str(k): _builder_float(v, f"scores[{k!r}]") for k, v in scores.items()}}
+
+
+def train_progress(cycle: int, of: int) -> dict[str, Any]:
+    """c-VEP training progress (v3.2): ``cycle`` complete cycles recorded of ``of``."""
+    n = _builder_int(of, "of", minimum=1)
+    c = _builder_int(cycle, "cycle")
+    if c > n:
+        raise ValueError(f"cycle {c} is past the {n} training cycles")
+    return {"type": "train", "cycle": c, "of": n}
+
+
+def trained(accuracy: float | None, chance: float, cycles: int) -> dict[str, Any]:
+    """The c-VEP template is ready (v3.2): its leave-one-cycle-out ``accuracy`` (None when it
+    could not be measured) against ``chance``, from ``cycles`` training cycles."""
+    acc = None
+    if accuracy is not None and math.isfinite(float(accuracy)):
+        acc = round(_builder_float(accuracy, "accuracy"), 3)
+        if not 0.0 <= acc <= 1.0:
+            raise ValueError(f"accuracy must lie in [0, 1], got {acc:g}")
+    return {"type": "trained", "accuracy": acc,
+            "chance": round(_builder_float(chance, "chance"), 3),
+            "cycles": _builder_int(cycles, "cycles", minimum=1)}
+
+
+def decision(layout_id: int, scores: Mapping[str, float], raw: str | None,
+             committed: str | None, lead: float | None, changed: bool) -> dict[str, Any]:
+    """One c-VEP decision for the confidence bars (v3.2). ``scores`` are correlations per slot
+    (not probabilities), ``raw`` this decision's best slot, ``committed`` the slot the votes
+    hold (None: no choice yet), ``lead`` the best score's lead over the runner-up."""
+    clean = {str(k): round(_builder_float(v, f"scores[{k!r}]"), 4) for k, v in scores.items()}
+    for name, value in (("raw", raw), ("committed", committed)):
+        if value is not None and value not in clean:
+            raise ValueError(f"decision {name} {value!r} is not one of the scored slots")
+    return {"type": "decision", "layout_id": _builder_int(layout_id, "layout_id"),
+            "scores": clean, "raw": raw, "committed": committed,
+            "lead": None if lead is None else round(_builder_float(lead, "lead"), 4),
+            "changed": bool(changed)}
 
 
 def scan_request(scan_id: int, settle_ms: int = SETTLE_MS) -> dict[str, Any]:

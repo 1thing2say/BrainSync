@@ -5,7 +5,7 @@
  * no touch gestures, so touching a square neither scrolls nor zooms the page.
  */
 :root {
-  --bg: #111;
+  --bg: #000;              /* the c-VEP standard: white squares on black */
   --fg: #e8e8e8;
   --muted: #9a9a9a;
   --card: #1c1c1c;

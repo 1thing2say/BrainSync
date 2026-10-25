@@ -11,6 +11,18 @@
  *     conn.open()
  *     // each requestAnimationFrame(ts): lum = flicker.luminance(target, ts);
  *     //   const onset = flicker.onsetDue(ts); if (onset) conn.send(onset)
+ *     //   for (const c of flicker.cycleDue(ts)) conn.send(c)          // code mode
+ *
+ * Code mode (PROTOCOL-v3 v3.2, docs/CVEP-STANDARD.md; the welcome says paradigm "code"):
+ * targets carry "lag" instead of "freq", and luminance() is 1 (white, the welcome's
+ * code.fill) or 0 (black): bit (n - lag) mod 63 of the welcome's code.bits, one bit a frame,
+ * n the frame count since the layout's first flickering frame. A still square is white.
+ * Phases "train" and "run" both flicker, and cue() names the slot to look at while
+ * training. cycleDue() hands out a "cycle" message on each cycle's first frame with that
+ * flip's Unix time. ConfidenceState (needs cvep.js, loaded before this file) turns the
+ * server's train, trained and decision messages into the standard's label lines, bars and
+ * status line. Load order in a browser: flicker.js, cvep.js, brainsync-client.js; without
+ * cvep.js code layouts still draw from code.bits, but ConfidenceState is unavailable.
  *
  * RefreshMeter is the refresh estimate of extension/overlay.js: 20 unmeasured warm-up rAF
  * intervals, then the mean of the last 120 intervals, leaving out those more than half a
@@ -55,8 +67,15 @@
   const F = root.BrainScrollFlicker ||
     (typeof require === "function" ? require("./flicker.js") : null);
   if (!F) throw new Error("load flicker.js before brainsync-client.js");
+  // cvep.js (the c-VEP standard's text helpers) is optional: code layouts draw from the
+  // welcome's code object either way, and ConfidenceState needs it.
+  const K = root.BrainSyncCode || (typeof require === "function" ? (function () {
+    try { return require("./cvep.js"); } catch (e) { return null; }
+  })() : null);
 
   const PROTOCOL = 3;
+  const CODE_STILL_LUM = 1.0;        // code mode: a still square is drawn white (lit)
+  const CYCLE_LATE_FRAMES = 2;       // a cycle start drawn this many frames late is still sent
   const WARMUP_FRAMES = 20;          // unmeasured, as PsychoPyRenderer.measure_refresh
   const REFRESH_FRAMES = 120;        // intervals in the estimate
   const STILL_LUM = 0.5;             // still targets are mid grey
@@ -206,12 +225,25 @@
       this.refreshRates = [60.0];   // the welcome's refresh_rates: the displays it accepts
       this.waveform = "sine";
       this.fake = false;
+      this.paradigm = "freq";       // the welcome's paradigm: "code" (c-VEP) or "freq"
+      this.code = null;             // code mode: {bits, lag_frames, cycle_frames, fill, ...}
       this.measuredHz = null;       // the display's measured refresh: frame period
       this.dropped = 0;
       this.t0 = null;               // rAF timestamp of the layout's first flickering frame
       this.lastTs = null;
       this.lastFramesAt = null;
       this.onsetSent = false;
+      this.lastCycle = -1;          // code mode: the last cycle index reported
+      this.missedCycles = 0;        // code mode: cycle starts not drawn in time (not sent)
+    }
+
+    /** True in code mode (the welcome said paradigm "code"). */
+    isCode() { return this.paradigm === "code"; }
+
+    /** The cue slot of a train phase (the target to look at while training), or null. */
+    cue() {
+      const p = this.phase;
+      return p && p.phase === "train" && typeof p.cue === "string" ? p.cue : null;
     }
 
     accept() { this.accepted = true; }
@@ -249,12 +281,15 @@
         this.refreshRates = rates.length ? rates : [this.refreshHz];
         if (F.WAVEFORMS.indexOf(msg.waveform) >= 0) this.waveform = msg.waveform;
         this.fake = msg.fake === true;
+        this.paradigm = msg.paradigm === "code" ? "code" : "freq";
+        this.code = this.paradigm === "code" ? parseCode(msg.code) : null;
       } else if (msg.type === "phase") {
         this.phase = msg;
       } else if (msg.type === "layout") {
         this.layout = msg;
         this.t0 = null;
         this.onsetSent = false;
+        this.lastCycle = -1;
       }
       this._sync();
     }
@@ -288,8 +323,8 @@
         this.dropped++;
       }
       this.lastTs = tFrame;
-      if (!flick) { this.t0 = null; return; }
-      if (this.t0 === null) { this.t0 = tFrame; this.lastFramesAt = tFrame; }
+      if (!flick) { this.t0 = null; this.lastCycle = -1; return; }
+      if (this.t0 === null) { this.t0 = tFrame; this.lastFramesAt = tFrame; this.lastCycle = -1; }
     }
 
     /** Frame index of tFrame, or null while still. */
@@ -309,9 +344,22 @@
       return m !== null && Math.abs(m - this.refreshHz) > this.refreshTolHz ? m : this.refreshHz;
     }
 
-    /** Luminance in [0, 1] of `target` ({freq, phase}) on the frame at tFrame; 0.5 while still. */
+    /** What a still target shows: mid grey (0.5) in freq mode, white (1) in code mode. */
+    stillLum() { return this.isCode() ? CODE_STILL_LUM : STILL_LUM; }
+
+    /**
+     * Luminance in [0, 1] of `target` on the frame at tFrame. Freq mode ({freq, phase}): the
+     * flicker.js wave, 0.5 while still. Code mode ({lag}): 1 (white) or 0 (black), the bit
+     * bits[(n - lag) mod 63] of the welcome's code, one bit a frame; 1 while still.
+     */
     luminance(target, tFrame) {
       const n = this.frame(tFrame);
+      if (this.isCode()) {
+        if (n === null) return CODE_STILL_LUM;
+        const c = this.code;
+        if (c === null || !Number.isInteger(target.lag) || target.lag < 0) return CODE_STILL_LUM;
+        return codeBit(c.bits, n, target.lag);
+      }
       if (n === null) return STILL_LUM;
       const hz = this.lumHz();
       if (!(finite(target.freq) && 2 * target.freq < hz)) return STILL_LUM;   // would alias
@@ -328,6 +376,31 @@
     }
 
     /**
+     * Code mode: the "cycle" messages due on the frame at tFrame (an array, empty most
+     * frames), for every cycle whose first frame (n mod cycle_frames == 0) this is. The
+     * time is that flip's Unix time: the rAF timestamp of this frame, or, when the cycle's
+     * first frame was dropped and this frame is at most CYCLE_LATE_FRAMES later, the time it
+     * was due (t0 + its index times the period). A cycle start further back was never shown
+     * and is counted in missedCycles, not sent. Freq mode: always empty.
+     */
+    cycleDue(tFrame) {
+      const n = this.frame(tFrame);
+      if (!this.isCode() || this.code === null || n === null) return [];
+      const len = this.code.cycle_frames;
+      const c = Math.floor(n / len);
+      if (c <= this.lastCycle) return [];
+      const out = [];
+      for (let k = this.lastCycle + 1; k <= c; k++) {
+        const late = n - k * len;
+        if (late > CYCLE_LATE_FRAMES) { this.missedCycles++; continue; }
+        const t = late === 0 ? tFrame : this.t0 + k * len * this.periodMs();
+        out.push({ type: "cycle", layout_id: this.layout.layout_id, n: k, t_client: this.wall(t) });
+      }
+      this.lastCycle = c;
+      return out;
+    }
+
+    /**
      * The frames report, every FRAMES_EVERY_MS while flickering; else null. `dropped` is the
      * running total since this FlickerState began; the server compares consecutive reports.
      */
@@ -341,7 +414,121 @@
     }
 
     _sync() {
-      if (!this.shouldFlicker()) this.t0 = null;
+      if (!this.shouldFlicker()) { this.t0 = null; this.lastCycle = -1; }
+    }
+  }
+
+  // ---------------------------------------------------------------- code mode helpers
+
+  function mod(a, b) {
+    const m = a % b;
+    return m < 0 ? m + b : m;
+  }
+
+  /** Bit (1 or 0) of a target at `lag` frames on flicker frame n, as cvep.js bit(). */
+  function codeBit(bits, n, lag) {
+    return bits[mod(n - lag, bits.length)] ? 1 : 0;
+  }
+
+  /**
+   * The welcome's code object, checked: {bits, lag_frames, cycle_frames, train_cycles,
+   * fill}, or cvep.js's standard values when it is missing or malformed (null without
+   * cvep.js).
+   */
+  function parseCode(code) {
+    const c = code && typeof code === "object" ? code : null;
+    const bitsOk = c && Array.isArray(c.bits) && c.bits.length > 0 &&
+      c.bits.every((b) => b === 0 || b === 1);
+    if (bitsOk && Number.isInteger(c.lag_frames) && c.lag_frames > 0 &&
+        c.cycle_frames === c.bits.length) {
+      return {
+        bits: c.bits.slice(), lag_frames: c.lag_frames, cycle_frames: c.cycle_frames,
+        train_cycles: Number.isInteger(c.train_cycles) ? c.train_cycles : null,
+        fill: typeof c.fill === "string" && c.fill ? c.fill : "#ffffff",
+      };
+    }
+    if (!K) return null;
+    return { bits: K.BITS.slice(), lag_frames: K.LAG_FRAMES, cycle_frames: K.CYCLE_FRAMES,
+             train_cycles: K.TRAIN_CYCLES, fill: K.WHITE };
+  }
+
+  /**
+   * The c-VEP confidence a page shows (docs/CVEP-STANDARD.md section 3), from the server's
+   * phase, layout, train, trained and decision messages; needs cvep.js. lines(targets) gives
+   * one label line per target ("YES  ███░░░░░ +0.42 <") with its level (0..1, for a
+   * graphical bar) and whether it was this decision's best; status() the line under them:
+   * "training: keep looking at YES   cycle 12/30" while training, then
+   * "lead 0.31   choice: YES" ("*" when the choice changed). trainedText() is
+   * "template ready: 83 % on held-out cycles (chance 33 %)", or "" before the template.
+   * A decision of another layout than the last one is ignored; a new layout clears it.
+   */
+  class ConfidenceState {
+    constructor() {
+      if (!K) throw new Error("load cvep.js before brainsync-client.js for ConfidenceState");
+      this.phase = null;
+      this.layout = null;
+      this.train = null;
+      this.trained = null;
+      this.decision = null;
+    }
+
+    handle(msg) {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "phase") this.phase = msg;
+      else if (msg.type === "layout") { this.layout = msg; this.decision = null; }
+      else if (msg.type === "train") { this.train = msg; this.trained = null; }
+      else if (msg.type === "trained") { this.trained = msg; this.train = null; }
+      else if (msg.type === "decision") {
+        if (this.layout && msg.layout_id === this.layout.layout_id) this.decision = msg;
+      } else if (msg.type === "welcome") {
+        this.train = this.trained = this.decision = null;
+      }
+    }
+
+    /** True while the last phase is train. */
+    training() { return Boolean(this.phase && this.phase.phase === "train"); }
+
+    _label(slot) {
+      const ts = this.layout && Array.isArray(this.layout.targets) ? this.layout.targets : [];
+      const t = ts.find((x) => x.slot === slot);
+      return String((t && t.label) || slot || "").toUpperCase();
+    }
+
+    /** One entry per target: {slot, label, line, level, score, best}. */
+    lines(targets) {
+      const list = targets || (this.layout && this.layout.targets) || [];
+      const labels = list.map((t) => String(t.label || t.slot).toUpperCase());
+      const width = labels.reduce((w, s) => Math.max(w, s.length), 0);
+      const d = this.decision;
+      return list.map((t, i) => {
+        const score = d && d.scores && finite(d.scores[t.slot]) ? d.scores[t.slot] : NaN;
+        const best = Boolean(d) && d.raw === t.slot;
+        return { slot: t.slot, label: labels[i], score, best, level: K.level(score),
+                 line: K.labelLine(labels[i], score, best, width) };
+      });
+    }
+
+    /** The status line under the squares, or "" when there is nothing to say yet. */
+    status() {
+      if (this.training()) {
+        const cue = this._label(this.phase.cue);
+        const tr = this.train;
+        const of = tr ? tr.of : this.phase.cycles;
+        const n = tr ? tr.cycle : 0;
+        return "training: keep looking at " + cue + "   cycle " + n + "/" + of;
+      }
+      const d = this.decision;
+      if (!d) return this.trainedText();
+      return K.statusLine(finite(d.lead) ? d.lead : NaN,
+                          d.committed == null ? null : this._label(d.committed), d.changed === true);
+    }
+
+    trainedText() {
+      const t = this.trained;
+      if (!t) return "";
+      const acc = finite(t.accuracy) ? String(Math.round(100 * t.accuracy)) : "?";
+      const ch = finite(t.chance) ? String(Math.round(100 * t.chance)) : "?";
+      return "template ready: " + acc + " % on held-out cycles (chance " + ch + " %)";
     }
   }
 
@@ -594,8 +781,9 @@
   const api = Object.freeze({
     PROTOCOL, WARMUP_FRAMES, REFRESH_FRAMES, STILL_LUM, FRAMES_EVERY_MS, BACKOFF_MS,
     PING_EVERY_MS, OFFSET_SAMPLES, NO_RECONNECT_CODES, CONN_STATES,
+    CODE_STILL_LUM, CYCLE_LATE_FRAMES,
     median, RefreshMeter, frameIndex, isDropped, rectToPx, parseMessage, newInstanceId,
-    FlickerState, Connection, flicker: F,
+    codeBit, parseCode, FlickerState, ConfidenceState, Connection, flicker: F, code: K,
   });
   root.BrainSyncClient = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

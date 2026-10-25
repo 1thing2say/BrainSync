@@ -51,15 +51,17 @@ def test_constants_match_the_contract():
     assert p.PROTOCOL == 3 and p.DEFAULT_PORT == 8765 and p.MAX_FRAME == 4 * 1024 * 1024
     assert (p.CLOSE_REPLACED, p.CLOSE_BAD_TOKEN, p.CLOSE_BUSY, p.CLOSE_HELLO_FIRST,
             p.CLOSE_HELLO_TIMEOUT) == (4000, 4001, 4002, 4003, 4008)
-    assert p.PHASES == ("wait", "calibrate", "run", "pause", "stop")
-    assert p.STAGES == ("slots", "pick", "confirm", "idle")
+    assert p.PHASES == ("wait", "calibrate", "train", "run", "pause", "stop")
+    assert p.FLICKER_PHASES == ("train", "run")
+    assert p.STAGES == ("slots", "pick", "confirm", "idle", "train")
+    assert p.PARADIGMS == ("code", "freq") and p.CODE_MAX_SLOTS == 3
     assert p.KINDS == ("slot", "button", "more", "confirm", "back")
     assert p.BOARD_STATES == ("unknown", "connecting", "streaming", "no-data", "error")
     assert p.ERROR_CODES == {"bad_token", "busy", "bad_hello", "refresh", "too_many_slots",
                              "protocol", "not_allowed", "detect_unavailable", "scan_failed",
                              "internal"}
-    assert p.CLIENT_TYPES == {"hello", "onset", "frames", "ping", "pause", "resume", "bye",
-                              "gaze", "scan", "clicked", "rescan"}
+    assert p.CLIENT_TYPES == {"hello", "onset", "cycle", "frames", "ping", "pause", "resume",
+                              "bye", "gaze", "scan", "clicked", "rescan"}
     assert p.VIEWER_TYPES == {"ping", "bye"} and p.VIEWER_TYPES < p.CLIENT_TYPES
     assert (p.LATENCY_S, p.ONSET_TIMEOUT_S, p.COOLDOWN_S, p.SETTLE_MS) == (0.14, 2.0, 1.5, 800)
     assert p.PING == {"type": "ping"}
@@ -652,6 +654,7 @@ def test_welcome_matches_the_contract():
                   refresh_tolerance_hz=1, freqs=(15, 17.0, np.float64(12), 20),
                   max_slots=4, detect=True)
     assert w == {"type": "welcome", "protocol": 3, "role": "controller", "mode": "point",
+                 "paradigm": "freq",
                  "server": {"name": "brainsync", "version": "0.1.0"}, "fake": False,
                  "waveform": "sine", "refresh_hz": 60.0, "refresh_tolerance_hz": 1.0,
                  "freqs": [15.0, 17.0, 12.0, 20.0], "max_slots": 4, "detect": True}
@@ -878,3 +881,118 @@ def test_builders_refuse_non_numbers(value):
 
 def test_rescan_is_a_bare_message():
     assert p.validate_client({"type": "rescan", "why": "app changed"}) == {"type": "rescan"}
+
+
+# -- code mode (v3.2, docs/CVEP-STANDARD.md section 4.2) ------------------------------------
+
+BITS63 = [int(c) for c in "000001111110101011001101110110100100111000101111001010001100001"]
+
+
+def code_obj(**over) -> dict:
+    return {**p.code_spec(BITS63, 21, 63, 30), **over}
+
+
+def test_code_welcome_carries_the_code_object_and_no_frequencies():
+    w = p.welcome("controller", "slots", fake=True, waveform="sine", refresh_hz=60,
+                  refresh_tolerance_hz=1, freqs=[], max_slots=3, detect=False,
+                  refresh_rates=[60], paradigm="code", code=code_obj())
+    assert w["paradigm"] == "code" and w["freqs"] == [] and w["max_slots"] == 3
+    assert w["code"] == {"bits": BITS63, "lag_frames": 21, "cycle_frames": 63,
+                         "train_cycles": 30, "fill": "#ffffff"}
+    assert json.loads(p.dumps(w))["code"]["bits"] == BITS63
+    args = {"fake": True, "waveform": "sine", "refresh_hz": 60, "refresh_tolerance_hz": 1,
+            "max_slots": 3, "detect": False}
+    with pytest.raises(ValueError, match="code object"):
+        p.welcome("controller", "slots", freqs=[], paradigm="code", **args)
+    with pytest.raises(ValueError, match="code object"):
+        p.welcome("controller", "slots", freqs=[15], code=code_obj(), **args)
+    with pytest.raises(ValueError, match="no frequencies"):
+        p.welcome("controller", "slots", freqs=[15], paradigm="code", code=code_obj(), **args)
+    with pytest.raises(ValueError, match="paradigm"):
+        p.welcome("controller", "slots", freqs=[15], paradigm="time", **args)
+
+
+@pytest.mark.parametrize("args, match", [
+    (([], 21, 63, 30), "bits"), (([0, 2], 21, 2, 30), "bits"),
+    ((BITS63, 21, 62, 30), "one bit a frame"), ((BITS63, 0, 63, 30), "lag_frames"),
+    ((BITS63, 21, 63, 1), "train_cycles"), ((BITS63, 21.0, 63, 30), "lag_frames")])
+def test_code_spec_rejects(args, match):
+    with pytest.raises(ValueError, match=match):
+        p.code_spec(*args)
+
+
+def test_train_phase_names_its_cue_and_cycles():
+    msg = p.phase("train", True, text="Look at the YES square", cue="yes", cycles=30)
+    assert msg == {"type": "phase", "phase": "train", "flicker": True, "seconds": None,
+                   "text": "Look at the YES square", "cue": "yes", "cycles": 30}
+    assert "cue" not in p.phase("run", True)
+    with pytest.raises(ValueError, match="cue"):
+        p.phase("train", True)
+    with pytest.raises(ValueError, match="cue"):
+        p.phase("run", True, cue="yes", cycles=30)
+    with pytest.raises(ValueError, match="cue"):
+        p.phase("train", True, cue="yes")
+
+
+def test_code_targets_carry_a_lag_and_no_frequency():
+    t = Target("yes", None, 0.0, "yes", "slot", lag=21)
+    assert t.to_dict() == {"slot": "yes", "freq": None, "phase": 0.0, "label": "yes",
+                           "kind": "slot", "rects": [], "lag": 21}
+    assert "lag" not in Target("yes", 15.0, 0.0, "yes", "slot").to_dict()
+    for freq, lag in ((15.0, 21), (None, -1), (None, 1.5), (None, True)):
+        with pytest.raises(ValueError):
+            Target("a", freq, 0.0, "a", "slot", lag=lag)
+    msg = p.layout(3, "slots", [Target(s, None, 0.0, s, "slot", lag=21 * i)
+                                for i, s in enumerate(("yes", "no", "help"))])
+    assert [t["lag"] for t in msg["targets"]] == [0, 21, 42]
+    assert all(t["freq"] is None for t in msg["targets"])
+    with pytest.raises(ValueError, match="unique lags"):
+        p.layout(3, "slots", [Target("a", None, 0.0, "a", "slot", lag=0),
+                              Target("b", None, 0.0, "b", "slot", lag=0)])
+    with pytest.raises(ValueError, match="not a mix"):
+        p.layout(3, "slots", [Target("a", None, 0.0, "a", "slot", lag=0),
+                              Target("b", 15.0, 0.0, "b", "slot")])
+
+
+def test_train_stage_is_point_mode_patches_of_kind_slot():
+    targets = [Target(f"t{k}", None, 0.0, "x", "slot", (Rect(0.1 + 0.3 * k, 0.4, 0.2, 0.2),),
+                      lag=21 * k) for k in range(3)]
+    assert p.layout(1, "train", targets)["stage"] == "train"
+    with pytest.raises(ValueError, match="needs at least one rect"):
+        p.layout(1, "train", [Target("t0", None, 0.0, "x", "slot", lag=0)])
+    with pytest.raises(ValueError, match="holds targets of kind"):
+        p.layout(1, "train", [Target("t0", None, 0.0, "x", "confirm",
+                                     (Rect(0.1, 0.1, 0.1, 0.1),), lag=0)])
+
+
+def test_cycle_is_a_checked_client_message():
+    msg = {"type": "cycle", "layout_id": 7, "n": 12, "t_client": 1792809201.512, "x": 1}
+    assert p.validate_client(msg) == {"type": "cycle", "layout_id": 7, "n": 12,
+                                      "t_client": 1792809201.512}
+    for over in ({"n": -1}, {"n": 1.5}, {"layout_id": True}, {"t_client": float("nan")},
+                 {"t_client": "now"}):
+        bad("protocol", p.validate_client, {**msg, **over})
+    bad("protocol", p.validate_client, {"type": "cycle", "layout_id": 7, "n": 1})
+
+
+def test_train_trained_and_decision_builders():
+    assert p.train_progress(12, 30) == {"type": "train", "cycle": 12, "of": 30}
+    with pytest.raises(ValueError):
+        p.train_progress(31, 30)
+    assert p.trained(np.float64(0.8333), 1 / 3, 30) == \
+        {"type": "trained", "accuracy": 0.833, "chance": 0.333, "cycles": 30}
+    assert p.trained(float("nan"), 1 / 3, 30)["accuracy"] is None
+    assert p.trained(None, 1 / 3, 30)["accuracy"] is None
+    with pytest.raises(ValueError):
+        p.trained(1.5, 1 / 3, 30)
+    d = p.decision(7, {"yes": np.float64(0.42), "no": 0.11, "help": -0.03}, "yes", "yes",
+                   0.31, False)
+    assert d == {"type": "decision", "layout_id": 7,
+                 "scores": {"yes": 0.42, "no": 0.11, "help": -0.03}, "raw": "yes",
+                 "committed": "yes", "lead": 0.31, "changed": False}
+    assert p.decision(7, {"yes": 0.1}, None, None, None, True)["committed"] is None
+    with pytest.raises(ValueError, match="not one of the scored slots"):
+        p.decision(7, {"yes": 0.1}, "no", None, None, False)
+    with pytest.raises(ValueError):
+        p.decision(7, {"yes": float("nan")}, None, None, None, False)
+    json.loads(p.dumps(d))
