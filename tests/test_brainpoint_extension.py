@@ -23,7 +23,7 @@ NODE = shutil.which("node") or next(
     (p for p in ("/usr/local/bin/node", "/opt/homebrew/bin/node") if Path(p).exists()), None)
 needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
-CONTENT_SCRIPTS = ["flicker.js", "brainsync-client.js", "cvep.js", "hints.js", "clicker.js",
+CONTENT_SCRIPTS = ["flicker.js", "cvep.js", "brainsync-client.js", "hints.js", "clicker.js",
                    "point_overlay.js", "content.js"]
 # brainsync.vep.codes.m_sequence(63), the c-VEP standard (docs/CVEP-STANDARD.md section 1)
 STANDARD_BITS = "000001111110101011001101110110100100111000101111001010001100001"
@@ -109,7 +109,7 @@ def test_overlay_reads_the_code_messages_of_the_standard():
 
 def test_background_imports_the_sdk_and_defaults_to_the_local_server():
     bg = (EXT / "background.js").read_text()
-    assert 'importScripts("flicker.js", "brainsync-client.js")' in bg
+    assert 'importScripts("flicker.js", "cvep.js", "brainsync-client.js")' in bg
     assert 'const DEFAULT_URL = "ws://127.0.0.1:8765/ws";' in bg
     assert '{ format: "jpeg", quality: 80 }' in bg
     opts = (EXT / "options.js").read_text()

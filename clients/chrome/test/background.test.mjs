@@ -87,7 +87,7 @@ async function connected(w, tabId = 7, fields = FIELDS) {
 
 test("loads the SDK with importScripts and posts closed on a new port; nothing opens before _hello", async () => {
   const w = load();
-  assert.deepEqual(w.loaded, ["flicker.js", "brainsync-client.js"]);
+  assert.deepEqual(w.loaded, ["flicker.js", "cvep.js", "brainsync-client.js"]);
   const p = w.port();
   await settle();
   assert.deepEqual(p.got, [{ type: "_state", state: "closed" }]);

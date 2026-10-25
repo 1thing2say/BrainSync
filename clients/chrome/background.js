@@ -46,7 +46,7 @@
 "use strict";
 
 if (typeof importScripts === "function" && !globalThis.BrainSyncClient) {
-  importScripts("flicker.js", "brainsync-client.js");
+  importScripts("flicker.js", "cvep.js", "brainsync-client.js");
 }
 const C = globalThis.BrainSyncClient;
 

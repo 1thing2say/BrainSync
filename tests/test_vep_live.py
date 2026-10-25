@@ -66,12 +66,13 @@ def test_js_frame_rule_and_text_match_python():
         "const out = {frames: [], bars: [], line: C.labelLine('YES', 0.42, true, 4),"
         " status: [C.statusLine(0.31, 'YES', true), C.statusLine(NaN, null, false)]};"
         "for (let n = -5; n < 130; n++) out.frames.push(C.frameBits(n));"
-        "for (const v of [-0.2, 0, 0.06, 0.42, 0.99, 1.5, NaN]) out.bars.push(C.bar(v));"
+        "for (const v of [-0.2, 0, 0.06, 0.0625, 0.1875, 0.3125, 0.42, 0.99, 1.5, NaN]) out.bars.push(C.bar(v));"
         "console.log(JSON.stringify(out));")
     got = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True,
                                     check=True).stdout)
     assert [tuple(f) for f in got["frames"]] == [live.code_frame(n) for n in range(-5, 130)]
-    assert got["bars"] == [live.bar(v) for v in (-0.2, 0, 0.06, 0.42, 0.99, 1.5, math.nan)]
+    halves = (0.0625, 0.1875, 0.3125)            # 0.5, 1.5, 2.5 cells: Python rounds to even
+    assert got["bars"] == [live.bar(v) for v in (-0.2, 0, 0.06, *halves, 0.42, 0.99, 1.5, math.nan)]
     d = Decision(time=0.0, scores=np.array([0.42, 0.1, -0.03]), raw=0, committed=0,
                  changed=True, gap=0.31, level=0.0)
     assert got["line"] == live.confidence_labels(d, ("YES", "NO", "HELP"))[0]
