@@ -18,7 +18,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import REPO_ROOT, load_config, load_env, load_intents  # noqa: E402
+from app.config import STATE_DIR, load_config, load_env, load_intents  # noqa: E402
 from app.tts import CartesiaTTS  # noqa: E402
 
 
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     load_env()
     tts = CartesiaTTS(cfg.speech, os.environ.get("CARTESIA_API_KEY"),
-                      cache_dir=REPO_ROOT / cfg.speech.cache_dir)
+                      cache_dir=STATE_DIR / cfg.speech.cache_dir)
     texts = intents.utterances
     if not tts.enabled:
         print(f"Cartesia is off: {tts.why_disabled}", file=sys.stderr)

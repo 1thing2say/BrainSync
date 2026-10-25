@@ -1,0 +1,17 @@
+Local change carried by third_party/brainflow-cerelog (see its VENDORED.md):
+pin setuptools below 81, because brainflow/{board_shim,data_filter,ml_model}.py
+import pkg_resources, which setuptools 81 removed.
+
+diff --git a/python_package/setup.py b/python_package/setup.py
+index 94c0e8f..6bb8c44 100644
+--- a/python_package/setup.py
++++ b/python_package/setup.py
+@@ -18,7 +18,7 @@ setup(
+     packages=find_packages(),
+     install_requires=[
+         'numpy',
+-        'setuptools'
++        'setuptools<81'  # ssvep: pkg_resources was removed in setuptools 81, see VENDORED.md
+     ],
+     package_data={
+         'brainflow': [

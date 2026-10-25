@@ -47,7 +47,15 @@ def test_default_config_loads() -> None:
     assert cfg.stim.slot_for("next") == "s4"
     assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s4")
     assert cfg.stim.waveform == "sine"
-    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3
+    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3 and cfg.menus.spare_options == 1
+    local, claude = cfg.llm.backends
+    assert (local.name, local.kind, local.base_url) == ("local", "llama", "http://127.0.0.1:9931")
+    assert local.api_key_env == "BRAINSYNC_LLAMA_API_KEY" and local.hedge_after_s == 0
+    assert local.extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert (claude.name, claude.kind, claude.base_url, claude.model) == (
+        "claude", "anthropic", "", "claude-haiku-5-5")
+    assert claude.timeout_s == 4.0 and claude.hedge_after_s == 2.5 and claude.keepalive_s == 20.0
+    assert cfg.llm.page_timeout_s == local.timeout_s + claude.timeout_s
     assert cfg.selection.confirm_mode == "always"
     assert cfg.speech.provider == "cartesia" and cfg.speech.model == "sonic-3.5"
 
@@ -173,7 +181,27 @@ INVALID_CONFIGS = [
     ("negative rest", _set("stim", "rest_s", -1), "rest_s"),
     ("zero max trial", _set("stim", "max_trial_s", 0), "max_trial_s"),
     ("zero baseline", _set("baseline", "seconds", 0), "baseline.seconds"),
-    ("zero llm timeout", _set("llm", "timeout_s", 0), "timeout_s"),
+    ("zero llm timeout", _set("llm", "backends", 1, "timeout_s", 0), "llm.backends.1.timeout_s"),
+    ("hedge not before the timeout", _set("llm", "backends", 1, "hedge_after_s", 4.0),
+     "llm.backends[claude].hedge_after_s (4) must be shorter than its timeout_s (4)"),
+    ("negative hedge", _set("llm", "backends", 1, "hedge_after_s", -1), "hedge_after_s"),
+    ("no backends", _set("llm", "backends", []), "llm.backends"),
+    ("unknown backend kind", _set("llm", "backends", 0, "kind", "openai"), "kind"),
+    ("unknown backend key", _set("llm", "backends", 0, "strict", True), "strict"),
+    ("backend field left out", _delete("llm", "backends", 1, "keepalive_s"), "keepalive_s"),
+    ("duplicate backend", _set("llm", "backends", 0, "name", "claude"), "duplicate name claude"),
+    ("bad backend name", _set("llm", "backends", 0, "name", "Local Server"), "name"),
+    ("bad key variable", _set("llm", "backends", 0, "api_key_env", "my key"), "api_key_env"),
+    ("llama without a url", _set("llm", "backends", 0, "base_url", ""), "needs its server's URL"),
+    ("url without a scheme", _set("llm", "backends", 0, "base_url", "127.0.0.1:9931"),
+     "is not an http(s) URL"),
+    ("keep-alive on llama", _set("llm", "backends", 0, "keepalive_s", 20),
+     "keep-alive is for Claude only"),
+    ("extra body replaces a field", _set("llm", "backends", 0, "extra_body", {"model": "x"}),
+     "model is set by app/menus.py"),
+    ("both forms", _set("llm", "model", "claude-haiku-5-5"), "not both"),
+    ("negative spares", _set("menus", "spare_options", -1), "spare_options"),
+    ("too many spares", _set("menus", "spare_options", 4), "spare_options"),
     ("zero option count", _set("menus", "option_count", 0), "option_count"),
     ("negative history", _set("context", "history_turns", -1), "history_turns"),
     ("bad confirm mode", _set("selection", "confirm_mode", "sometimes"), "confirm_mode"),
@@ -203,6 +231,71 @@ def test_invalid_config_raises(
     assert expected in str(exc.value)
 
 
+def test_hedge_and_spares_can_be_turned_off(tmp_path: Path) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["backends"][1]["hedge_after_s"] = 0
+    raw["llm"]["backends"][1]["timeout_s"] = 1.0
+    raw["menus"]["spare_options"] = 0
+    cfg = load_config(_write(tmp_path, raw))
+    assert cfg.llm.backend("claude").hedge_after_s == 0 and cfg.menus.spare_options == 0
+
+
+def test_the_single_claude_form_still_loads_as_one_backend(tmp_path: Path) -> None:
+    # Config files written before llm.backends (an installed /etc/brainsync/default.yaml).
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"] = {"model": "claude-haiku-5-5", "timeout_s": 4.0, "hedge_after_s": 2.5,
+                  "keepalive_s": 20.0}
+    (claude,) = load_config(_write(tmp_path, raw)).llm.backends
+    assert (claude.name, claude.kind, claude.base_url, claude.api_key_env) == (
+        "claude", "anthropic", "", "ANTHROPIC_API_KEY")
+    assert (claude.model, claude.timeout_s, claude.hedge_after_s, claude.keepalive_s) == (
+        "claude-haiku-5-5", 4.0, 2.5, 20.0)
+    assert claude.extra_body == {}
+    raw["llm"] = {"model": "claude-haiku-5-5", "timeout_s": 3.0}  # the old defaults still apply
+    (claude,) = load_config(_write(tmp_path, raw)).llm.backends
+    assert claude.hedge_after_s == 2.5 and claude.keepalive_s == 20.0 and claude.timeout_s == 3.0
+    raw["llm"] = {"model": "claude-haiku-5-5", "timeout_s": 0}
+    with pytest.raises(ConfigError, match="timeout_s"):
+        load_config(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+                                   "claude-mythos-5-1"])
+def test_a_claude_model_that_rejects_a_forced_tool_choice_is_a_config_error(
+        tmp_path: Path, model: str) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["backends"][1]["model"] = model
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, raw))
+    assert f"llm.backends[claude].model: {model} answers the forced tool_choice" in str(exc.value)
+    assert "use claude-haiku-5-5" in str(exc.value)
+    raw["llm"] = {"model": model, "timeout_s": 4.0}  # the single-Claude form too
+    with pytest.raises(ConfigError, match="forced tool_choice"):
+        load_config(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-haiku-4-5", "claude-opus-5",
+                                   "claude-sonnet-5"])
+def test_claude_models_that_take_a_forced_tool_choice_load(tmp_path: Path, model: str) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["backends"][1]["model"] = model
+    assert load_config(_write(tmp_path, raw)).llm.backend("claude").model == model
+
+
+def test_the_forced_tool_choice_check_is_for_claude_only(tmp_path: Path) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["backends"][0]["model"] = "claude-opus-5-5"  # a llama-server name: never sent to Claude
+    assert load_config(_write(tmp_path, raw)).llm.backend("local").model == "claude-opus-5-5"
+
+
+def test_claude_can_come_first_and_local_alone_loads(tmp_path: Path) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["backends"].reverse()
+    assert [b.name for b in load_config(_write(tmp_path, raw)).llm.backends] == ["claude", "local"]
+    raw["llm"]["backends"] = [b for b in raw["llm"]["backends"] if b["name"] == "local"]
+    assert load_config(_write(tmp_path, raw)).llm.page_timeout_s == 10.0
+
+
 def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:
     raw = _raw(DEFAULT_CONFIG_PATH)
     raw["stim"]["waveform"] = "square"
@@ -213,12 +306,12 @@ def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:
 def test_every_problem_is_listed(tmp_path: Path) -> None:
     raw = _raw(DEFAULT_CONFIG_PATH)
     raw["stim"]["cue_s"] = -1
-    raw["llm"]["timeout_s"] = 0
+    raw["llm"]["backends"][1]["timeout_s"] = 0
     raw["server"]["port"] = 0
     with pytest.raises(ConfigError) as exc:
         load_config(_write(tmp_path, raw))
     assert len(exc.value.problems) == 3
-    for key in ("stim.cue_s", "llm.timeout_s", "server.port"):
+    for key in ("stim.cue_s", "llm.backends.1.timeout_s", "server.port"):
         assert key in str(exc.value)
 
 

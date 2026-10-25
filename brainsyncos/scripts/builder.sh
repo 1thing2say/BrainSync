@@ -96,8 +96,9 @@ cmd_run() {
     # /scratch is a tmpfs for unpacking squashfs layers: NVIDIA's overlay layers
     # carry trusted.overlay.* xattrs, which only CAP_SYS_ADMIN may write and the
     # macOS bind mount cannot store at all.
+    local rc=0
     # shellcheck disable=SC2086
-    exec docker run --rm $io_flags $INIT_FLAGS \
+    docker run --rm $io_flags $INIT_FLAGS \
         --platform "$BUILDER_PLATFORM" \
         --cpus "$BUILD_CPUS" --memory "$BUILD_MEMORY" \
         --cap-add SYS_ADMIN \
@@ -112,7 +113,26 @@ cmd_run() {
         -e MAKEFLAGS="-j$BUILD_JOBS" \
         -e CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS" \
         -w /work \
-        "$(image_ref)" "$@"
+        "$(image_ref)" "$@" || rc=$?
+    give_back_files
+    return "$rc"
+}
+
+# give_back_files: on Linux with rootful Docker, or Docker Desktop on WSL, what
+# the container writes as root stays root-owned on the host, and host-side
+# steps can then neither clean nor rewrite it. Hand such files under
+# brainsyncos/ back to the calling user. Docker Desktop on macOS and rootless
+# Docker map ownership themselves, so nothing is found there.
+give_back_files() {
+    local uid gid
+    uid="$(id -u)"
+    gid="$(id -g)"
+    [ "$uid" != 0 ] || return 0
+    [ -n "$(find "$BRAINSYNCOS_ROOT" ! -user "$uid" -print 2>/dev/null | head -n 1)" ] || return 0
+    # shellcheck disable=SC2086
+    docker run --rm $INIT_FLAGS --platform "$BUILDER_PLATFORM" -v "$BRAINSYNCOS_ROOT:/work" \
+        "$(image_ref)" find /work ! -uid "$uid" -exec chown -h "$uid:$gid" {} + \
+        || warn "could not hand container-written files under brainsyncos/ back to uid $uid"
 }
 
 cmd_clean() {

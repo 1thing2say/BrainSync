@@ -24,7 +24,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-DEFAULT_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from brainsync import paths
+
+DEFAULT_LOG_DIR = paths.log_dir()  # <repo>/logs in a checkout; BRAINSYNC_LOG_DIR overrides
 RESERVED_KEYS = ("t_unix", "event")
 RESERVED_PREFIX = "field_"
 

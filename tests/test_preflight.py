@@ -13,7 +13,8 @@ from app.tts import CartesiaTTS
 from tools import preflight
 from tools.preflight import (
     FAIL, PASS, SKIP, WARN, Result, Timing, check_cartesia, check_claude, check_clips,
-    check_health, check_keys, check_network, fetch_server, probe_host, redact, report, run_checks,
+    check_health, check_keys, check_local, check_network, fetch_server, probe_host, redact, report,
+    run_checks,
 )
 
 CFG = load_config()
@@ -25,9 +26,10 @@ MP3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xf3" * 100
 
 def health(**over) -> dict:
     """A healthy /api/health answer; ``over`` replaces whole sections or top-level keys."""
-    h = {"state": "IDLE", "resume_ready": True,
+    h = {"state": "IDLE", "resume_ready": True, "ui_client": "browser",
          "decoder": {"connected": True, "ok": True, "display_ok": True, "board_ok": True,
-                     "message": "", "keyboard_mode": False, "fake_decoder": False},
+                     "message": "", "keyboard_mode": False, "fake_decoder": False,
+                     "name": "ssvep-fbcca", "fake_flag": False},
          "partner_page": {"connected": True, "mic": "listening", "mic_muted": False,
                           "stt_mode": "always"},
          "llm": {"enabled": True, "why_disabled": "", "dynamic": True, "ok": False,
@@ -90,16 +92,31 @@ def ticking(step_s: float):
 # -- keys ------------------------------------------------------------------------------------
 
 
+LLAMA_KEY = "local-llama-test-key"
+LLAMA = "BRAINSYNC_LLAMA_API_KEY"
+
+
 @pytest.mark.parametrize("env, want", [
-    (ENV, {"ANTHROPIC_API_KEY": PASS, "CARTESIA_API_KEY": PASS}),
-    ({}, {"ANTHROPIC_API_KEY": FAIL, "CARTESIA_API_KEY": WARN}),
-    ({"ANTHROPIC_API_KEY": ANT_KEY, "CARTESIA_API_KEY": ""}, {"ANTHROPIC_API_KEY": PASS,
+    # A laptop: no llama-server, so the local backend is simply off (not a warning).
+    (ENV, {LLAMA: SKIP, "ANTHROPIC_API_KEY": PASS, "CARTESIA_API_KEY": PASS}),
+    ({}, {LLAMA: SKIP, "ANTHROPIC_API_KEY": FAIL, "CARTESIA_API_KEY": WARN}),
+    ({"ANTHROPIC_API_KEY": ANT_KEY, "CARTESIA_API_KEY": ""}, {LLAMA: SKIP, "ANTHROPIC_API_KEY": PASS,
                                                              "CARTESIA_API_KEY": WARN}),
+    # BrainSyncOS offline: the local model writes the pages, Claude would be the rescue.
+    ({LLAMA: LLAMA_KEY}, {LLAMA: PASS, "ANTHROPIC_API_KEY": WARN, "CARTESIA_API_KEY": WARN}),
+    ({**ENV, LLAMA: LLAMA_KEY}, {LLAMA: PASS, "ANTHROPIC_API_KEY": PASS, "CARTESIA_API_KEY": PASS}),
 ])
 def test_keys_are_reported_by_name_only(env, want):
     results = check_keys(CFG, env)
     assert levels(results) == want
     assert ANT_KEY not in repr(results) and CAR_KEY not in repr(results)
+    assert LLAMA_KEY not in repr(results)
+
+
+def test_a_config_with_only_a_local_backend_fails_without_its_key():
+    cfg = CFG.model_copy(update={"llm": CFG.llm.model_copy(update={"backends": [
+        CFG.llm.backend("local")]})})
+    assert levels(check_keys(cfg, {}))[LLAMA] == FAIL
 
 
 def test_keys_not_used_by_the_config_are_skipped():
@@ -149,17 +166,75 @@ def test_probe_reports_a_dns_failure():
 def test_claude_model_lookup_is_free_and_sends_the_key_header_only():
     net = FakeNet()
     result = check_claude(CFG, ANT_KEY, transport=net.transport)
-    assert result.level == PASS and CFG.llm.model in result.reason
+    model = CFG.llm.backend("claude").model
+    assert result.name == "claude" and result.level == PASS and model in result.reason
     [req] = net.requests
-    assert req.method == "GET" and req.url.path == f"/v1/models/{CFG.llm.model}"
+    assert req.method == "GET" and req.url.path == f"/v1/models/{model}"
     assert req.headers["x-api-key"] == ANT_KEY and ANT_KEY not in str(req.url)
 
 
-@pytest.mark.parametrize("status, fix", [(401, "wrong or revoked"), (404, "llm.model"),
+@pytest.mark.parametrize("status, fix", [(401, "wrong or revoked"), (404, "llm.backends (claude)"),
                                          (529, "fall back")])
 def test_claude_errors_fail_with_a_fix(status, fix):
     result = check_claude(CFG, ANT_KEY, transport=FakeNet(claude=status).transport)
     assert result.level == FAIL and fix in result.fix and f"HTTP {status}" in result.reason
+    # With the local model writing the pages, Claude failing is a fallback the demo survives.
+    rescue = check_claude(CFG, ANT_KEY, transport=FakeNet(claude=status).transport, others_on=True)
+    assert rescue.level == WARN
+
+
+def llama_net(health: int = 200, models: int = 200, down: bool = False) -> tuple[list, httpx.MockTransport]:
+    seen: list[httpx.Request] = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if down:
+            raise httpx.ConnectError("Connection refused", request=req)
+        if req.url.path == "/health":
+            return httpx.Response(health, json={"status": "ok" if health == 200 else "loading"})
+        if req.url.path == "/v1/models":
+            if req.headers.get("authorization") != f"Bearer {LLAMA_KEY}":
+                return httpx.Response(401, json={"error": {"message": "Invalid API Key"}})
+            return httpx.Response(models, json={"data": [{"id": "Qwen3.5-2B-Q4_K_M.gguf"}]})
+        return httpx.Response(404)
+
+    return seen, httpx.MockTransport(handle)
+
+
+def test_local_llama_server_up_with_the_right_key_passes():
+    seen, transport = llama_net()
+    result = check_local(CFG.llm.backend("local"), LLAMA_KEY, transport=transport)
+    assert result.level == PASS and "Qwen3.5-2B-Q4_K_M.gguf" in result.reason
+    assert [str(r.url) for r in seen] == ["http://127.0.0.1:9931/health",
+                                          "http://127.0.0.1:9931/v1/models"]
+    assert "authorization" not in seen[0].headers  # /health needs no key
+    assert LLAMA_KEY not in repr(result)
+
+
+@pytest.mark.parametrize("net, others_on, want, text", [
+    ({"down": True}, True, WARN, "not reachable"),
+    ({"down": True}, False, FAIL, "pages would be fixed lists"),
+    ({"health": 503}, True, WARN, "still loading"),
+    ({"health": 503}, False, WARN, "still loading"),
+    ({"health": 500}, False, FAIL, "/health HTTP 500"),
+])
+def test_local_llama_server_problems(net, others_on, want, text):
+    _, transport = llama_net(**net)
+    result = check_local(CFG.llm.backend("local"), LLAMA_KEY, others_on=others_on, transport=transport)
+    assert result.level == want and text in result.reason and result.fix
+
+
+def test_local_llama_server_rejecting_the_key_names_the_variable():
+    _, transport = llama_net()
+    result = check_local(CFG.llm.backend("local"), "wrong", others_on=True, transport=transport)
+    assert result.level == WARN and "rejects BRAINSYNC_LLAMA_API_KEY" in result.reason
+    assert "--api-key-file" in result.fix
+
+
+def test_local_without_its_key_is_skipped_and_never_contacted():
+    seen, transport = llama_net()
+    assert check_local(CFG.llm.backend("local"), None, transport=transport).level == SKIP
+    assert seen == []
 
 
 def test_claude_without_a_key_is_skipped():
@@ -241,19 +316,30 @@ def test_a_healthy_live_server_passes_everything():
      "keyboard mode"),
     ({"decoder": {"keyboard_mode": True, "connected": False, "ok": False}}, "display", WARN,
      "keyboard mode"),
-    ({"decoder": {"fake_decoder": True}}, "decoder", WARN, "fake decoder"),
-    ({"decoder": {"fake_decoder": True}}, "display", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True}}, "decoder", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True}}, "display", WARN, "fake decoder"),
+    # tools/fake_decoder.py started by hand: the server knows it only by its hello's name.
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder"}}, "decoder", WARN,
+     "selections are random, not EEG (fake-decoder, started by hand)"),
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder"}}, "display", WARN, "fake decoder"),
+    ({"decoder": {"fake_decoder": True, "name": "fake-decoder", "ok": False,
+                  "message": "low signal"}}, "decoder", FAIL, "fake decoder (fake-decoder)"),
+    ({}, "decoder", PASS, "bridge ssvep-fbcca connected and ok"),
     ({"decoder": {"connected": False, "ok": False}}, "decoder", FAIL, "no bridge"),
     ({"decoder": {"connected": False, "ok": False}}, "display", FAIL, "no display"),
-    ({"decoder": {"fake_decoder": True, "connected": False, "ok": False}}, "decoder", FAIL,
-     "fake decoder not connected"),
-    ({"decoder": {"fake_decoder": True, "ok": False, "message": "Rejected: slots"}}, "decoder", FAIL,
+    ({"decoder": {"fake_decoder": True, "fake_flag": True, "connected": False, "ok": False,
+                  "name": ""}}, "decoder", FAIL, "fake decoder not connected"),
+    ({"decoder": {"fake_decoder": True, "fake_flag": True, "ok": False, "name": "",
+                  "message": "Rejected: slots"}}, "decoder", FAIL,
      "Rejected: slots"),
     ({"decoder": {"ok": False, "message": "Rejected: refresh 120 Hz"}}, "decoder", FAIL, "120 Hz"),
     ({"decoder": {"display_ok": False}}, "display", FAIL, "display down"),
     ({"decoder": {"board_ok": False}}, "decoder", WARN, "board_ok"),
     ({"partner_page": {"connected": False, "mic": ""}}, "partner page", FAIL, "not open"),
     ({"partner_page": {"connected": False, "mic": ""}}, "mic", WARN, "no partner page"),
+    ({"ui_client": "ios"}, "partner page", PASS, "connected (iPhone app)"),
+    ({"ui_client": "browser"}, "partner page", PASS, "connected (browser)"),
+    ({"ui_client": ""}, "partner page", PASS, "connected"),
     ({"partner_page": {"mic_muted": True}}, "mic", WARN, "muted"),
     ({"partner_page": {"mic": "denied"}}, "mic", WARN, "denied"),
     ({"partner_page": {"mic": "offline"}}, "mic", WARN, "offline"),
@@ -279,11 +365,71 @@ def test_health_problems(over, name, want, text):
     assert want in (PASS, SKIP) or result.fix
 
 
+def backend_health(**over) -> dict:
+    """The llm section of a server with llm.backends (local, then claude); ``over`` per backend."""
+    local = {"name": "local", "kind": "llama", "model": "qwen3.5-2b",
+             "base_url": "http://127.0.0.1:9931", "timeout_s": 10.0, "enabled": True,
+             "why_disabled": "", "keepalive_s": 0.0, "warm_ok": None, "keepalive_running": False}
+    claude = {"name": "claude", "kind": "anthropic", "model": "claude-haiku-5-5", "base_url": "",
+              "timeout_s": 4.0, "enabled": True, "why_disabled": "", "keepalive_s": 20.0,
+              "warm_ok": True, "keepalive_running": True}
+    backends = [{**local, **over.pop("local", {})}, {**claude, **over.pop("claude", {})}]
+    llm = {"enabled": any(b["enabled"] for b in backends), "why_disabled": "", "dynamic": True,
+           "ok": True, "model": "qwen3.5-2b", "keepalive_s": 0.0, "warm_ok": True,
+           "keepalive_running": True, "page_timeout_s": 14.0, "last_backend": "local",
+           "last_error": "", "backends": backends}
+    llm.update(over)
+    return health(llm=llm)
+
+
+@pytest.mark.parametrize("over, name, want, text", [
+    ({}, "local (server)", PASS, "qwen3.5-2b at http://127.0.0.1:9931; wrote the last page in time"),
+    ({}, "claude (server)", PASS, "claude-haiku-5-5, connection kept open"),
+    ({"last_backend": "claude"}, "claude (server)", PASS, "wrote the last page"),
+    ({"ok": False, "last_backend": "", "last_error": "local: timeout; claude: HTTP 529"},
+     "local (server)", PASS, "last page: timeout"),
+    ({"ok": False, "last_backend": "", "last_error": "local: timeout; claude: HTTP 529"},
+     "claude (server)", PASS, "last page: HTTP 529"),
+    # A laptop: no llama-server key, Claude writes the pages.
+    ({"local": {"enabled": False, "why_disabled": "BRAINSYNC_LLAMA_API_KEY is not set"}},
+     "local (server)", SKIP, "BRAINSYNC_LLAMA_API_KEY"),
+    # Offline BrainSyncOS without a Claude key: the local model alone.
+    ({"claude": {"enabled": False, "why_disabled": "ANTHROPIC_API_KEY is not set"}},
+     "claude (server)", WARN, "ANTHROPIC_API_KEY"),
+    ({"local": {"enabled": False, "why_disabled": "BRAINSYNC_LLAMA_API_KEY is not set"},
+      "claude": {"enabled": False, "why_disabled": "ANTHROPIC_API_KEY is not set"}},
+     "claude (server)", FAIL, "ANTHROPIC_API_KEY"),
+    ({"claude": {"warm_ok": False}}, "claude (server)", WARN, "keep-alive failing"),
+    ({"dynamic": False}, "local (server)", SKIP, "fixed lists only"),
+])
+def test_health_with_backends(over, name, want, text):
+    result = {r.name: r for r in check_health(backend_health(**over), {})}[name]
+    assert result.level == want and text in result.reason
+    assert want in (PASS, SKIP) or result.fix
+
+
 @pytest.mark.parametrize("message, fix", [("Rejected: refresh 120 Hz", "rejected hello"),
                                           ("", "bridge's terminal")])
 def test_a_bridge_that_is_not_ok_gets_the_matching_fix(message, fix):
     result = check_health(health(decoder={"ok": False, "message": message}), {})[0]
     assert result.level == FAIL and fix in result.fix
+
+
+@pytest.mark.parametrize("decoder, fix", [
+    ({"fake_decoder": True, "name": "fake-decoder"}, "stop tools/fake_decoder.py"),
+    ({"fake_decoder": True, "fake_flag": True}, "restart without --fake-decoder"),
+])
+def test_a_fake_decoder_gets_the_fix_for_how_it_was_started(decoder, fix):
+    result = check_health(health(decoder=decoder), {})[0]
+    assert result.level == WARN and fix in result.fix and "start the bridge" in result.fix
+
+
+def test_a_server_without_decoder_names_still_counts_its_flag():
+    h = health()
+    h["decoder"] = {k: v for k, v in h["decoder"].items() if k not in ("name", "fake_flag")}
+    h["decoder"]["fake_decoder"] = True
+    result = check_health(h, {})[0]
+    assert result.level == WARN and "--fake-decoder" in result.fix
 
 
 # -- fixed-list clips on disk ----------------------------------------------------------------
@@ -325,11 +471,20 @@ def test_run_with_everything_fine_is_a_go(tmp_path):
     write_clips(tmp_path)
     results = run_checks("http://127.0.0.1:8013", env=ENV, transport=FakeNet().transport,
                          probe=fast_probe, clips_dir=tmp_path)
-    assert {r.level for r in results} == {PASS}
+    assert {r.level for r in results if r.name != LLAMA} == {PASS}
+    assert levels(results)[LLAMA] == SKIP and "local" not in levels(results)  # a laptop: one line
     names = [r.name for r in results]
-    assert names[:3] == ["config", "ANTHROPIC_API_KEY", "CARTESIA_API_KEY"]
+    assert names[:4] == ["config", LLAMA, "ANTHROPIC_API_KEY", "CARTESIA_API_KEY"]
     assert {"net api.anthropic.com", "net api.cartesia.ai", "claude", "cartesia", "clips",
             "server", "decoder", "mic"} <= set(names)
+
+
+def test_a_local_llama_server_is_checked_even_with_skip_network():
+    seen, transport = llama_net()
+    results = run_checks("http://127.0.0.1:8013", skip_network=True, env={**ENV, LLAMA: LLAMA_KEY},
+                         transport=transport)
+    assert levels(results)["local"] == PASS
+    assert {r.url.path for r in seen} >= {"/health", "/v1/models"}
 
 
 def test_skip_network_makes_no_api_calls():

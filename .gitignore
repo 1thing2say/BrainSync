@@ -53,6 +53,9 @@ brainsyncos/**/*.iso
 brainsyncos/config/authorized_keys
 brainsyncos/config/brainsync-password.hash
 
+# dmux hook templates (tool config, not project code)
+.dmux-hooks/
+
 # TRIBE v2 heatmap: its own venv, model cache and rendered clips
 .venv-tribe/
 .tribe-cache/

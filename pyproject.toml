@@ -21,6 +21,19 @@ dependencies = [
     "httpx>=0.27",  # Cartesia TTS over REST (app/tts.py)
 ]
 
+# One command per app on the BrainSyncOS image (brainsyncos/docs/phase3-notes.md); each is
+# the same as its `python -m` form.
+[project.scripts]
+brainsync-demo = "brainsync.demo:main"
+brainsync-record = "brainsync.record:main"
+brainsync-check = "brainsync.check:main"
+brainsync-stimulus = "brainsync.stimulus.__main__:main"
+brainsync-swipe = "brainsync.swipe:main"
+brainsync-swipe-web = "brainsync.swipe_web:main"
+brainchess = "brainsync.brainchess.__main__:main"
+brainsync-server = "brainsync.server.app:main"
+brainsync-voice = "app.server:main"
+
 [project.optional-dependencies]
 display = ["psychopy>=2026.2", "pillow>=10.1"]
 reels = ["websockets>=12"]

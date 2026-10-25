@@ -1,0 +1,177 @@
+/*
+ * BrainSync reference page: a dark full-screen canvas, a HUD, the dock (banner and buttons)
+ * and the warning gate. It fits a portrait phone: everything keeps out of the safe-area
+ * insets (the notch, the home bar), the buttons are at least 48 CSS px, and the canvas takes
+ * no touch gestures, so touching a square neither scrolls nor zooms the page.
+ */
+:root {
+  --bg: #111;
+  --fg: #e8e8e8;
+  --muted: #9a9a9a;
+  --card: #1c1c1c;
+  --accent: #3ddc84;
+  --warn: #ffb347;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  display: block;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* The safe area as a box that app.js measures; never seen. */
+#safe {
+  position: fixed;
+  top: var(--safe-top);
+  right: var(--safe-right);
+  bottom: var(--safe-bottom);
+  left: var(--safe-left);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#hud {
+  position: fixed;
+  top: calc(12px + var(--safe-top));
+  left: calc(12px + var(--safe-left));
+  margin: 0;
+  max-width: calc(100% - 24px - var(--safe-left) - var(--safe-right));
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--muted);
+  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+#dock {
+  position: fixed;
+  left: var(--safe-left);
+  right: var(--safe-right);
+  bottom: 0;
+  padding: 0 16px calc(12px + var(--safe-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+#banner {
+  min-height: 1.45em;
+  max-width: 100%;
+  text-align: center;
+  font-size: clamp(16px, 2.6vh, 26px);
+  line-height: 1.45;
+}
+
+#dock .buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: auto;
+}
+
+button {
+  font: inherit;
+  min-height: 48px;
+  min-width: 48px;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #000;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:focus-visible { outline: 3px solid var(--fg); outline-offset: 2px; }
+
+button:disabled { opacity: 0.5; cursor: default; }
+
+#pause, #resume {
+  min-width: 140px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+#pause {
+  background: var(--warn);
+}
+
+button.secondary {
+  background: #2a2a2a;
+  color: var(--fg);
+}
+
+[hidden] { display: none !important; }
+
+#warning {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
+           calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+/* margin: auto centres the card, and a card taller than the screen scrolls from its top. */
+#warning .card {
+  max-width: 560px;
+  margin: auto;
+  padding: 24px;
+  border-radius: 10px;
+  background: var(--card);
+  border-left: 4px solid var(--warn);
+}
+
+#warning h1 {
+  margin: 0 0 12px;
+  font-size: 22px;
+  color: var(--warn);
+}
+
+#accept { width: 100%; }
+
+kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--muted);
+  border-radius: 4px;
+  font: 13px ui-monospace, Menlo, monospace;
+}
+
+@media (max-width: 600px) {
+  body { font-size: 16px; }
+  #hud { padding: 6px 8px; font-size: 11px; }
+  #warning .card { padding: 18px; }
+  #warning h1 { font-size: 20px; }
+}

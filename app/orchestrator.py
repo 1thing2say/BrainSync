@@ -9,9 +9,9 @@ The orchestrator owns all state. It is driven by events (decoder and browser mes
 ``tick()``), reads time from an injectable clock and sends messages through two callbacks, so tests
 run it without timers, sockets or threads. Pages of options come from the LLM (V3: a
 ``request_page`` hook, answered by ``on_page_ready``) after each partner line and for "More
-options"; the next MENU_CUE waits for it in PREPARING for up to ``llm.timeout_s``, then uses the
-fallback lists in ``config/intents.yaml``. The decoder side speaks protocol 2
-(INTERFACE-v2-draft.md).
+options"; the next MENU_CUE waits for it in PREPARING for up to ``llm_wait_s`` (every active
+backend's turn, one after the other), then uses the fallback lists in ``config/intents.yaml``.
+The decoder side speaks protocol 2 (INTERFACE-v2-draft.md).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ LIST_MORE_LABEL = "MORE"  # list mode: NEXT on the last option asks for new opti
 class St(str, Enum):
     IDLE = "IDLE"
     BASELINE = "BASELINE"
-    PREPARING = "PREPARING"  # waiting for the LLM's page (up to llm.timeout_s), screen still
+    PREPARING = "PREPARING"  # waiting for the LLM's page (up to llm_wait_s), screen still
     MENU_CUE = "MENU_CUE"
     STIMULATING = "STIMULATING"  # a page or list trial
     CONFIRMING = "CONFIRMING"  # the confirm trial: Say it / Back
@@ -134,11 +134,14 @@ class Orchestrator:
         on_page: Callable[[list[str]], None] | None = None,
         audio_url: Callable[[str], str | None] | None = None,
         request_page: Callable[[PageRequest], None] | None = None,
+        llm_wait_s: float | None = None,
     ) -> None:
         """``on_page(utterances)`` runs whenever a new page of options is set (TTS prefetch);
         ``audio_url(text)`` returns a ready clip for ``text`` or None (the browser speaks it);
         ``request_page(req)`` asks the LLM for a page, answered later by ``on_page_ready``. Without
-        it, every page comes from the fallback lists."""
+        it, every page comes from the fallback lists. ``llm_wait_s``: how long the next MENU_CUE
+        waits for that page (app/menus.py ``page_timeout_s``: the active backends' turns one after
+        the other); by default every configured backend's (``llm.page_timeout_s``)."""
         self.cfg = cfg
         self.intents = intents
         self._send_ui_cb = send_ui
@@ -150,18 +153,22 @@ class Orchestrator:
         self.on_page = on_page
         self.audio_url = audio_url
         self.request_page = request_page
+        self.llm_wait_s = cfg.llm.page_timeout_s if llm_wait_s is None else llm_wait_s
         self.conversation = Conversation(cfg.context.history_turns)
         self._request_ids = itertools.count(1)
         self.awaiting: int | None = None  # the LLM page request the next MENU_CUE waits for
-        self.awaiting_until = 0.0  # when that wait ends (llm.timeout_s after the request)
+        self.awaiting_until = 0.0  # when that wait ends (llm_wait_s after the request)
         # The partner's mic (PLAN V4). In always mode it follows the state (see _mic_wanted).
         self.mic_muted = cfg.speech.start_muted
         self.mic_key: tuple[bool, bool] | None = None  # last (on, muted) sent in always mode
         self.mic_tail_until = 0.0  # the mic reopens after this, once a reply has ended
         self.mic_report = ""  # what the page says its recognition is doing
         self.last_stt_interrupt = float("-inf")
-        # The last LLM page arrived in time and valid; False until one has (no badge before proof).
-        self.llm_ok = False
+        # The last LLM page arrived in time and valid; None until one was asked for and answered
+        # (no OK badge before proof, and no warning either).
+        self.llm_ok: bool | None = None
+        self.llm_backend = ""  # the backend that wrote the last page ("" for a fixed list)
+        self.llm_error = ""  # why the last page fell back, backend by backend
 
         self.mode = cfg.menus.mode
         self.slots = [s.slot for s in cfg.stim.slots]
@@ -190,12 +197,19 @@ class Orchestrator:
         self.decoder_connected = False
         self.acked = False  # the bridge's hello passed the check (hello_ack sent)
         self.decoder_error = ""  # why the last hello was rejected
+        self.decoder_name = ""  # the acked hello's name; "" before an ack
         self.paused_by_decoder = False
         # Last bridge status; assumed fine until a status says otherwise.
         self.bridge_ok = self.board_ok = self.display_ok = True
         self.bridge_message = ""
         self.baseline_id = 0
         self.expected_baseline: int | None = None  # baseline_id we wait for, if a bridge records it
+
+    @property
+    def decoder_fake(self) -> bool:
+        """Selections are not EEG: started with --fake-decoder, or the acked bridge says it is a
+        fake (tools/fake_decoder.py names itself "fake-decoder" unless --name says otherwise)."""
+        return self.fake_decoder or self.decoder_name.lower().startswith("fake")
 
     @property
     def shown(self) -> ShowPage | None:
@@ -247,6 +261,7 @@ class Orchestrator:
         self.decoder_connected = False
         self.acked = False
         self.decoder_error = ""
+        self.decoder_name = ""
         self.bridge_ok = self.board_ok = self.display_ok = True
         self.bridge_message = ""
         self._record("decoder_disconnected")
@@ -280,6 +295,7 @@ class Orchestrator:
         """Check the bridge's hello against config: hello_ack, or error and stay paused."""
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
                                   self.cfg.display.expected_refresh_hz)
+        self.decoder_name = ""  # a new hello: only an acked one names the decoder
         if problems:
             self.acked = False
             self.decoder_error = "; ".join(problems)
@@ -290,6 +306,9 @@ class Orchestrator:
             return
         self.acked = True
         self.decoder_error = ""
+        self.decoder_name = hello.name
+        # The log says whether this session's selections came from EEG.
+        self._record("decoder_acked", name=hello.name, fake=self.decoder_fake)
         screen = self.screen or self._build_screen()
         self._send_decoder(HelloAck(protocol=PROTOCOL, roles=self.roles,
                                     labels=screen.display.labels or {}))
@@ -441,8 +460,10 @@ class Orchestrator:
 
     # -------------------------------------------------------------- events: LLM pages
 
-    def on_page_ready(self, request_id: int, options: list[Option] | None) -> None:
-        """The LLM's answer to ``request_page``: ranked options, or None (it failed)."""
+    def on_page_ready(self, request_id: int, options: list[Option] | None, *, backend: str = "",
+                      error: str = "") -> None:
+        """The LLM's answer to ``request_page``: ranked options and the backend that wrote them,
+        or None and why each backend failed."""
         if request_id != self.awaiting:
             self._record("llm_page_ignored", request_id=request_id,
                          why="late" if options is not None else "late failure")
@@ -450,33 +471,33 @@ class Orchestrator:
         if self.clock() >= self.awaiting_until:
             # Still awaited only because the confirm trial does not wait: too late all the same.
             self._give_up_on_llm()  # keep the fallback list already pending
-            options = None
+            options, error = None, "timed out"
         self.awaiting = None
         if options is None:
-            self._set_llm_ok(False)  # keep the fallback list already pending
+            self._set_llm_ok(False, error=error)  # keep the fallback list already pending
         else:
             self.pending_list = OptionList(list_id=f"m{next(self._list_ids)}", name=LLM_LIST,
                                            options=list(options))
-            self._set_llm_ok(True)
+            self._set_llm_ok(True, backend=backend)
         if self.state is St.PREPARING:
             self._enter_menu_cue()
 
     def _ask_llm(self, reason: str) -> None:
-        """Ask for an LLM page; the next MENU_CUE waits for it (up to llm.timeout_s)."""
+        """Ask for an LLM page; the next MENU_CUE waits for it (up to llm_wait_s)."""
         if self.request_page is None:
             return
         self.awaiting = next(self._request_ids)
-        self.awaiting_until = self.clock() + self.cfg.llm.timeout_s
+        self.awaiting_until = self.clock() + self.llm_wait_s
         self.request_page(self.conversation.page_request(self.awaiting, reason, self.clock()))
 
     def _give_up_on_llm(self) -> None:
         self._record("llm_page_timeout", request_id=self.awaiting)
         self.awaiting = None
-        self._set_llm_ok(False)
+        self._set_llm_ok(False, error="timed out")
 
-    def _set_llm_ok(self, ok: bool) -> None:
-        if ok != self.llm_ok:
-            self.llm_ok = ok
+    def _set_llm_ok(self, ok: bool, backend: str = "", error: str = "") -> None:
+        if (ok, backend, error) != (self.llm_ok, self.llm_backend, self.llm_error):
+            self.llm_ok, self.llm_backend, self.llm_error = ok, backend, error
             self._send_status()
 
     # ------------------------------------------------------------------ transitions
@@ -506,7 +527,7 @@ class Orchestrator:
     def _enter_menu_cue(self) -> None:
         """Show the next screen (page, confirm or list), still, for cue_s before its trial.
 
-        If an LLM page is on its way, wait for it first in PREPARING (until llm.timeout_s after
+        If an LLM page is on its way, wait for it first in PREPARING (until llm_wait_s after
         the request); the confirm screen never waits.
         """
         if self.awaiting is not None and self.picked is None:
@@ -759,8 +780,13 @@ class Orchestrator:
             decoder_message=(f"Rejected: {self.decoder_error}" if self.decoder_error
                              else self.bridge_message),
             resume_ready=self.state in (St.IDLE, St.PAUSED) and not self.resume_problem(),
-            llm_ok=self.request_page is not None and self.llm_ok,
-            fake_decoder=self.fake_decoder,
+            llm_ok=self.request_page is not None and self.llm_ok is True,
+            llm=("off" if self.request_page is None else "waiting" if self.llm_ok is None
+                 else "ok" if self.llm_ok else "failed"),
+            llm_backend=self.llm_backend if self.request_page is not None else "",
+            llm_error=self.llm_error if self.request_page is not None else "",
+            fake_decoder=self.decoder_fake,
+            decoder_name=self.decoder_name,
             keyboard_mode=self.keyboard_mode,
             mic_muted=self.mic_muted,
             mic=self.mic_report,

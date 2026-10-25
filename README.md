@@ -714,6 +714,113 @@ Like, with a `[card]` table for BrainSwipe) and `one_target_12`, `one_target_15`
 `one_target_17` (single-target sessions for phase 0). Space starts a session, Escape
 quits.
 
+## Client/server (v3) and BrainPoint
+
+The headset and the decoder can run as a server, so the screen the user looks at no longer
+has to be on the machine that reads the board. The server owns the EEG board and the
+decoder and never draws anything. A client draws the flickering targets and gets back what
+the user picked; it never sees EEG. `PROTOCOL-v3.md` is the wire contract. The server is
+meant for an NVIDIA Jetson Orin Nano next to the headset (see `deploy/jetson/`), and runs
+on the Mac with `--board fake` while that is being set up.
+
+> **Photosensitivity rule.** Every client shows the photosensitivity warning and draws no
+> flicker until the user accepts it, and it sends `accepted: true` in its hello only after
+> that. The server refuses a controller without it. Esc stops the flicker at once, and the
+> flicker stops whenever the socket closes.
+
+There are two kinds of client:
+
+- **slots mode**: the client names its targets (`["yes", "no"]`), draws them where it
+  likes, and gets a `selection` each time the decoder commits one. The reference page
+  (`clients/web/`, served by the server) and the Python client
+  (`python -m brainsync.server.client`) use it.
+- **point mode (BrainPoint)**: the Chrome extension in `clients/chrome/` sends screenshots
+  of the tab. The server asks Claude Haiku (`claude-haiku-5-5`) for the clickable elements
+  and shows the best three as flickering patches plus "More" (strategy B, top-K plus
+  more). Picking a patch clicks it; risky buttons (pay, delete, send) need a second pick of
+  "Do it" first.
+
+### Run the server without a headset
+
+```bash
+.venv/bin/python -m brainsync.server --board fake --no-auth
+```
+
+It prints `BrainSync server on ws://127.0.0.1:8765/ws (fake board, point mode off, freqs
+15,17,12,20)` and the page address, `open http://127.0.0.1:8765/`. Open it, read the
+warning, accept, and wait about two seconds while the page measures the display refresh
+(set the display to 60 Hz with ProMotion off; `--ignore-refresh` skips the check). The
+server calibrates for `--calibrate-s` seconds (default 10: look at the screen and relax),
+then the two squares flicker. With `--board fake`, hovering a square makes the fake board
+carry its tone, and a selection follows about 2.5 s later and repeats every 2.7 s or so
+while the mouse stays.
+
+Without `--no-auth` the server makes a token on the first run, in
+`~/.config/brainsync/token` (mode 0600, `--token-file` to move it), and prints the page
+address with it: `open http://127.0.0.1:8765/#token=...`. The token travels in the address
+fragment, which the browser never sends to a server. `--no-auth` works only with a loopback
+`--host`. `GET /health` answers `{"ok": true, "board": "streaming", "controller": false,
+"viewers": 0}`.
+
+```bash
+.venv/bin/python -m brainsync.server --board fake --env-file .env   # point mode on
+.venv/bin/python -m brainsync.server --board cerelog                # the Cerelog X8
+.venv/bin/python -m brainsync.server.client --url ws://127.0.0.1:8765/ws --token-file \
+    ~/.config/brainsync/token --slots yes,no --gaze yes --count 3     # headless client
+```
+
+Point mode needs `ANTHROPIC_API_KEY` on the server. `--env-file PATH` reads KEY=VALUE lines
+without overriding the environment, so the key can live in a gitignored file; it is never
+printed or logged. Without a key, or with `--no-detect`, the server still runs: slots mode
+works and a point-mode client is told `detect_unavailable`. `--min-p-button` (default 0.5)
+sets which elements are shown. `--log PATH` appends a JSON-lines record of the session
+(phases, layouts, onsets, selections, scans, clicks; never the token or a screenshot).
+Screenshots are kept only with `--log-scans DIR`, in the format `tools/screen_eval.py`
+reads. Ctrl-C or SIGTERM tells every client `phase stop` and exits 0; a port in use or a
+missing board exits 1, a bad argument 2.
+
+### Load the BrainPoint extension
+
+1. Start the server with point mode on (above).
+2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked and pick
+   `clients/chrome/` (Chrome 116 or newer).
+3. In the extension's Options, enter the server address (`ws://127.0.0.1:8765/ws`) and the
+   token the server printed (empty with `--no-auth`).
+4. Open the page to control, click the BrainPoint toolbar icon (or Alt+Shift+B), accept the
+   warning. After calibration the server asks for a screenshot, Haiku finds the buttons, and
+   the patches appear. With `--board fake`, hovering a patch picks it.
+
+`clients/chrome/README.md` explains each file and permission. Password fields are blacked
+out in the screenshot and their values never leave the page.
+
+### Over the network: Tailscale
+
+The server speaks plain `ws://`. Anything beyond this machine goes through `tailscale
+serve`, which adds HTTPS (and so `wss://`) with a certificate for the machine's tailnet
+name:
+
+```bash
+.venv/bin/python -m brainsync.server --board cerelog          # still on 127.0.0.1:8765
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8765
+```
+
+The page is then at `https://<machine>.<tailnet>.ts.net/#token=...` and the extension's
+server address is `wss://<machine>.<tailnet>.ts.net/ws`. `tailscale serve` has changed its
+syntax across versions (older ones used `tailscale serve https / http://127.0.0.1:8765`), so
+check `tailscale serve --help` for yours, and `tailscale serve status` shows what is
+served. If the page's own address is refused with HTTP 403, add
+`--origin 'https://<machine>\.<tailnet>\.ts\.net'`. Binding `--host 0.0.0.0` instead serves
+plain `ws://` to the whole LAN; keep the token on if you do.
+
+### On the Jetson
+
+`deploy/jetson/` has a systemd unit and the steps. `--board cerelog` needs the Cerelog fork
+of BrainFlow built for Linux aarch64: `deploy/jetson/brainflow/` builds the wheel (Docker on
+the Mac, or natively on the Jetson) and `deploy/jetson/brainflow/INSTALL.md` installs and
+checks it. The wheel was verified in an arm64 container, not yet on a real Jetson with the
+headset; without it the server runs there only with `--board fake`. Only the server process
+reads the board's serial port.
+
 ## Live brain map
 
 A live scalp map of your own EEG in the browser. Every 0.25 s the last 2 s from the 8
@@ -850,6 +957,22 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/swipe.py` | BrainSwipe: fresh-window swipe voting, the endless feed, CLI |
 | `brainsync/swipe_web.py` | BrainSwipe browser mock: localhost server with Server-Sent Events, the real swipe logic on a real-time fake board |
 | `brainsync/web/` | The mock's page: HTML, CSS, `app.js` (DOM, network, speech) and `logic.js` (pure helpers, tested with node) |
+| `PROTOCOL-v3.md` | The client/server wire contract (v3) |
+| `brainsync/server/protocol.py` | v3 messages: constants, parsing and checking client messages, building server messages |
+| `brainsync/server/transport.py` | WebSocket + HTTP on one port: token, Origin, hello-first, controller and viewers |
+| `brainsync/server/decoding.py` | `DecoderBank`: one decoder per frequency set over a shared history, onset gating |
+| `brainsync/server/session.py` | The server's main loop: phases, calibration, selections, slots mode |
+| `brainsync/server/app.py` | `python -m brainsync.server`: CLI, token file, board, logs, signals |
+| `brainsync/server/client.py` | Synchronous Python client (`python -m brainsync.server.client`) |
+| `brainsync/screen/detect.py` | Clickable elements of a screenshot with Claude Haiku (structured output) |
+| `brainsync/screen/selector.py` | BrainPoint pages: top-K candidates plus "more", non-overlapping patches |
+| `brainsync/screen/controller.py` | `PointMode`: scan, detect, pick, confirm, click, scan again |
+| `brainsync/envfile.py` | KEY=VALUE env file loader that never overrides or prints |
+| `clients/js/` | Browser SDK: `Connection`, `FlickerState`, refresh meter, and `flicker.js` |
+| `clients/web/` | The reference page (slots mode), served by the server at `/` |
+| `clients/chrome/` | BrainPoint, the point-mode Chrome extension |
+| `deploy/jetson/` | systemd unit and setup steps for the Jetson |
+| `tools/screen_eval.py` | Scores Haiku's detection against DOM ground truth |
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 | `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
 | `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
@@ -881,6 +1004,20 @@ BrainSwipe adds 220: `test_swipe.py` 53, `test_swipe_cli.py` 29, `test_swipe_web
 run the whole swipe loop on the fake board. They check that stale windows never vote, that the
 voice line names the profile on screen, and that a card or flash command never changes a
 square's luminance.
+
+The client/server split and BrainPoint add 929 Python tests and 153 node tests
+(`node --test 'clients/js/test/*.test.mjs' 'clients/chrome/test/*.test.mjs'`):
+`test_server_protocol.py` 270, `test_server_transport.py` 118 (a real server on port 0),
+`test_server_decoding.py` 38, `test_server_session.py` 60, `test_server_client.py` 90,
+`test_screen_detect.py` 70, `test_screen_selector.py` 95, `test_screen_controller.py` 58,
+`test_screen_eval.py` 74, `test_clients_js.py` 7, `test_brainpoint_extension.py` 18 and
+`test_server_e2e.py` 31. The end-to-end file runs `brainsync.server` on a real socket with a
+real-time fake board (about 30 s): slots mode from the Python client, point mode through
+scan, top-K pages, click, a risky button's confirm and the next scan, auth (4001, 4002,
+takeover 4000), HTTP, the CLI's exit codes and SIGTERM, and the real JavaScript SDK, reference
+page and extension agent against the server through Node's WebSocket
+(`tests/server_e2e_client.mjs`). Point mode uses the real Detector with a stub `create`, so
+no test calls the Anthropic API.
 
 The filter tests check passband gain within 2% at 12, 15, 17 and 30 Hz, stopband gain
 under 0.05 at 1, 2, 90 and 110 Hz, zero lag, and a 60 Hz notch deeper than -40 dB. The

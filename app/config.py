@@ -20,17 +20,22 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import (BaseModel, ConfigDict, Field, StringConstraints, ValidationError,
+                      model_validator)
 
 from app.schemas import Option, SlotId, SlotSpec, Waveform, validate_option
+from brainsync import paths
 
+# In a source checkout these are the repo's folders; brainsync/paths.py has the installed places
+# and the BRAINSYNC_* variables that override them.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = REPO_ROOT / "config"
+CONFIG_DIR = paths.config_dir()
+STATE_DIR = paths.state_dir()  # relative paths the app writes (speech.cache_dir) resolve here
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"
 DEFAULT_INTENTS_PATH = CONFIG_DIR / "intents.yaml"
 DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"  # the fictional demo persona (committed)
-USER_PROFILE_PATH = REPO_ROOT / "profiles" / "user.yaml"  # a real user's profile: gitignored
-DEFAULT_ENV_PATH = REPO_ROOT / ".env"  # gitignored; secrets such as CARTESIA_API_KEY
+USER_PROFILE_PATH = STATE_DIR / "profiles" / "user.yaml"  # a real user's profile: gitignored
+DEFAULT_ENV_PATH = paths.env_file()  # gitignored; secrets such as CARTESIA_API_KEY
 
 REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
 
@@ -104,15 +109,71 @@ class MenusConfig(Strict):
     mode: Literal["page", "list"]
     dynamic: bool
     option_count: int = Field(ge=1)
+    # extra candidates Claude writes, ranked last, that replace an invalid or repeated option
+    spare_options: int = Field(default=1, ge=0, le=3)
     label_max_chars: int = Field(ge=1)
     label_max_words: int = Field(ge=1)
     utterance_max_words: int = Field(ge=1)
 
 
-class LLMConfig(Strict):
+# Claude models that answer a forced tool_choice ("tool" or "any") with HTTP 400 (claude-api
+# skill, 2026-10): app/menus.py forces its one tool, so every page would fall back.
+FORCED_TOOL_CHOICE_400 = ("claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5-5",
+                          "claude-sonnet-5-5")
+# Request fields app/menus.py sets itself; a backend's extra_body must not replace them.
+RESERVED_BODY_KEYS = ("model", "max_tokens", "system", "tools", "tool_choice", "messages",
+                      "output_config", "stream")
+
+
+class LLMBackend(Strict):
+    """One LLM that can write a page: Claude, or a local llama-server's Anthropic-style
+    ``/v1/messages``. Every field is explicit in default.yaml."""
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")  # in logs, status and preflight
+    # anthropic: the Claude API (effort, keep-alive); llama: llama-server, which drops ``strict``
+    # and ``output_config`` and turns the forced tool_choice into "required"
+    kind: Literal["anthropic", "llama"]
+    base_url: str  # "" = the SDK's default (api.anthropic.com, or ANTHROPIC_BASE_URL)
     model: str = Field(min_length=1)
-    timeout_s: float = Field(gt=0)
-    keepalive_s: float = Field(default=20.0, ge=0)  # 0: no keep-alive calls
+    api_key_env: str = Field(pattern=r"^[A-Z_][A-Z0-9_]*$")  # no key set: this backend is off
+    timeout_s: float = Field(gt=0)  # this backend's whole turn (first, hedge, retry)
+    hedge_after_s: float = Field(ge=0)  # a second, identical call if none answered; 0: off
+    keepalive_s: float = Field(ge=0)  # anthropic only: a free call this often while idle; 0: off
+    extra_body: dict[str, Any]  # merged into the request body, e.g. chat_template_kwargs
+
+
+class LLMConfig(Strict):
+    """The backends, tried in order for each page; after the last, the fixed lists.
+
+    The older single-Claude form (``model``, ``timeout_s``, ``hedge_after_s``, ``keepalive_s``,
+    no ``backends``) still loads: it becomes one backend named ``claude``.
+    """
+
+    backends: list[LLMBackend] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _single_claude(cls, data: Any) -> Any:
+        legacy = ("model", "timeout_s", "hedge_after_s", "keepalive_s")
+        if not isinstance(data, dict) or not any(k in data for k in legacy):
+            return data
+        if "backends" in data:
+            raise ValueError("use either llm.backends or the single-Claude keys (llm.model, "
+                             "llm.timeout_s, ...), not both")
+        rest = {k: v for k, v in data.items() if k not in legacy}
+        claude = {"name": "claude", "kind": "anthropic", "base_url": "",
+                  "api_key_env": "ANTHROPIC_API_KEY", "hedge_after_s": 2.5, "keepalive_s": 20.0,
+                  "extra_body": {}}
+        claude.update({k: data[k] for k in legacy if k in data})
+        return {**rest, "backends": [claude]}
+
+    @property
+    def page_timeout_s(self) -> float:
+        """The longest a page can take: every backend's turn, one after the other."""
+        return sum(b.timeout_s for b in self.backends)
+
+    def backend(self, name: str) -> LLMBackend:
+        return next(b for b in self.backends if b.name == name)
 
 
 class ContextConfig(Strict):
@@ -163,6 +224,42 @@ class AppConfig(Strict):
     selection: SelectionConfig
 
 
+def forced_tool_choice_400(model: str) -> bool:
+    """Whether this Claude model rejects a forced tool_choice (so app/menus.py cannot use it)."""
+    return any(model == m or model.startswith((m + "-", m + "@")) for m in FORCED_TOOL_CHOICE_400)
+
+
+def check_llm(llm: LLMConfig) -> list[str]:
+    """The backends' cross-field rules (each problem names the backend)."""
+    problems: list[str] = []
+    names = [b.name for b in llm.backends]
+    dupes = sorted(n for n, k in Counter(names).items() if k > 1)
+    if dupes:
+        problems.append(f"llm.backends: duplicate name {', '.join(dupes)}")
+    for b in llm.backends:
+        where = f"llm.backends[{b.name}]"
+        if b.hedge_after_s and b.hedge_after_s >= b.timeout_s:
+            problems.append(f"{where}.hedge_after_s ({b.hedge_after_s:g}) must be shorter than "
+                            f"its timeout_s ({b.timeout_s:g}), or 0 for no hedge")
+        if b.base_url and not re.match(r"^https?://[^/\s]+", b.base_url):
+            problems.append(f"{where}.base_url: {b.base_url!r} is not an http(s) URL")
+        reserved = sorted(set(b.extra_body) & set(RESERVED_BODY_KEYS))
+        if reserved:
+            problems.append(f"{where}.extra_body: {', '.join(reserved)} is set by app/menus.py")
+        if b.kind == "llama":
+            if not b.base_url:
+                problems.append(f"{where}.base_url: a llama backend needs its server's URL "
+                                "(http://127.0.0.1:9931)")
+            if b.keepalive_s:
+                problems.append(f"{where}.keepalive_s: keep-alive is for Claude only (llama-server "
+                                "is on this computer); use 0")
+        elif forced_tool_choice_400(b.model):
+            problems.append(f"{where}.model: {b.model} answers the forced tool_choice that "
+                            "app/menus.py sends with HTTP 400, so every page would be a fixed "
+                            "list; use claude-haiku-5-5")
+    return problems
+
+
 def check_app_config(cfg: AppConfig) -> list[str]:
     """Cross-field rules pydantic cannot express per field. Returns problems (empty = fine)."""
     problems: list[str] = []
@@ -198,6 +295,7 @@ def check_app_config(cfg: AppConfig) -> list[str]:
     elif cfg.selection.confirm_mode != "never":
         problems.append("selection.confirm_mode: list mode has no confirm step; use never")
 
+    problems += check_llm(cfg.llm)
     if cfg.speech.stt_max_line_s <= cfg.speech.stt_gap_s:
         problems.append("speech.stt_max_line_s must be longer than speech.stt_gap_s")
     if cfg.speech.model.endswith("-latest"):
@@ -489,6 +587,7 @@ def save_user_profile(profile: Profile, path: str | Path = USER_PROFILE_PATH) ->
 __all__ = [
     "REPO_ROOT",
     "CONFIG_DIR",
+    "STATE_DIR",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_INTENTS_PATH",
     "DEFAULT_PROFILE_PATH",

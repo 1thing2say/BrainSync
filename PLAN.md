@@ -11,7 +11,8 @@ only (in `.git/info/exclude`) and loads both:
 This plan covers **only the voice and UI side**, built by Elijah. His teammate builds the SSVEP
 decoder and the flicker display in a separate repo, `1thing2say/ssvep` (cloned at `../ssvep`,
 branch `feat/spectrum-check`). The two sides meet only at the message contract in `INTERFACE.md`.
-**Laptop only for now**; phone support comes later (section 10).
+The partner page runs on the laptop, an iPhone (Safari or the native app in `ios/`) or Android
+Chrome (section 10).
 
 At the start of each session, ask Elijah whether he wants code written or only the approach
 explained. All work happens on `dev` (or another non-`main` branch); `main` changes only through
@@ -114,6 +115,47 @@ pull requests.
   browser fallback voice (`ui/voice_core.js`) prefers local Premium / Enhanced English voices
   and never a network voice.
 
+- **Quality fixes (2026-10-24, branch `feat/quality-fixes`):** fewer Claude pages lost to the
+  fallback: one spare candidate (`menus.spare_options`), repeats and duplicates compared without
+  case or punctuation, and a hedged second call after `llm.hedge_after_s` (live `llm_eval`: 11/12
+  pages valid, the miss was the cold first connection). A decoder whose hello name starts with
+  "fake" counts as fake even when started by hand: FAKE DECODER badge, preflight WARN,
+  `decoder_acked` in the log. `/api/health` uses public properties only.
+
+- **Partner page refresh (2026-10-24, branch `feat/ui-refresh`):** the mirror shows each option's
+  sentence as the big text (its label is a tag), a coloured status banner, a selection timer that
+  fills to `stim.max_trial_s`, a stronger picked box and the spoken sentence while it plays. The
+  panel puts Stop on top, then a mic card with the partner's words as they talk, the
+  conversation (the user's lines under their first name), and an operator footer: one health line
+  ("Ready" or what is wrong, details on a click), Correct / Wrong, the profile link. FAKE DECODER /
+  KEYBOARD stay on the mirror. Phone layout (≤ 600 px): partner's part first, Stop fixed at the
+  bottom. Logic in `ui/view_core.js` (node-tested); `python tools/ui_shots.py` screenshots every
+  state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root`, palette
+  still to choose.
+
+- **Phone version (2026-10-24, branch `feat/mobile`):** `python -m app.server --tunnel` opens a
+  Cloudflare quick tunnel (`app/tunnel.py`, `cloudflared`, no account) and prints a phone link
+  with a per-start access key; the laptop page offers **Copy phone link**. `app/remote.py` gates
+  every request from outside this computer: the key (link once, then an HttpOnly cookie), else
+  403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
+  (one reused audio element), the screen stays awake (Wake Lock), safe-area insets, 16 px inputs.
+  Checked through a real tunnel; the iPhone test itself is still to do. Server shutdown now runs
+  `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan. The native app below is now
+  the main phone client; this Safari page stays its fallback.
+- **iOS partner app (2026-10-24, branch `feat/mobile`):** `ios/BrainSyncPartner`, a SwiftUI app
+  (iOS 17+, no dependencies) that replaces the Safari page. It is a `/ws/ui` client like the
+  browser (`?client=ios`): mirror, Stop, mic card, typing, conversation, Correct / Wrong. Pairing:
+  the server prints an app link, `brainsync://pair?url=…&key=…` (`--tunnel`, or `server.host:
+  0.0.0.0` for plain LAN http, where `main()` finds the LAN address), and the laptop page offers
+  **Copy iPhone app link**; the web phone link pasted into the app works too. Native parts:
+  on-device speech recognition (`SFSpeechRecognizer`, echo cancellation, the `listen_core.js`
+  rules ported), Cartesia clips through `AVPlayer` with the built-in `AVSpeechSynthesizer` voice
+  as fallback, screen kept awake. While it is connected it is the one partner page: the laptop's
+  page shows "Open on another page" (close code 4000), and `/api/health` / preflight say which
+  client is connected (`ui_client`). `ios/BrainSyncKit` (Swift package: links, messages, socket,
+  `ListenCore`) is tested against `ui_messages.json`, written from `app/schemas.py` by
+  `tools/ui_fixture.py` (`--check` fails when stale). Built on the teammate's Mac with Xcode 16
+  (`ios/README.md`); not yet compiled or run on a device.
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 
@@ -141,6 +183,7 @@ pull requests.
 | Bridge (`ssvep/online/bridge.py`) | Teammate | The board connection, the decoder, the display process | Server (websocket client), display (stdin/stderr) |
 | PsychoPy display (`ssvep.stimulus`) | Teammate | Frame-locked flicker, option text, the box, `Esc` | Bridge only |
 | Chrome partner page (`ui/`) | Elijah | Rendering, TTS, STT, STOP | Server only |
+| iPhone partner app (`ios/`), optional | Elijah | The same as the Chrome page, natively; replaces it while connected | Server only (`/ws/ui?client=ios`) |
 | Claude API | — | Ranked reply options | Server only (`app/menus.py`) |
 
 The server ↔ bridge contract is `INTERFACE-v2-draft.md` (protocol 2): the server speaks only
@@ -152,8 +195,8 @@ Design risks to settle:
 1. **One screen cannot show both windows.** The flicker must be full screen (the teammate's rule,
    enforced by PsychoPy), but the partner page needs a visible Chrome window for push-to-talk and
    STOP. Options: an external monitor for Chrome, with PsychoPy pinned to the built-in panel
-   (`screen = 0`, locked at 60 Hz); or the partner page on a phone (section 10, `server.host:
-   0.0.0.0`; check that the phone browser's speech recognition works). With Chrome, PsychoPy and
+   (`screen = 0`, locked at 60 Hz); or the partner page on the partner's iPhone (section 10:
+   the native app, Safari as fallback; speech recognition still to check on a device). With Chrome, PsychoPy and
    the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
 2. **The contract is not confirmed yet.** The server speaks only protocol 2
    (`INTERFACE-v2-draft.md`), but the teammate has not agreed it, and the bridge cannot be built
@@ -285,11 +328,20 @@ BrainSync/
     app.js              # websocket client: conversation, status, STOP, mirror of the user's screen
     speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
     voice_core.js       # picks the fallback voice: local Premium / Enhanced English first
+    view_core.js        # banner, health line, mic card, selection timer (pure, node-tested)
+  ios/                  # native iPhone partner app; ios/README.md (install, pair)
+    BrainSyncPartner.xcodeproj   # Xcode 16+, iOS 17+
+    BrainSyncPartner/            # SwiftUI app: pair screen, warning, partner view, mirror,
+                                 #   Listener (on-device STT), Speaker (AVPlayer + system voice)
+    BrainSyncKit/                # Swift package: ServerLink, messages, UIConnection, ListenCore
+      Tests/BrainSyncKitTests/Fixtures/ui_messages.json   # every /ws/ui message, from schemas.py
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
     prerender_tts.py    # Cartesia clips for every fixed-list sentence, into speech.cache_dir
+    ui_shots.py         # screenshots of the partner page's states (headless Chrome)
+    ui_fixture.py       # writes ios/.../ui_messages.json from app/schemas.py (--check: stale?)
     log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
   docs/
     DEMO.md             # operator's demo runbook (V6 items 2-3)
@@ -326,7 +378,7 @@ BrainSync/
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` later for phone or Jetson |
+| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` for the iPhone app on the LAN (or use `--tunnel`), later the Jetson |
 | `stim.slots` | s1 13 Hz, s2 15 Hz, s3 17 Hz, s4 11 Hz | Mirrors his `four_diamond.toml` (changed 2026-10-24 from 15/17/20/12); checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
 | `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 11 Hz, the lowest and nearest the user's alpha, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
@@ -340,9 +392,12 @@ BrainSync/
 | `menus.label_max_chars` | 18 | |
 | `menus.label_max_words` | 3 | |
 | `menus.utterance_max_words` | 14 | |
-| `llm.model` | `claude-haiku-5-5` | |
-| `llm.timeout_s` | 4.0 | One retry, then fallback |
-| `llm.keepalive_s` | 20.0 | While idle, a free API call this often keeps the connection open; 0 = off |
+| `menus.spare_options` | 1 | Extra lower-ranked candidates Claude writes; a bad or repeated option is dropped and the next one fills the page, so one slip no longer loses it |
+| `llm.backends` | `local`, then `claude` | Tried in order for each page, then the fixed lists. A backend whose key (`api_key_env`) is not set is off, so a laptop without llama-server runs Claude alone, as before. Each backend gets its own `timeout_s`, from the start of its turn; one that fails early (refused connection, bad key) hands over at once. A page takes at most the sum, and the orchestrator waits that long. The old single-Claude keys (`llm.model`, `llm.timeout_s`, ...) still load as one `claude` backend |
+| `llm.backends[local]` | `kind: llama`, `http://127.0.0.1:9931`, `qwen3.5-2b`, `BRAINSYNC_LLAMA_API_KEY`, 10 s | llama-server's `/v1/messages`. It drops `strict` and `output_config`, so the pydantic checks do the work. No hedge (one slot), no keep-alive. `extra_body: {chat_template_kwargs: {enable_thinking: false}}`. A refused connection hands over in milliseconds, without a retry. 10 s is an estimate for a 2B model on the Orin Nano, not measured |
+| `llm.backends[claude]` | `kind: anthropic`, `claude-haiku-5-5`, `ANTHROPIC_API_KEY`, 4 s | As before: at most 3 calls (first, hedge, one retry), effort `low`. A Claude model that rejects a forced `tool_choice` (Opus 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1) is a config error |
+| `llm.backends[].hedge_after_s` | 0 / 2.5 | No answer by then: the same call again, in parallel; the first usable answer wins. 0 = off; must be below that backend's `timeout_s` |
+| `llm.backends[].keepalive_s` | 0 / 20.0 | Claude only: while idle, a free API call this often keeps the connection open; 0 = off |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
 | `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
@@ -410,7 +465,8 @@ STIMULATING --partner_text--> stop trial (reason context_changed) --> MENU_CUE (
 any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)--> BASELINE
 ```
 
-- `MENU_CUE` waits for the next page up to `llm.timeout_s`, then uses a fallback page.
+- `MENU_CUE` waits for the next page up to the active backends' `timeout_s` added up (4 s with
+  Claude alone), then uses a fallback page.
 - `CONFIRMING` is its own trial (new `trial_id`) with only two active slots: "Say it" on s1
   (13 Hz) and "Back" on s4 (11 Hz), so the confirm step is a 2-class decision. A timeout counts as
   Back: nothing is ever spoken by default.
@@ -610,12 +666,18 @@ Take shifts with the teammate. Commit a working state before sleeping.
 - LLM calls are mocked in tests; one optional live smoke test behind `RUN_LLM_TESTS=1`.
 - The flicker is his: dropped frames come from his display's session log (SYNC 1.5).
 
-## 10. Later: phone and Jetson (not now)
+## 10. Phone (built) and Jetson (later)
 
-- The partner page is already a web page served by the laptop, so a phone can join over the local
-  network by setting `server.host: 0.0.0.0` and opening `http://<laptop-ip>:8000`.
-- Planned split: the partner page on the partner's phone (mic, transcript, conversation), while the
-  laptop runs his display for the user.
+- The partner page can run on the partner's phone (mic, transcript, conversation, Stop) while the
+  laptop runs his display for the user. Only one partner page is active; a new one replaces the
+  old (close code 4000).
+- **iPhone: the native app** (`ios/`, `ios/README.md`), installed from Xcode on the teammate's
+  Mac. It pairs with the app link the server prints. Two ways to reach the server:
+  `python -m app.server --tunnel` (Cloudflare https, any network) or `server.host: 0.0.0.0`
+  (plain http on the same Wi-Fi; the app allows local http, a phone browser gets no mic there).
+- Fallback: the web page in iPhone Safari or Android Chrome through the `--tunnel` phone link.
+- Remote requests always need the per-start access key (`app/remote.py`, 403 / 4403);
+  `/ws/decoder` is never remote.
 - The decoder could later run on a Jetson and connect to `/ws/decoder` over the network; the
   contract does not change. The vendored BrainFlow would need Linux ARM builds first.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
@@ -630,11 +692,15 @@ pip install -e ".[dev]"
 pytest
 python -m app.server                        # real decoder connects to /ws/decoder
 python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
+python -m app.server --tunnel               # + a phone link (https, access key) via cloudflared
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
 python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
 python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
 python tools/prerender_tts.py               # fixed-list clips to disk while the network is good
+python tools/ui_shots.py                    # partner page screenshots into cache/ui_shots/
+python tools/ui_fixture.py                  # rewrite the iOS message fixture (--check: exit 1 if stale)
+(cd ios/BrainSyncKit && swift test)         # BrainSyncKit tests (Mac or Linux Swift toolchain)
 python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
 
 # demo runbook: docs/DEMO.md

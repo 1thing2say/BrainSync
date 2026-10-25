@@ -9,7 +9,8 @@ requests at once). Clips are cached on disk by voice, model and text, so a promp
 once plays instantly the next time; ``prefetch`` warms the cache for prompts that are
 known in advance.
 
-The key is ``CARTESIA_API_KEY`` from the environment, else from the first ``.env`` found
+The key is ``CARTESIA_API_KEY`` from the environment, else from ``BRAINSYNC_ENV_FILE``
+(an installed copy: /etc/brainsync/secrets.env), else from the first ``.env`` found
 in the working directory or above it, or above this package (the repo root's ``.env``
 serves every worktree under it). It is never printed. Without a key, without a player,
 or when a request fails, the prompt is only printed (there is no other voice to fall back
@@ -30,6 +31,8 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+
+from . import paths
 
 __all__ = ["CartesiaSpeaker", "TTSError", "speak", "prefetch", "find_api_key",
            "player_command", "default_speaker", "DEFAULT_VOICE_ID"]
@@ -82,10 +85,15 @@ def read_dotenv(path: Path, name: str) -> str | None:
 def find_api_key(env: Mapping[str, str] = os.environ,
                  starts: Iterable[Path] | None = None) -> str | None:
     """CARTESIA_API_KEY from ``env``, else from the nearest ``.env`` above any of ``starts``
-    (default: the working directory, then this package)."""
+    (default: first the secrets file of brainsync/paths.py, then the working directory and
+    this package)."""
     if env.get(KEY_NAME):
         return env[KEY_NAME]
-    starts = [Path.cwd(), Path(__file__).resolve().parent] if starts is None else starts
+    if starts is None:
+        key = read_dotenv(paths.env_file(), KEY_NAME)
+        if key:
+            return key
+        starts = [Path.cwd(), Path(__file__).resolve().parent]
     for start in starts:
         for folder in (start, *start.parents):
             key = read_dotenv(folder / ".env", KEY_NAME)

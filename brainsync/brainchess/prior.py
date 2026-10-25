@@ -31,7 +31,8 @@ import numpy as np
 __all__ = ["MATE_SCORE", "PIECE_VALUES", "find_stockfish", "heuristic_scores", "to_weights", "Engine"]
 
 ENV_VAR = "BRAINCHESS_STOCKFISH"
-FALLBACK_PATHS = ("/opt/homebrew/bin/stockfish", "/usr/local/bin/stockfish")
+# Homebrew, then Debian/Ubuntu's stockfish package (/usr/games is not on a systemd unit's PATH)
+FALLBACK_PATHS = ("/opt/homebrew/bin/stockfish", "/usr/local/bin/stockfish", "/usr/games/stockfish")
 
 MATE_SCORE = 10000.0
 MAX_MULTIPV = 64
