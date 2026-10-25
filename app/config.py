@@ -23,14 +23,18 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from app.schemas import Option, SlotId, SlotSpec, Waveform, validate_option
+from brainsync import paths
 
+# In a source checkout these are the repo's folders; brainsync/paths.py has the installed places
+# and the BRAINSYNC_* variables that override them.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = REPO_ROOT / "config"
+CONFIG_DIR = paths.config_dir()
+STATE_DIR = paths.state_dir()  # relative paths the app writes (speech.cache_dir) resolve here
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "default.yaml"
 DEFAULT_INTENTS_PATH = CONFIG_DIR / "intents.yaml"
 DEFAULT_PROFILE_PATH = CONFIG_DIR / "profile.yaml"  # the fictional demo persona (committed)
-USER_PROFILE_PATH = REPO_ROOT / "profiles" / "user.yaml"  # a real user's profile: gitignored
-DEFAULT_ENV_PATH = REPO_ROOT / ".env"  # gitignored; secrets such as CARTESIA_API_KEY
+USER_PROFILE_PATH = STATE_DIR / "profiles" / "user.yaml"  # a real user's profile: gitignored
+DEFAULT_ENV_PATH = paths.env_file()  # gitignored; secrets such as CARTESIA_API_KEY
 
 REQUIRED_FALLBACK_LISTS = ("home", "yes_no")
 
@@ -497,6 +501,7 @@ def save_user_profile(profile: Profile, path: str | Path = USER_PROFILE_PATH) ->
 __all__ = [
     "REPO_ROOT",
     "CONFIG_DIR",
+    "STATE_DIR",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_INTENTS_PATH",
     "DEFAULT_PROFILE_PATH",

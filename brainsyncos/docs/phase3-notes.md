@@ -41,12 +41,12 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
 
 ### 3b: the apps (parent repo plus `packages/brainsync*`)
 
-1. **Make the app work from an install** (changes outside `brainsyncos/`).
-   - Today, `pytest` against an installed wheel gives 70 failures and 6 collection errors.
-   - Replace the repo-root lookups (`app/config.py:26-31`, `app/server.py:50`, `app/log.py:27`, `brainsync/paths.py`) with env-overridable paths: `BRAINSYNC_CONFIG_DIR`, `BRAINSYNC_UI_DIR`, `BRAINSYNC_LOG_DIR` and `BRAINSYNC_ENV_FILE`. Alternatively, ship the files as package data.
-   - Add `[project.scripts]`: `brainsync-demo`, `brainsync-swipe`, `brainchess`, `brainsync-voice`.
-   - Use the system Stockfish (`/usr/games/stockfish`).
-   - Speech: another session moved the apps' prompts to Cartesia TTS (`brainsync/voice.py`); offline, it only prints. Decide whether to add `espeak-ng` as an offline voice.
+1. **Make the app work from an install** (changes outside `brainsyncos/`). **Done 2026-10-24**, after merging `main` (the protocol v3 `brainsync.server` included):
+   - `brainsync/paths.py` resolves every place the apps read or write. Each is a `BRAINSYNC_*` variable if set; otherwise the repo folder in a checkout, or the installed place: config `/etc/brainsync`, UI `/usr/share/brainsync/ui`, the v3 server's clients `/usr/share/brainsync/clients`, secrets `/etc/brainsync/secrets.env`, state (user profile, TTS cache) `$XDG_STATE_HOME/brainsync`, logs `<state>/logs`. `app/config.py`, `app/log.py`, `app/server.py`, `brainsync/server/app.py`, `brainsync/voice.py` and the two TTS tools use it. In a checkout nothing moves.
+   - `[project.scripts]`: `brainsync-demo`, `-record`, `-check`, `-stimulus`, `-swipe`, `-swipe-web`, `brainchess`, `brainsync-server` (v3), `brainsync-voice`.
+   - BrainChess finds `/usr/games/stockfish` (Ubuntu's package) without `PATH`.
+   - Checked: a wheel installed with `pip --target` outside the repo runs `brainsync-voice` (page 200, `/api/health`, log in the state folder) with `BRAINSYNC_CONFIG_DIR` and `BRAINSYNC_UI_DIR` set. `tests/test_install_layout.py` covers the wiring.
+   - **Still open:** the speech fallback. `brainsync/voice.py` speaks only through Cartesia; offline it prints. Decide whether to add `espeak-ng` (in the Jetson pool) as an offline voice. Running the whole pytest suite against the installed wheel waits for the builder venv (step 2).
 2. **Package the runtime as `brainsync-runtime`**: a venv at `/opt/brainsyncos/venv`, built in the builder at that exact path.
    - Build it from the hash-locked wheels in `phase3-research/python/brainsync.lock.txt`: 57 wheels, all with cp312 aarch64 builds.
    - PsychoPy goes in with `--no-deps` and the trimmed set (`psychopy-excludes.txt`, plus `json-tricks`, `six` and `pyserial`). `from psychopy import visual, event` works under Xvfb this way.

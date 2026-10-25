@@ -43,7 +43,7 @@ if __package__ in (None, ""):
 import httpx  # noqa: E402
 
 from app.config import (  # noqa: E402
-    REPO_ROOT,
+    STATE_DIR,
     AppConfig,
     ConfigError,
     load_config,
@@ -316,7 +316,7 @@ def check_clips(cfg: AppConfig, clips_dir: str | Path | None = None) -> Result:
         return Result("clips", SKIP, "speech.provider is browser")
     if clips_dir is None and not speech.cache_dir:
         return Result("clips", SKIP, "speech.cache_dir is empty: clips live in memory only")
-    clips_dir = Path(clips_dir) if clips_dir is not None else REPO_ROOT / speech.cache_dir
+    clips_dir = Path(clips_dir) if clips_dir is not None else STATE_DIR / speech.cache_dir
     m = cfg.menus
     try:
         intents = load_intents(option_count=m.option_count, label_max_chars=m.label_max_chars,

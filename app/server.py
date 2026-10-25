@@ -36,6 +36,7 @@ from pydantic import ValidationError
 
 from app.config import (
     REPO_ROOT,
+    STATE_DIR,
     USER_PROFILE_PATH,
     AppConfig,
     ConfigError,
@@ -54,8 +55,9 @@ from app.orchestrator import Orchestrator
 from app.remote import RemoteGate, is_remote, new_key
 from app.schemas import Message, parse_decoder_to_server, parse_ui_to_server, to_json
 from app.tts import AUDIO_ROUTE, CartesiaTTS
+from brainsync import paths
 
-UI_DIR = REPO_ROOT / "ui"
+UI_DIR = paths.ui_dir()  # <repo>/ui in a checkout; BRAINSYNC_UI_DIR overrides
 TICK_S = 0.02  # how often deadlines are checked; well below the shortest timing in config
 REPLACED = 4000  # websocket close code sent to a connection that a newer one replaced
 UI_CLIENTS = ("browser", "ios")  # /ws/ui?client=...: the iPhone app says ios; anything else is a browser
@@ -432,7 +434,7 @@ def main(argv: list[str] | None = None) -> None:
                      cartesia_api_key=os.environ.get("CARTESIA_API_KEY"),
                      anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
                      profile_path=USER_PROFILE_PATH,
-                     tts_cache_dir=REPO_ROOT / cfg.speech.cache_dir if cfg.speech.cache_dir else None)
+                     tts_cache_dir=STATE_DIR / cfg.speech.cache_dir if cfg.speech.cache_dir else None)
     tts, menus = app.state.tts, app.state.menus
     voice = (f"Cartesia {cfg.speech.model}" if tts.enabled
              else f"browser speechSynthesis only ({tts.why_disabled})")

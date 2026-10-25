@@ -51,6 +51,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from .. import paths
 from ..envfile import load_env_file
 from . import protocol as P
 from .decoding import DecoderBank
@@ -61,9 +62,9 @@ NAME = "python -m brainsync.server"
 DEFAULT_FREQS = (15.0, 17.0, 12.0, 20.0)
 TOKEN_FILE = Path("~/.config/brainsync/token")
 CALIBRATE_S = 10.0
-ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = ROOT / "clients" / "web"
-JS_DIR = ROOT / "clients" / "js"
+# <repo>/clients in a checkout; BRAINSYNC_CLIENTS_DIR overrides (brainsync/paths.py)
+WEB_DIR = paths.clients_dir() / "web"
+JS_DIR = paths.clients_dir() / "js"
 WEB_FILES = ("index.html", "style.css", "app.js")
 JS_FILES = ("flicker.js", "brainsync-client.js")
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png"}
