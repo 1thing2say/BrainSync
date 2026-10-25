@@ -28,8 +28,9 @@
 #                config, OOBE skipped, NVIDIA's default users removed, package
 #                repository keyring installed, the board's udev rules and
 #                ch341 module installed (modules.dep), brainsync-runtime and
-#                brainsync installed (brainsync-voice runs), and the repository
-#                unmounted again; re-run is idempotent
+#                brainsync installed (brainsync-voice runs), the CUDA runtime
+#                installed (ldconfig resolves libcudart and libcublas), and the
+#                repository unmounted again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -373,6 +374,19 @@ check_usb_serial() {
     echo "board: brainsync-udev and brainsyncos-ch341-tegra installed, ch341 in modules.dep for $kver"
 }
 
+# check_cuda TARGET: 80-cuda.sh installed NVIDIA's CUDA runtime and no dGPU driver.
+check_cuda() {
+    local t="$1" lib
+    grep -q '80-cuda.sh: installed cuda-cudart-13-2 .*, libcublas-13-2 ' "$t/var/log/brainsyncos/install.log" \
+        || die "80-cuda.sh did not finish"
+    for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
+        in_target "$t" ldconfig -p | grep -q "^[[:space:]]$lib (libc6,AArch64) => " || die "ldconfig does not resolve $lib"
+    done
+    ! in_target "$t" dpkg-query -W -f '${Package} ${Status}\n' 'libnvidia-compute*' 2> /dev/null | grep -q ' installed$' \
+        || die "libnvidia-compute is installed"
+    echo "cuda: cudart and cuBLAS installed, ldconfig resolves libcudart.so.13, libcublas.so.13 and libcublasLt.so.13"
+}
+
 c_hook() {
     setup_target
     local t="$W/target" rel
@@ -390,9 +404,10 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (9 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (10 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
     check_keyring "$t"
     check_usb_serial "$t"
+    check_cuda "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.
