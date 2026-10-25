@@ -29,7 +29,9 @@ from brainsync.online import Decision, Decoder
 
 FS = 250.0
 FREQS = (15.0, 17.0)
-HEADLESS = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
+FREQ = ["--paradigm", "freq"]           # the 15 / 17 Hz path; c-VEP is the default
+HEADLESS = ["--fake", "--fast", "--no-stimulus", "--no-voice", *FREQ]
+CODE = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
 
 
 @pytest.fixture(autouse=True)
@@ -731,7 +733,7 @@ def fake_stimulus(monkeypatch, tmp_path):
 
 def test_board_commands_reach_the_stimulus(fake_stimulus, capsys):
     calls, lines, _ = fake_stimulus
-    assert cli.main(["--fake", "--fast", "--no-voice", "--max-moves", "1", "--seed", "2",
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--max-moves", "1", "--seed", "2",
                      "--calibrate", "10", "--color", "black", "--end-s", "0"]) == 0
     assert len(calls) == 1
     assert calls[0]["command"][1:3] == ["-m", "brainsync.brainchess.stimulus"]
@@ -771,7 +773,7 @@ def test_board_commands_reach_the_stimulus(fake_stimulus, capsys):
 def test_escape_in_the_stimulus_ends_the_run_cleanly(fake_stimulus, capsys):
     _, _, mode = fake_stimulus
     mode["value"] = "escape"
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10"]) == 0
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10"]) == 0
     assert "run ended: escape" in capsys.readouterr().out
 
 
@@ -792,7 +794,7 @@ def test_the_final_screen_stays_up_before_the_stimulus_closes(fake_stimulus, cap
     # regression: EOF used to follow the result caption within a millisecond, so the last
     # move and the result were never on screen
     _, lines, _ = fake_stimulus
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10", "--end-s", "0.6",
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10", "--end-s", "0.6",
                      *argv]) == 0
     times = read_times(lines)
     assert times[-1][1] == "EOF"
@@ -804,7 +806,7 @@ def test_the_final_screen_stays_up_before_the_stimulus_closes(fake_stimulus, cap
 def test_no_linger_without_a_finished_game(fake_stimulus, capsys):
     _, lines, _ = fake_stimulus
     began = time.monotonic()
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10", "--seconds", "4",
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10", "--seconds", "4",
                      "--end-s", "30"]) == 0
     assert time.monotonic() - began < 25
     assert "run ended: time up" in capsys.readouterr().out
@@ -829,7 +831,7 @@ def test_escape_on_the_final_screen_closes_it_and_keeps_the_result(fake_stimulus
     _, _, mode = fake_stimulus
     mode["value"] = "escape_at_result"
     began = time.monotonic()
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10", "--end-s", "20",
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10", "--end-s", "20",
                      "--fen", "6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1"]) == 0
     assert time.monotonic() - began < 15                # did not wait out --end-s
     out = capsys.readouterr().out
@@ -840,7 +842,7 @@ def test_stimulus_crash_mid_game_exits_1(fake_stimulus, capsys):
     # the demo's regression: a crashed stimulus must not leave the exit code at 0
     _, _, mode = fake_stimulus
     mode["value"] = "crash"
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10"]) == 1
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10"]) == 1
     cap = capsys.readouterr()
     assert "run ended: stimulus" in cap.out
     assert "error: the stimulus exited with code 1" in cap.err
@@ -866,7 +868,7 @@ def test_ctrl_c_mid_game_exits_0_even_when_it_reached_the_stimulus(fake_stimulus
     mode["value"] = "sigint"
     InterruptingBoard.reads = 500            # past calibration (10 s = 400 reads)
     monkeypatch.setattr(cli, "FakeBoard", InterruptingBoard)
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10"]) == 0
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10"]) == 0
     cap = capsys.readouterr()
     assert "run ended: interrupted" in cap.out and "stimulus exited with code" not in cap.err
     assert calls[0]["stim"].proc.returncode == -signal.SIGINT
@@ -876,7 +878,7 @@ def test_ctrl_c_during_calibration_exits_130(fake_stimulus, monkeypatch, capsys)
     calls, _, _ = fake_stimulus
     InterruptingBoard.reads = 100
     monkeypatch.setattr(cli, "FakeBoard", InterruptingBoard)
-    assert cli.main(["--fake", "--fast", "--no-voice", "--calibrate", "10"]) == 130
+    assert cli.main(["--fake", "--fast", "--no-voice", *FREQ, "--calibrate", "10"]) == 130
     cap = capsys.readouterr()
     assert "interrupted before the game started" in cap.err and cap.out == ""
     assert calls[0]["stim"].proc.returncode == 0
@@ -940,3 +942,309 @@ def test_modules_do_not_import_psychopy():
     code = ("import sys, brainsync.brainchess.__main__, brainsync.brainchess.game; "
             "assert 'psychopy' not in sys.modules and 'matplotlib.pyplot' not in sys.modules")
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+# -- c-VEP: CodeGate, the three-target session and the default CLI --------------------------
+
+from brainsync.brainchess.game import BACK  # noqa: E402
+from brainsync.brainchess.gate import CodeGate  # noqa: E402
+from brainsync.vep.live import CYCLE_FRAMES, CodeVepDecoder, standard_fake_board  # noqa: E402
+
+CYCLE_S = CYCLE_FRAMES / 60.0
+
+
+class StubCodeDecoder:
+    """What CodeGate needs from a CodeVepDecoder: a cycle length, votes and reset()."""
+
+    fs = FS
+    n_samples = int(round(CYCLE_S * FS))
+    votes = 2
+
+    def __init__(self) -> None:
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+def code_decision(onset: float, raw: int, committed: int = ABSTAIN,
+                  changed: bool = False) -> Decision:
+    """A c-VEP decision for the cycle starting at Unix time ``onset``."""
+    return Decision(time=onset + StubCodeDecoder.n_samples / FS, scores=np.array([0.5, 0.1, 0.0]),
+                    raw=raw, committed=committed, changed=changed, gap=0.4, level=0.5)
+
+
+def test_code_gate_drops_cycles_that_began_before_the_screen_settled():
+    now = {"t": 100.0}
+    dec = StubCodeDecoder()
+    gate = CodeGate(dec, cooldown_s=0.5, clock=lambda: now["t"])
+    assert gate.fresh_from == 100.5 and gate.votes == 2
+    events = [(100.1, "cycle", 0), (100.5, "cycle", 1), (101.55, "cycle", 2),
+              (101.0, "stim_on", 0)]
+    assert gate.fresh(events) == [(100.5, "cycle", 1), (101.55, "cycle", 2)]
+    assert gate.dropped == 1
+    now["t"] = 200.0
+    gate.screen_changed()
+    assert dec.resets == 1 and gate.fresh_from == 200.5
+    assert gate.fresh([(101.55, "cycle", 2)]) == []
+
+
+def test_code_gate_fires_on_the_decoders_commit_and_ignores_stale_decisions():
+    now = {"t": 0.0}
+    dec = StubCodeDecoder()
+    gate = CodeGate(dec, cooldown_s=0.5, clock=lambda: now["t"])
+    assert gate.push(code_decision(1.0, 2)) == ABSTAIN          # a vote, no commit yet
+    assert gate.pending == 2 and gate.streak == 1
+    now["t"] = 3.0
+    assert gate.push(code_decision(2.05, 2, committed=2, changed=True)) == 2
+    assert gate.fired == 1 and dec.resets == 1 and gate.fresh_from == 3.5
+    # a decision from the same batch, made on the old screen: stale
+    assert gate.push(code_decision(2.05, 1, committed=1, changed=True)) == ABSTAIN
+    assert gate.stale == 1 and gate.pending == ABSTAIN
+    # a commitment that did not change (the same target again) is no new pick
+    assert gate.push(code_decision(3.6, 0, committed=0, changed=False)) == ABSTAIN
+    with pytest.raises(ValueError, match="cooldown"):
+        CodeGate(dec, cooldown_s=-1)
+
+
+def test_code_gate_stream_time_counts_from_the_first_sample():
+    gate = CodeGate(StubCodeDecoder(), clock=lambda: 0.0)
+    gate.observe(np.array([]))
+    assert gate.origin is None
+    gate.observe(np.array([50.0, 50.004]))
+    gate.observe(np.array([60.0]))
+    assert gate.origin == 50.0
+    assert gate.stream_time(code_decision(51.0, 0)) == pytest.approx(
+        1.0 + StubCodeDecoder.n_samples / FS)
+
+
+def make_code_session(board: chess.Board | None = None, **kw):
+    kw.setdefault("code", True)
+    return make_session(board, **kw)
+
+
+def test_code_session_draws_three_panels_and_back_undoes():
+    session, display = make_code_session()
+    session.start()
+    assert session.n_targets == 3 and display.stage == "piece"
+    assert display.panels == ("", "", "BACK")            # the board's groups flicker
+    first = display.groups
+    session.on_pick(BACK)                                # nothing to undo yet
+    assert display.groups == first and session.undos == 0 and session.backs == 1
+    assert session.picks[-1].target == BACK
+    session.on_pick(0)
+    assert display.groups != first
+    session.on_pick(BACK)
+    assert display.groups == first and session.undos == 1
+    with pytest.raises(ValueError, match="target must be 0..2"):
+        session.on_pick(3)
+    freq, _ = make_session()
+    freq.start()
+    with pytest.raises(ValueError, match="target must be 0..1"):
+        freq.on_pick(BACK)
+
+
+def test_code_session_confirm_is_play_restart_back():
+    board = chess.Board("7k/7p/8/7P/8/8/8/K5R1 b - - 0 1")   # one legal move
+    session, display = make_code_session(board, user_color=chess.BLACK)
+    session.start()
+    assert display.stage == "confirm" and display.panels == ("PLAY", "RESTART", "BACK")
+    assert session.target_labels() == ("PLAY", "RESTART", "BACK")
+    session.on_pick(0)
+    assert session.user_moves == 1
+
+
+def test_code_session_promotion_labels_fit_the_confidence_lines():
+    session, display = make_code_session(chess.Board("1r2k3/2P5/8/8/8/8/8/4K3 w - - 0 1"))
+    session.start()
+    user = SimulatedUser(Engine(None, seed=1))
+    for _ in range(40):
+        if display.stage == "promo":
+            break
+        session.on_pick(user.look(session))
+    assert display.stage == "promo"
+    assert len(display.panels) == 3 and display.panels[2] == "BACK"
+    labels = session.target_labels()
+    assert labels[2] == "BACK" and all(len(lab) <= 10 for lab in labels)
+
+
+def test_code_session_sends_confidence_and_training_screens():
+    dec = StubCodeDecoder()
+    now = {"t": 0.0}
+    gate = CodeGate(dec, cooldown_s=0.5, clock=lambda: now["t"])
+    session, display = make_code_session(gate=gate)
+    session.show_training(0, 30)
+    assert display.cue_target == 0 and not display.holding
+    assert display.panels == ("A", "B", "BACK")
+    assert display.confidence_lines == ("training: keep looking at A   cycle 0/30",)
+    session.show_training(12, 30)
+    assert display.confidence_lines[0].endswith("cycle 12/30")
+    session.trained(0.83, 1 / 3)
+    assert display.cue_target is None and display.holding
+    assert display.confidence_lines == ("template ready: 83 % on held-out cycles (chance 33 %)",)
+    session.start()
+    assert session.push(code_decision(1.0, 0)) == ABSTAIN
+    lines = display.confidence_lines
+    assert len(lines) == 4 and lines[0].startswith("A    ") and lines[0].endswith("+0.50 <")
+    assert lines[2].startswith("BACK ") and lines[3] == "lead 0.40   no choice yet"
+    assert display.windows[-1] == (pytest.approx(1.0 + StubCodeDecoder.n_samples / FS), 0,
+                                   True, False)
+    assert display.vote_state is None                   # no vote meters in code mode
+    before = display.groups
+    assert session.push(code_decision(2.05, 1, committed=1, changed=True)) == 1
+    assert display.groups != before and session.picks[-1].target == 1
+    assert display.confidence_lines[3] == "lead 0.40   choice: B *"
+
+
+def test_simulated_user_looks_at_back_after_a_wrong_pick():
+    session, display = make_code_session()
+    user = SimulatedUser(Engine(None, seed=9))
+    session.start()
+    right = user.look(session)
+    assert right in (0, 1)
+    session.on_pick(1 - right)                          # a wrong decode
+    assert user.look(session) == BACK
+    session.on_pick(BACK)
+    assert user.look(session) == right
+
+
+def test_code_game_with_wrong_decodes_is_played_out_with_back():
+    session, _ = make_code_session(max_moves=4)
+    user = SimulatedUser(Engine(None, seed=9))
+    session.start()
+    rng = np.random.default_rng(0)
+    picks = 0
+    while not session.over:
+        target = user.look(session)
+        if rng.random() < 0.2:                          # a wrong decode now and then
+            target = int(rng.choice([k for k in range(3) if k != target]))
+        session.on_pick(target)
+        picks += 1
+        assert picks < 2000
+    assert session.user_moves == 4 and session.undos >= 1
+    assert sum(m.backs for m in session.moves) == session.backs
+    assert "undid a pick" in session.summary()[0]
+
+
+def test_stimulus_display_writes_confidence_cue_and_three_panels():
+    out = io.StringIO()
+    d = StimulusDisplay(out)
+    assert d.show("." * 64, None, None, ("", "", "BACK"), "x")
+    assert d.confidence(["A  ███ +0.42 <", "lead|0.31"])
+    assert d.confidence(["A  ███ +0.42 <", "lead|0.31"])      # unchanged: not sent again
+    assert d.cue(0) and d.cue(0) and d.cue(None) and d.confidence([])
+    lines = out.getvalue().splitlines()
+    assert "panels ||BACK" in lines
+    assert lines.count("confidence A  ███ +0.42 <|lead/0.31") == 1
+    assert lines[-3:] == ["cue 0", "cue none", "confidence"]
+    cmds = [parse_command(ln) for ln in lines]
+    assert cmds[-4].value == ("A  ███ +0.42 <", "lead/0.31") and cmds[-1].value == ()
+
+
+def test_cli_code_end_to_end_fake_fast(capsys):
+    began = time.monotonic()
+    assert cli.main([*CODE, "--max-moves", "3", "--seed", "1"]) == 0
+    assert time.monotonic() - began < 60
+    cap = capsys.readouterr()
+    assert "brainchess: 3 moves played" in cap.out and "ended: move limit" in cap.out
+    assert len(list(read_pgn(cap.out).mainline_moves())) == 5
+    assert "c-VEP chess_cvep: 3 targets" in cap.err
+    assert "[speak] Look at the A square and keep looking at it." in cap.err
+    assert "template from 30 cycles, leave-one-out accuracy" in cap.err
+    assert "baseline from" not in cap.err                 # no rest calibration for c-VEP
+    assert "went to the target the simulated user looked at" in cap.out
+    # a pick takes three cycles: the one the screen change cut (dropped) and two decisions
+    first = next(ln for ln in cap.err.splitlines() if ln.startswith("  pick: move 1"))
+    assert "at 3.7 s" in first
+
+
+def test_cli_code_noisy_board_uses_back_and_still_plays(monkeypatch, capsys):
+    import functools
+    from brainsync.vep import live
+    monkeypatch.setattr(cli, "standard_fake_board",
+                        functools.partial(live.standard_fake_board, amp=0.15))
+    assert cli.main([*CODE, "--max-moves", "2", "--seed", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "brainchess: 2 moves played" in out
+    summary = out.splitlines()[0]
+    undid = int(summary.split(" undid a pick")[0].rsplit("(", 1)[1])
+    assert undid >= 1
+
+
+def test_cli_code_template_is_saved_and_reused(tmp_path, capsys):
+    path = tmp_path / "chess.npz"
+    assert cli.main([*CODE, "--max-moves", "1", "--save-template", str(path)]) == 0
+    assert path.exists() and f"template saved to {path}" in capsys.readouterr().err
+    assert cli.main([*CODE, "--max-moves", "1", "--template", str(path)]) == 0
+    cap = capsys.readouterr()
+    assert "training:" not in cap.err and f"template {path}" in cap.err
+    assert "brainchess: 1 moves played" in cap.out
+
+
+@pytest.mark.parametrize("argv, why", [
+    (["--no-voice", "--no-stimulus"], "--no-stimulus works only with --fake"),
+    (["--train-cycles", "1"], "--train-cycles"),
+    (["--cycles", "0"], "--cycles"),
+])
+def test_cli_code_bad_arguments(argv, why, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2 and why in capsys.readouterr().err
+
+
+def test_cli_code_refuses_a_frequency_config_and_freq_a_code_config(capsys):
+    assert cli.main([*CODE, "--config", "chess"]) == 2
+    assert "three-target [code] config" in capsys.readouterr().err
+    assert cli.main([*HEADLESS, "--config", "chess_cvep"]) == 2
+    assert "two-target config" in capsys.readouterr().err
+
+
+def test_code_board_commands_reach_the_stimulus(fake_stimulus, capsys):
+    calls, lines, _ = fake_stimulus
+    assert cli.main(["--fake", "--fast", "--no-voice", "--max-moves", "1", "--seed", "2",
+                     "--end-s", "0"]) == 0
+    args = calls[0]["args"]
+    assert args[:4] == ["-c", "chess_cvep", "--markers", "unix"]
+    cmds = [parse_command(ln) for ln in lines.read_text().splitlines()]
+    verbs = [c.verb for c in cmds]
+    assert verbs[0] == "lanes" and "go" in verbs and "votes" not in verbs
+    # training: the three panels flicker with the cue on A, then the cue goes
+    cues = [c.value for c in cmds if c.verb == "cue"]
+    assert cues == [0, None]
+    panels = [c.value for c in cmds if c.verb == "panels"]
+    assert panels[0] == ("A", "B", "BACK") and ("", "", "BACK") in panels
+    assert ("PLAY", "RESTART", "BACK") in panels
+    conf = [c.value for c in cmds if c.verb == "confidence"]
+    assert conf[0] == ("training: keep looking at A   cycle 0/30",)
+    assert any(c and c[0].startswith("template ready") for c in conf)
+    assert any(len(c) == 4 and c[3].startswith("lead ") for c in conf)
+    windows = [c.value for c in cmds if c.verb == "window"]
+    assert any(w.fired for w in windows)
+    # one decision per code cycle, on the board's stream clock
+    gaps = [b.t - a.t for a, b in zip(windows, windows[1:])]
+    assert min(gaps) == pytest.approx(CYCLE_S, abs=0.01)
+
+
+def test_log_tail_reads_only_whole_cycle_lines(tmp_path):
+    log = tmp_path / "stim.log"
+    log.write_text("measured refresh: 60.00 Hz\n[marker 10.0000] go\n[marker 10.0000] cyc")
+    tail = cli.LogTail(log)
+    assert tail.events() == []
+    with open(log, "a") as f:
+        f.write("le:0\n[marker 11.0500] cycle:1\n[marker 11.1] groups:....\n")
+    assert tail.events() == [(10.0, "cycle", 0), (11.05, "cycle", 1)]
+    assert tail.events() == []
+
+
+def test_code_feed_passes_only_fresh_cycles_to_the_decoder():
+    board = standard_fake_board(fixated=0, seed=1)
+    dec = CodeVepDecoder(board.fs, train_cycles=2)
+    gate = CodeGate(dec, cooldown_s=0.5, clock=lambda: board.now)
+    feed = cli.CodeFeed(gate, board.read_events)
+    gate.screen_changed()
+    board.start_flicker()
+    board.advance(4.0)
+    feed.feed(*board.read())
+    assert feed.n_seen == 1000 and gate.origin == board.t0
+    assert gate.dropped == 1                               # cycle 0 began at the change
+    assert not dec.training                                # cycles 1 and 2 trained it

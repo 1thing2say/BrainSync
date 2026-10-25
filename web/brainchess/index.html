@@ -20,6 +20,7 @@
   --ink: #1B2228;
   --trace15: #AD530A;
   --trace17: #1E5DA6;
+  --trace-back: #3F7A3A;   /* c-VEP: the Back panel, target 2 */
   --marker: #B42A22;
   --sage: #A7B2AB;
   /* derived neutrals, biased toward the paper's green-grey */
@@ -54,6 +55,7 @@
     --ink: #E1E7E3;
     --trace15: #F0984A;
     --trace17: #74A9EC;
+    --trace-back: #8CC47F;
     --marker: #F06A5F;
     --sage: #3A474D;
     --surface: #172227;
@@ -73,6 +75,7 @@
   --ink: #E1E7E3;
   --trace15: #F0984A;
   --trace17: #74A9EC;
+  --trace-back: #8CC47F;
   --marker: #F06A5F;
   --sage: #3A474D;
   --surface: #172227;
@@ -181,12 +184,15 @@ button, input, select { font: inherit; color: inherit; }
 .meter[data-t="1"] { --c: var(--trace17); }
 .meter[data-t="1"] .pips i { border-radius: 50%; }
 .meter .pips i.on { background: var(--c); }
+/* c-VEP: the decoder's confidence, one line per target and the lead / choice line */
+.conf { margin: 0; font: 500 var(--step--1)/1.35 var(--f-mono); white-space: pre; color: var(--ink); min-width: 0; overflow-x: auto; }
 .flash {
   font: 600 var(--step--1)/1.2 var(--f-mono); padding: 3px 8px; border-radius: var(--radius);
   background: var(--ink); color: var(--paper); justify-self: start; box-shadow: 0 0 0 3px var(--surface);
 }
 .flash[data-t="0"] { background: var(--trace15); color: var(--on-accent); }
 .flash[data-t="1"] { background: var(--trace17); color: var(--on-accent); }
+.flash[data-t="2"] { background: var(--trace-back); color: var(--on-accent); }
 .flash.wrong::after { content: "  not where you looked"; font-weight: 400; }
 .badge-auto { font: 500 0.6875rem/1 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; border: 1px dashed var(--ink-2); padding: 4px 6px; color: var(--ink-2); }
 
@@ -201,8 +207,13 @@ button, input, select { font: inherit; color: inherit; }
 .board-wrap { grid-area: board; display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-rows: auto 16px; min-width: 0; }
 .panel[data-t="0"] { grid-area: p0; }
 .panel[data-t="1"] { grid-area: p1; }
+.panel[data-t="2"] { grid-area: p2; }
+/* c-VEP: a third target, BACK, under the right-hand panel */
+.arena:not(.code) .panel[data-t="2"] { display: none; }
+.arena.code { grid-template-areas: "p0 board p1" "p0 board p2"; --l2: 100%; }
 @media (max-width: 720px) {
   .arena { grid-template-columns: 1fr 1fr; grid-template-areas: "board board" "p0 p1"; }
+  .arena.code { grid-template-columns: 1fr 1fr 1fr; grid-template-areas: "board board board" "p0 p1 p2"; }
 }
 .ranks { display: grid; grid-template-rows: repeat(8, 1fr); }
 .files { grid-column: 2; display: grid; grid-template-columns: repeat(8, 1fr); }
@@ -298,6 +309,9 @@ button, input, select { font: inherit; color: inherit; }
 .panel .phz { font: 600 0.6875rem/1 var(--f-mono); padding: 2px 4px; border-radius: 2px; }
 .panel[data-t="0"] .phz { color: var(--trace15); border: 1px solid currentColor; }
 .panel[data-t="1"] .phz { color: var(--trace17); border: 1px solid currentColor; border-radius: 999px; }
+.panel[data-t="2"] .phz { color: var(--trace-back); border: 1px solid currentColor; border-radius: 0 8px 0 8px; }
+/* the training cue box: look here */
+.panel.cue { outline: 3px solid var(--marker); outline-offset: 4px; }
 .panel:not(.active) .plabel, .panel:not(.active) .phz { opacity: 0.7; }
 .panel .ring { display: none; }
 .panel.gaze .ring {
@@ -311,16 +325,20 @@ button, input, select { font: inherit; color: inherit; }
 .panel.active { color: var(--ink); border-width: 2px; border-style: solid; }
 .panel.active[data-t="0"] { border-color: var(--trace15); background: color-mix(in srgb, var(--trace15) 26%, var(--surface)); }
 .panel.active[data-t="1"] { border-color: var(--trace17); background: color-mix(in srgb, var(--trace17) 26%, var(--surface)); }
+.panel.active[data-t="2"] { border-color: var(--trace-back); background: color-mix(in srgb, var(--trace-back) 26%, var(--surface)); }
 .panel.active::before { content: ""; position: absolute; inset: 0; pointer-events: none; background-color: transparent; animation: tintpulse 2.4s ease-in-out infinite; }
 .panel.active[data-t="0"]::before { --pc: var(--trace15); background-image: repeating-linear-gradient(45deg, color-mix(in srgb, var(--trace15) 45%, transparent) 0 2px, transparent 2px 10px); }
 .panel.active[data-t="1"]::before { --pc: var(--trace17); background-image: radial-gradient(circle, color-mix(in srgb, var(--trace17) 55%, transparent) 1.5px, transparent 2px); background-size: 9px 9px; }
+.panel.active[data-t="2"]::before { --pc: var(--trace-back); background-image: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--trace-back) 45%, transparent) 0 2px, transparent 2px 10px); }
 .panel.active .plabel, .panel.active .pnote { position: relative; z-index: 1; background: var(--surface); padding: 2px 5px; border-radius: 2px; color: var(--ink); }
 .panel.active .phz { position: relative; z-index: 1; }
 .panel.active .phz { color: var(--on-accent); }
 .panel.active[data-t="0"] .phz { background: var(--trace15); }
 .panel.active[data-t="1"] .phz { background: var(--trace17); }
+.panel.active[data-t="2"] .phz { background: var(--trace-back); }
 .arena.real .panel.active[data-t="0"] { background: hsl(0 0% var(--l0)); }
 .arena.real .panel.active[data-t="1"] { background: hsl(0 0% var(--l1)); }
+.arena.real .panel.active[data-t="2"] { background: hsl(0 0% var(--l2)); }
 .arena.real .panel.active::before { display: none; }
 .panel .pnote { font: 400 0.6875rem/1.2 var(--f-mono); color: var(--ink-2); }
 .panel.lost::after { content: ""; position: absolute; inset: 0; background: var(--paper); animation: lose 0.7s ease-out forwards; }
@@ -334,6 +352,7 @@ button, input, select { font: inherit; color: inherit; }
 .legend .k17 { background: var(--trace17); border-radius: 50%; }
 .legend .kna { height: 3px; background: var(--ink-2); vertical-align: 2px; }
 .legend .kst { background: var(--ink-2); opacity: 0.3; }
+.legend .kback { background: var(--trace-back); height: 7px; }
 #trace { width: 100%; height: 150px; display: block; }
 .strip-tools { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
 .btn.small { padding: 3px 8px; font-size: 0.6875rem; }
@@ -432,8 +451,8 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 <div class="wrap">
   <header class="top">
     <div class="brand">
-      <h1>BrainChess <span class="hz mono" aria-hidden="true">15</span><span class="hz mono" aria-hidden="true">/17</span></h1>
-      <p>Play chess with your eyes. The pieces you can move flicker at two rates, and an EEG headset reads which one you watch. Here your pointer stands in for your eyes.</p>
+      <h1>BrainChess <span class="hz mono" id="hz-a" aria-hidden="true">c-</span><span class="hz mono" id="hz-b" aria-hidden="true">VEP</span></h1>
+      <p id="brand-p">Play chess with your eyes. The pieces you can move flicker in two coded patterns, a third square takes back a wrong pick, and an EEG headset reads which one you watch. Here your pointer stands in for your eyes.</p>
     </div>
     <div class="top-right">
       <div class="electrodes">
@@ -465,6 +484,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
             <div class="meter" data-t="1" aria-hidden="true"><span>17 Hz</span><span class="pips"><i></i><i></i><i></i><i></i></span></div>
             <span class="vcount" id="vcount">0 of 4</span>
           </div>
+          <pre class="conf" id="conf" aria-label="Decoder confidence per target" hidden></pre>
           <div class="over-actions" id="over" hidden>
             <span class="hint" id="over-sub"></span>
             <button class="btn solid" type="button" id="over-new">New game</button>
@@ -480,7 +500,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
         <div class="panel" data-t="0" id="panel0" tabindex="0" role="group" aria-roledescription="gaze target" aria-label="Left target, 15 Hz">
           <span class="ring"></span>
           <span class="plabel" id="plabel0">PLAY</span>
-          <span class="phz">15 Hz</span>
+          <span class="phz" id="phz0">15 Hz</span>
           <span class="pnote" id="pnote0">used after you pick a move</span>
         </div>
         <div class="board-wrap">
@@ -500,8 +520,14 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
         <div class="panel" data-t="1" id="panel1" tabindex="0" role="group" aria-roledescription="gaze target" aria-label="Right target, 17 Hz">
           <span class="ring"></span>
           <span class="plabel" id="plabel1">BACK</span>
-          <span class="phz">17 Hz</span>
+          <span class="phz" id="phz1">17 Hz</span>
           <span class="pnote" id="pnote1">used after you pick a move</span>
+        </div>
+        <div class="panel" data-t="2" id="panel2" tabindex="0" role="group" aria-roledescription="gaze target" aria-label="BACK, undo the last pick">
+          <span class="ring"></span>
+          <span class="plabel" id="plabel2">BACK</span>
+          <span class="phz" id="phz2">+700 ms</span>
+          <span class="pnote" id="pnote2">undo the last pick</span>
         </div>
       </div>
 
@@ -512,8 +538,9 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
             <button class="btn small" type="button" id="trace-pause" aria-pressed="false">Pause trace</button>
           </div>
           <div class="legend">
-            <span><i class="k15"></i>15 Hz</span>
-            <span><i class="k17"></i>17 Hz</span>
+            <span><i class="k15"></i><span id="leg0">15 Hz</span></span>
+            <span><i class="k17"></i><span id="leg1">17 Hz</span></span>
+            <span id="leg2"><i class="kback"></i>BACK</span>
             <span><i class="kna"></i>no answer</span>
             <span><i class="kst"></i>too early (stale)</span>
           </div>
@@ -532,6 +559,14 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
           </div>
           <input type="range" id="acc" min="40" max="98" step="1" value="96">
           <p class="hint" id="acc-hint">Each window names your group 96% of the time, the other group 1%, and gives no answer 3%.</p>
+        </div>
+        <div class="ctl">
+          <span class="label" id="coding-l">Coding</span>
+          <div class="seg" role="radiogroup" aria-labelledby="coding-l">
+            <label><input type="radio" name="coding" id="coding-code" value="code" checked><span>c-VEP, 3 targets</span></label>
+            <label><input type="radio" name="coding" id="coding-freq" value="freq"><span>15 / 17 Hz</span></label>
+          </div>
+          <p class="hint" id="coding-hint"></p>
         </div>
         <div class="ctl">
           <span class="label" id="speed-l">Speed</span>
@@ -557,8 +592,8 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
           </div>
           <p class="hint" id="view-hint">Safe view shows each group as a tint with a slow pulse. Nothing flashes.</p>
           <div class="warning" id="warn" hidden>
-            <p><strong>Flashing at 15 and 17 Hz.</strong> Flicker in this range can trigger seizures in people with photosensitive epilepsy. Do not turn it on if you or anyone watching has that risk.</p>
-            <p>The page first measures how many frames per second your screen draws and sets the flicker from that. If the screen is too slow or too uneven for 15 and 17 Hz, flicker stays off.</p>
+            <p><strong id="warn-head">Flashing white and black.</strong> <span id="warn-body">Flicker like this can trigger seizures in people with photosensitive epilepsy. Do not turn it on if you or anyone watching has that risk.</span></p>
+            <p id="warn-how">The page first measures how many frames per second your screen draws and sets the flicker from that. If the screen is too slow or too uneven, flicker stays off.</p>
             <p id="warn-status" hidden></p>
             <p>Press Escape or the Stop button at any time to stop it.</p>
             <div class="confirm-row">
@@ -609,6 +644,10 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     <h2 id="h-how">How it works</h2>
     <div class="how-grid">
       <div>
+        <h3>c-VEP: three codes and a way back</h3>
+        <p>The default coding is the BrainSync c-VEP standard. One 63-frame pseudo-random sequence of white and black frames (1.05 s at 60 Hz) runs on every target, each 21 frames (350 ms) later than the one before: group A on the board, group B, and a BACK panel. Before the game the decoder trains on 30 cycles while you look at A, then reads every cycle: under the prompt each target gets a bar and its score, the correlation of your EEG with that target's delayed response. Two decisions in a row for the same target make a pick, about 3.7 s after the board changed. BACK undoes the last pick at every step, so a wrong pick costs one more pick, not the whole move. On the PLAY screen the middle panel, RESTART, starts the move over.</p>
+      </div>
+      <div>
         <h3>Two frequencies, one cut</h3>
         <p>Only two flicker rates work reliably for this player: 15 Hz and 17 Hz. Every piece you can move flickers at one of them. A straight line between two files or two ranks splits the pieces into a 15 Hz group and a 17 Hz group, so the likely moves weigh about the same on each side.</p>
       </div>
@@ -647,13 +686,14 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="cvep.js"></script>
 <script src="core.js"></script>
 <script>
 (function () {
   "use strict";
-  var C = window.BrainChessCore;
+  var C = window.BrainChessCore, K = window.BrainSyncCode;
   var promptEl = document.getElementById("prompt");
-  if (!C || typeof window.Chess !== "function") {
+  if (!C || !K || typeof window.Chess !== "function") {
     promptEl.textContent = "The game engine did not load. Reload the page to try again.";
     return;
   }
@@ -666,6 +706,9 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   var HOLD_OPP = 2.0;
   var START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
   var FREQ = [15, 17];
+  // c-VEP (docs/CVEP-STANDARD.md): three targets, one m-sequence, 21 frames apart
+  var BACK = C.BACK, CYCLE = K.CYCLE_FRAMES / 60, TRAIN_CYCLES = K.TRAIN_CYCLES;
+  var CODE_NAMES = ["A", "B", "BACK"];
   var GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
   var NAME = { k: "king", q: "queen", r: "rook", b: "bishop", n: "knight", p: "pawn" };
   var STAGES = ["piece", "dest", "promo", "confirm"];
@@ -674,7 +717,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   /* ---------- DOM ---------- */
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $("board"), arenaEl = $("arena");
-  var panelEl = [$("panel0"), $("panel1")];
+  var panelEl = [$("panel0"), $("panel1"), $("panel2")];
   var cells = [], rows = [];
   for (var r = 0; r < 8; r++) {
     var row = document.createElement("div");
@@ -707,7 +750,11 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     posSeen: new Map(),       // positionKey -> times reached (threefold, as game.py)
     stagesSeen: [],           // selector stages entered in this attempt (for the step row)
     youSan: null, oppSan: null,
-    flickerHz: 60, measuring: null, tracePaused: false
+    flickerHz: 60, measuring: null, tracePaused: false,
+    // c-VEP: the coding, its training, the frame counter of the current layout and the
+    // last decision shown as confidence bars
+    code: true, trained: false, trainStart: 0, trainK: 0, trainAcc: null, trainedNote: false,
+    codeFrame: 0, layoutKey: "", conf: null, confText: ""
   };
   var rngDecoder = C.mulberry32(20261024), rngOpp = C.mulberry32(7), rngAuto = C.mulberry32(42);
 
@@ -722,9 +769,20 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   }
   function makeDecoder() {
     var a = accParams();
-    S.decoder = new C.MockDecoder({ step: STEP, window: WINDOW, votes: VOTES, cooldown: SETTLE,
-      pCorrect: a.pCorrect, pWrong: a.pWrong, pStray: a.pStray, rng: rngDecoder });
+    S.decoder = S.code
+      ? new C.MockCodeDecoder({ cooldown: SETTLE, pCorrect: a.pCorrect, pWrong: a.pWrong, pStray: a.pStray, rng: rngDecoder })
+      : new C.MockDecoder({ step: STEP, window: WINDOW, votes: VOTES, cooldown: SETTLE,
+        pCorrect: a.pCorrect, pWrong: a.pWrong, pStray: a.pStray, rng: rngDecoder });
     S.decoder.screenChanged(S.t);
+    S.ticks = []; S.conf = null;
+  }
+  function nTargets() { return S.code ? 3 : 2; }
+  /** What each target means on the screen now, for the confidence lines. */
+  function confLabels() {
+    var sel = S.phase === "user" ? S.selector : null;
+    var p = sel ? sel.panels() : null;
+    if (p) return [p[0].slice(0, 10), p[1].slice(0, 10), "BACK"];
+    return CODE_NAMES.slice();
   }
 
   /* ---------- board geometry ---------- */
@@ -769,8 +827,28 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     $("side-" + color).checked = true;
     layoutBoard();
     $("over").hidden = true;
-    if (S.chess.turn() === S.userColor) startUserTurn(); else opponentMove();
+    S.conf = null;
+    if (S.code && !S.trained) startTraining(); else beginPlay();
     renderAll();
+  }
+  function beginPlay() {
+    if (S.chess.turn() === S.userColor) startUserTurn(); else opponentMove();
+  }
+
+  /* c-VEP training: 30 cycles with the cue box on A, then the held-out accuracy */
+  function startTraining() {
+    S.phase = "train"; S.trainStart = S.t; S.trainK = 0;
+    S.decoder.screenChanged(S.t);
+    announce("Training: look at the A square and keep looking at it, " + TRAIN_CYCLES + " cycles.");
+  }
+  function finishTraining() {
+    // the simulated template: each held-out cycle right as often as the slider says
+    var a = accParams(), right = 0;
+    for (var k = 0; k < TRAIN_CYCLES; k++) if (rngDecoder() < a.pCorrect) right++;
+    S.trained = true; S.trainAcc = right / TRAIN_CYCLES; S.trainedNote = true;
+    announce("Template ready: " + Math.round(100 * S.trainAcc) + " percent on held-out cycles, chance 33 percent.");
+    beginPlay();
+    S.decoder.screenChanged(S.t);
   }
 
   function notePosition() {
@@ -783,7 +861,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     if (outcome()) { endGame(); return; }
     var scores = C.heuristicScores(S.chess);
     S.weights = C.toWeights(scores, {});
-    S.selector = new C.MoveSelector(S.chess, S.weights, { confirm: true });
+    S.selector = new C.MoveSelector(S.chess, S.weights, { confirm: true, undo: S.code });
     S.phase = "user";
     S.turnStart = S.t; S.turnPicks = 0;
     S.arrowMove = null;
@@ -856,6 +934,11 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       S.intended = C.opponentReply(copy, rngAuto);
     }
     var u = S.intended;
+    if (S.code) {
+      // with Back: undo a wrong pick at once (game.py SimulatedUser)
+      var lt = C.userLook(sel, u);
+      if (lt === BACK || sel.stage === "confirm" || sel.stage === "promo") return { kind: "panel", t: lt };
+    }
     if (sel.stage === "confirm") return { kind: "panel", t: sel.targetFor(u) };
     // the intended move, or once a wrong pick ruled it out, the heaviest move still
     // reachable (ties in python-chess move order), as game.py SimulatedUser
@@ -869,6 +952,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   function gazeTarget(g) {
     var sel = S.selector;
     if (!g || S.phase !== "user" || !sel) return null;
+    if (g.kind === "panel" && g.t === BACK) return S.code ? BACK : null;
     if (g.kind === "sq") {
       if (sel.stage !== "piece" && sel.stage !== "dest") return null;
       var s = sel.sideOf(g.i);
@@ -885,20 +969,21 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   function onPick(target, intendedTarget) {
     var sel = S.selector;
     var prevGroups = sel.groups(), stage = sel.stage;
-    var isBack = stage === "confirm" && target === 1;
-    var wrong = intendedTarget !== null && intendedTarget !== target;
-    sel.choose(target);
+    var isBack = stage === "confirm" && target === 1;       // c-VEP: RESTART
+    var isUndo = S.code && target === BACK, undone = false;
+    var wrong = intendedTarget !== null && intendedTarget !== undefined && intendedTarget !== target;
+    if (isUndo) undone = sel.undo(); else sel.choose(target);
     if (isBack) S.stagesSeen = [];
     if (S.stagesSeen.indexOf(sel.stage) < 0) S.stagesSeen.push(sel.stage);
     S.turnPicks++; S.picksTotal++;
     if (wrong) S.wrong++;
-    if (isBack) S.backs++;
+    if (isBack || isUndo) S.backs++;
     // the losing group goes still and fades
     var lost = [];
-    if (stage === "piece" || stage === "dest") {
+    if (!isUndo && (stage === "piece" || stage === "dest")) {
       for (var k = 0; k < 64; k++) if (prevGroups[k] === String(1 - target)) lost.push(k);
     }
-    S.lost = { squares: lost, was: 1 - target, panel: (stage === "confirm" || stage === "promo") ? 1 - target : null };
+    S.lost = { squares: lost, was: 1 - target, panel: (!isUndo && (stage === "confirm" || stage === "promo")) ? 1 - target : null };
     S.lostUntil = performance.now() + 700;
     S.wonUntil = performance.now() + 550;
     S.wonTarget = target;
@@ -906,11 +991,20 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     flash.hidden = false;
     flash.dataset.t = String(target);
     flash.className = "flash" + (wrong ? " wrong" : "");
-    flash.textContent = isBack ? "BACK picked, 17 Hz" : (stage === "confirm" ? "PLAY picked, 15 Hz" : "Picked the " + FREQ[target] + " Hz group");
+    if (S.code) {
+      flash.textContent = isUndo ? (undone ? "BACK picked: last pick undone" : "BACK picked: nothing to undo")
+        : isBack ? "RESTART picked" : (stage === "confirm" ? "PLAY picked"
+          : stage === "promo" ? "Picked panel " + CODE_NAMES[target] : "Picked group " + CODE_NAMES[target]);
+    } else {
+      flash.textContent = isBack ? "BACK picked, 17 Hz" : (stage === "confirm" ? "PLAY picked, 15 Hz" : "Picked the " + FREQ[target] + " Hz group");
+    }
     S.flashUntil = performance.now() + 2200; S.flashIsHint = false;
     if (sel.stage === "done") { playUserMove(sel.move); renderAll(); return; }
     S.decoder.screenChanged(S.t);
-    announce((isBack ? "Back. Start the move again. " : FREQ[target] + " hertz. ") + (S.chess.in_check() ? "Check. " : "") + sel.prompt());
+    var said = S.code
+      ? (isUndo ? (undone ? "Back. Last pick undone. " : "Nothing to undo. ") : isBack ? "Restart. Start the move again. " : CODE_NAMES[target] + ". ")
+      : (isBack ? "Back. Start the move again. " : FREQ[target] + " hertz. ");
+    announce(said + (S.chess.in_check() ? "Check. " : "") + sel.prompt());
     renderAll();
   }
 
@@ -949,9 +1043,9 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       var glyph = p ? GLYPH[p.type] + "︎" : "";
       if (pe.textContent !== glyph) pe.textContent = glyph;
       pe.className = "piece" + (p && p.color === "b" ? " b" : "");
-      if (g === "0" || g === "1") { tag.hidden = false; tag.textContent = g === "0" ? "15" : "17"; } else tag.hidden = true;
+      if (g === "0" || g === "1") { tag.hidden = false; tag.textContent = S.code ? CODE_NAMES[+g] : (g === "0" ? "15" : "17"); } else tag.hidden = true;
       var label = sqName(sq) + (p ? ", " + (p.color === "w" ? "white " : "black ") + NAME[p.type] : ", empty");
-      if (g === "0" || g === "1") label += ", " + FREQ[+g] + " hertz group";
+      if (g === "0" || g === "1") label += S.code ? ", group " + CODE_NAMES[+g] : ", " + FREQ[+g] + " hertz group";
       if (g === "s") label += ", selected";
       if (checked) label += mated ? ", checkmated" : ", in check";
       cell.setAttribute("aria-label", label);
@@ -977,31 +1071,47 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   function renderPanels() {
     var sel = S.phase === "user" ? S.selector : null;
     var labels = sel ? sel.panels() : null;
+    var training = S.code && S.phase === "train";
+    if (training) labels = ["A", "B"];
     var now = performance.now();
     var lost = S.lost && now < S.lostUntil ? S.lost : null;
-    for (var t = 0; t < 2; t++) {
+    for (var t = 0; t < 3; t++) {
       var pe = panelEl[t];
+      var rate = S.code ? "code " + Math.round(t * K.LAG_FRAMES / 60 * 1000) + " ms late" : (t < 2 ? FREQ[t] + " hertz" : "");
+      $("phz" + t).textContent = S.code ? "+" + Math.round(t * K.LAG_FRAMES / 60 * 1000) + " ms" : (t < 2 ? FREQ[t] + " Hz" : "");
+      pe.classList.toggle("cue", training && t === 0);
+      if (t === BACK) {
+        // c-VEP: BACK is a target at every step of the user's turn (and in training)
+        var live = S.code && (S.phase === "user" || training);
+        pe.classList.toggle("active", live);
+        pe.setAttribute("aria-label", "BACK, " + rate + ", " + (live ? "look here to undo the last pick" : "not a target now"));
+        continue;
+      }
       var active = !!labels;
       pe.classList.toggle("active", active);
       pe.classList.toggle("lost", !!(lost && lost.panel === t));
-      var pl = $("plabel" + t), txt = active ? labels[t] : (t === 0 ? "PLAY" : "BACK");
+      var idle = t === 0 ? "PLAY" : (S.code ? "RESTART" : "BACK");
+      var pl = $("plabel" + t), txt = active ? labels[t] : idle;
       // promotion groups like "Rook / Bishop / Knight": one piece name per line
       pl.textContent = txt.split(" / ").join("\n");
-      pl.classList.toggle("multi", txt.indexOf(" / ") >= 0);
-      var note = active ? (sel.stage === "confirm" ? (t === 0 ? "play the move" : "start over") : "promote") : "used after you pick a move";
+      // a long word (RESTART) gets the smaller face too, so it never breaks mid-word
+      pl.classList.toggle("multi", txt.indexOf(" / ") >= 0 || txt.length > 6);
+      var note = training ? (t === 0 ? "look here" : "training") : active ? (sel.stage === "confirm" ? (t === 0 ? "play the move" : "start over") : "promote") : "used after you pick a move";
       $("pnote" + t).textContent = note;
-      pe.setAttribute("aria-label", (active ? labels[t] : (t === 0 ? "PLAY" : "BACK")) + ", " + FREQ[t] + " hertz target, " + (active ? "look here to choose" : "not a target yet, used after you pick a move"));
+      pe.setAttribute("aria-label", (active ? labels[t] : idle) + ", " + rate + " target, " + (active ? "look here to choose" : "not a target yet, used after you pick a move"));
     }
   }
 
   function renderPrompt() {
     var sel = S.phase === "user" ? S.selector : null, text;
     if (sel) text = (S.chess.in_check() ? "Check. " : "") + sel.prompt();
+    else if (S.phase === "train") text = "Look at the A square and keep looking at it";
     else if (S.phase === "opp") text = (S.youSan ? "You played " + S.youSan + ". " : "") + (S.userColor === "w" ? "Black" : "White") + " played " + S.oppSan;
     else if (S.phase === "over") text = resultText().head;
     else text = "";
     if (promptEl.textContent !== text) promptEl.textContent = text;
-    $("meters").hidden = S.phase === "over";
+    $("meters").hidden = S.phase === "over" || S.code;
+    $("conf").hidden = !S.code;
     var cur = sel ? STAGES.indexOf(sel.stage) : (S.phase === "opp" && S.stagesSeen.length ? 4 : -1);
     var items = $("steps").querySelectorAll("li[data-s]");
     for (var k = 0; k < items.length; k++) {
@@ -1011,9 +1121,12 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       li.removeAttribute("aria-current");
       if (k === cur) li.setAttribute("aria-current", "step");
     }
-    var how = S.auto
+    var how = S.phase === "train"
+      ? "<b>The decoder is training.</b> Keep your eyes on the A panel with the red box: 30 code cycles, about 32 s at 1x."
+      : S.auto
       ? "<b>Autoplay is looking for you.</b> Turn it off under Rig to use your pointer."
-      : "<b>Rest your pointer on a piece</b> (tap it on a touch screen). No clicking: your pointer stands in for your eyes.";
+      : "<b>Rest your pointer on a piece</b> (tap it on a touch screen). No clicking: your pointer stands in for your eyes." +
+        (S.code ? " A wrong pick? Rest it on BACK." : "");
     if ($("howto").innerHTML !== how) $("howto").innerHTML = how;
     $("howto").hidden = S.phase === "over";
   }
@@ -1049,7 +1162,8 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     var cell = g && g.kind === "sq" ? cells[g.i] : null;
     // a side panel is a target only at the confirm and promotion steps
     var panelsLive = S.phase === "user" && S.selector && S.selector.panels();
-    var panel = g && g.kind === "panel" && panelsLive ? panelEl[g.t] : null;
+    var backLive = S.code && g && g.kind === "panel" && g.t === BACK && S.phase === "user";
+    var panel = g && g.kind === "panel" && (panelsLive || backLive) ? panelEl[g.t] : null;
     if (gazeCell && gazeCell !== cell) { gazeCell.classList.remove("gaze", "auto"); gazeCell.style.removeProperty("--v"); }
     if (gazePanel && gazePanel !== panel) { gazePanel.classList.remove("gaze"); gazePanel.style.removeProperty("--v"); }
     if (cell) { cell.classList.add("gaze"); cell.classList.toggle("auto", S.auto); }
@@ -1058,8 +1172,29 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     boardEl.setAttribute("aria-activedescendant", "sq-" + sqName(S.cursor));
   }
 
+  /** c-VEP: the standard's label lines (bar, score, "<" on the best) and status line. */
+  function renderConfidence() {
+    if (!S.code) return;
+    var lines;
+    if (S.phase === "train") {
+      lines = ["training: keep looking at A   cycle " + S.trainK + "/" + TRAIN_CYCLES];
+    } else if (S.conf) {
+      var ev = S.conf.ev, labels = S.conf.labels;
+      var width = Math.max.apply(null, labels.map(function (l) { return l.length; }));
+      lines = labels.map(function (l, k) { return K.labelLine(l, ev.scores[k], k === ev.raw, width); });
+      lines.push(K.statusLine(ev.lead, ev.committed >= 0 ? labels[ev.committed] : null, ev.changed));
+    } else if (S.trainedNote && S.trainAcc !== null) {
+      lines = ["template ready: " + Math.round(100 * S.trainAcc) + " % on held-out cycles (chance 33 %)"];
+    } else {
+      lines = ["waiting for the first code cycle"];
+    }
+    var text = lines.join("\n");
+    if (text !== S.confText) { S.confText = text; $("conf").textContent = text; }
+  }
+
   function renderVotes() {
     var d = S.decoder;
+    var VOTES = d.votes;
     var pending = d.pending, streak = S.phase === "user" ? (d.streak || 0) : 0;
     var meters = document.querySelectorAll(".meter");
     for (var t = 0; t < 2; t++) {
@@ -1082,12 +1217,12 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       }
       el.style.setProperty("--v", String(v));
       el.style.setProperty("--d", dw.toFixed(3));
-      el.style.setProperty("--vc", gt === 1 ? "var(--trace17)" : "var(--trace15)");
+      el.style.setProperty("--vc", gt === BACK ? "var(--trace-back)" : gt === 1 ? "var(--trace17)" : "var(--trace15)");
     }
   }
 
   function renderAll() {
-    renderBoard(); renderPanels(); renderPrompt(); renderStats(); renderGaze(); renderVotes();
+    renderBoard(); renderPanels(); renderPrompt(); renderStats(); renderGaze(); renderVotes(); renderConfidence();
   }
 
   /* ---------- trace strip (canvas) ---------- */
@@ -1100,9 +1235,10 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   var colors = {};
   function readColors() {
     var cs = getComputedStyle(document.documentElement);
-    ["--ink", "--ink-2", "--trace15", "--trace17", "--marker", "--grid", "--rule", "--surface"].forEach(function (k) { colors[k] = cs.getPropertyValue(k).trim(); });
+    ["--ink", "--ink-2", "--trace15", "--trace17", "--trace-back", "--marker", "--grid", "--rule", "--surface"].forEach(function (k) { colors[k] = cs.getPropertyValue(k).trim(); });
   }
-  function sampleUntil(t, freq) {
+  var codeResp = [0, 0, 0, 0];
+  function sampleUntil(t, freq, codeTarget, codeFrom) {
     while (nextSample <= t) {
       var ts = nextSample;
       for (var ch = 0; ch < 4; ch++) {
@@ -1110,6 +1246,12 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
         noiseState[ch] = noiseState[ch] * 0.82 + n * 0.55;
         var alpha = 0.35 * Math.sin(2 * Math.PI * 10.2 * ts + ch) * (0.6 + 0.4 * Math.sin(0.7 * ts + ch * 1.3));
         var ss = freq ? 0.75 * AMP[ch] * Math.sin(2 * Math.PI * freq * ts + ch * 0.6) : 0;
+        if (codeTarget !== null && codeTarget !== undefined && ts >= codeFrom) {
+          // c-VEP: the gazed target's white / black frames, smoothed like a visual response
+          var bitNow = K.bit(codeTarget, Math.floor((ts - codeFrom) * 60)) - 0.5;
+          codeResp[ch] = codeResp[ch] * 0.7 + bitNow * 0.3;
+          ss = 1.4 * AMP[ch] * codeResp[ch];
+        }
         buf[ch][bufHead] = noiseState[ch] + alpha + ss;
       }
       bufT[bufHead] = ts;
@@ -1157,16 +1299,17 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     }
     // decoder windows, one tick per 0.25 s window, placed at the window's end
     ctx.fillStyle = colors["--ink-2"]; ctx.fillText("win", 2, tickTop + tickH / 2);
-    var tw = Math.max(2, plotW * STEP / SPAN - 2);
+    var tw = Math.max(2, plotW * (S.code ? CYCLE : STEP) / SPAN - 2);
     for (var j = 0; j < S.ticks.length; j++) {
       var ev = S.ticks[j];
       if (ev.t < t0) continue;
       var xe = xOf(ev.t) - tw;
       ctx.globalAlpha = ev.fresh ? 1 : 0.3;
-      if (ev.raw === 0 || ev.raw === 1) {
-        ctx.fillStyle = ev.raw === 0 ? colors["--trace15"] : colors["--trace17"];
+      if (ev.raw === 0 || ev.raw === 1 || ev.raw === 2) {
+        ctx.fillStyle = ev.raw === 0 ? colors["--trace15"] : ev.raw === 1 ? colors["--trace17"] : colors["--trace-back"];
         if (ev.raw === 0) ctx.fillRect(xe, tickTop, tw, tickH);
-        else { ctx.fillRect(xe, tickTop + 4, tw, tickH - 4); }
+        else if (ev.raw === 1) { ctx.fillRect(xe, tickTop + 4, tw, tickH - 4); }
+        else { ctx.fillRect(xe, tickTop + 8, tw, tickH - 8); }
       } else {
         ctx.fillStyle = colors["--ink-2"]; ctx.fillRect(xe, tickTop + tickH / 2 - 1, tw, 2);
       }
@@ -1182,7 +1325,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   var lastNow = null, lastTraceDraw = 0;
   function firedTarget(ev) {
     var f = ev.fired;
-    if (f === 0 || f === 1) return f;
+    if (f === 0 || f === 1 || (S.code && f === BACK)) return f;
     if (f === true && (ev.raw === 0 || ev.raw === 1)) return ev.raw;
     return null;
   }
@@ -1198,23 +1341,47 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 
     // the still board after the opponent's reply
     if (S.phase === "opp" && S.t >= S.phaseUntil) { startUserTurn(); renderAll(); }
+    // c-VEP training: one cycle at a time on A, then the game
+    if (S.phase === "train") {
+      var tk = Math.min(TRAIN_CYCLES, Math.floor((S.t - S.trainStart) / CYCLE));
+      if (tk !== S.trainK) { S.trainK = tk; renderConfidence(); }
+      if (tk >= TRAIN_CYCLES) { finishTraining(); renderAll(); }
+    }
 
     var g = currentGaze();
     var gt = gazeTarget(g);
     if (S.auto) renderGaze();
-    var events = S.decoder.advance(S.t, S.phase === "user" ? gt : null) || [];
+    var events = S.phase === "train" ? [] : (S.decoder.advance(S.t, S.phase === "user" ? gt : null) || []);
     for (var k = 0; k < events.length; k++) {
       var ev = events[k];
       var fire = S.phase === "user" ? firedTarget(ev) : null;
       S.ticks.push({ t: ev.t, raw: ev.raw, fresh: ev.fresh, fire: fire !== null });
+      if (S.code && ev.fresh && S.phase === "user") { S.conf = { ev: ev, labels: confLabels() }; S.trainedNote = false; }
       if (fire !== null) { onPick(fire, gt); break; }
     }
     while (S.ticks.length > 60) S.ticks.shift();
+    if (S.code) renderConfidence();
 
-    sampleUntil(S.t, S.phase === "user" && gt !== null ? FREQ[gt] : 0);
+    if (S.code) {
+      var looked = S.phase === "train" ? 0 : (S.phase === "user" ? gt : null);
+      sampleUntil(S.t, 0, looked, S.phase === "train" ? S.trainStart : S.decoder.switchT);
+    } else {
+      sampleUntil(S.t, S.phase === "user" && gt !== null ? FREQ[gt] : 0);
+    }
 
     // real flicker, frame-indexed at the refresh rate measured before it started
-    if (S.real) {
+    if (S.real && S.code) {
+      // c-VEP: one bit per frame, white or black, counted from the layout's first
+      // flickering frame (every change of the screen restarts the code)
+      var flickering = S.phase === "user" || S.phase === "train";
+      var key = S.phase + "|" + (S.selector && S.phase === "user" ? S.selector.groups() + S.selector.stage : "");
+      if (key !== S.layoutKey) { S.layoutKey = key; S.codeFrame = 0; }
+      for (var ct = 0; ct < 3; ct++) {
+        var on = flickering ? K.bit(ct, S.codeFrame) : 1;
+        arenaEl.style.setProperty("--l" + ct, on ? "100%" : "0%");
+      }
+      if (flickering) S.codeFrame++;
+    } else if (S.real) {
       var holding = S.phase !== "user";
       for (var t = 0; t < 2; t++) {
         var lum = holding ? 0.5 : 0.5 * (1 + Math.sin(2 * Math.PI * FREQ[t] * S.frame / S.flickerHz));
@@ -1291,11 +1458,15 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     pe.addEventListener("focus", function () { setGaze({ kind: "panel", t: t }, "key"); });
     pe.addEventListener("blur", function () { if (S.gazeSrc === "key") setGaze(null, null); });
     pe.addEventListener("keydown", function (e) {
-      if ((t === 0 && e.key === "ArrowRight") || (t === 1 && e.key === "ArrowLeft")) {
+      if ((t === 0 && e.key === "ArrowRight") || (t >= 1 && e.key === "ArrowLeft")) {
         e.preventDefault();
         var v = visual(S.cursor);
         S.cursor = fromVisual(t === 0 ? 0 : 7, v.r);
         boardEl.focus();
+      } else if (S.code && t === 1 && e.key === "ArrowDown") {
+        e.preventDefault(); panelEl[2].focus();
+      } else if (t === 2 && e.key === "ArrowUp") {
+        e.preventDefault(); panelEl[1].focus();
       }
     });
   });
@@ -1305,7 +1476,9 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     var a = accParams();
     var pct = Math.round(a.pCorrect * 100), wr = Math.round(a.pWrong * 100);
     $("acc-out").textContent = pct + "%";
-    $("acc-hint").textContent = "Each window names your group " + pct + "% of the time, the other group " + wr + "%, and gives no answer " + (100 - pct - wr) + "%.";
+    $("acc-hint").textContent = S.code
+      ? "Each 1.05 s code cycle carries the response of the target you look at " + pct + "% of the time, another target's " + wr + "%, and no clear response " + (100 - pct - wr) + "%. Two decisions in a row make a pick."
+      : "Each window names your group " + pct + "% of the time, the other group " + wr + "%, and gives no answer " + (100 - pct - wr) + "%.";
     if (S.decoder) { S.decoder.pCorrect = a.pCorrect; S.decoder.pWrong = a.pWrong; S.decoder.pStray = a.pStray; }
   }
   $("acc").addEventListener("input", updateAcc);
@@ -1338,9 +1511,11 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     resetWarn();
     viewSafe.checked = !on; viewReal.checked = on;
     $("view-hint").textContent = on
-      ? "Real flicker is on: 15 and 17 Hz, counted in frames of your screen, measured at " + S.flickerHz + " frames per second."
+      ? (S.code
+        ? "Real flicker is on: the c-VEP code, one white or black frame per screen frame, measured at " + S.flickerHz + " frames per second" + (Math.abs(S.flickerHz - 60) > 1 ? " (the standard is 60, so each cycle is " + (63 / S.flickerHz).toFixed(2) + " s here)." : ".")
+        : "Real flicker is on: 15 and 17 Hz, counted in frames of your screen, measured at " + S.flickerHz + " frames per second.")
       : "Safe view shows each group as a tint with a slow pulse. Nothing flashes.";
-    if (!on) { arenaEl.style.removeProperty("--l0"); arenaEl.style.removeProperty("--l1"); }
+    if (!on) { arenaEl.style.removeProperty("--l0"); arenaEl.style.removeProperty("--l1"); arenaEl.style.removeProperty("--l2"); }
     // Stop, Escape and Keep safe view leave keyboard focus on the view switch, not on <body>
     if (!on && restoreFocus && focusInStopOrWarn(active)) viewSafe.focus();
   }
@@ -1362,7 +1537,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       $("warn-yes").disabled = false;
       $("warn-status").hidden = false;
       $("warn-status").textContent = "Real flicker stays off. Your screen drew about " + Math.round(hz) + " frames per second" +
-        (uneven > 0.2 ? ", unevenly" : "") + ", which cannot show 15 and 17 Hz cleanly.";
+        (uneven > 0.2 ? ", unevenly" : "") + (S.code ? ", which cannot show the code one bit per frame cleanly." : ", which cannot show 15 and 17 Hz cleanly.");
       announce($("warn-status").textContent);
       return;
     }
@@ -1407,6 +1582,38 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     if (!S.tracePaused) drawTrace();
   });
   if (reduceMotion.addEventListener) reduceMotion.addEventListener("change", applyReduceMotion);
+
+  // coding: c-VEP (three targets with Back, the BrainSync standard) or 15 / 17 Hz
+  function applyCoding() {
+    arenaEl.classList.toggle("code", S.code);
+    $("hz-a").textContent = S.code ? "c-" : "15";
+    $("hz-b").textContent = S.code ? "VEP" : "/17";
+    $("brand-p").textContent = S.code
+      ? "Play chess with your eyes. The pieces you can move flicker in two coded patterns, a third square takes back a wrong pick, and an EEG headset reads which one you watch. Here your pointer stands in for your eyes."
+      : "Play chess with your eyes. The pieces you can move flicker at two rates, and an EEG headset reads which one you watch. Here your pointer stands in for your eyes.";
+    $("leg0").textContent = S.code ? "A" : "15 Hz";
+    $("leg1").textContent = S.code ? "B" : "17 Hz";
+    $("leg2").hidden = !S.code;
+    $("coding-hint").textContent = S.code
+      ? "Three white and black codes, 350 ms apart: group A, group B and BACK, which undoes the last pick. The decoder trains for 30 cycles (about 32 s) before the first game."
+      : "Two flicker rates, 15 and 17 Hz, with no Back target: a wrong pick shows at PLAY / BACK, which starts the move over.";
+    $("warn-head").textContent = S.code ? "Flashing white and black, a broadband code." : "Flashing at 15 and 17 Hz.";
+    $("warn-body").textContent = S.code
+      ? "The code changes up to 60 times a second and includes the 15 to 25 Hz band most likely to trigger seizures in people with photosensitive epilepsy. Do not turn it on if you or anyone watching has that risk."
+      : "Flicker in this range can trigger seizures in people with photosensitive epilepsy. Do not turn it on if you or anyone watching has that risk.";
+    if (S.real) setReal(true);
+    updateAcc();
+  }
+  document.querySelectorAll('input[name="coding"]').forEach(function (el) {
+    el.addEventListener("change", function () {
+      if (!el.checked) return;
+      S.code = el.value === "code";
+      applyCoding();
+      makeDecoder();
+      newGame(S.userColor);
+      announce(S.code ? "c-VEP coding: three targets with Back. A new game starts." : "15 and 17 hertz coding: two targets. A new game starts.");
+    });
+  });
 
   // new game and side, with an in-page confirmation once a game is under way
   var pendingSide = "w";
@@ -1454,7 +1661,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   sizeCanvas();
   if (window.ResizeObserver) new ResizeObserver(function () { sizeCanvas(); drawTrace(); }).observe(canvas);
   applyReduceMotion();
-  updateAcc();
+  applyCoding();
   makeDecoder();
   newGame("w");
   // warm the trace so the first frame shows a strip of signal
@@ -1463,6 +1670,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   window.__brainchess = {
     state: S,
     pick: function (target) { if (S.phase === "user" && S.selector) onPick(target, null); },
+    skipTraining: function () { if (S.phase === "train") { finishTraining(); renderAll(); } },
     loadFen: function (fen) {
       var ch = new Chess();
       if (!ch.load(fen)) return false;

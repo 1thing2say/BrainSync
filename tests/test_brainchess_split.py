@@ -516,3 +516,108 @@ def test_split_gap_property_random(min_gap):
         assert min(gap(chosen, weights), min_gap) == max(min(gap(c, weights), min_gap) for c in ok)
         g0, g1 = split(weights, 0.15, min_gap)
         assert g0 == {s for s in weights if chosen.side(s) == 0}
+
+
+# -- c-VEP: the Back target undoes the last pick -------------------------------------------
+
+def _screen(sel: MoveSelector) -> tuple:
+    """Everything a pick changes, for comparing a selector before and after undo."""
+    return (sel.stage, sel.groups(), sel.panels(), sel.prompt(), sorted(sel.candidate_moves(),
+                                                                        key=str))
+
+
+def test_undo_at_the_first_pick_changes_nothing_but_counts():
+    sel = MoveSelector(chess.Board(), _uniform(chess.Board()), undo=True)
+    before = _screen(sel)
+    assert not sel.can_undo
+    assert sel.undo() is False
+    assert _screen(sel) == before and sel.picks == 1 and sel.undos == 0
+
+
+@pytest.mark.parametrize("fen", [START, MIDGAME, PROMOTION, ONE_PIECE, CASTLE_BOTH])
+def test_undo_steps_back_through_every_pick(fen):
+    board = chess.Board(fen)
+    sel = MoveSelector(board, _random_weights(board, 3), undo=True)
+    move = sorted(board.legal_moves, key=lambda m: m.uci())[-1]
+    screens = [_screen(sel)]
+    while sel.stage != "confirm":
+        sel.choose(sel.target_for(move))
+        screens.append(_screen(sel))
+    assert sel.shown_move == move
+    while sel.can_undo:                    # all the way back, one screen per pick
+        assert sel.undo() is True
+        screens.pop()
+        assert _screen(sel) == screens[-1]
+    assert len(screens) == 1 and sel.undos == sel.picks // 2
+    _drive(sel, move)                      # and the move can still be chosen
+    assert sel.move == move
+
+
+def test_undo_returns_to_the_split_before_a_skipped_stage():
+    board = chess.Board(ONE_PIECE)          # king or knight: one pick, then dest
+    sel = MoveSelector(board, _uniform(board), undo=True)
+    first = _screen(sel)
+    knight = next(m for m in board.legal_moves if m.from_square == sq("e1"))
+    sel.choose(sel.target_for(knight))
+    while sel.stage == "piece":
+        sel.choose(sel.target_for(knight))
+    assert sel.stage == "dest"
+    while sel.can_undo:
+        sel.undo()
+    assert _screen(sel) == first
+
+
+def test_confirm_in_undo_mode_is_play_restart_and_back_undoes_the_last_pick():
+    board = chess.Board(ONE_MOVE)
+    sel = MoveSelector(board, _uniform(board), undo=True)
+    assert sel.stage == "confirm" and not sel.can_undo     # nothing was picked
+    assert sel.panels() == ("PLAY", "RESTART")
+    assert sel.prompt().startswith("Play ") and sel.prompt().endswith("Look at PLAY")
+    board = chess.Board(START)
+    sel = MoveSelector(board, _uniform(board), undo=True)
+    move = chess.Move.from_uci("g1f3")
+    while sel.stage != "confirm":
+        before = _screen(sel)
+        sel.choose(sel.target_for(move))
+    sel.undo()                             # BACK on the PLAY screen: the last split again
+    assert _screen(sel) == before and sel.stage == "dest"
+    sel.choose(sel.target_for(move))
+    assert sel.stage == "confirm"
+    sel.choose(1)                          # RESTART: back to the first split, no undo left
+    assert sel.stage == "piece" and not sel.can_undo
+
+
+def test_undo_is_refused_once_the_move_is_chosen():
+    board = chess.Board(ONE_MOVE)
+    sel = MoveSelector(board, _uniform(board), confirm=True, undo=True)
+    sel.choose(0)
+    assert sel.stage == "done" and not sel.can_undo
+    with pytest.raises(ValueError, match="already chosen"):
+        sel.undo()
+
+
+def test_freq_mode_keeps_play_back():
+    board = chess.Board(ONE_MOVE)
+    sel = MoveSelector(board, _uniform(board))
+    assert sel.panels() == ("PLAY", "BACK") and sel.prompt().endswith("Look at PLAY or BACK")
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_a_user_with_wrong_decodes_and_back_gets_its_move(seed):
+    # every wrong pick is undone at once with Back, so the intended move is always reached
+    rng = np.random.default_rng(seed)
+    board = chess.Board(ALL_FENS[seed % len(ALL_FENS)])
+    sel = MoveSelector(board, _random_weights(board, seed), undo=True)
+    moves = sorted(board.legal_moves, key=lambda m: m.uci())
+    move = moves[int(rng.integers(len(moves)))]
+    for _ in range(500):
+        if sel.stage == "done":
+            break
+        if sel.stage == "confirm" and sel.shown_move != move:
+            sel.undo()
+        elif sel.stage != "confirm" and not sel.reachable(move):
+            sel.undo()
+        else:
+            right = sel.target_for(move)
+            sel.choose(1 - right if rng.random() < 0.3 else right)
+    assert sel.stage == "done" and sel.move == move
