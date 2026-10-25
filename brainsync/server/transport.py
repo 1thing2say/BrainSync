@@ -247,7 +247,10 @@ class Transport:
         self._instances: dict[int, str] = {}    # controller conn_id -> its hello.client.instance
         self._n_viewers = 0
         self._events: queue.Queue[Event] = queue.Queue()
-        self._lock = threading.Lock()        # guards _controller and _n_viewers for readers
+        # Guards _controller and _n_viewers for readers. Each change to them queues its
+        # connect or disconnect Event under the same lock, so a reader that sees the new
+        # controller or viewer count always finds that Event in events() too.
+        self._lock = threading.Lock()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -456,20 +459,29 @@ class Transport:
         entry = self._joined.pop(conn_id, None)
         if entry is not None:
             conn, role = entry
-            self._recount()
-            self._events.put(Event("disconnect", conn_id, role, None, None, time.time(), code))
+            self._recount(Event("disconnect", conn_id, role, None, None, time.time(), code))
         else:
             conn = self._conns.get(conn_id)
         if conn is not None:
             self._spawn(conn.close(code, reason))
 
-    def _recount(self) -> None:
+    def _recount(self, event: Event | None = None, *, controller: int | None = None,
+                 instance: str | None = None) -> None:
+        """Bring the controller and viewer count in line with ``_joined`` and queue ``event``,
+        all under one lock. ``controller`` names a newly joined controller (with its
+        ``instance``, if it sent one)."""
         with self._lock:
+            if controller is not None:
+                self._controller = controller
+                if instance is not None:
+                    self._instances[controller] = instance
             if self._controller is not None and self._controller not in self._joined:
                 self._controller = None
             for gone in [c for c in self._instances if c not in self._joined]:
                 del self._instances[gone]
             self._n_viewers = sum(1 for _, role in self._joined.values() if role == "viewer")
+            if event is not None:
+                self._events.put(event)
 
     # -- incoming ----------------------------------------------------------------------------
 
@@ -491,9 +503,8 @@ class Transport:
             self._conns.pop(conn_id, None)
             entry = self._joined.pop(conn_id, None)
             if entry is not None:
-                self._recount()
-                self._events.put(Event("disconnect", conn_id, entry[1], None, None,
-                                       time.time(), _close_code(conn)))
+                self._recount(Event("disconnect", conn_id, entry[1], None, None,
+                                    time.time(), _close_code(conn)))
 
     async def _refuse(self, conn: ServerConnection, code: str | None, message: str,
                       close_code: int, reason: str) -> bool:
@@ -569,13 +580,8 @@ class Transport:
         for out in texts:
             broadcast([conn], out)
         self._joined[conn_id] = (conn, role)
-        with self._lock:
-            if role == "controller":
-                self._controller = conn_id
-                if instance is not None:
-                    self._instances[conn_id] = instance
-        self._recount()
-        self._events.put(Event("connect", conn_id, role, hello.to_dict(), hello, t))
+        self._recount(Event("connect", conn_id, role, hello.to_dict(), hello, t),
+                      controller=conn_id if role == "controller" else None, instance=instance)
         return True
 
     async def _receive(self, conn: ServerConnection, conn_id: int, text: str | bytes) -> None:
