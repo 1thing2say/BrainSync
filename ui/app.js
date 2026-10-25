@@ -14,6 +14,11 @@ let keyboardMode = false;
 let lastSpoken = null;   // utterance_id of the last spoken reply, for Correct / Wrong
 let userName = "User";   // the user's first name in the conversation, from /api/config
 const CONVERSATION_LINES = 4;  // partner + user lines kept on screen (the server keeps the full log)
+// The flicker warning when the iPhone app is the user's screen (display.flicker: phone).
+const PHONE_WARNING = "The user's screen is the iPhone app: its two cards flash fully on and off "
+  + "(c-VEP), a flicker that can trigger photosensitive seizures. Nobody with photosensitive "
+  + "epilepsy or flicker sensitivity should look at it. This page is a still mirror and never flickers.";
+const PHONE_STOP = "Stop here, or a tap anywhere on the phone, turns the flicker off immediately.";
 
 // Returns false when the server is not connected, so callers can say so.
 function send(msg) {
@@ -68,33 +73,38 @@ function handle(msg) {
   }
 }
 
-// Diamond positions by slot (s1 top, s2 left, s3 right, s4 bottom, as on the user's screen).
-const POSITIONS = { s1: "top", s2: "left", s3: "right", s4: "bottom" };
-
 function renderPage(msg) {
   shown = msg;
-  // The confirm screen's sentence sits in the empty centre of the diamond, between Say it (top)
-  // and Back (bottom), as on the flicker display; list mode keeps it above the targets.
+  // The confirm screen's sentence (and calibrate's instruction) sits in the still centre between
+  // the targets, as on the flicker display; list mode keeps it above the targets.
   $("option-text").textContent = msg.mode === "list" ? msg.text : "";
   renderList(msg);
   const targets = $("targets");
-  targets.className = `targets ${msg.mode === "list" ? "row" : "diamond"}`;
-  $("centre-text").textContent = msg.mode === "confirm" ? msg.text : "";
+  // diamond: page mode (s1 top, s2 left, s3 right, s4 bottom); sides: the phone's Look to Speak
+  // cards, left (s1) and right (s2); row: list mode (ViewCore.layout).
+  const layout = ViewCore.layout(msg);
+  targets.className = `targets ${layout}`;
+  $("centre-text").textContent = msg.mode === "confirm" || msg.mode === "calibrate" ? msg.text : "";
   $("centre-text").hidden = stateName === "SPEAKING";  // the Speaking box shows it then
   targets.replaceChildren($("centre"), ...msg.slots.map((s) => {
     // In keyboard mode the boxes are buttons too (a click = the slot's key), for touch screens.
     const el = document.createElement(keyboardMode ? "button" : "div");
     const key = s.slot.replace("s", "");
-    el.className = `target ${s.role} pos-${POSITIONS[s.slot] || "top"}`;
+    const c = ViewCore.card(msg, s);
+    el.className = `target ${s.role} pos-${ViewCore.position(layout, s.slot)}${c.cue ? " cue" : ""}`;
     el.dataset.slot = s.slot;
-    // The sentence is what gets spoken, so it is the big text; the short label is its tag.
-    // Targets without a sentence (More options, Say it, Back) show the label big instead.
     // .flicker is the white layer whose opacity the flicker loop drives (display.flicker: browser).
+    // Halves mode lists the card's phrases instead of one big text (spans: a button holds no list).
     el.innerHTML = `<span class="flicker" aria-hidden="true"></span><span class="target-tag"></span>`
-      + `<span class="target-text"></span><span class="target-key"></span>`;
-    const sentence = s.utterance && s.utterance.trim();
-    el.querySelector(".target-tag").textContent = sentence ? s.label : "";
-    el.querySelector(".target-text").textContent = sentence || s.label;
+      + `<span class="target-text"></span><span class="phrases"></span><span class="target-key"></span>`;
+    el.querySelector(".target-tag").textContent = c.tag;
+    el.querySelector(".target-text").textContent = c.text;
+    el.querySelector(".phrases").replaceChildren(...c.items.map((item) => {
+      const line = document.createElement("span");
+      line.className = item.more ? "phrase more" : "phrase";
+      line.textContent = item.text;
+      return line;
+    }));
     el.querySelector(".target-key").textContent = keyboardMode ? `key ${key}` : "";
     if (keyboardMode) {
       el.type = "button";
@@ -133,7 +143,8 @@ function renderPhase(next) {
 // --- the flicker (display.flicker: browser) ---------------------------------------------------
 // Every target on screen flickers at its slot's frequency from the server's flicker phase until
 // any other phase. Only the server starts it; Stop, Esc, a lost connection or a hidden tab stop it
-// here at once, without waiting for the server.
+// here at once, without waiting for the server. With display.flicker psychopy or phone (c-VEP on
+// the iPhone) this page is a still mirror and never flickers (FlickerCore.drawsFlicker).
 
 let flickerOn = false;     // from /api/config: this page draws the flicker
 let waveform = "sine";
@@ -153,7 +164,7 @@ function drawFlicker(ms) {
   if (onsetMs === 0) onsetMs = ms;
   const n = FlickerCore.frameIndex(ms - onsetMs, 1000 / refreshHz);
   document.querySelectorAll(".target").forEach((t) => {
-    const slot = slotFreqs[t.dataset.slot];
+    const slot = slotFreqs[t.dataset.slot];  // frequency slots only (FlickerCore.freqSlots)
     const layer = t.querySelector(".flicker");
     if (slot && layer) {
       layer.style.opacity = FlickerCore.luminance(slot.freq_hz, slot.phase_deg, n, refreshHz, waveform);
@@ -319,6 +330,11 @@ function renderStatus(s) {
   const resume = $("resume");
   resume.disabled = !s.resume_ready;
   resume.title = s.resume_ready ? "" : "Not ready: see the state line";
+  // c-VEP: the template's last score, small; a low or failed one in the warning colour.
+  const cal = ViewCore.calibration(s);
+  $("calibration").textContent = cal.text;
+  $("calibration").className = `calibration tone-${cal.tone}`;
+  $("calibration").hidden = !cal.text;
   if (shown && modeChanged) renderPage(shown);
 }
 
@@ -411,9 +427,15 @@ fetch("/api/config")
     if (c.listen_window_s) listenWindow = c.listen_window_s;
     if (c.stt_mode) sttMode = c.stt_mode;
     if (c.max_trial_s) maxTrialS = c.max_trial_s;
-    flickerOn = Boolean(c.flicker);
+    flickerOn = FlickerCore.drawsFlicker(c);
+    if (!flickerOn) stopFlicker();
     if (c.waveform) waveform = c.waveform;
-    if (c.slots) slotFreqs = c.slots;
+    slotFreqs = FlickerCore.freqSlots(c.slots);
+    // The iPhone app is the user's screen (c-VEP): this page only mirrors it, still.
+    if (c.display === "phone") {
+      $("warning-flicker").textContent = PHONE_WARNING;
+      $("warning-stop").textContent = PHONE_STOP;
+    }
     if (c.refresh_hz) expectedHz = refreshHz = c.refresh_hz;
     measureRefresh();
     if (c.user_name) userName = c.user_name;
