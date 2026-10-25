@@ -761,7 +761,7 @@ The full report is [`docs/base-iso-inventory.md`](docs/base-iso-inventory.md). `
   - Open: Wi-Fi provisioning at build time.
 - **VM edition (UTM): done (see above).** Installed end to end in UTM on both backends. Not tried yet: USB passthrough of the real EEG board.
   - Phase 3 and 4 `install.d` steps must run on both editions (or skip cleanly on the one they do not apply to).
-- **Phase 3: BrainSync payload**, in five parts, each shipped through the signed repository. Status, pins and the handoff to an x86-64 build machine are in [`docs/phase3-notes.md`](docs/phase3-notes.md).
+- **Phase 3: BrainSync payload**, in five parts, each shipped through the signed repository. Status, pins and the handoff to an x86-64 build machine are in [`docs/phase3-notes.md`](docs/phase3-notes.md); the 2026-10-25 handoff back to the Mac, with each branch's state, is in [`docs/phase3-handoff.md`](docs/phase3-handoff.md).
   - **3a, build system and repository: done** (see [The package repository](#the-package-repository-phase-3)).
   - **3b, the apps.**
     - Make the app installable outside the repo: configurable paths instead of the repo-root lookups, console commands, a speech fallback without macOS `say`.

@@ -5,6 +5,10 @@ far ran on an Apple M4 Mac (arm64, Docker Desktop, UTM). It continues on an
 x86-64 laptop. This file lists what is done, what the next parts need, and what
 changes on x86-64.
 
+**2026-10-25: the work moves back to the Mac.** Start with
+[phase3-handoff.md](phase3-handoff.md): the new decisions, the state of each
+branch, and the next steps.
+
 ## Decisions (approved 2026-10-24)
 
 | Topic | Decision |
