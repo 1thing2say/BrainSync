@@ -7,6 +7,8 @@
 #   scripts/builder.sh shell            interactive shell in the builder
 #   scripts/builder.sh image            print the image reference
 #   scripts/builder.sh clean [--all]    delete build/out (--all: all of build/)
+#   scripts/builder.sh --cross build|run|shell|image
+#                                       the same with the amd64 cross-builder
 #
 # Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
 # only when the ISO is found; commands that do not need it run without),
@@ -26,6 +28,11 @@
 # yields a new tag; `run` builds the image first if that tag is missing.
 # Always uses --platform linux/arm64 (native on Apple Silicon; x86_64 hosts
 # need qemu-user/binfmt registered with Docker).
+# --cross selects a second, separate image instead: brainsyncos-cross-builder
+# (docker/Dockerfile.cross-builder, --platform linux/amd64), which compiles
+# aarch64 code at native speed on an x86-64 host (scripts/build-llama.sh
+# compile). Same mounts, caps and variables; on Apple Silicon it runs under
+# emulation instead. The arm64 builder is unchanged by it.
 # `clean` truncates large files before deleting them: Docker Desktop keeps
 # deleted bind-mounted files open, so a plain rm would not free their space.
 
@@ -34,6 +41,13 @@ load_config
 load_build_config
 
 DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.builder"
+if [ "${1:-}" = --cross ]; then
+    shift
+    DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.cross-builder"
+    BUILDER_IMAGE_NAME=brainsyncos-cross-builder
+    BUILDER_PLATFORM=linux/amd64
+    case "${1:-}" in build|run|shell|image) ;; *) die "--cross takes build, run, shell or image" ;; esac
+fi
 # tini as PID 1 passes Ctrl-C/SIGTERM to the whole process group. Without it the
 # script itself is PID 1, ignores SIGINT, and xorriso/dd keep running.
 INIT_FLAGS="--init -e TINI_KILL_PROCESS_GROUP=1"

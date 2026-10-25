@@ -5,6 +5,7 @@
 #   make doctor           check what the build needs
 #   make key              create the package repository signing key (once)
 #   make wheels           the BrainFlow Cerelog wheel (build/wheels/)
+#   make llama            llama.cpp for aarch64 (build/llama/)
 #   make packages repo iso
 #   make test             tests/test_phase3.sh (TESTS="phase2 vm" for others)
 #   make clean            delete build/out
@@ -14,7 +15,7 @@ EDITION ?= jetson
 TESTS ?= phase3
 BUILD := scripts/build.sh
 
-.PHONY: all doctor key wheels packages repo iso test clean
+.PHONY: all doctor key wheels llama packages repo iso test clean
 
 all:
 	$(BUILD) all --edition $(EDITION)
@@ -24,6 +25,9 @@ doctor key packages repo iso:
 
 wheels:
 	$(BUILD) wheels
+
+llama:
+	$(BUILD) llama
 
 test:
 	$(BUILD) test $(TESTS)

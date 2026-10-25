@@ -28,8 +28,10 @@
 #                config, OOBE skipped, NVIDIA's default users removed, package
 #                repository keyring installed, the board's udev rules and
 #                ch341 module installed (modules.dep), brainsync-runtime and
-#                brainsync installed (brainsync-voice runs), and the repository
-#                unmounted again; re-run is idempotent
+#                brainsync installed (brainsync-voice runs), brainsyncos-llama
+#                and -cuda installed with the service enabled and its key in
+#                secrets.env (85-llama.sh), and the repository unmounted
+#                again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -373,6 +375,18 @@ check_usb_serial() {
     echo "board: brainsync-udev and brainsyncos-ch341-tegra installed, ch341 in modules.dep for $kver"
 }
 
+# check_llama TARGET: 85-llama.sh installed the local LLM with its CUDA
+# backend, enabled the service and gave BCI Voice the key.
+check_llama() {
+    local t="$1"
+    grep -q '85-llama.sh: installed brainsyncos-llama .*, brainsyncos-llama-cuda .*; llama-server version: ' \
+        "$t/var/log/brainsyncos/install.log" || die "85-llama.sh did not finish"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "brainsyncos-llama.service is not enabled"
+    grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$t/etc/brainsyncos/llama/api-key")" "$t/etc/brainsync/secrets.env" \
+        || die "secrets.env lacks the llama-server key"
+    echo "llm: brainsyncos-llama and -cuda installed, service enabled, key in secrets.env"
+}
+
 c_hook() {
     setup_target
     local t="$W/target" rel
@@ -390,9 +404,10 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (9 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (10 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
     check_keyring "$t"
     check_usb_serial "$t"
+    check_llama "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.

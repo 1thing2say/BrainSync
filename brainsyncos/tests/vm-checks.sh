@@ -31,7 +31,8 @@
 #                package repository and 60-apt-repo.sh installs its keyring;
 #                75-usb-serial.sh installs the board's udev rules but not the
 #                Jetson-only ch341 module; 70-brainsync.sh the BrainSync apps
-#                (brainsync-voice runs)
+#                (brainsync-voice runs); 85-llama.sh brainsyncos-llama without
+#                the CUDA backend, the service enabled, its key in secrets.env
 # Work happens in /scratch (tmpfs); nothing is written to build/.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
@@ -413,7 +414,7 @@ c_hook() {
         || die "/etc/issue line 1: $(head -1 "$t/etc/issue")"
     head -2 "$t/etc/issue"
     tail -1 "$log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$log")"
-    grep -q 'BrainSyncOS layer installed (9 steps)' "$log" || die "log lacks the summary"
+    grep -q 'BrainSyncOS layer installed (10 steps)' "$log" || die "log lacks the summary"
     grep -q '60-apt-repo.sh: repository verified; brainsyncos-archive-keyring ' "$log" || die "60-apt-repo.sh did not finish"
     cmp "$t/usr/share/keyrings/brainsyncos-archive-keyring.gpg" "$W/iso/brainsyncos/repo-key.gpg" \
         || die "the installed keyring is not the build's repository key"
@@ -428,6 +429,13 @@ c_hook() {
     [ -s "$t/usr/lib/udev/rules.d/70-brainsync-cerelog.rules" ] || die "the board's udev rules are missing"
     ! in_target "$t" dpkg -s brainsyncos-ch341-tegra > /dev/null 2>&1 || die "the VM got the Jetson-only ch341 module"
     echo "board: brainsync-udev installed, no ch341 module (Ubuntu's kernel has it)"
+    grep -q '85-llama.sh: vm-arm64 edition: CPU backends only' "$log" && grep -q '85-llama.sh: installed brainsyncos-llama [^,]*; ' "$log" \
+        || die "85-llama.sh did not install brainsyncos-llama alone"
+    ! in_target "$t" dpkg -s brainsyncos-llama-cuda > /dev/null 2>&1 || die "the VM got the Jetson-only CUDA backend"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "brainsyncos-llama.service is not enabled"
+    grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$t/etc/brainsyncos/llama/api-key")" "$t/etc/brainsync/secrets.env" \
+        || die "secrets.env lacks the llama-server key"
+    echo "llm: brainsyncos-llama installed without the CUDA backend, service enabled, key in secrets.env"
     grep -q 'hook.sh: vm-arm64 edition on: QEMU QEMU Virtual Machine, serial UTM0042AB12CD (from dmi product_serial)' "$log" \
         || die "machine identity not logged: $(grep 'edition on' "$log")"
     ! grep -n 'WARNING\|No such file' "$log" || die "the VM install logged a warning"

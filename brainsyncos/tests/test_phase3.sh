@@ -15,7 +15,11 @@
 # merge of mapped trees, and hook.sh mounting the repository for
 # 60-apt-repo.sh and 70-brainsync.sh in NVIDIA's real target base layer; the
 # board packages (brainsyncos-ch341-tegra against NVIDIA's kernel,
-# brainsync-udev) and 75-usb-serial.sh installing them there. In a test-only
+# brainsync-udev) and 75-usb-serial.sh installing them there; llama.cpp
+# (build/llama from scripts/build-llama.sh, compiled in the cross-builder
+# and checked in the arm64 builder unless up to date), its two packages and
+# 85-llama.sh installing them there, with the service's own command line
+# serving a test model to the BrainSync venv. In a test-only
 # Ubuntu container with Xvfb (tests/runtime-checks.sh): the two BrainSync
 # packages installed, imported, PsychoPy drawing, every command, and
 # brainsync-voice serving its page offline. Then the BrainFlow wheel in
@@ -193,8 +197,8 @@ t_packages() {
         (cd "$BRAINSYNCOS_ROOT/$TD/debs/$e" && LC_ALL=C ls ./*.deb) | sed 's|^\./||' | sed 's/_.*//' | tr '\n' ' ' > "$TMP_DIR/names.$e"
         echo "$e: $(cat "$TMP_DIR/names.$e")"
     done
-    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra " ] \
-        && [ "$(cat "$TMP_DIR/names.vm")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring " ] \
+    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra brainsyncos-llama-cuda brainsyncos-llama " ] \
+        && [ "$(cat "$TMP_DIR/names.vm")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-llama " ] \
         || die "wrong package sets per edition"
     expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
     expect_fail 'no repository signing key' "$B" run scripts/build-packages.sh --edition vm --key "$TD/none.asc" --out "$TD/x"
@@ -211,6 +215,21 @@ t_wheel() {
     expect_fail 'no wheel named nope' "$B" run scripts/build-wheels.sh --only nope
     expect_fail 'wheels takes only --force' "$S/build.sh" wheels --fast
     in_builder wheel
+}
+
+# llama.cpp: build/llama is a cache like build/wheels, so an up-to-date,
+# checked build is used as it is (compile and check take long; the check
+# alone runs under emulation on x86-64). brainsyncos-llama packages it.
+t_llama() {
+    "$S/build.sh" llama
+    "$S/build.sh" llama 2>&1 | tee "$TMP_DIR/llama.out"
+    grep -q 'up to date' "$TMP_DIR/llama.out" && grep -q 'checked already' "$TMP_DIR/llama.out" \
+        || die "a second scripts/build.sh llama run rebuilt or re-checked"
+    cat "$BUILD_DIR/llama/llama.env" "$BUILD_DIR/llama/check.env"
+    expect_fail 'llama takes only --force' "$S/build.sh" llama --fast
+    expect_fail 'compile runs in the amd64 cross-builder' "$B" run scripts/build-llama.sh compile
+    expect_fail 'check runs in the arm64 builder' "$B" --cross run scripts/build-llama.sh check
+    expect_fail '--cross takes build, run, shell or image' "$B" --cross clean
 }
 
 t_repo() {
@@ -268,6 +287,7 @@ check builder-caps         t_builder_caps
 check build-sh             t_build_sh
 check repo-key             t_repo_key
 if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
+check llama                t_llama
 check packages             t_packages
 check repo                 t_repo
 if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
@@ -278,6 +298,8 @@ if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check install-hook     in_builder hook
     check board-debs       in_builder debs
     check usb-serial       in_builder usbserial
+    check llama-debs       in_builder llama-debs
+    check llama-install    in_builder llama
 fi
 check wheel                t_wheel
 check shellcheck           t_shellcheck

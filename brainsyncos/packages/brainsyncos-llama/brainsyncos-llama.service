@@ -1,0 +1,77 @@
+# brainsyncos-llama.service - the local LLM for BrainSync: llama-server on
+# 127.0.0.1:9931 (package brainsyncos-llama; BCI Voice's "local" backend).
+#
+# It starts only once a model package is installed: that package puts the
+# GGUF file in /opt/brainsyncos/models/ and names it in
+# /etc/brainsyncos/llama.d/model.conf (BSOS_LLAMA_MODEL, BSOS_LLAMA_ALIAS,
+# optionally BSOS_LLAMA_CTX_SIZE). The API key is made once per device by
+# the install step 85-llama.sh in /etc/brainsyncos/llama/api-key (root
+# only) and reaches llama-server as a credential. /health answers without
+# it; everything else needs it.
+# llama-server runs with an empty environment (env -i): only the flags on
+# the ExecStart line count, so no LLAMA_ARG_* variable can turn on tools,
+# other hosts or the router. The build has no subprocess support at all
+# (LLAMA_SUBPROCESS=OFF). Local tuning goes in a drop-in.
+[Unit]
+Description=Local LLM for BrainSync (llama-server on 127.0.0.1:9931)
+Documentation=file:///usr/share/doc/brainsyncos-llama/README
+ConditionPathExists=/etc/brainsyncos/llama.d/model.conf
+ConditionPathExistsGlob=/opt/brainsyncos/models/*.gguf
+
+[Service]
+Type=exec
+Environment=BSOS_LLAMA_ALIAS=local BSOS_LLAMA_CTX_SIZE=8192
+EnvironmentFile=/etc/brainsyncos/llama.d/model.conf
+LoadCredential=api-key:/etc/brainsyncos/llama/api-key
+# One request at a time (-np 1, BCI Voice sends one page at once), prompt
+# cache capped at 512 MiB (the default 8 GiB does not fit an 8 GB Orin), no
+# web UI, no /slots, never any download. GPU layers stay at llama-server's
+# default, auto: all that fit on the Orin's GPU, none without one.
+ExecStart=/usr/bin/env -i /opt/brainsyncos/llama/bin/llama-server \
+    --host 127.0.0.1 --port 9931 --api-key-file %d/api-key \
+    --model ${BSOS_LLAMA_MODEL} --alias ${BSOS_LLAMA_ALIAS} --ctx-size ${BSOS_LLAMA_CTX_SIZE} \
+    --parallel 1 --cache-ram 512 --ctx-checkpoints 4 \
+    --no-webui --no-slots --offline --cors-origins localhost
+Restart=on-failure
+RestartSec=5
+
+# Low priority: BrainSync's flicker and EEG come first. Memory limits are to
+# be measured on the Orin (Phase 3e).
+Nice=10
+CPUWeight=50
+IOWeight=50
+
+# Network: 127.0.0.1 only, inbound and outbound.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Sandbox.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
