@@ -135,7 +135,8 @@ t_repo_key() {
     force_rm_tree "$BRAINSYNCOS_ROOT/$TD"
     "$B" run scripts/make-repo-key.sh --out "$TD/key"
     local f="$BRAINSYNCOS_ROOT/$KEY" pub="$BRAINSYNCOS_ROOT/$TD/key/repo-signing-key.pub.asc" fpr fpr2
-    [ "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f")" = 600 ] || die "secret key is not mode 600"
+    # GNU stat first: its -f means filesystem status and succeeds, so the BSD form must come second.
+    [ "$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")" = 600 ] || die "secret key is not mode 600"
     grep -q 'BEGIN PGP PRIVATE KEY BLOCK' "$f" || die "secret key file holds no secret key"
     ! grep -q 'PRIVATE KEY' "$pub" || die "public key file holds a private key"
     "$B" run bash -c 'source scripts/lib.sh; key_records "$1"' _ "$KEY" > "$TMP_DIR/key.recs"
