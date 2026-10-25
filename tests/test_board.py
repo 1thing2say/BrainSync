@@ -241,6 +241,30 @@ def test_detect_serial_port(tmp_path) -> None:
     assert detect_serial_port([str(tmp_path / "ttyUSB*")]) == str(tmp_path / "ttyUSB0")
 
 
+class _Port:
+    def __init__(self, device: str, vid: int | None) -> None:
+        self.device, self.vid = device, vid
+
+
+def test_detect_com_port_ranks_by_vendor_then_number() -> None:
+    assert bd.detect_com_port(lambda: []) == ""
+    assert bd.detect_com_port(lambda: [_Port("COM1", None), _Port("COM3", 0x8087)]) == ""
+    ports = [_Port("COM12", 0x1A86), _Port("COM5", 0x1A86), _Port("COM2", 0x0403)]
+    assert bd.detect_com_port(lambda: ports) == "COM5"      # CH340 beats FTDI, 5 before 12
+    assert bd.detect_com_port(lambda: [_Port("COM9", 0x303A), _Port("COM4", 0x10C4)]) == "COM9"
+
+
+def test_detect_serial_port_default_follows_platform(monkeypatch) -> None:
+    monkeypatch.setattr(bd, "detect_com_port", lambda: "COM7")
+    monkeypatch.setattr(bd.sys, "platform", "win32")
+    assert detect_serial_port() == "COM7"
+    assert "COM ports" in bd.serial_search_note()
+    monkeypatch.setattr(bd.sys, "platform", "darwin")
+    monkeypatch.setattr(bd, "SERIAL_PATTERNS", ())          # nothing matches: no COM scan
+    assert detect_serial_port() == ""
+    assert "COM" not in bd.serial_search_note()
+
+
 def test_full_scale_constant() -> None:
     assert bd.ADC_FULL_SCALE_UV == pytest.approx(187_500.0)
 

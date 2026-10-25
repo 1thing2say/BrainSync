@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import math
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -210,7 +211,12 @@ def score_command(path: Path, n_targets: int, python: str | None = None) -> str:
     """Shell command scoring ``path`` with the interpreter running this (the venv's)."""
     tool = "brainsync.score_cued" if n_targets > 1 else "brainsync.select_freqs"
     exe = python or sys.executable or "python"
-    return f"{shlex.quote(exe)} -m {tool} {shlex.quote(str(path))}"
+    if sys.platform != "win32":
+        return f"{shlex.quote(exe)} -m {tool} {shlex.quote(str(path))}"
+    # PowerShell: double quotes, and a quoted program needs the call operator in front
+    quoted = subprocess.list2cmdline([exe])
+    call = "& " if quoted.startswith('"') else ""
+    return f"{call}{quoted} -m {tool} {subprocess.list2cmdline([str(path)])}"
 
 
 def fallback_dir() -> Path:

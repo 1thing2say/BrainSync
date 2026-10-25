@@ -158,6 +158,16 @@ pull requests.
   (`ios/README.md`); not yet compiled or run on a device.
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
+- **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
+  move. The demo Mac stays the main machine and the macOS / Linux setup (README, vendored
+  BrainFlow, `deploy/jetson`) is unchanged. `deploy/windows/` runs `brainsync/` (board, decoder,
+  PsychoPy stimulus) in native Windows Python: `setup.ps1` (`.venv-win`, Python 3.12, lean
+  PsychoPy, the Cerelog BrainFlow fork built with MSVC by `brainflow/build_brainflow.ps1`, same
+  commit and patches as the Jetson plus `msvc-compat.patch`), `check.ps1` (charger, USB suspend,
+  COM port, measured 60 Hz). Code: COM-port detection by USB vendor id, a PowerShell WAV player,
+  Windows quoting in `record.score_command`; POSIX paths untouched. Not WSL: only Windows sees
+  the COM port, and WSLg windows are not vsynced. BrainFlow checks pass on Windows; the live run
+  with the board is still to do. Details and known Windows test gaps: `deploy/windows/INSTALL.md`.
 
 ## System design
 

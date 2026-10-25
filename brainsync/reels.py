@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from .board import FS, SERIAL_PATTERNS, CerelogBoard, FakeBoard, detect_serial_port
+from .board import FS, CerelogBoard, FakeBoard, detect_serial_port, serial_search_note
 from .bridge import (HOST, PORT, Bridge, config_message, cue_message, eeg_message,
                      phase_message, scroll_message)
 from .classify import ABSTAIN, make
@@ -376,7 +376,7 @@ def _await_device(link: Link, args: argparse.Namespace, voice: bool) -> str:
     if port:
         return port
     print(f"no EEG device connected: plug in the Cerelog X8 USB receiver (looked for "
-          f"{', '.join(SERIAL_PATTERNS)}); waiting up to {args.wait_device:g} s...",
+          f"{serial_search_note()}); waiting up to {args.wait_device:g} s...",
           file=sys.stderr)
     link.send(phase_message("wait", False, None, NO_DEVICE))
     link.send(eeg_message("absent", "plug in the Cerelog X8 USB receiver"))

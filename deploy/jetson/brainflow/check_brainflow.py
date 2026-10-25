@@ -1,6 +1,7 @@
-"""Checks an installed brainflow (Cerelog fork) without hardware. Run by verify_wheel.sh.
+"""Checks an installed brainflow (Cerelog fork) without hardware. Run by verify_wheel.sh,
+and on Windows by deploy/windows/setup.ps1.
 
-1. every .so in brainflow/lib dlopens (dependencies resolve)
+1. every .so (.dll on Windows) in brainflow/lib dlopens (dependencies resolve)
 2. CERELOG_X8_BOARD exists, 250 Hz, its descriptor has 8 EEG channels
 3. SYNTHETIC_BOARD: prepare_session / start_stream / get_board_data / release_session
 4. DataHandler: detrend + bandpass on the synthetic data
@@ -23,8 +24,9 @@ with warnings.catch_warnings():
 
 lib = os.path.join(os.path.dirname(brainflow.__file__), "lib")
 print("brainflow package:", os.path.dirname(brainflow.__file__))
-sos = sorted(glob.glob(os.path.join(lib, "*.so")))
-assert sos, "no .so files in " + lib
+ext = ".dll" if os.name == "nt" else ".so"
+sos = sorted(glob.glob(os.path.join(lib, "*" + ext)))
+assert sos, f"no {ext} files in " + lib
 for so in sos:
     ctypes.CDLL(so)
     print("dlopen ok:", os.path.basename(so))
@@ -61,7 +63,7 @@ print(f"DataHandler bandpass 5-45 Hz: std {before:.3f} -> {float(np.std(ch)):.3f
 assert np.all(np.isfinite(ch))
 
 params = BrainFlowInputParams()
-params.serial_port = "/dev/ttyUSB-does-not-exist"
+params.serial_port = "COM255" if os.name == "nt" else "/dev/ttyUSB-does-not-exist"
 params.timeout = 15
 t0 = time.monotonic()
 try:

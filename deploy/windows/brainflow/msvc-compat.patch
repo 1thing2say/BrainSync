@@ -1,0 +1,79 @@
+Windows only. Lets Shared_brainflow-cerelog 932b3944 build with current MSVC
+(Visual Studio 2026, toolset 14.51). macOS and Linux never compile either change.
+
+1. src/utils/inc/get_dll_dir.h includes <atlstr.h> for one CString used to find the
+   DLL's own folder. The build defines neither UNICODE nor _MBCS, and current ATL refuses
+   to compile as MBCS, so every file including the header fails. get_dll_path is
+   rewritten with plain Win32 calls (GetModuleHandleExA + GetModuleFileNameA, cut at the
+   last backslash); the result is the same folder with a trailing backslash. Inside
+   #ifdef _WIN32.
+2. third_party/DSPFilters (used by DataHandler) aliases `tr1 = std::tr1` for every MSVC.
+   std::tr1 was removed from MSVC's library, so it now takes the `tr1 = std` branch the
+   other compilers use, keeping std::tr1 only for MSVC before 2015 (_MSC_VER < 1900).
+
+Apply from the repository root:  git apply msvc-compat.patch
+
+diff --git a/src/utils/inc/get_dll_dir.h b/src/utils/inc/get_dll_dir.h
+index a09a81e..ae17948 100644
+--- a/src/utils/inc/get_dll_dir.h
++++ b/src/utils/inc/get_dll_dir.h
+@@ -2,33 +2,30 @@
+ 
+ #ifdef _WIN32
+ #include <Windows.h>
+-#include <atlstr.h>
+ #include <string.h>
+ 
+-// no unicode!
++// no unicode! (plain Win32, no ATL: newer MSVC's ATL refuses MBCS builds)
+ inline bool get_dll_path (char *res)
+ {
+-    CString this_path = "";
+-    WCHAR path[MAX_PATH];
++    char path[MAX_PATH];
+     HMODULE hm;
+-    if (GetModuleHandleExW (
++    if (!GetModuleHandleExA (
+             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+-            (LPWSTR)&get_dll_path, &hm))
++            (LPCSTR)&get_dll_path, &hm))
+     {
+-        GetModuleFileNameW (hm, path, sizeof (path));
+-        PathRemoveFileSpecW (path);
+-        this_path = CStringW (path);
+-        if (!this_path.IsEmpty () && this_path.GetAt (this_path.GetLength () - 1) != '\\')
+-            this_path += "\\";
++        return false;
+     }
+-    else
++    DWORD len = GetModuleFileNameA (hm, path, MAX_PATH);
++    if (len == 0 || len >= MAX_PATH)
+     {
+         return false;
+     }
+-    char *buf = NULL;
+-    buf = this_path.GetBuffer (this_path.GetLength ());
+-    this_path.ReleaseBuffer ();
+-    strcpy (res, buf);
++    char *slash = strrchr (path, '\\');
++    if (slash != NULL)
++    {
++        slash[1] = '\0';
++    }
++    strcpy (res, path);
+     return true;
+ }
+ 
+diff --git a/third_party/DSPFilters/include/DspFilters/Common.h b/third_party/DSPFilters/include/DspFilters/Common.h
+index 8786b66..b96fcfd 100644
+--- a/third_party/DSPFilters/include/DspFilters/Common.h
++++ b/third_party/DSPFilters/include/DspFilters/Common.h
+@@ -57,7 +57,7 @@ THE SOFTWARE.
+ #include <vector>
+ #include <algorithm>
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && _MSC_VER < 1900  // std::tr1 is gone from current MSVC
+ namespace tr1 = std::tr1;
+ #else
+ namespace tr1 = std;

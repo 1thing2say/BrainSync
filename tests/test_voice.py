@@ -175,13 +175,29 @@ def test_find_api_key(tmp_path, monkeypatch):
 
 
 def test_player_command_preference():
+    wav = Path("/tmp/x.wav")
     have = {"aplay", "ffplay"}
-    cmd = voice.player_command(Path("/tmp/x.wav"), which=lambda n: n if n in have else None)
-    assert cmd == ["aplay", "-q", "/tmp/x.wav"]
-    assert voice.player_command(Path("/tmp/x.wav"), which=lambda n: "/usr/bin/afplay"
-                                if n == "afplay" else None) == ["afplay", "/tmp/x.wav"]
-    assert voice.player_command(Path("/tmp/x.wav"), which=lambda n: None) is None
+    cmd = voice.player_command(wav, which=lambda n: n if n in have else None)
+    assert cmd == ["aplay", "-q", str(wav)]                  # str: "\tmp\x.wav" on Windows
+    assert voice.player_command(wav, which=lambda n: "/usr/bin/afplay"
+                                if n == "afplay" else None) == ["afplay", str(wav)]
+    assert voice.player_command(wav, which=lambda n: None) is None
     assert all(p[0] != "say" for p in voice.PLAYERS)
+
+
+def test_player_command_windows_fallback():
+    path = Path("C:/Users/o'brien/clip.wav")
+    cmd = voice.player_command(path, which=lambda n: n if n == "powershell" else None)
+    assert cmd[:4] == list(voice.WINDOWS_PLAYER)
+    quoted = str(path).replace("'", "''")             # the quote cannot end the string
+    assert cmd[4] == f"(New-Object Media.SoundPlayer '{quoted}').PlaySync()"
+    curly = voice.player_command(Path("C:/x/o\u2019brien.wav"), which=lambda n: n)
+    assert curly is not None and curly[0] == "afplay"   # afplay first when it exists
+    curly = voice.player_command(Path("C:/x/o\u2019brien.wav"),
+                                 which=lambda n: n if n == "powershell" else None)
+    assert "o\u2019\u2019brien" in curly[4]             # typographic quotes end it too
+    both = {"powershell", "ffplay"}                   # a POSIX player still wins
+    assert voice.player_command(path, which=lambda n: n if n in both else None)[0] == "ffplay"
 
 
 def test_silenced_by_environment(monkeypatch):

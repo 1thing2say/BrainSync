@@ -29,6 +29,9 @@ SERIAL_PATTERNS = (
     "/dev/ttyUSB*",
     "/dev/ttyACM*",
 )
+# Windows has no /dev: COM ports are matched by USB vendor id instead (WCH CH340 on the
+# X8 V1, Espressif on the ESP32-S3 V2, Silicon Labs CP210x, FTDI), in this order.
+USB_SERIAL_VIDS = (0x1A86, 0x303A, 0x10C4, 0x0403)
 POSTERIOR_ROWS = tuple(MONTAGE.index(c) for c in POSTERIOR)  # rows the fake tone goes on
 
 
@@ -48,13 +51,51 @@ def _names(ch_names: Sequence[str] | None, n: int) -> tuple[str, ...]:
     return names
 
 
-def detect_serial_port(patterns: Sequence[str] = SERIAL_PATTERNS) -> str:
-    """First USB serial device matching ``patterns`` (in pattern order), or "" if none."""
+def detect_serial_port(patterns: Sequence[str] | None = None) -> str:
+    """First USB serial device matching ``patterns`` (in pattern order), or "" if none.
+
+    ``patterns`` None means this platform's default: ``SERIAL_PATTERNS`` on macOS and
+    Linux, ``detect_com_port`` on Windows.
+    """
+    if patterns is None:
+        if sys.platform == "win32":
+            return detect_com_port()
+        patterns = SERIAL_PATTERNS
     for pattern in patterns:
         found = sorted(glob.glob(pattern))
         if found:
             return found[0]
     return ""
+
+
+def detect_com_port(comports: Callable[[], Sequence[Any]] | None = None) -> str:
+    """Windows: the COM port of the first known USB serial adapter, or "" if none.
+
+    Adapters rank by ``USB_SERIAL_VIDS``, then by port number. ``comports`` replaces
+    pyserial's ``list_ports.comports``, for tests; without pyserial nothing is found.
+    """
+    if comports is None:
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            return ""
+        comports = list_ports.comports
+    ports = [p for p in comports() if getattr(p, "vid", None) in USB_SERIAL_VIDS]
+    if not ports:
+        return ""
+
+    def rank(p: Any) -> tuple[int, int, str]:
+        digits = "".join(ch for ch in p.device if ch.isdigit())
+        return USB_SERIAL_VIDS.index(p.vid), int(digits or 0), p.device
+
+    return min(ports, key=rank).device
+
+
+def serial_search_note() -> str:
+    """What ``detect_serial_port()`` looks for on this platform, for error messages."""
+    if sys.platform == "win32":
+        return "COM ports of USB serial adapters (CH340, ESP32-S3, CP210x, FTDI)"
+    return ", ".join(SERIAL_PATTERNS)
 
 
 def _brainflow() -> Any:
@@ -66,8 +107,9 @@ def _brainflow() -> Any:
     except ImportError as exc:
         raise ImportError(
             "brainflow with Cerelog X8 support is not installed; copy the brainflow-cerelog "
-            "folder somewhere writable and run `.venv/bin/python -m pip install "
-            "--no-build-isolation <copy>` (needs setuptools<81)") from exc
+            f"folder somewhere writable and run `{sys.executable or 'python'} -m pip install "
+            "--no-build-isolation <copy>` (needs setuptools<81; on Windows run "
+            "deploy/windows/setup.ps1 instead)") from exc
     return board_shim
 
 
