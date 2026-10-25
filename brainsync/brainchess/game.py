@@ -16,6 +16,12 @@ strip and vote meters (``window``, ``votes``); the run loop adds the EEG lanes
 (``lanes``, ``eeg``). ``SimulatedUser`` stands in for the user with
 ``--fake``: it decides on a move at the start of each turn and after every screen change
 looks at the group holding it, or at BACK once a wrong pick has ruled it out.
+
+``code=True`` is the c-VEP standard (docs/CVEP-STANDARD.md): three targets, the two
+groups (target 0 and 1, code lags 0 and 21 frames) and a Back panel (target 2) that
+undoes the last pick at every step; on the PLAY screen the second panel is RESTART.
+Each decision's confidence (a bar and score per target, the lead and the choice) goes to
+the display's side column (``confidence``), and the training screen cues target 0.
 """
 from __future__ import annotations
 
@@ -31,7 +37,8 @@ import numpy as np
 
 from ..classify import ABSTAIN
 from ..online import Decision
-from .gate import MoveGate
+from ..vep.live import confidence_labels, confidence_line
+from .gate import CodeGate, MoveGate
 from .prior import Engine
 from .render import render_pieces
 from .split import MoveSelector
@@ -48,7 +55,11 @@ PHASES = ("idle", "user", "opponent", "over")
 STAGES = ("piece", "dest", "promo", "confirm", "none")
 
 Arrow = tuple[int, int] | None
-Panels = tuple[str, str] | None
+Panels = tuple[str, ...] | None   # two labels (f-VEP), or three with Back (c-VEP)
+BACK = 2                          # c-VEP: the Back panel's target
+GROUP_NAMES = ("A", "B")          # c-VEP: the two board groups, as tagged on their squares
+BACK_LABEL = "BACK"
+LABEL_CHARS = 10                  # confidence-line labels are cut to this
 
 
 class Display(Protocol):
@@ -67,6 +78,14 @@ class Display(Protocol):
 
     def votes(self, target: int, n: int, of: int) -> bool:
         """``n`` of ``of`` agreeing fresh windows for ``target`` (ABSTAIN: none yet)."""
+        ...
+
+    def confidence(self, lines: Sequence[str]) -> bool:
+        """c-VEP: the confidence block (a line per target and a status line); () clears."""
+        ...
+
+    def cue(self, target: int | None) -> bool:
+        """c-VEP: the cue box on panel ``target`` (training), None to clear it."""
         ...
 
     def lanes(self, names: Sequence[str]) -> bool:
@@ -112,6 +131,8 @@ class StimulusDisplay:
         self._text = ""
         self._stage = "none"
         self._votes: tuple[int, int, int] | None = None
+        self._confidence: tuple[str, ...] = ()
+        self._cue: int | None = None
         self._holding = True
 
     def _write(self, lines: list[str]) -> bool:
@@ -146,7 +167,7 @@ class StimulusDisplay:
         if arrow != self._arrow:
             lines.append("arrow none" if arrow is None else f"arrow {arrow[0]} {arrow[1]}")
         if panels != self._panels:
-            lines.append("panels none" if panels is None else f"panels {panels[0]}|{panels[1]}")
+            lines.append("panels none" if panels is None else "panels " + "|".join(panels))
         if text != self._text:
             lines.append(f"text {text}" if text else "text")
         if stage != self._stage:
@@ -169,6 +190,24 @@ class StimulusDisplay:
         if not self._write([f"votes {_target(target)} {n} {of}"]):
             return False
         self._votes = state
+        return True
+
+    def confidence(self, lines: Sequence[str]) -> bool:
+        # keep the runs of spaces that line the bars up; only line breaks and '|' go
+        lines = tuple(" ".join(str(ln).splitlines()).replace("|", "/").strip() for ln in lines)
+        if lines == self._confidence:
+            return not self.closed
+        if not self._write(["confidence " + "|".join(lines) if lines else "confidence"]):
+            return False
+        self._confidence = lines
+        return True
+
+    def cue(self, target: int | None) -> bool:
+        if target == self._cue:
+            return not self.closed
+        if not self._write(["cue none" if target is None else f"cue {int(target)}"]):
+            return False
+        self._cue = target
         return True
 
     def lanes(self, names: Sequence[str]) -> bool:
@@ -217,6 +256,9 @@ class NullDisplay:
         self.closed = False
         self.windows: list[tuple[float, int, bool, bool]] = []
         self.vote_state: tuple[int, int, int] | None = None
+        self.confidence_lines: tuple[str, ...] = ()
+        self.confidence_log: list[tuple[str, ...]] = []
+        self.cue_target: int | None = None
         self.lane_names: tuple[str, ...] = ()
         self.eeg_samples = 0       # counted, not kept: a long headless run sends many
 
@@ -238,6 +280,16 @@ class NullDisplay:
 
     def votes(self, target: int, n: int, of: int) -> bool:
         self.vote_state = (target, n, of)
+        return True
+
+    def confidence(self, lines: Sequence[str]) -> bool:
+        self.confidence_lines = tuple(lines)
+        self.confidence_log.append(self.confidence_lines)
+        return True
+
+    def cue(self, target: int | None) -> bool:
+        self.calls.append(("cue", {"target": target}))
+        self.cue_target = target
         return True
 
     def lanes(self, names: Sequence[str]) -> bool:
@@ -319,6 +371,8 @@ class ChessSession:
     ``pieces_dir`` None skips rendering the pieces PNG (no stimulus to show it).
     ``on_screen(session)`` runs after every change of what is on screen (the simulated
     user looks again). ``max_moves`` > 0 ends the session after that many user moves.
+    ``code=True``: the c-VEP standard's three targets, group A, group B and Back (undo the
+    last pick); the gate is then a ``CodeGate``.
     """
 
     def __init__(self, board: chess.Board, engine: Engine, display: Display | None = None, *,
@@ -328,7 +382,7 @@ class ChessSession:
                  speak: Callable[[str], None] = _silent, pieces_dir: str | Path | None = None,
                  flip: bool | None = None,
                  on_screen: Callable[[ChessSession], None] | None = None,
-                 balance_tol: float = 0.15, min_gap: int = 1) -> None:
+                 balance_tol: float = 0.15, min_gap: int = 1, code: bool = False) -> None:
         if not hold_s >= 0:   # also rejects NaN
             raise ValueError(f"hold_s must be >= 0, got {hold_s}")
         if isinstance(max_moves, bool) or int(max_moves) != max_moves or max_moves < 0:
@@ -350,6 +404,10 @@ class ChessSession:
         self.on_screen = on_screen
         self.balance_tol = balance_tol
         self.min_gap = min_gap
+        self.code = bool(code)
+        self.n_targets = 3 if self.code else 2
+        self.holding = True         # the display's flicker stands still (as it starts)
+        self.undos = 0              # Back picks that took a pick back
         self.phase = "idle"
         self.ended = ""             # why the session is over: "game over" or "move limit"
         self.selector: MoveSelector | None = None
@@ -426,27 +484,76 @@ class ChessSession:
 
     def _hold(self) -> None:
         self.display_ok = self.display.hold() and self.display_ok
+        self.holding = True
 
     def _go(self) -> None:
         self.display_ok = self.display.go() and self.display_ok
+        self.holding = False
+
+    def _confidence(self, lines: Sequence[str]) -> None:
+        self.display_ok = self.display.confidence(lines) and self.display_ok
+
+    def _cue(self, target: int | None) -> None:
+        self.display_ok = self.display.cue(target) and self.display_ok
+
+    def target_labels(self) -> tuple[str, ...]:
+        """What each target means on the current screen, for the confidence lines."""
+        sel = self.selector
+        if not self.code:
+            return ("0", "1")
+        if sel is not None and sel.stage in ("promo", "confirm"):
+            panels = sel.panels()
+            assert panels is not None
+            return (*(lab[:LABEL_CHARS] for lab in panels), BACK_LABEL)
+        return (*GROUP_NAMES, BACK_LABEL)
+
+    def _panels(self) -> Panels:
+        """The side panels for the current selector: two (f-VEP, None when the board
+        flickers), or three with Back (c-VEP; '' for an idle panel)."""
+        sel = self.selector
+        assert sel is not None
+        panels = sel.panels()
+        if not self.code:
+            return panels
+        return (*(panels if panels is not None else ("", "")), BACK_LABEL)
 
     def _screen_changed(self) -> None:
         if self.gate is not None:
             self.gate.screen_changed()
-            self._votes()
+            if not self.code:
+                self._votes()
         if self.on_screen is not None:
             self.on_screen(self)
 
     def _draw_selector(self) -> None:
         sel = self.selector
         assert sel is not None
-        self._show(sel.groups(), sel.arrow(), sel.panels(), sel.prompt(), sel.stage)
+        self._show(sel.groups(), sel.arrow(), self._panels(), sel.prompt(), sel.stage)
 
     def show_still(self, text: str) -> None:
         """The position on a still board with a caption (calibration, before start)."""
         arrow = None if self.last_reply is None else (self.last_reply.from_square,
                                                       self.last_reply.to_square)
         self._show(PLAIN, arrow, None, text)
+        self._hold()
+
+    def show_training(self, done: int, of: int) -> None:
+        """c-VEP training (docs/CVEP-STANDARD.md, section 2): every panel flickers, the cue
+        box sits on target 0's panel and the side column counts the training cycles."""
+        name = GROUP_NAMES[0]
+        if self.holding:     # first call: the training screen goes up
+            self._show(PLAIN, None, (*GROUP_NAMES, BACK_LABEL),
+                       f"Look at the {name} square and keep looking at it")
+            self._cue(0)
+            self._go()
+        self._confidence([f"training: keep looking at {name}   cycle {done}/{of}"])
+
+    def trained(self, accuracy: float, chance: float) -> None:
+        """The template is ready: say how well it cross-validated and drop the cue."""
+        self._cue(None)
+        self._confidence([f"template ready: {100 * accuracy:.0f} % on held-out cycles "
+                          f"(chance {100 * chance:.0f} %)"])
+        self._show(PLAIN, None, None, "Template ready")
         self._hold()
 
     # -- flow --------------------------------------------------------------------------
@@ -492,7 +599,8 @@ class ChessSession:
             self._end("game over")
             return
         self.selector = MoveSelector(self.board, self._weights(), confirm=self.confirm,
-                                     balance_tol=self.balance_tol, min_gap=self.min_gap)
+                                     balance_tol=self.balance_tol, min_gap=self.min_gap,
+                                     undo=self.code)
         self.phase = "user"
         self._turn_started = self.clock()
         self._turn_picks = 0
@@ -506,21 +614,29 @@ class ChessSession:
         self._screen_changed()
 
     def on_pick(self, target: int) -> None:
-        """Apply one decoded pick (0 or 1) to the current selector."""
+        """Apply one decoded pick (0 or 1; with code, 2 is Back) to the current selector."""
         if self.phase != "user" or self.selector is None:
             raise ValueError(f"no pick is expected now (phase {self.phase!r})")
+        if isinstance(target, bool) or target not in range(self.n_targets):
+            raise ValueError(f"target must be 0..{self.n_targets - 1}, got {target!r}")
         sel = self.selector
         stage = sel.stage
         n = len(sel.candidates())
         back = stage == "confirm" and target == 1
-        sel.choose(target)
+        undo = self.code and target == BACK
+        undone = sel.undo() if undo else sel.choose(target)
         self._turn_picks += 1
         self.picks.append(Pick(self.user_moves + 1, stage, int(target), n,
                                self.clock() - self._turn_started))
         if back:
             self.backs += 1
             self._turn_backs += 1
-            self.speak("Back")
+            self.speak("Restart" if self.code else "Back")
+        if undo:
+            self.backs += 1
+            self._turn_backs += 1
+            self.undos += int(bool(undone))
+            self.speak("Back" if undone else "Nothing to undo")
         if sel.stage == "done":
             self._play_user_move(sel.move)
             return
@@ -578,18 +694,24 @@ class ChessSession:
         """
         if self.gate is None:
             return ABSTAIN
-        t = d.end / self.gate.decoder.fs
+        t = self.gate.stream_time(d)
         if self.phase != "user":
             self.display_ok = self.display.window(t, int(d.raw), False, False) \
                 and self.display_ok
             return ABSTAIN
         stale = self.gate.stale
+        labels = self.target_labels()
         target = self.gate.push(d)
-        self.display_ok = self.display.window(t, int(d.raw), self.gate.stale == stale,
+        fresh = self.gate.stale == stale
+        self.display_ok = self.display.window(t, int(d.raw), fresh,
                                               target != ABSTAIN) and self.display_ok
+        if self.code and fresh:
+            # the bars of the screen the decision was made on, then the screen it leads to
+            self._confidence([*confidence_labels(d, labels), confidence_line(d, labels)])
         if target != ABSTAIN:
             self.on_pick(target)
-        self._votes()
+        if not self.code:
+            self._votes()
         return target
 
     def _end(self, why: str) -> None:
@@ -623,8 +745,10 @@ class ChessSession:
         picks = sum(m.picks for m in self.moves)
         per = f"{picks / n:.1f}" if n else "n/a"
         secs = f"{sum(m.seconds for m in self.moves) / n:.1f} s" if n else "n/a"
+        backs = (f"{self.backs} BACK ({self.undos} undid a pick)" if self.code
+                 else f"{self.backs} BACK")
         lines = [f"brainchess: {n} moves played, {picks} picks ({per} per move), "
-                 f"{self.backs} BACK, {secs} per move; {self.status()}"
+                 f"{backs}, {secs} per move; {self.status()}"
                  + (f"; ended: {self.ended}" if self.ended else "")]
         if self.moves:
             lines.append("  moves: " + "  ".join(
@@ -640,7 +764,9 @@ class SimulatedUser:
     Engine with its own seed, so it plays sensible moves). ``look(session)`` is the target
     it looks at now: the group holding its move; after a wrong pick has ruled that move
     out, the group of the heaviest move still reachable (any pick moves the selection on),
-    and then BACK at confirm. ABSTAIN while the board is still.
+    and then BACK at confirm. ABSTAIN while the board is still. With a Back target (c-VEP)
+    it looks at Back as soon as a wrong pick has ruled its move out, and at confirm when
+    the wrong move is shown.
     """
 
     def __init__(self, engine: Engine) -> None:
@@ -656,6 +782,10 @@ class SimulatedUser:
             self._selector = sel
             self.intended = self.engine.reply(session.board)
         assert self.intended is not None
+        if session.code and sel.can_undo and not sel.reachable(self.intended):
+            return BACK
+        if session.code and sel.stage == "confirm" and sel.shown_move != self.intended:
+            return BACK if sel.can_undo else 1
         if sel.stage == "confirm":
             return sel.target_for(self.intended)
         move = self.intended
