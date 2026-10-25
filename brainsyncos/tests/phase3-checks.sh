@@ -77,7 +77,7 @@ c_apt() {
     mv "$idx/Packages.gz.t" "$idx/Packages.gz"
     expect_apt_fail "a tampered index" 'Hash Sum mismatch' "$p" "$W/repo"
     fresh_repo
-    deb="$(ls "$W/repo/pool/$REPO_COMPONENT"/*.deb | head -1)"
+    deb="$(ls "$W/repo/pool/$REPO_COMPONENT"/brainsyncos-archive-keyring_*.deb)"
     printf 'x' >> "$deb"
     expect_apt_fail "a tampered .deb" 'Hash Sum mismatch' "$p" "$W/repo" 'bsos_apt install brainsyncos-archive-keyring --reinstall'
     fresh_repo
