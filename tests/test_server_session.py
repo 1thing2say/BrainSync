@@ -1563,6 +1563,20 @@ def test_code_point_mode_trains_on_the_modes_own_train_targets():
     assert rig.selections()[0]["slot"] == "more"
 
 
+def test_code_failed_training_says_why_and_starts_again():
+    rig = CodeRig()
+    rig.connect(1, code_hello())
+    rig.until(lambda: rig.tr.of("train")[-1]["cycle"] >= 2)
+    rig.bank.retrain()
+    rig.bank.train_error = "only 0 training cycle(s) could be cut"
+    rig.advance(DT)
+    (err,) = rig.tr.to(1, "error")
+    assert err["code"] == "internal" and "Training failed" in err["message"]
+    assert rig.tr.of("train")[-1]["cycle"] == 0 and rig.session.phase == "train"
+    assert ("train_failed" in rig.kinds()) and rig.bank.train_error == ""
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+
+
 def test_code_onset_is_only_logged():
     rig = CodeRig()
     lay = rig.run_code()
