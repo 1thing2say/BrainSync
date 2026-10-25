@@ -1,4 +1,4 @@
-// What the partner page shows, as pure functions of the server's messages: the status banner, the
+// What the session page shows, as pure functions of the server's messages: the status banner, the
 // one-line health summary, the mic card and the selection progress. Pure, so node can test it
 // (tests/js/view_core.test.js); app.js only puts the results on the page. Loaded before app.js.
 "use strict";

@@ -176,6 +176,10 @@ pull requests.
   iPhone app keeps its own text box. The targets sit further apart: wider diamond gaps, and the
   confirm screen keeps the diamond's empty middle row, so Say it (top) and Back (bottom) are about
   230 px apart instead of 30 px (phones: side by side, 3 rem apart).
+  It is no longer called the partner page (the profile page links back to "Session"; the server
+  prints "BrainSync page: …"), and `ui/` is served with `Cache-Control: no-cache`, so a browser
+  never runs a cached old `app.js` against a new `index.html` (that left the page stuck on
+  "Connecting…").
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a

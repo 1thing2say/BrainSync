@@ -1,9 +1,9 @@
-// Partner page: renders what the server says and reports events back. All state is server-side.
+// The session page: renders what the server says and reports events back. All state is server-side.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const RECONNECT_MS = 1000;
-const REPLACED = 4000;  // close code: another partner page took over (app/server.py)
+const REPLACED = 4000;  // close code: another page took over (app/server.py)
 
 let ws = null;
 let shown = null;        // last show_page

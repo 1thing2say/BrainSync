@@ -1,4 +1,4 @@
-/* Partner page. Nothing here flashes: the only flicker is on the teammate's PsychoPy display.
+/* The session page (index.html) and the profile page. Nothing here flashes: the only flicker is on the teammate's PsychoPy display.
    Every colour is a variable here, so a new palette only changes this block. The values are the
    shared tokens: the iPhone app's Palette uses the same hex values, so both clients match.
    Near-black, 1 px borders, colour only for status. */
@@ -51,13 +51,15 @@ a { color: var(--text); }
 
 /* Mono labels: small, uppercase, spaced (pills, tags, section titles). */
 .phase, .badge, .target-tag, .target-key, .speaking-tag, .option-count, .panel h2, .conversation .who,
-.callout-title, .profile-page legend, .preview h2 {
+.topbar-label, .callout-title, .profile-page legend, .preview h2 {
   font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
 
-/* Top bar: the name and the profile link. */
+/* Top bar: the name, the profile link; on the profile page also its name after a slash. */
 .topbar { display: flex; align-items: center; gap: 0.6rem; height: 3rem; padding: 0 1.25rem;
   border-bottom: 1px solid var(--line); background: var(--bg); flex: none; }
 .wordmark { font-weight: 700; font-size: 1rem; letter-spacing: -0.03em; color: var(--text); text-decoration: none; }
+.topbar-sep { color: var(--line-strong); font-size: 1.2rem; }
+.topbar-label { font-size: 0.75rem; color: var(--muted); }
 .topbar-nav { margin-left: auto; display: flex; gap: 1rem; }
 .topbar-nav a { color: var(--muted); text-decoration: none; font-size: 0.875rem; padding: 0.35rem 0.1rem; }
 .topbar-nav a:hover { color: var(--text); }
@@ -248,11 +250,11 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
 
-/* Laptop: the whole partner page fits the window, never a page scroll. The conversation shrinks
-   first and scrolls on its own; the panel scrolls only on a very short window. Only body.partner
+/* Laptop: the whole session page fits the window, never a page scroll. The conversation shrinks
+   first and scrolls on its own; the panel scrolls only on a very short window. Only body.session
    (index.html): the profile page is a long form and scrolls as usual. */
 @media (min-width: 901px) {
-  body.partner { height: 100vh; height: 100dvh; overflow: hidden; }
+  body.session { height: 100vh; height: 100dvh; overflow: hidden; }
   .layout { min-height: 0; }
   .mirror, .panel { min-height: 0; overflow-y: auto; }
   .targets { min-height: 0; }
@@ -288,7 +290,7 @@ button.target:disabled { cursor: default; color: var(--text); background: var(--
     padding-bottom: calc(0.6rem + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
 }
 
-/* Phone (the partner page on the partner's phone, PLAN section 10, the iPhone app's fallback): the
+/* Phone (the session page in a phone browser, PLAN section 10, the iPhone app's fallback): the
    partner's part first, a compact mirror below it; Stop stays in the bottom bar from the 900 px rule. */
 @media (max-width: 600px) {
   /* iPhone: room for the notch (viewport-fit=cover in index.html). */

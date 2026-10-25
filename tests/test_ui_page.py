@@ -87,11 +87,11 @@ def test_nothing_blinks():
     assert "blink" not in css
 
 
-def test_only_the_partner_page_is_held_to_the_window():
-    # At 901 px and up the partner page never scrolls; the profile page (same stylesheet) must.
+def test_only_the_session_page_is_held_to_the_window():
+    # At 901 px and up the session page never scrolls; the profile page (same stylesheet) must.
     css = re.sub(r"/\*.*?\*/", "", (UI / "style.css").read_text(encoding="utf-8"), flags=re.S)
     held = re.findall(r"([^{}]+)\{[^{}]*overflow:\s*hidden", css)
     bodies = [sel.strip() for sel in held if re.search(r"(^|[\s,])body\b", sel.strip())]
-    assert bodies == ["body.partner"]
-    assert '<body class="partner">' in (UI / "index.html").read_text(encoding="utf-8")
-    assert 'class="partner"' not in (UI / "profile.html").read_text(encoding="utf-8")
+    assert bodies == ["body.session"]
+    assert '<body class="session">' in (UI / "index.html").read_text(encoding="utf-8")
+    assert 'class="session"' not in (UI / "profile.html").read_text(encoding="utf-8")

@@ -10,7 +10,7 @@
   <title>BCI Voice</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body class="partner">
+<body class="session">
   <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
   <div id="warning" class="overlay" role="dialog" aria-modal="true" aria-labelledby="warning-title">
     <div class="card callout warn">
@@ -27,13 +27,13 @@
     </div>
   </div>
 
-  <!-- Shown when another tab or phone opened the partner page (only one can be connected). -->
+  <!-- Shown when another tab or phone opened the session (only one page can be connected). -->
   <div id="replaced" class="overlay" role="dialog" aria-modal="true" aria-labelledby="replaced-title" hidden>
     <div class="card callout">
       <p class="callout-title">Note</p>
       <h1 id="replaced-title">Open on another page</h1>
-      <p>The partner page was opened in another tab or on another device, which now runs the
-        session. Only one partner page can be connected at a time.</p>
+      <p>BrainSync was opened in another tab or on another device, which now runs the
+        session. Only one page can be connected at a time.</p>
       <button id="take-over" class="primary">Use this page instead</button>
     </div>
   </div>
