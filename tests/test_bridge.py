@@ -419,9 +419,10 @@ def test_cycles_and_toggles_are_queued_with_their_tab(bridge, capsys):
 
     asyncio.run(main())
     events = bridge.events()
-    cycles = [(e["n"], e["t"], e["_client"]) for e in events if e["type"] == "cycle"]
-    (_, _, ca), (_, _, cb), _ = cycles
-    assert ca != cb and cycles == [(0, 100.0, ca), (0, 100.2, cb), (1, 101.05, ca)]
-    assert events[-1]["type"] == "toggled"
+    # the two sockets' messages may interleave either way; each keeps its own number
+    tab = {(e["n"], e["t"]): e["_client"] for e in events if e["type"] == "cycle"}
+    assert set(tab) == {(0, 100.0), (0, 100.2), (1, 101.05)}
+    assert tab[0, 100.0] == tab[1, 101.05] != tab[0, 100.2]
+    assert [e["type"] for e in events].count("toggled") == 1
     assert bridge.ignored == 2
     assert capsys.readouterr().err.count("ignored a cycle message") == 2
