@@ -172,7 +172,7 @@ second key: a device only trusts the key its ISO came with.
 
 ## Open items
 
-- **Confirm on the new machine:** run `tests/test_phase3.sh` once under x86-64 emulation.
+- **Confirmed on x86-64 (2026-10-24):** `tests/test_phase3.sh` passes all 10 checks on a WSL2 laptop with Docker Desktop, under arm64 emulation, from a clone under `~`. It needed two fixes: `builder.sh` hands root-owned output back to the user, and the key-mode check reads GNU `stat` first. From `/mnt/c` the key check fails by design (Windows drives ignore `chmod`).
 - **Review of 3a not finished.** A three-lens review (correctness, key handling and apt trust, install-time robustness on the real installers) was running when this was pushed; its results are not in this commit.
 - **Not exercised yet:** a real UTM install of a 3a ISO, i.e. the repository bind mount under real subiquity/curtin. The tests use a chroot shim for curtin.
 - **Clock risk:** the apt helper accepts a clock in the past (tested at 2001), and a clock past the key's expiry fails. That is correct, but a Jetson whose RTC jumps far ahead would fail the install.
