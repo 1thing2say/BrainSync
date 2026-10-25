@@ -71,10 +71,12 @@ class SNR(CCA):
         outer = max(self.neighbour_hz, inner + 4.0 * bin_hz)
         return inner, outer
 
-    def raw_scores(self, X: np.ndarray) -> np.ndarray:
+    def raw_scores(self, X: np.ndarray, offset: float = 0.0) -> np.ndarray:
         """SNR in dB (n_trials, n_targets): the largest bin within exclude_hz of the frequency
         (a variant of the paper's P(f_k) that tolerates a frequency between two bins) over
-        the mean power of the bins in ``ring``."""
+        the mean power of the bins in ``ring``. ``offset`` (the window's start relative to
+        the onset, which ``CCA.scores`` passes for phase-locked templates) is ignored: a power
+        spectrum has no phase."""
         X = self._windows(X)
         inner, outer = self.ring(X.shape[-1])
         power, bins = self.spectrum(X)
