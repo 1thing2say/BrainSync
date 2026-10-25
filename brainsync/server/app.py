@@ -66,7 +66,6 @@ from typing import Any
 from ..envfile import load_env_file
 from ..vep.live import TRAIN_CYCLES
 from . import protocol as P
-from .coding import POINT_KEYS
 from .decoding import DecoderBank
 from .session import Session
 from .transport import Transport, is_loopback
@@ -308,6 +307,12 @@ class ArchivingMode:
     def stop(self) -> None:
         self.mode.stop()
 
+    def __getattr__(self, name: str) -> Any:
+        # the rest (code mode's train_targets(), k) is the wrapped mode's
+        if name == "mode":
+            raise AttributeError(name)
+        return getattr(self.mode, name)
+
 
 def make_detector(args: argparse.Namespace) -> Any | None:
     """The Detector for point mode, or None (noted on stderr) when it is off."""
@@ -323,16 +328,29 @@ def make_detector(args: argparse.Namespace) -> Any | None:
     return detector
 
 
-def make_point_factory(detector: Any, freqs: Sequence[float], *, min_p_button: float,
+def make_point_factory(detector: Any, freqs: Sequence[float] | None, *, min_p_button: float,
                        log: Callable[[str, dict], None] | None = None,
                        archive: ScanArchive | None = None,
-                       **options: Any) -> Callable[[], Any]:
+                       lags: Sequence[int] | None = None,
+                       **options: Any) -> Callable[..., Any]:
     """A factory of PointMode (one per controller), checked once now so a bad setting fails at
-    startup instead of at the first controller."""
+    startup instead of at the first controller.
+
+    Code mode passes ``lags`` (frames, one per target): the mode is then
+    ``PointMode(detector, None, lags=lags, viewport=(w, h))``, and the session calls the
+    factory with the controller's ``viewport`` (w, h), or None when the hello had none.
+    """
     from ..screen.controller import PointMode
 
-    def factory() -> Any:
-        mode = PointMode(detector, freqs, min_p_button=min_p_button, log=log, **options)
+    def factory(viewport: tuple[float, float] | None = None) -> Any:
+        kw = dict(options)
+        if viewport is not None:
+            kw["viewport"] = viewport
+        if lags is not None:
+            mode = PointMode(detector, None, lags=tuple(lags), min_p_button=min_p_button,
+                             log=log, **kw)
+        else:
+            mode = PointMode(detector, freqs, min_p_button=min_p_button, log=log, **kw)
         return mode if archive is None else ArchivingMode(mode, archive)
 
     factory().stop()
@@ -567,10 +585,19 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         if detector is not None:
             if args.log_scans is not None:
                 archive = ScanArchive(args.log_scans)
-            # code mode: PointMode places its 3 targets on stand-ins that become lags
-            point_factory = make_point_factory(
-                detector, POINT_KEYS if code else freqs, min_p_button=args.min_p_button,
-                archive=archive, log=None if log is None else log.prefixed("point."))
+            lags = None
+            if code:     # the c-VEP PointMode (brainsync.screen): K = 3 targets on lags
+                lags = tuple(k * bank.lag_frames for k in range(bank.n_targets))
+            try:
+                point_factory = make_point_factory(
+                    detector, None if code else freqs, min_p_button=args.min_p_button,
+                    archive=archive, log=None if log is None else log.prefixed("point."),
+                    lags=lags)
+            except TypeError as exc:     # a PointMode that does not take lags yet
+                if not code:
+                    raise
+                _note(f"point mode is off: this PointMode cannot place code targets ({exc})")
+                point_factory = None
         max_slots = P.CODE_MAX_SLOTS if code else len(freqs)
         # The transport and the session need each other; the session is made right below,
         # before the transport starts, so these lambdas never see None.

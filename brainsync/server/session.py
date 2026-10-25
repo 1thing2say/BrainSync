@@ -78,8 +78,9 @@ point mode's K = 3 targets get theirs from the stand-in frequencies of coding.PO
 There is no rest calibration: a controller first goes through the "train" phase (flicker on,
 ``cue`` the slot at lag 0, text "Look at the <LABEL> square") until the decoder has its
 template, unless it holds one under 10 minutes old. Slots mode trains on its own layout;
-point mode trains on a session-made "train" layout of three patches in a centred row and
-starts its mode afterwards. "train" progress goes out on every new cycle, then "trained"
+point mode trains on a "train" layout of the mode's ``train_targets()`` (BrainPoint's b1,
+b2 and more in a centred row; the session's t0, t1, t2 for a mode without it) and starts
+its mode afterwards. The point factory is called with ``viewport=(w, h)`` in code mode. "train" progress goes out on every new cycle, then "trained"
 with the held-out accuracy and chance, and the phase turns "run". A pause during training
 restarts the training on resume, and so does a resume after a long pause. The controller's
 ``cycle`` messages (each cycle's first flip) for the running layout are mapped to the board's
@@ -557,6 +558,10 @@ class Session:
                                "turned off (no ANTHROPIC_API_KEY, or --no-detect); set the key "
                                "and restart the server, or use slots mode.")
             try:
+                if self.paradigm == "code":   # the c-VEP PointMode sizes its training patches
+                    vp = hello.viewport
+                    return self._point_factory(
+                        viewport=None if not vp else (float(vp["w"]), float(vp["h"])))
                 return self._point_factory()
             except Exception as exc:
                 raise _Refused("detect_unavailable",
@@ -791,8 +796,14 @@ class Session:
         self._bank.retrain()
         self._log("train_start", {"cycles": self._bank.train_cycles})
         if self._point():
-            viewport = None if self._hello is None else self._hello.viewport
-            targets = train_layout(viewport, self._bank.lag_frames)
+            # the mode's own training patches (BrainPoint: b1, b2 and more in a centred
+            # row), else the session's t0, t1, t2
+            make = getattr(self._mode, "train_targets", None)
+            if callable(make):
+                targets = list(make())
+            else:
+                viewport = None if self._hello is None else self._hello.viewport
+                targets = train_layout(viewport, self._bank.lag_frames)
             self._set_layout(P.layout(0, "train", targets), now)
         elif not self._started:
             self._start_mode(now)

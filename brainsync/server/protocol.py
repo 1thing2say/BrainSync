@@ -91,7 +91,7 @@ EPS = 1e-6                   # float slack for rects that end exactly at the vie
 
 # Which target kinds each layout stage may hold.
 _STAGE_KINDS = {"slots": ("slot",), "pick": ("button", "more"), "confirm": ("confirm", "back"),
-                "idle": (), "train": ("slot",)}
+                "idle": (), "train": ("slot", "button", "more")}
 _STAGE_KINDS_TEXT = {k: ", ".join(v) for k, v in _STAGE_KINDS.items()}
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _MAGIC = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n"}

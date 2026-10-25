@@ -961,7 +961,7 @@ def test_train_stage_is_point_mode_patches_of_kind_slot():
     with pytest.raises(ValueError, match="needs at least one rect"):
         p.layout(1, "train", [Target("t0", None, 0.0, "x", "slot", lag=0)])
     with pytest.raises(ValueError, match="holds targets of kind"):
-        p.layout(1, "train", [Target("t0", None, 0.0, "x", "button",
+        p.layout(1, "train", [Target("t0", None, 0.0, "x", "confirm",
                                      (Rect(0.1, 0.1, 0.1, 0.1),), lag=0)])
 
 

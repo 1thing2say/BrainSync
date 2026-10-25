@@ -1501,7 +1501,7 @@ def test_code_point_mode_trains_on_three_centred_patches_then_starts_the_mode():
         P.Target("b2", 2.0, 0.0, "Help", "button", (P.Rect(0.4, 0.1, 0.2, 0.2),)),
         P.Target("more", 3.0, 0.0, "More", "more", (P.Rect(0.7, 0.7, 0.2, 0.2),))])
     mode = StubMode(start=lambda now: [pick, P.phase("run", True)])
-    rig = CodeRig(point_factory=lambda: mode)
+    rig = CodeRig(point_factory=lambda **kw: mode)
     rig.connect(1, hello(mode="point", slots=None, viewport={"w": 1600, "h": 900, "dpr": 1}))
     lay = rig.tr.of("layout")[0]
     assert lay["stage"] == "train" and [t["slot"] for t in lay["targets"]] == ["t0", "t1", "t2"]
@@ -1522,6 +1522,45 @@ def test_code_point_mode_trains_on_three_centred_patches_then_starts_the_mode():
     rig.message({"type": "gaze", "slot": "b2"})
     rig.until(lambda: rig.selections(), limit=15.0)
     assert rig.selections()[0]["slot"] == "b2" and ("on_selection", "b2") in mode.calls
+
+
+def test_code_point_mode_trains_on_the_modes_own_train_targets():
+    """BrainPoint's c-VEP PointMode: built with viewport=(w, h), trains on its
+    train_targets() (b1, b2, more), cue b1, and its later layouts carry lags already."""
+    rects = [P.Rect(0.2 + 0.25 * k, 0.4, 0.1, 0.2) for k in range(3)]
+    kinds = ("button", "button", "more")
+    train = [P.Target(s, None, 0.0, s.upper(), kinds[k], (rects[k],), lag=21 * k)
+             for k, s in enumerate(("b1", "b2", "more"))]
+    pick = P.layout(0, "pick", [P.Target("b1", None, 0.0, "Sign in", "button", (rects[0],),
+                                         lag=0),
+                                P.Target("more", None, 0.0, "More", "more", (rects[2],),
+                                         lag=42)])
+
+    class LagMode(StubMode):
+        def train_targets(self):
+            return train
+
+    mode = LagMode(start=lambda now: [pick, P.phase("run", True)])
+    made: list[dict] = []
+
+    def factory(**kw):
+        made.append(kw)
+        return mode
+
+    rig = CodeRig(point_factory=factory)
+    rig.connect(1, hello(mode="point", slots=None, viewport={"w": 1600, "h": 900, "dpr": 2}))
+    assert made == [{"viewport": (1600.0, 900.0)}]
+    lay = rig.tr.of("layout")[0]
+    assert lay["stage"] == "train" and [t["slot"] for t in lay["targets"]] == ["b1", "b2", "more"]
+    ph = rig.tr.of("phase")[-1]
+    assert ph["phase"] == "train" and ph["cue"] == "b1" and ph["text"] == "Look at the B1 square"
+    rig.until(lambda: rig.session.phase == "run", limit=30.0)
+    lay = rig.tr.of("layout")[-1]
+    assert lay["stage"] == "pick" and [t["lag"] for t in lay["targets"]] == [0, 42]
+    rig.message({"type": "gaze", "slot": "more"})
+    assert rig.board.fixated == 2
+    rig.until(lambda: rig.selections(), limit=15.0)
+    assert rig.selections()[0]["slot"] == "more"
 
 
 def test_code_onset_is_only_logged():

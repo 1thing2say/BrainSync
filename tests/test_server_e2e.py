@@ -84,6 +84,7 @@ def server(tmp_path_factory):
     token_file = tmp / "config" / "token"
     p = app.build_parser()
     args = p.parse_args(["--board", "fake", "--port", "0", "--token-file", str(token_file),
+                         "--paradigm", "freq",
                          "--calibrate-s", str(CALIBRATE_S), "--log", str(tmp / "log.jsonl"),
                          "--log-scans", str(tmp / "scans")])
     app.check_arguments(p, args)
@@ -414,7 +415,7 @@ def test_http_serves_the_reference_page_the_sdk_and_health(server):
     status, headers, body = http_get(server.port, "/static/brainsync-client.js")
     assert status == 200 and headers["content-type"].startswith("text/javascript")
     assert body == (ROOT / "clients" / "js" / "brainsync-client.js").read_bytes()
-    for name in ("flicker.js", "app.js", "style.css"):
+    for name in ("flicker.js", "cvep.js", "app.js", "style.css"):
         assert http_get(server.port, f"/static/{name}")[0] == 200
     status, headers, body = http_get(server.port, "/health")
     assert status == 200 and headers["content-type"].startswith("application/json")
@@ -474,6 +475,99 @@ def test_python_client_cli_prints_selections(server):
     assert server.token not in proc.stdout + proc.stderr
 
 
+# -- code mode (c-VEP standard) -------------------------------------------------------------
+
+CODE_TRAIN = 4      # training cycles here (the standard's 30 take 32 s)
+
+
+@pytest.fixture(scope="module")
+def code_server(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("server_e2e_code")
+    p = app.build_parser()
+    args = p.parse_args(["--board", "fake", "--port", "0", "--no-auth", "--no-detect",
+                         "--train-cycles", str(CODE_TRAIN), "--log", str(tmp / "log.jsonl")])
+    app.check_arguments(p, args)
+    assert args.paradigm == "code"
+    ready: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    result: list[int] = []
+    thread = threading.Thread(target=lambda: result.append(app.serve(args, stop, ready.put)),
+                              name="e2e-code-server", daemon=True)
+    thread.start()
+    transport = ready.get(timeout=30)
+    yield SimpleNamespace(url=transport.url, port=transport.port, tmp=tmp)
+    stop.set()
+    thread.join(15)
+    assert not thread.is_alive() and result == [0]
+
+
+@pytest.mark.slow
+def test_code_mode_trains_then_selects_the_slot_the_fake_user_looks_at(code_server):
+    c = Client(code_server.url, None, slots=("yes", "no", "help"), takeover=True)
+    try:
+        w = c.connect(timeout=10)
+        assert w["paradigm"] == "code" and w["freqs"] == [] and w["max_slots"] == 3
+        assert w["code"]["train_cycles"] == CODE_TRAIN and w["refresh_rates"] == [60.0]
+        ph = c.until("phase", timeout=10, pred=lambda m: m["phase"] == "train")
+        assert ph["cue"] == "yes" and ph["flicker"] is True
+        assert [t["lag"] for t in c.layout["targets"]] == [0, 21, 42]
+        done = c.until("trained", timeout=CODE_TRAIN * 1.05 + 10)
+        assert done["cycles"] == CODE_TRAIN and done["accuracy"] >= 0.75
+        assert c.train is not None and c.train["of"] == CODE_TRAIN
+        c.until("phase", timeout=5, pred=lambda m: m["phase"] == "run")
+        c.gaze("no")
+        sel = c.until("selection", timeout=15, pred=lambda m: m["slot"] == "no")
+        assert set(sel["scores"]) == {"yes", "no", "help"} and sel["score"] > 0.3
+        assert c.decision is not None and c.decision["layout_id"] == sel["layout_id"]
+        assert c.onsets == 1                    # one layout; train and run share it
+    finally:
+        c.close()
+    records = [json.loads(x) for x in (code_server.tmp / "log.jsonl").read_text().splitlines()]
+    kinds = [r["kind"] for r in records]
+    assert "train_start" in kinds and "trained" in kinds and "selection" in kinds
+    assert "calibrate_start" not in kinds
+
+
+def test_code_mode_viewer_sees_the_template_and_freq_slots_are_refused(code_server):
+    v = Client(code_server.url, None, role="viewer", mode=None, slots=None, refresh_hz=None)
+    try:
+        assert v.connect(timeout=10)["paradigm"] == "code"
+    finally:
+        v.close()
+    with pytest.raises(ServerError) as info:
+        Client(code_server.url, None, slots=("a", "b", "c", "d"), takeover=True).connect(10)
+    assert info.value.code == "too_many_slots"
+
+
+def test_code_point_factory_builds_pointmode_on_lags_with_the_viewport(monkeypatch):
+    """Code mode builds BrainPoint's PointMode(detector, None, lags=(0, 21, 42),
+    viewport=(w, h), ...); ArchivingMode passes train_targets() through."""
+    import brainsync.screen.controller as ctrl
+    calls: list[tuple] = []
+
+    class FakePointMode:
+        def __init__(self, detector, freqs, **kw):
+            calls.append((freqs, kw))
+            self.k = 3
+
+        def train_targets(self):
+            return ["b1", "b2", "more"]
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(ctrl, "PointMode", FakePointMode)
+    archive = app.ScanArchive(Path(os.environ.get("TMPDIR", "/tmp")) / "bs-e2e-archive")
+    factory = app.make_point_factory(object(), None, min_p_button=0.5, lags=(0, 21, 42),
+                                     archive=archive)
+    mode = factory(viewport=(1600.0, 900.0))
+    assert mode.train_targets() == ["b1", "b2", "more"] and mode.k == 3
+    assert calls[0] == (None, {"lags": (0, 21, 42), "min_p_button": 0.5, "log": None})
+    assert calls[-1][1]["viewport"] == (1600.0, 900.0) and calls[-1][0] is None
+    app.make_point_factory(object(), (15.0, 17.0), min_p_button=0.5)()
+    assert calls[-1] == ((15.0, 17.0), {"min_p_button": 0.5, "log": None})
+
+
 # -- command line -------------------------------------------------------------------------
 
 def _env() -> dict:
@@ -487,7 +581,8 @@ def test_cli_help_exits_0():
     proc = subprocess.run([PY, "-m", "brainsync.server", "--help"], cwd=ROOT, env=_env(),
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0
-    for flag in ("--board", "--token-file", "--no-auth", "--freqs", "--calibrate-s", "--origin",
+    for flag in ("--board", "--token-file", "--no-auth", "--paradigm", "--train-cycles",
+                 "--freqs", "--calibrate-s", "--origin",
                  "--no-detect", "--env-file", "--min-p-button", "--log", "--log-scans"):
         assert flag in proc.stdout
 
@@ -503,7 +598,10 @@ def test_cli_help_exits_0():
     ["--board", "muse"],
     ["--board", "fake", "--serial-port", "/dev/x"],
     ["--no-auth", "--token-file", "x"],
-    ["--board", "fake", "--no-auth", "--calibrate-s", "1"],     # shorter than two windows
+    ["--board", "fake", "--no-auth", "--paradigm", "freq", "--calibrate-s", "1"],  # < 2 windows
+    ["--paradigm", "time"],
+    ["--train-cycles", "1"],
+    ["--refresh-rates", "60,120"],                              # code mode: one rate
 ])
 def test_cli_bad_arguments_exit_2(argv, tmp_path):
     proc = subprocess.run([PY, "-m", "brainsync.server", "--port", "0", *argv], cwd=tmp_path,
@@ -582,7 +680,7 @@ def test_browser_url_puts_the_token_in_the_fragment():
 
 def test_static_files_cover_the_reference_page():
     files = app.static_files()
-    assert set(files) == {"index.html", "style.css", "app.js", "flicker.js",
+    assert set(files) == {"index.html", "style.css", "app.js", "flicker.js", "cvep.js",
                           "brainsync-client.js"}
     html = files["index.html"].read_text()
     for src in re.findall(r'(?:src|href)="/static/([^"]+)"', html):
@@ -621,8 +719,12 @@ def test_refresh_rates_flag_defaults_to_60_90_120_144_and_is_checked(capsys):
     p = app.build_parser()
     args = p.parse_args(["--board", "fake", "--no-auth"])
     app.check_arguments(p, args)
+    assert args.paradigm == "code" and args.refresh_rates == (60.0,)   # one bit a frame
+    args = p.parse_args(["--board", "fake", "--no-auth", "--paradigm", "freq"])
+    app.check_arguments(p, args)
     assert args.refresh_rates == (60.0, 90.0, 120.0, 144.0) and not args.ignore_refresh
-    args = p.parse_args(["--board", "fake", "--no-auth", "--refresh-rates", "120,144"])
+    args = p.parse_args(["--board", "fake", "--no-auth", "--paradigm", "freq",
+                         "--refresh-rates", "120,144"])
     app.check_arguments(p, args)
     assert args.refresh_rates == (120.0, 144.0)
     assert "--refresh-rates" in p.format_help()
@@ -631,7 +733,7 @@ def test_refresh_rates_flag_defaults_to_60_90_120_144_and_is_checked(capsys):
                       (["--refresh-rates", "0,60"], "must lie in"),
                       (["--refresh-rates", "40,60"], "40 cannot show the 20 Hz"),
                       (["--freqs", "15,30", "--refresh-rates", "60,120"], "60 cannot show the 30")]:
-        args = p.parse_args(["--board", "fake", "--no-auth", *argv])
+        args = p.parse_args(["--board", "fake", "--no-auth", "--paradigm", "freq", *argv])
         with pytest.raises(SystemExit) as info:
             app.check_arguments(p, args)
         assert info.value.code == 2
@@ -642,6 +744,7 @@ def test_refresh_rates_flag_defaults_to_60_90_120_144_and_is_checked(capsys):
 def test_refresh_rates_reach_the_welcome(tmp_path):
     p = app.build_parser()
     args = p.parse_args(["--board", "fake", "--port", "0", "--no-auth", "--no-detect",
+                         "--paradigm", "freq",
                          "--calibrate-s", str(CALIBRATE_S), "--refresh-rates", "120,144"])
     app.check_arguments(p, args)
     ready: queue.Queue = queue.Queue()
