@@ -13,7 +13,7 @@ leave-one-block-out, at the requested window lengths. The gate line reads the be
 more; 55-70 % means train and re-check; below that fall back to list mode). Finally the chosen
 classifier is fitted on all trials, its rest baseline on the still windows, and saved as
 ``cache/templates/<recording>_<classifier>.npz`` for ``brainsync.demo --model`` and
-``brainsync.server --model``. The saved model keeps the window length it was scored at only
+``brainsync.server --decoder-model``. The saved model keeps the window length it was scored at only
 through its templates; the decoder's window and abstain rules stay its own.
 
 Exit status: 0 when scored and saved, 1 when recording or scoring failed, 2 for bad options.

@@ -68,3 +68,35 @@ def test_calibrate_rejects_bad_options_and_missing_file(tmp_path: Path) -> None:
         calibrate.main(["--trials", "1", "--fake"])
     assert calibrate.main(["--from", str(tmp_path / "none_cued.npz")]) == 1
     assert calibrate.model_path(Path("x_cued.npz"), "etrca").name == "x_cued_etrca.npz"
+
+
+def test_saved_model_drives_the_server_bank_and_the_demo_decoder(tmp_path: Path) -> None:
+    from brainsync.server import app
+    from brainsync.server.decoding import DecoderBank, build_decoder
+    from brainsync.synthetic import rest_trials
+
+    out = tmp_path / "model.npz"
+    assert calibrate.main(["-c", "four_diamond", "--fake", "--seed", "2", "--trials", "16",
+                           "--save-dir", str(tmp_path), "--out", str(out), "--methods", "fbcca",
+                           "--windows", "1"]) == 0
+    dec = build_decoder([13.0, 15.0, 17.0, 11.0], [0.0] * 4, model=out)
+    assert dec.classifier.name == "etrcar" and dec.needs_onset
+    from brainsync.online import TUNED
+    assert dec.classifier.margin == TUNED.margin and dec.classifier.threshold == TUNED.threshold
+    with pytest.raises(ValueError, match="trained for"):
+        build_decoder([15.0, 17.0], [0.0, 0.0], model=out)
+    with pytest.raises(ValueError, match="channels"):
+        build_decoder([13.0, 15.0, 17.0, 11.0], [0.0] * 4, model=out, channels=("O1", "O2"))
+    bank = DecoderBank(model=out)
+    rng = np.random.default_rng(0)
+    bank.calibrate_from(rng.standard_normal((8, 250 * 12)))
+    bank.activate([13.0, 15.0, 17.0, 11.0], [0.0] * 4, now=100.0)
+    assert bank.decoder is not None and bank.decoder.onset == 100.0
+    bank.set_onset(100.5)
+    assert bank.decoder.onset == 100.5
+    X = rng.standard_normal((8, 250 * 6))
+    out_decisions = bank.feed(X, 100.0 + np.arange(250 * 6) / 250.0)
+    assert out_decisions and all(np.isfinite(d.offset_s) for d in out_decisions)
+    assert all(d.offset_s >= 0.5 - 1e-9 for d in out_decisions)   # gated: no window before the onset
+    args = app.build_parser().parse_args(["--decoder-model", str(out), "--board", "fake"])
+    assert args.decoder_model == str(out)

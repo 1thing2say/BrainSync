@@ -253,7 +253,7 @@ SSVEP phase relative to the `stim_on` marker is only weakly consistent across tr
 either the display-to-board onset timing jitters or the response is too weak for templates.
 Both have the same cure: measure the onset with the stimulus's photodiode patch, add posterior
 electrodes, then record the four-target gate session with `brainsync.calibrate`. FBCCA stays
-the live default; `demo --model` and the server's `DecoderBank(model=...)` take a saved model
+the live default; `demo --model` and the server's `--decoder-model` take a saved model
 once one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
 
 ## Phase 2: two-target cued trials
