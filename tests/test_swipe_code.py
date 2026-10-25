@@ -237,28 +237,30 @@ def test_feedback_stream_follows_the_standard(fake_stimulus, capsys):
     assert swipe.main(["--fake", "--fast", "--no-voice", "--seconds", "30"]) == 0
     out = capsys.readouterr().out
     args = calls[0]["args"]
-    assert "swipe_cvep" in args[1] and "--cards" not in args and "--labels" in args
+    assert "swipe_cvep" in args[1] and "--cards" in args and "--labels" in args
     lines = feedback.read_text().splitlines()
     assert json.loads(lines[0]) == {"flicker": True} and lines[1] == "0"
     msgs = [json.loads(ln) for ln in lines if ln.startswith("{")]
     texts = [m["text"] for m in msgs if "text" in m]
     assert texts[0] == "training: keep looking at Pass   cycle 0/30"
     ready = next(i for i, t in enumerate(texts) if t.startswith("template ready"))
-    deck = load_deck()
-    names = {p.name for p in deck}
     after = texts[ready + 1:]
-    assert after and all(t.split(",")[0] in names for t in after)   # the profile first
-    assert any(t.endswith(swipe.CODE_PROMPTS[1]) for t in after)
+    assert after and any(t == swipe.CODE_PROMPTS[1] for t in after)   # the card shows the profile
     assert any(t.splitlines()[-1].startswith("lead ") for t in after)
     labels = [m["labels"] for m in msgs if "labels" in m]
     assert labels and all(row[0].startswith("Pass ") and row[1].startswith("Super like ")
                           and row[2].startswith("Like ") for row in labels)
     # integer lines: the training cue, its clearing, then each swipe's box and its clearing
-    ints = [int(ln) for ln in lines if not ln.startswith("{")]
+    ints = [int(ln) for ln in lines if ln.lstrip("-").isdigit()]
     assert ints[:2] == [0, ABSTAIN]
     shown = [k for k in ints[2:] if k != ABSTAIN]
     order = {"Pass": PASS, "Super like": SUPER_LIKE, "Like": LIKE}
-    assert shown == [order[n] for _, n in swipes_from(out)]
+    swiped = [order[n] for _, n in swipes_from(out)]
+    assert shown == swiped
+    # every swipe flashes its square and shows the next card, as in the f-VEP feed
+    flashes = [int(ln.split()[1]) for ln in lines if ln.startswith("flash ")]
+    cards = [ln for ln in lines if ln.startswith("card ")]
+    assert flashes == swiped and len(cards) == len(swiped)
 
 
 def test_freq_flag_keeps_the_two_square_feed(capsys):

@@ -793,8 +793,9 @@ class PsychoPyRenderer:
             square.draw()
         for mark in self.fixations:
             mark.draw()
-        for label in self.labels:
-            label.draw()
+        if not any(labels):   # a decoder's labels (confidence lines) replace the static ones
+            for label in self.labels:
+                label.draw()
         if self._text_problems and (any(labels) or centre):
             for problem in self._text_problems:
                 print(f"warning: decoder text: {problem}", file=sys.stderr, flush=True)

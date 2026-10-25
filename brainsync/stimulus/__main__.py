@@ -291,8 +291,10 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
             hold = (None if reader is None or not args.hold_still
                     else (lambda: not reader.heard))
             if cfg.coded:
-                frames = coded_free_frames(cfg, sequence_for(cfg, seed), args.seconds,
-                                           cue=cue, stop=stop, hold=hold, control=control)
+                frames = coded_free_frames(
+                    cfg, sequence_for(cfg, seed), args.seconds, cue=cue, stop=stop, hold=hold,
+                    control=control, card=card,
+                    flash=None if reader is None else (lambda: reader.flash))
             else:
                 frames = free_frames(cfg, args.seconds, cue=cue, stop=stop, hold=hold,
                                      card=card,
@@ -349,8 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if cfg.coded and (cards or cfg.conditions or args.rate):
-        print(f"error: --cards, --conditions and --rate are for a flicker config, not the "
+    if cfg.coded and (cfg.conditions or args.rate):
+        print(f"error: --conditions and --rate are for a flicker config, not the "
               f"[{cfg.paradigm}] config {cfg.name!r}", file=sys.stderr)
         return 2
     if cards and cfg.card is None:

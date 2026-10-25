@@ -17,8 +17,9 @@ that square, the next profile comes up and the swipe is spoken: "Pass", "Liked <
 (a match with chance --match-rate) or, for a Super like, "Super liked <name>. It's a
 match!": a Super like is a Like that always matches. ``CodeSwiper`` makes every swipe
 count only cycles that began --cooldown s after the card changed, and resets the
-decoder's buffered cycles and votes on every card. The coded stimulus draws no profile
-cards yet (its free run refuses --cards for a [code] config), so the profile is text.
+decoder's buffered cycles and votes on every card. The stimulus draws the profile card
+between the squares (swapped and flashed on every swipe, as in the f-VEP feed), the
+confidence lines beside the squares and the lead / choice line below the card.
 
 f-VEP (--paradigm freq, config swipe): the stimulus draws a profile card between the
 two squares. The left square (target 0, 15 Hz) is Pass and the right one (target 1,
@@ -417,17 +418,23 @@ def _code_status(d: Decision, elapsed: float, labels: Sequence[str], fired: int,
 
 
 def _play_code(args: argparse.Namespace, cfg: StimulusConfig, board: Any,
-               decoder: live.CodeVepDecoder, deck: Sequence[Profile], feed: Feed) -> int:
-    """One c-VEP session (brainsync.demo.code_session) with the profile as the centre text."""
+               decoder: live.CodeVepDecoder, deck: Sequence[Profile], feed: Feed,
+               extra: Sequence[str] = ()) -> int:
+    """One c-VEP session (brainsync.demo.code_session). With ``extra`` = ["--cards", DIR]
+    the stimulus draws the profile cards (swapped and flashed on every swipe, as in the
+    f-VEP feed) and the centre line is the status alone; without cards the profile is the
+    centre text."""
     labels = cfg.labels
     voice = not args.no_voice
     swiper = CodeSwiper(decoder, cooldown_s=args.cooldown)
     tally = Tally()
     stim: Stimulus | None = None
     cue = ABSTAIN          # the box sits on the swiped square until the next decision
+    cards = "--cards" in extra
+    order = card_order(len(deck), feed.current)
 
     def centre(status: str) -> str:
-        return f"{card_text(deck[feed.current])}\n{status}"
+        return status if cards else f"{card_text(deck[feed.current])}\n{status}"
 
     def on_start(started: Stimulus | None) -> bool:
         nonlocal stim
@@ -450,12 +457,15 @@ def _play_code(args: argparse.Namespace, cfg: StimulusConfig, board: Any,
         outcome = feed.swipe(liked=fired != PASS, super_like=fired == SUPER_LIKE)
         said = voice_line(deck[outcome.card], outcome)
         cue = fired
+        if cards:
+            ok = ok and demo.send(stim, f"flash {fired}")
+            ok = ok and demo.send(stim, f"card {order[feed.current]}")
         ok = ok and demo.send(stim, fired) and demo.send_text(stim, centre(said))
         speak(said, voice)
         return ok
 
     ended, code = demo.code_session(
-        args, cfg, board, decoder, stimulus_args=demo.code_stimulus_args(args, cfg),
+        args, cfg, board, decoder, stimulus_args=demo.code_stimulus_args(args, cfg, extra),
         on_decision=on_decision, on_start=on_start, feed=swiper.feed, labels=labels,
         prompts=CODE_PROMPTS)
     if ended != "not started":
@@ -587,10 +597,9 @@ def main(argv: list[str] | None = None) -> int:
           f"cooldown {args.cooldown:g} s, match rate {args.match_rate:g}, seed {args.seed}",
           file=sys.stderr)
     feed = Feed(len(deck), match_rate=args.match_rate, seed=args.seed)
-    if args.paradigm == "code":   # the coded stimulus draws no cards: the profile is text
-        return _play_code(args, cfg, board, decoder, deck, feed)
+    play = _play_code if args.paradigm == "code" else _play
     if args.no_stimulus:   # nothing shows the cards, so nothing to render (no Pillow needed)
-        return _play(args, cfg, board, decoder, deck, feed, extra=())
+        return play(args, cfg, board, decoder, deck, feed, extra=())
     # the stimulus loads the PNGs as textures at startup; the folder goes after the session
     with tempfile.TemporaryDirectory(prefix="brainswipe_cards_") as tmp:
         try:
@@ -602,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"error: cannot write the cards: {exc}", file=sys.stderr)
             return 2
-        return _play(args, cfg, board, decoder, deck, feed, extra=["--cards", tmp])
+        return play(args, cfg, board, decoder, deck, feed, extra=["--cards", tmp])
 
 
 if __name__ == "__main__":

@@ -159,9 +159,13 @@ def coded_free_frames(cfg: StimulusConfig, seq: Sequence, seconds: float | None 
                       cue: Callable[[], int] | None = None,
                       stop: Callable[[], bool] | None = None,
                       hold: Callable[[], bool] | None = None,
-                      control: Callable[[], Control] | None = None) -> Iterator[Frame]:
+                      control: Callable[[], Control] | None = None,
+                      card: Callable[[], int] | None = None,
+                      flash: Callable[[], tuple[int, int]] | None = None) -> Iterator[Frame]:
     """The sequence running continuously from its frame 0: ``display.free_frames`` with
-    ``seq`` in place of the frequency flicker, so the cue box, ``hold`` and the JSON
-    ``control`` lines (labels, centre text, active targets, flicker on / off) work as
-    there; ``seconds`` counts sequence frames only."""
-    return free_frames(cfg, seconds, cue=cue, stop=stop, hold=hold, control=control, seq=seq)
+    ``seq`` in place of the frequency flicker, so the cue box, ``hold``, the JSON
+    ``control`` lines (labels, centre text, active targets, flicker on / off) and the
+    profile ``card`` / ``flash`` (BrainSwipe) work as there; ``seconds`` counts sequence
+    frames only."""
+    return free_frames(cfg, seconds, cue=cue, stop=stop, hold=hold, card=card, flash=flash,
+                       control=control, seq=seq)
