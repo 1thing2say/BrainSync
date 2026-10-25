@@ -17,6 +17,9 @@ after every decision, and a status line gives the lead and the committed choice
 <stamp>_cvep_template.npz and reusable with --template FILE. t-VEP decides once every
 square has --min-flashes flashes in the last --flash-window seconds. f-VEP is brainsync.demo's
 run with --classifier snr (the paper's FFT-SNR rule; cca and fbcca also work).
+--save keeps the whole run (every sample the board sent, all 8 channels in µV with Unix
+times, and the marker text) as <stamp>_vep.npz in the recordings folder, for
+python -m brainsync.vep.timing, the marker-to-sample alignment check.
 
 --fake replaces the board with vep.fake.SequenceFakeBoard (code / time) or board.FakeBoard
 (freq): the fake user looks at a square that changes every --switch s, the markers come
@@ -50,12 +53,13 @@ from ..metrics import ABSTAIN, accuracy, itr_bits, itr_bpm
 from ..online import Decision, Decoder
 from ..paths import recordings_dir
 from ..record import reserve_path
-from ..recordings import MONTAGE, POSTERIOR, Event, channel_indices, parse_events
+from ..recordings import (MONTAGE, POSTERIOR, Event, channel_indices, parse_events,
+                          save_recording)
 from ..signal import preprocess
 from ..stimulus import StimulusConfig, load_config
 from ..stimulus.coded import sequence_for
 from .cvep import Template, cross_validate, fit_template, lag_samples
-from .fake import SequenceFakeBoard
+from .fake import SequenceFakeBoard, markers_text
 from .fvep import SNR
 from .sync import SyncDecoder, cut_epochs, first_commit
 from .tvep import FlashAverager
@@ -102,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     code.add_argument("--cycles", type=int, default=2,
                       help="cycles averaged before each decision (default 2)")
     code.add_argument("--train-cycles", type=int, default=30,
-                      help="cycles recorded on square 0 for the template (default 30)")
+                      help="cycles recorded on square 0 for the template (default 30, at "
+                           "least 2)")
     code.add_argument("--template", type=Path, default=None,
                       help="a saved template instead of training")
     code.add_argument("--save-template", type=Path, default=None,
@@ -126,7 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     fvep.add_argument("--harmonics", type=int, default=1,
                       help="harmonics per frequency (default 1, the fundamental)")
     fvep.add_argument("--calibrate", type=float, default=15.0,
-                      help="still-screen seconds for the rest baseline (default 15)")
+                      help="still-screen seconds for the rest baseline (default 15, short on "
+                           "purpose for a demo; brainsync.demo recommends 30 and warns below it)")
     board = p.add_argument_group("board")
     board.add_argument("--names", type=_names, default=list(MONTAGE),
                        help="comma-separated names of the 8 board channels, in order")
@@ -156,8 +162,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ignore-refresh", action="store_true",
                    help="let the stimulus run when its measured refresh is not 60 Hz")
     p.add_argument("--no-voice", action="store_true", help="no spoken prompts")
+    p.add_argument("--save", nargs="?", const="", default=None, metavar="DIR",
+                   help="code / time: save every sample of the run (8 channels, uV, Unix "
+                        "times) and the marker text as <stamp>_vep.npz in DIR (default: the "
+                        "recordings folder, or a temp folder with --fake), for "
+                        "python -m brainsync.vep.timing")
     p.add_argument("--scores", action=argparse.BooleanOptionalAction, default=True,
-                   help="label each square and show a confidence line (one bar per target, "
+                   help="code / time: label each square and show a confidence line (one bar per target, "
                         "the lead, the committed choice) under the squares after every "
                         "decision (default on)")
     return p
@@ -171,6 +182,15 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         p.error("--compare runs on the synthetic board: add --fake")
     if args.no_stimulus and not args.fake and args.paradigm != "freq":
         p.error("--no-stimulus needs --fake for code / time: the markers come from the display")
+    if args.compare and args.config is not None:
+        p.error("--compare uses each paradigm's default config; drop -c")
+    if args.template is not None and args.paradigm != "code":
+        p.error("--template is for --paradigm code")
+    if args.template is not None and args.save_template is not None:
+        p.error("--save-template needs a training stage; drop --template")
+    if args.train_cycles < 2:
+        p.error(f"--train-cycles must be >= 2 (leave-one-out needs two cycles), got "
+                f"{args.train_cycles}")
     for flag, value in (("--seconds", args.seconds), ("--switch", args.switch),
                         ("--epoch", args.epoch), ("--flash-window", args.flash_window),
                         ("--window", args.window), ("--step", args.step),
@@ -178,7 +198,7 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         if not value > 0:
             p.error(f"{flag} must be positive, got {value}")
     for flag, value in (("--votes", args.votes), ("--cycles", args.cycles),
-                        ("--train-cycles", args.train_cycles), ("--min-flashes", args.min_flashes),
+                        ("--min-flashes", args.min_flashes),
                         ("--trials", args.trials), ("--train-trials", args.train_trials),
                         ("--harmonics", args.harmonics)):
         if value < 1:
@@ -221,12 +241,32 @@ class LogTail:
         return parse_events("\n".join(lines))
 
 
+def run_folder(args: argparse.Namespace) -> Path:
+    """Where a run's files go: the recordings folder, or a temp folder with --fake."""
+    folder = (Path(tempfile.gettempdir()) / "brainsync_fake" if args.fake else recordings_dir())
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def template_path(args: argparse.Namespace) -> Path:
     if args.save_template is not None:
         return Path(args.save_template)
-    folder = (Path(tempfile.gettempdir()) / "brainsync_fake" if args.fake else recordings_dir())
+    return reserve_path(run_folder(args), time.time(), "cvep_template")
+
+
+def save_run(args: argparse.Namespace, cfg: StimulusConfig, fs: float,
+             kept: Sequence[tuple[np.ndarray, np.ndarray]], markers: str, started: float) -> Path:
+    """Write every sample the run read (concatenated in order) and the marker text as
+    <stamp>_vep.npz (recordings.save_recording; ``freqs`` are the config's, nan for a coded
+    one), in --save's folder or run_folder; the path."""
+    if not kept:
+        raise ValueError("nothing to save: the board sent no samples")
+    X = np.concatenate([x for x, _ in kept], axis=1)
+    t = np.concatenate([s for _, s in kept])
+    folder = Path(args.save) if args.save else run_folder(args)
     folder.mkdir(parents=True, exist_ok=True)
-    return reserve_path(folder, time.time(), "cvep_template")
+    path = reserve_path(folder, started, "vep")
+    return save_recording(path, X, t, fs, args.names, cfg.freqs, markers, kind="cued")
 
 
 def _name(labels: Sequence[str], k: int) -> str:
@@ -300,9 +340,11 @@ def collect_cycles(board: Any, events: Callable[[], list[Event]], n_cycles: int,
                    rows: Sequence[int], n_samples: int, sleep: Callable[[float], None],
                    clock: Callable[[], float], stop: Callable[[], str | None],
                    timeout_s: float,
-                   progress: Callable[[int], None] | None = None) -> np.ndarray:
+                   progress: Callable[[int], None] | None = None,
+                   read: Callable[[], tuple[np.ndarray, np.ndarray]] | None = None) -> np.ndarray:
     """Record until ``n_cycles`` complete cycles have been marked; the cut, filtered cycles.
-    ``progress(k)`` is called whenever the count of marked cycles changes."""
+    ``progress(k)`` is called whenever the count of marked cycles changes. ``read`` replaces
+    ``board.read`` (the demo's --save reads through a wrapper that keeps every sample)."""
     Xs, ts, marks = [], [], []
     began = heard = clock()
     reported = -1
@@ -311,7 +353,7 @@ def collect_cycles(board: Any, events: Callable[[], list[Event]], n_cycles: int,
         if why:
             raise RuntimeError(why)
         sleep(POLL_S)
-        X, t = board.read()
+        X, t = (read or board.read)()
         now = clock()
         if X.shape[1]:
             Xs.append(X[list(rows)])
@@ -408,6 +450,17 @@ def run_coded(args: argparse.Namespace) -> int:
     stim: Stimulus | None = None
     tally = Tally()
     ended, code = "not started", 0
+    started_at = time.time()
+    saving = args.save is not None
+    kept: list[tuple[np.ndarray, np.ndarray]] = []    # --save: every (X, t) the board sent
+    seen: list[Event] = []                             # --save with --fake: the board's markers
+
+    def read_board() -> tuple[np.ndarray, np.ndarray]:
+        X, t = board.read()
+        if saving and X.shape[1]:
+            kept.append((X, t))
+        return X, t
+
     try:
         if not args.fake:
             print("connecting to the Cerelog X8 (can take 15 s)...", file=sys.stderr)
@@ -416,12 +469,18 @@ def run_coded(args: argparse.Namespace) -> int:
                 print("starting the stimulus...", file=sys.stderr)
                 stim = launch_stimulus(coded_stimulus_args(cfg, args), stdin=subprocess.PIPE)
             tail = LogTail(stim.log) if stim is not None else None
-            events: Callable[[], list[Event]]
+            raw_events: Callable[[], list[Event]]
             if args.fake:
-                events = board.read_events
+                raw_events = board.read_events
             else:
                 assert tail is not None
-                events = tail.events
+                raw_events = tail.events
+
+            def events() -> list[Event]:
+                evs = raw_events()
+                if saving and args.fake:
+                    seen.extend(evs)
+                return evs
 
             def stimulus_gone() -> str | None:
                 if stim is not None and stim.proc.poll() is not None:
@@ -436,7 +495,7 @@ def run_coded(args: argparse.Namespace) -> int:
             show = send_text if args.scores else (lambda stim, text: True)
             show_labels = send_labels if args.scores else (lambda stim, names: True)
             speak(PROMPTS["still"], voice)
-            board.read()
+            read_board()
             if decoder is None:   # c-VEP without a template: train on square 0
                 speak(PROMPTS["train"].format(label=labels[0]), voice)
                 if args.fake:
@@ -451,6 +510,7 @@ def run_coded(args: argparse.Namespace) -> int:
                 cycles = collect_cycles(board, events, args.train_cycles, board.fs, rows, n,
                                         sleep, clock, stimulus_gone,
                                         timeout_s=(args.train_cycles + 3) * cycle_s + 10,
+                                        read=read_board,
                                         progress=lambda k: show(
                                             stim, f"training: keep looking at {labels[0]}"
                                                   f"   cycle {k}/{args.train_cycles}"))
@@ -469,7 +529,7 @@ def run_coded(args: argparse.Namespace) -> int:
                 raise RuntimeError("stimulus pipe closed")
             speak(PROMPTS["go"], voice)
             show(stim, PROMPTS["go"])
-            board.read()
+            read_board()
             events()
             decoder.reset()
             ended = "started"
@@ -494,7 +554,7 @@ def run_coded(args: argparse.Namespace) -> int:
                             n_switch = due
                             board.set_target(due % cfg.n_targets)
                     sleep(POLL_S)
-                    X, t = board.read()
+                    X, t = read_board()
                     now = clock()
                     if X.shape[1]:
                         heard = now
@@ -508,9 +568,12 @@ def run_coded(args: argparse.Namespace) -> int:
                         at = clock() - began
                         tally.add(d, at, truth)
                         print(_status(d, at, labels, truth), file=sys.stderr, flush=True)
-                        if not np.isfinite(score_scale):
-                            top = float(np.nanmax(d.scores)) if len(d.scores) else float("nan")
-                            score_scale = top if np.isfinite(top) and top > 0 else 1.0
+                        if not np.isfinite(score_scale) and np.isfinite(d.scores).any():
+                            # the first decision with real scores sets the bar scale; an
+                            # all-NaN decision (a square still short of flashes) keeps waiting
+                            top = float(np.nanmax(d.scores))
+                            if top > 0:
+                                score_scale = top
                         if not (show_labels(stim, confidence_labels(d, labels, score_scale))
                                 and show(stim, confidence_line(d, labels))):
                             pipe_ok = False
@@ -543,6 +606,22 @@ def run_coded(args: argparse.Namespace) -> int:
             if rc not in (0, None):
                 print(f"error: the stimulus exited with code {rc}; see {stim.log}", file=sys.stderr)
                 code = code or 1
+    if saving and kept:
+        # the stimulus has ended, so its log holds every marker and the timing summary
+        text = markers_text(seen, cfg.refresh) if args.fake else (stim.text() if stim else "")
+        try:
+            path = save_run(args, cfg, board.fs, kept, text, started_at)
+        except (OSError, ValueError) as exc:
+            print(f"error: could not save the run: {exc}", file=sys.stderr)
+            code = code or 1
+        else:
+            n = sum(x.shape[1] for x, _ in kept)
+            print(f"saved {path}: {n} samples ({n / board.fs:.1f} s), "
+                  f"{len(parse_events(text))} markers", file=sys.stderr)
+            if stim is not None:
+                print(f"stimulus log: {stim.log}", file=sys.stderr)
+            print(f"timing check: python -m brainsync.vep.timing {path}"
+                  + (f" -c {cfg.name}" if cfg.name != "cvep_4" else ""), file=sys.stderr)
     if ended != "not started":
         print("\n".join(_coded_summary(tally, labels, ended, cfg.paradigm)))
     return code

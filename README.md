@@ -996,6 +996,13 @@ auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The
 needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
 venv with PsychoPy is the one described in "Install"; run the commands with its python.
 
+`web/vep-lab/index.html` is a static explainer for an audience: the three codings' stimulus
+sequences, the toy model's responses (the same kernel as `synthetic.vep_kernel`, ported to
+`vep_core.js` and checked against the Python), the paper's Figures 2 to 4 as a flash
+response, a response spectrum and the m-sequence autocorrelation, and a live preview of
+each paradigm's squares behind a photosensitivity warning and a start button. No network,
+no libraries; `node --test web/vep-lab/test/vep_core.test.mjs` runs its tests.
+
 How it fits the code base. A stimulus config may carry a `[code]` table (m-sequence length,
 lag in frames, frames per bit) or a `[time]` table (flash and gap frames, round order)
 instead of frequencies; `brainsync.stimulus.coded` turns either into per-frame luminances
@@ -1030,7 +1037,8 @@ MacBook's notch hides the top edge. `--fake` swaps the board
 for `vep.fake.SequenceFakeBoard`: a made-up flash VEP (`synthetic.vep_kernel`, a damped
 sine after a 60 ms latency) convolved with the fixated target's sequence, on the posterior
 channels over Gaussian noise, with the markers coming from the fake board itself. It
-checks the pipeline, not anyone's visual cortex. `--compare --fake` runs cued trials of
+checks the pipeline, not anyone's visual cortex, and only the fixated target evokes
+anything (the paper's peripheral targets evoke smaller responses too). `--compare --fake` runs cued trials of
 each paradigm and prints accuracy, abstain rate, seconds per selection and Wolpaw's ITR
 beside the paper's figures; `--amp` and `--noise` set how easy the data are.
 
@@ -1050,11 +1058,20 @@ What to expect on the headset, and why the defaults differ from the paper:
   (20 min, gel on O1 / O2), pass the eyes-closed alpha check, and fixate the square's
   centre during training before reading anything into a live c-VEP run.
 - Marker-to-sample alignment has not been measured on the demo Mac (PLAN.md V5). A constant
-  offset is absorbed by training; jitter between cycles is not. Check the cycle markers'
-  spacing in the stimulus log (1.0500 s apart) before trusting a live c-VEP run.
-- t-VEP flashes under 4 Hz per target by construction (`config_warnings` says so if a
-  config does not), so a decision needs at least `--min-flashes` rounds: slow, as in the
-  paper.
+  offset is absorbed by training; jitter between cycles is not. Run a live or fake run with
+  `--save` (every sample plus the marker text go to `<stamp>_vep.npz`, and the demo prints
+  the stimulus log's path), then `python -m brainsync.vep.timing <that file> [-c cvep_2]`:
+  PASS / WARN / FAIL lines for the cycle (or flash) spacing against the config's grid
+  (1.0500 s a cycle; a single dropped frame is a WARN, a two-frame slip a FAIL), the marker
+  clock's drift in ppm, every marker's gap to the nearest sample (under one sample period),
+  the markers inside the recording, the board's sample rate against 250 Hz, and the log's
+  measured refresh and dropped-frame summary. Exit 0 means nothing failed. It cannot see
+  the flip-to-photons latency of the panel; that is a constant and a photodiode's job.
+- `tvep_4` flashes each target once a second (`config_warnings` flags a `[time]` table
+  above 4 Hz per target). The paper's 4 Hz bound keeps one target's consecutive responses
+  apart; here the screen as a whole flashes four times a second, so a 0.5 s epoch also
+  holds the start of another target's response, which the per-target average cancels. A
+  decision needs at least `--min-flashes` rounds: slow, as in the paper.
 - `fvep_6` is on/off flicker as on the paper's CRT, so its 5- and 7-frame cycles have an
   uneven duty cycle (warned), and 10 Hz sits on the user's alpha (PLAN.md section 14).
 - Safety: an m-sequence is broadband and includes 15 to 25 Hz, and t-VEP is bright brief
@@ -1116,7 +1133,9 @@ What to expect on the headset, and why the defaults differ from the paper:
 | `brainsync/vep/tvep.py` | `FlashAverager`: flash-locked averages, peak-to-valley amplitude, abstain until enough flashes |
 | `brainsync/vep/sync.py` | `cut_epochs` at marker times; `SyncDecoder`, the live c-VEP / t-VEP decoder over samples and markers |
 | `brainsync/vep/fake.py` | `SequenceFakeBoard`: synthetic board that follows a coded stimulus and emits its markers |
-| `brainsync/vep/__main__.py` | `python -m brainsync.vep`: live t-VEP / f-VEP / c-VEP demos, c-VEP training, `--compare` table |
+| `brainsync/vep/__main__.py` | `python -m brainsync.vep`: live t-VEP / f-VEP / c-VEP demos, c-VEP training, `--save`, `--compare` table |
+| `brainsync/vep/timing.py` | `python -m brainsync.vep.timing`: marker spacing, drift and marker-to-sample alignment of a run, PASS / WARN / FAIL |
+| `web/vep-lab/` | The three codings explained: sequences, toy responses, the paper's figures, a live preview (`vep_core.js` tested with node) |
 
 ## Tests
 
@@ -1146,16 +1165,19 @@ run the whole swipe loop on the fake board. They check that stale windows never 
 voice line names the profile on screen, and that a card or flash command never changes a
 square's luminance.
 
-The VEP paradigms add 67: `test_vep_codes.py` 33 (every listed m-sequence has full period
+The VEP paradigms add 96: `test_vep_codes.py` 33 (every listed m-sequence has full period
 and the N / -1 autocorrelation, lagged codes are mutually orthogonal, flashes never
-overlap, the `[code]` / `[time]` tables validate), `test_vep_frames.py` 11 (frame
+overlap, the `[code]` / `[time]` tables validate), `test_vep_frames.py` 12 (frame
 luminances equal the code matrix, cycle and flash markers land on the flip times, the CLI
-plans and refuses flicker-only flags), `test_vep_fake.py` 6 (the kernel's shape, a stream
-free of chunking artifacts, the response tells the fixated target apart),
-`test_vep_decoders.py` 9 (SNR, Template, FlashAverager and SyncDecoder each above 90 %
-on synthetic data, abstention without enough flashes or without a marker) and
-`test_vep_cli.py` 8 (fake live runs of all three paradigms, the comparison table, the
-argument checks).
+plans, labels and refuses flicker-only flags), `test_vep_fake.py` 6 (the kernel's shape, a
+stream free of chunking artifacts, the response tells the fixated target apart),
+`test_vep_decoders.py` 10 (SNR, Template, FlashAverager and SyncDecoder each above 90 %
+on synthetic data, the SNR ring clear of the Hann lobe, abstention without enough flashes
+or without a marker), `test_vep_cli.py` 12 (fake live runs of all three paradigms that
+follow the fake user's gaze, the confidence text, `--save`, the comparison table, the
+argument checks), `test_vep_timing.py` 14 (slips, drift, markers against samples, the
+CLI's exit codes) and `test_vep_lab.py` 9 (the explainer page has no external URL, its JS
+m-sequence and kernel match the Python bit for bit, its node tests pass).
 
 The client/server split and BrainPoint add 929 Python tests and 153 node tests
 (`node --test 'clients/js/test/*.test.mjs' 'clients/chrome/test/*.test.mjs'`):

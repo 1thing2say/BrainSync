@@ -2,11 +2,13 @@
 the argument checks. No display, no headset (--fake --fast --no-stimulus)."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from brainsync.stimulus import load_config
 from brainsync.vep import __main__ as cli
 from brainsync.vep.cvep import Template
 
@@ -22,7 +24,12 @@ def test_fake_cvep_run_trains_saves_and_decodes(tmp_path: Path, capsys):
     assert tpl.is_file() and Template.load(tpl).n_cycles == 12
     assert "training: 12 cycles" in err and "leave-one-out accuracy" in err
     assert "committed" in err and "code: " in out and "commits:" in out
-    assert "agreeing with the fake user's gaze" in out
+    hits, n = map(int, re.search(r"gaze: (\d+)/(\d+)", out).groups())
+    assert n >= 4 and hits / n >= 0.6, out                   # the decoder followed the fake user
+    labels = load_config(cli.DEFAULT_CONFIGS["code"]).labels
+    commits = [c.split("->")[1] for c in re.search(r"commits: (.*)", out).group(1).split()]
+    assert commits[-1] == labels[1]                          # the last square looked at (16 s, switch 8)
+    assert set(commits) <= {labels[0], labels[1]}, commits   # never a square nobody looked at
     # reuse the template: no training stage
     rc = cli.main(["--paradigm", "code", *FAST, "--template", str(tpl), "--seconds", "8"])
     out, err = capsys.readouterr()
@@ -36,6 +43,13 @@ def test_fake_tvep_run(capsys):
     assert rc == 0, err
     assert "time-VEP tvep_4" in err and "time: " in out
     assert "decisions in" in out
+    # the 6 s flash window keeps the old square's flashes for seconds after each gaze
+    # switch, so decisions lag the fake user: ask that both squares looked at were
+    # committed, the last one last, and that agreement beats what a wrong decoder gets
+    hits, n = map(int, re.search(r"gaze: (\d+)/(\d+)", out).groups())
+    assert n >= 4 and hits / n >= 0.4, out
+    commits = [c.split("->")[1] for c in re.search(r"commits: (.*)", out).group(1).split()]
+    assert commits[0] == "0" and commits[-1] == "1", commits
 
 
 def test_fake_fvep_run_uses_the_demo_session(capsys):
@@ -146,3 +160,45 @@ def test_confidence_labels_and_line():
     assert lines[0].count("\u2588") == 4 and not lines[0].endswith("<")   # 0.1 / 0.2 of 8
     assert cli.confidence_line(abstained, ["YES", "NO"]) == "lead  -     no choice yet"
     assert cli.send_text(None, "x") is True and cli.send_labels(None, ["a", "b"]) is True
+
+
+def test_save_keeps_every_sample_and_the_markers(tmp_path: Path, capsys):
+    from brainsync.recordings import load_recording, parse_events
+    from brainsync.vep import timing
+    tpl = tmp_path / "tpl.npz"
+    rc = cli.main(["--paradigm", "code", *FAST, "--train-cycles", "6", "--seconds", "6",
+                   "--switch", "3", "--save-template", str(tpl), "--save", str(tmp_path),
+                   "--seed", "2"])
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    saved = [ln for ln in err.splitlines() if ln.startswith("saved ")]
+    assert len(saved) == 1 and "_vep.npz" in saved[0] and "markers" in saved[0]
+    assert "timing check: python -m brainsync.vep.timing" in err
+    files = list(tmp_path.glob("*_vep.npz"))
+    assert len(files) == 1
+    rec = load_recording(files[0])
+    assert rec.X.shape[0] == 8 and rec.X.shape[1] == rec.t.size and rec.fs == 250.0
+    # training (6 cycles) plus the 6 s run, every sample in order
+    assert rec.t[-1] - rec.t[0] > 12.0 and np.all(np.diff(rec.t) > 0)
+    assert np.allclose(np.diff(rec.t), 1 / rec.fs, atol=1e-6)   # Unix times: ~2e-7 s rounding
+    cycles = parse_events(rec.marker_text, ["cycle"])
+    assert len(cycles) >= 11 and cycles[0][2] == 0
+    assert parse_events(rec.marker_text, ["stim_on"])
+    assert np.all(np.isnan(rec.freqs)) and rec.n_targets == 4
+    # the saved run passes the timing check, and the fake user's data are in it
+    assert timing.main([str(files[0])]) == 0
+    assert "PASS cycle spacing" in capsys.readouterr().out
+    assert np.std(rec.X[6]) > 5.0            # O1 carries noise plus the response
+
+
+def test_paradigm_specific_argument_checks(tmp_path: Path, capsys):
+    for argv in (["--compare", "--fake", "-c", "cvep_2"],
+                 ["--paradigm", "time", "--fake", "--template", str(tmp_path / "t.npz")],
+                 ["--paradigm", "code", "--fake", "--template", str(tmp_path / "t.npz"),
+                  "--save-template", str(tmp_path / "s.npz")],
+                 ["--paradigm", "code", "--fake", "--train-cycles", "1"]):
+        with pytest.raises(SystemExit) as e:
+            cli.main(argv)
+        assert e.value.code == 2, argv
+    err = capsys.readouterr().err
+    assert "drop -c" in err and "--template is for" in err and "at least" in err or ">= 2" in err
