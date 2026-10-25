@@ -506,6 +506,8 @@ class Orchestrator:
         if self.cfg.display.flicker != "browser" or self.paradigm != "code":
             self._record("cycle_ignored", why="the page does not draw the code")
             return
+        if not self.acked:
+            return  # keyboard mode without a bridge: nobody decodes them (logged on arrival)
         t = self.page_clock.unix(msg.t_client, self.clock())
         if t < self.page_flicker_at - CYCLE_SLACK_S:
             why = "before its flicker was asked for"

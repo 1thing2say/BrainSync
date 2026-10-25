@@ -10,15 +10,18 @@ gitignored .env.
 
     python -m app.server                    # real decoder connects to /ws/decoder
     python -m app.server --fake-decoder     # also start tools/fake_decoder.py --random
-    python -m app.server --bridge cerelog   # also start brainsync.voice_bridge (headset + display)
-    python -m app.server --bridge fake --bridge-headless   # the bridge on fake EEG, no window
+    python -m app.server --bridge cerelog   # also start brainsync.voice_bridge (the headset)
+    python -m app.server --bridge fake      # the bridge on fake EEG
     python -m app.server --keyboard         # keys 1-4 on the page select
     python -m app.server --tunnel           # also a public https link for the partner's phone
     python -m app.server --config config/fvep_page.yaml   # the 4-target f-VEP fallback
 
 The default config is c-VEP (three targets: 2 options + NEXT, a training step instead of the
 baseline, confidence bars; docs/CVEP-STANDARD.md); --bridge and --fake-decoder follow the
-config's paradigm.
+config's paradigm. With ``display.flicker: browser`` (the default) the session page draws the
+flicker, so --bridge runs the bridge headless (no PsychoPy window) and, in code mode, relays the
+page's cycle flips to it (INTERFACE-v2-draft.md section 9.7); ``display.flicker: psychopy``
+gives the bridge its window again (--bridge-headless still turns it off).
 """
 
 from __future__ import annotations
@@ -512,9 +515,12 @@ def main(argv: list[str] | None = None) -> None:
                    help="also open a Cloudflare quick tunnel and print a phone link (needs cloudflared)")
     p.add_argument("--bridge", choices=BRIDGE_KINDS,
                    help="also start python -m brainsync.voice_bridge against this server: cerelog = "
-                        "the Cerelog X8 and the PsychoPy display, fake = FakeBoard")
+                        "the Cerelog X8, fake = FakeBoard; headless when the page draws the "
+                        "flicker (display.flicker: browser, the default), else with the PsychoPy "
+                        "display")
     p.add_argument("--bridge-headless", action="store_true",
-                   help="with --bridge: no PsychoPy window (the bridge's --no-stimulus)")
+                   help="with --bridge and display.flicker: psychopy: no PsychoPy window "
+                        "(the bridge's --no-stimulus)")
     args = p.parse_args(argv)
     if args.bridge and args.fake_decoder:
         p.error("--bridge and --fake-decoder both connect to /ws/decoder: pick one")

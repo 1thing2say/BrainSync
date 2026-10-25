@@ -175,10 +175,11 @@ DECODER_TYPES = {"hello", "stim_onset", "selection", "no_selection", "baseline_d
 def test_draft_has_all_its_examples() -> None:
     types = [json.loads(raw)["type"] for raw in DRAFT_EXAMPLES]
     # two display examples (a page and the confirm screen), two hellos (freq, and code in
-    # section 9 with train, train_progress, trained and decision)
-    assert len(types) == 18
+    # section 9 with train, train_progress, trained and decision), two cycles (section 9.7: a
+    # training's and a trial's)
+    assert len(types) == 20
     assert set(types) == DECODER_TYPES | {
-        "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause", "train"
+        "hello_ack", "baseline", "display", "stim_start", "stim_stop", "pause", "train", "cycle"
     }
 
 

@@ -613,6 +613,9 @@ markers, so the server relays those times:
 
 ```json
 {"type": "cycle", "train_id": 3, "n": 12, "t_unix": 1792809214.112}
+```
+
+```json
 {"type": "cycle", "trial_id": 42, "n": 0, "t_unix": 1792809201.512}
 ```
 
