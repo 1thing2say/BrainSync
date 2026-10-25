@@ -1,0 +1,14 @@
+# Cerelog X8 EEG board (BrainSync): its USB serial port, for the brainsync
+# user (group dialout) and the BrainFlow fork. From brainsync-udev.
+#   V1: CH340 USB-UART bridge, vendor 1a86, driver ch341   -> /dev/ttyUSB*
+#   V2: ESP32-S3 native USB CDC, vendor 303a, driver cdc_acm -> /dev/ttyACM*
+# Both also get /dev/cerelog. ID_MM_DEVICE_IGNORE keeps ModemManager from
+# probing the port (its probe toggles DTR, which resets an ESP32-S3); it is
+# set before ModemManager's own rules (77-mm-*) read it.
+ACTION=="remove", GOTO="brainsync_cerelog_end"
+SUBSYSTEM!="tty", GOTO="brainsync_cerelog_end"
+
+ATTRS{idVendor}=="1a86", GROUP="dialout", MODE="0660", SYMLINK+="cerelog", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="303a", GROUP="dialout", MODE="0660", SYMLINK+="cerelog", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+LABEL="brainsync_cerelog_end"
