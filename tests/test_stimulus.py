@@ -699,6 +699,14 @@ class _FakeStim:
         self.drawn += 1
 
 
+class _FakeRect(_FakeStim):
+    pass
+
+
+class _FakeShapeStim(_FakeStim):
+    pass
+
+
 class _FakePsychoWindow:
     size = (3024, 1964)   # 14" MacBook Pro, 1.54:1
 
@@ -724,7 +732,8 @@ def test_psychopy_renderer_against_fake_psychopy(monkeypatch, capsys):
 
     from brainsync.stimulus.display import Aborted, PsychoPyRenderer
     keys: list[list[str]] = [[], ["escape"]]
-    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeStim, TextStim=_FakeStim)
+    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeStim, TextStim=_FakeStim,
+                                   ShapeStim=_FakeStim)
     event = types.SimpleNamespace(getKeys=lambda keyList: keys.pop(0) if keys else [],
                                   clearEvents=lambda: None)
     fake = types.ModuleType("psychopy")
@@ -748,6 +757,35 @@ def test_psychopy_renderer_against_fake_psychopy(monkeypatch, capsys):
     monkeypatch.setattr(_FakePsychoWindow, "size", (1440, 1080))   # 4:3 is too narrow
     PsychoPyRenderer(cfg)
     assert "cut off" in capsys.readouterr().err
+
+
+def test_psychopy_renderer_draws_target_shapes(monkeypatch):
+    import dataclasses
+    import types
+
+    from brainsync.stimulus import shapes
+    from brainsync.stimulus.display import PsychoPyRenderer
+    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeRect,
+                                   ShapeStim=_FakeShapeStim, TextStim=_FakeStim)
+    event = types.SimpleNamespace(getKeys=lambda keyList: [], clearEvents=lambda: None)
+    fake = types.ModuleType("psychopy")
+    fake.visual, fake.event = visual, event
+    monkeypatch.setitem(sys.modules, "psychopy", fake)
+    cfg = _cfg(targets={"freqs": [13.0, 15.0, 17.0]}, layout={"cols": 3, "spacing": 0.5})
+    names = ["square", "plus", "arrow-up"]
+    cfg = dataclasses.replace(cfg, targets=tuple(
+        dataclasses.replace(t, shape=n) for t, n in zip(cfg.targets, names)))
+    r = PsychoPyRenderer(cfg)
+    square, plus, arrow = r.squares
+    assert type(square) is _FakeRect
+    assert square.kw["size"] == (cfg.size, cfg.size) and square.kw["pos"] == cfg.targets[0].pos
+    for stim, t in ((plus, cfg.targets[1]), (arrow, cfg.targets[2])):
+        assert type(stim) is _FakeShapeStim
+        assert stim.kw["vertices"] == shapes.vertices(t.shape, cfg.size)
+        assert stim.kw["pos"] == t.pos and stim.kw["lineColor"] is None
+    r.draw(np.array([1.0, 0.0, 1.0]), -1)
+    assert [s.fillColor for s in r.squares] == [(1.0, 1.0, 1.0), (-1, -1, -1), (1.0, 1.0, 1.0)]
+    assert [s.drawn for s in r.squares] == [1, 1, 1]
 
 
 def test_ready_line_follows_the_refresh_check(fake_window, capsys):

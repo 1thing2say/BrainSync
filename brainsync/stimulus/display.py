@@ -29,6 +29,7 @@ from typing import Protocol, TextIO
 
 import numpy as np
 
+from . import shapes
 from .config import StimulusConfig, Trial, card_overlap
 from ..vep.codes import bit_luminance
 from .feedback import Control
@@ -666,7 +667,8 @@ def png_size(path: str | Path) -> tuple[int, int]:
 
 
 class PsychoPyRenderer:
-    """Fullscreen PsychoPy window: one grey square per target plus an outline cue box each.
+    """Fullscreen PsychoPy window: one grey square (or [targets] shapes outline) per target
+    plus an outline cue box each.
 
     With ``cards``, every PNG becomes one ImageStim at init (textures are never loaded in
     the frame loop), centred, [card] height high and as wide as its own aspect says, and
@@ -696,12 +698,18 @@ class PsychoPyRenderer:
                                  checkTiming=False)
         self.win.setMouseVisible(False)
         side, box = cfg.size, 2.0 * cfg.reach
-        self.squares = []
+        self.squares = []   # the flicker targets, whatever their shape
         self.boxes = []
         self.flashes = []
         for t in cfg.targets:
-            self.squares.append(visual.Rect(self.win, size=(side, side), pos=t.pos,
-                                            lineColor=None, fillColor=to_psychopy_rgb(0.0)))
+            if t.shape == "square":
+                self.squares.append(visual.Rect(self.win, size=(side, side), pos=t.pos,
+                                                lineColor=None, fillColor=to_psychopy_rgb(0.0)))
+            else:   # ShapeStim tessellates the concave plus and arrows
+                self.squares.append(visual.ShapeStim(self.win,
+                                                     vertices=shapes.vertices(t.shape, side),
+                                                     pos=t.pos, lineColor=None,
+                                                     fillColor=to_psychopy_rgb(0.0)))
             self.boxes.append(visual.Rect(self.win, size=(box, box), pos=t.pos,
                                           fillColor=None, lineColor=cfg.cue_color,
                                           lineWidth=cfg.cue_line_px))
