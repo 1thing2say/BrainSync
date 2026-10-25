@@ -7,6 +7,7 @@ stores them column by column (9.25, 11.25, 13.25, 9.75, ...). ``load`` returns t
 ascending frequency order.
 
     python -m brainsync.nakanishi --windows 1 2 4
+    python -m brainsync.nakanishi --windows 0.5 1 --methods cca etrca mscca   # trained, held out
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import paths
-from .classify import make
+from .classify import METHODS, is_trained, make
 from .metrics import accuracy
 from .signal import Band, preprocess
 
@@ -113,9 +114,26 @@ def epochs(ds: Dataset, window_s: float, band: Band | None = BAND,
 
 
 def subject_accuracy(ds: Dataset, method: str, window_s: float, harmonics: int = 3) -> float:
-    """Accuracy of a training-free classifier (default settings) over all of a subject's trials."""
+    """Accuracy of a classifier (default settings) over all of a subject's trials.
+
+    Training-free methods score every trial directly. Trained methods (trca, etrca, their
+    -R variants, mscca) are scored leave-one-block-out: fitted on the other blocks'
+    trials, scored on the held-out block, so every trial is predicted by a filter that
+    never saw it (the protocol of Nakanishi 2018 and Wong 2020).
+    """
     clf = make(method, freqs=ds.freqs, fs=ds.fs, harmonics=harmonics, phases=ds.phases)
-    return accuracy(ds.y, clf.predict(epochs(ds, window_s)))
+    X = epochs(ds, window_s)
+    if not is_trained(method):
+        return accuracy(ds.y, clf.predict(X))
+    pred = np.empty(ds.y.size, dtype=int)
+    for b in np.unique(ds.blocks):
+        test = ds.blocks == b
+        try:
+            clf.fit(X[~test], ds.y[~test])
+        except ValueError as exc:
+            raise ValueError(f"{method} with block {b} held out of {ds.n_blocks}: {exc}") from None
+        pred[test] = clf.predict(X[test])
+    return accuracy(ds.y, pred)
 
 
 def accuracy_table(subjects: Sequence[int], windows: Sequence[float],
@@ -148,7 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--windows", type=float, nargs="+", default=[1.0, 2.0, 4.0],
                     help="window lengths in seconds (default 1 2 4)")
     ap.add_argument("--subjects", type=int, nargs="+", default=list(range(1, N_SUBJECTS + 1)))
-    ap.add_argument("--methods", nargs="+", default=["cca", "fbcca"], choices=["cca", "fbcca"])
+    ap.add_argument("--methods", nargs="+", default=["cca", "fbcca"], choices=list(METHODS),
+                    help="classifiers (default cca fbcca); trained ones are leave-one-block-out")
     ap.add_argument("--harmonics", type=int, default=3)
     ap.add_argument("--data-dir", type=Path, default=None,
                     help="folder with s1.mat..s10.mat (default $BRAINSYNC_DATA_DIR/nakanishi2015)")

@@ -1,7 +1,13 @@
-"""Score CCA and FBCCA on the cued multi-target recordings (``*_cued.npz``).
+"""Score CCA and FBCCA, and the trained spatial filters, on the cued recordings (``*_cued.npz``).
 
     python -m brainsync.score_cued                        # every *_cued.npz in recordings_dir()
     python -m brainsync.score_cued path/a_cued.npz --methods fbcca --windows 1 2 --margin 1.5
+    python -m brainsync.score_cued --methods fbcca etrca mscca   # trained methods, held out
+
+The trained methods (trca, trca-r, etrca, etrca-r, mscca) are scored leave-one-trial-out:
+for every trial the classifier is fitted on the recording's other trials (and its
+baseline on their still windows) and then scores the left-out trial, so no number comes
+from a trial the filter has seen. Their rows carry a ``*`` in the report.
 
 Every trial is cut into a flicker window (stim_on + latency) and a "still" window
 (stim_off + latency) of the recorded length; shorter analysis windows take the first
@@ -32,12 +38,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .classify import ABSTAIN, make
+from .classify import ABSTAIN, METHODS as ALL_METHODS, is_trained, make
 from .metrics import abstain_rate, accuracy, binom_p, confusion_matrix, itr_bpm
 from .recordings import POSTERIOR, Recording, Windows, cut_windows, \
     list_recordings, load_recording, reject_artifacts
 
-METHODS = ("cca", "fbcca")
+METHODS = ("cca", "fbcca")      # the default; ALL_METHODS adds the trained ones
 WINDOWS = (1.0, 2.0, 3.0)
 DEFAULT_MARGIN = 1.0     # baseline spreads the winner must lead by before the decoder commits
 GAZE_SHIFT_S = 0.5       # added to the window for the ITR selection time
@@ -69,6 +75,7 @@ class Row:
     pred_margin: np.ndarray = field(repr=False)
     scores: np.ndarray = field(repr=False)
     control_pred: np.ndarray = field(repr=False)
+    held_out: bool = False      # trained method: every trial scored by a fit on the other trials
 
     @property
     def control_accuracy(self) -> float:
@@ -178,6 +185,35 @@ def resolve_windows(windows: Sequence[float], recorded_s: float) -> list[float]:
     return split_windows(windows, recorded_s)[0]
 
 
+def _held_out(clf, X_on: np.ndarray, X_off: np.ndarray, y: np.ndarray):
+    """Leave-one-trial-out scores for a trained classifier.
+
+    For trial t the classifier is fitted on the other flicker windows, its baseline on the
+    other still windows, and it then scores trial t's flicker and still window. Returns
+    the margin predictions, baseline-corrected scores, still-window scores and their
+    margin predictions (all per trial), and the mean baseline over the folds.
+    """
+    n = y.size
+    pred_margin = np.empty(n, dtype=int)
+    control_margin = np.empty(n, dtype=int)
+    scores = np.empty((n, clf.n_targets))
+    rest = np.empty((n, clf.n_targets))
+    means = np.empty((n, clf.n_targets))
+    spreads = np.empty(n)
+    for t in range(n):
+        train = np.arange(n) != t
+        try:
+            clf.fit(X_on[train], y[train])
+        except ValueError as exc:
+            raise ValueError(f"{clf.name}: cannot hold trial {t} out: {exc}") from None
+        clf.fit_baseline(X_off[train])
+        pred_margin[t : t + 1], scores[t : t + 1] = clf.decide(X_on[t])
+        rest[t : t + 1] = clf.scores(X_off[t])
+        control_margin[t : t + 1] = clf.predict_scores(rest[t : t + 1])
+        means[t], spreads[t] = clf.baseline_mean, clf.baseline_spread
+    return pred_margin, scores, rest, control_margin, means.mean(axis=0), float(spreads.mean())
+
+
 def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequence[float],
                   fs: float, windows: Sequence[float], methods: Sequence[str] = METHODS,
                   phases: Sequence[float] | None = None, margin: float = DEFAULT_MARGIN,
@@ -208,10 +244,17 @@ def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequenc
         X_on, X_off = on[..., :n], off[..., :n]
         for m in methods:
             clf = make(m, freqs=freqs, fs=fs, harmonics=harmonics, phases=phases, margin=margin)
-            clf.fit_baseline(X_off)
-            pred_margin, s = clf.decide(X_on)
+            held_out = is_trained(m)
+            if held_out:
+                fold = _held_out(clf, X_on, X_off, y)
+                pred_margin, s, rest, control_margin, base_mean, base_spread = fold
+            else:
+                clf.fit_baseline(X_off)
+                pred_margin, s = clf.decide(X_on)
+                rest = clf.scores(X_off)
+                control_margin = clf.predict_scores(rest)
+                base_mean, base_spread = clf.baseline_mean.copy(), clf.baseline_spread
             pred = s.argmax(axis=1)
-            rest = clf.scores(X_off)
             control = rest.argmax(axis=1)
             hits = int(np.count_nonzero(pred == y))
             acc = accuracy(y, pred)
@@ -225,10 +268,11 @@ def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequenc
                 committed_accuracy=float(np.mean(pred_margin[go] == y[go])) if go.any()
                 else float("nan"),
                 control_hits=c_hits, control_p=binom_p(c_hits, y.size, chance),
-                control_abstain=abstain_rate(clf.predict_scores(rest)),
-                baseline_mean=clf.baseline_mean.copy(), baseline_spread=clf.baseline_spread,
+                control_abstain=abstain_rate(control_margin),
+                baseline_mean=base_mean, baseline_spread=base_spread,
                 confusion=confusion_matrix(y, pred, n_targets),
-                pred=pred, pred_margin=pred_margin, scores=s, control_pred=control))
+                pred=pred, pred_margin=pred_margin, scores=s, control_pred=control,
+                held_out=held_out))
     return rows
 
 
@@ -343,15 +387,20 @@ def format_report(rep: Report, n_perm: int = N_PERMUTATIONS) -> str:
     if rep.still is not None:
         lines += _still_note(rep.still)
 
+    if any(r.held_out for r in rep.rows):
+        lines.append("* held out: fitted on the recording's other trials (baseline on their still "
+                     "windows), scored on each left-out trial; the rest mean is the fold average")
+
     base_hdr = " ".join(f"{_hz(f):>8}" for f in rep.freqs)
-    lines.append(f"{'method':<6} {'window':>7} {'hits/n':>7} {'acc':>5} {'p':>7} {'ITR':>6} "
+    lines.append(f"{'method':<8} {'window':>7} {'hits/n':>7} {'acc':>5} {'p':>7} {'ITR':>6} "
                  f"{'abstain':>7} {'acc|go':>6} | {'still':>7} {'p':>6} {'abst':>5} | "
                  f"rest mean {base_hdr} {'spread':>7}")
     for r in rep.rows:
         go = "  -  " if np.isnan(r.committed_accuracy) else f"{100 * r.committed_accuracy:5.0f}%"
         base = " ".join(f"{v:8.4f}" for v in r.baseline_mean)
+        tag = r.method + ("*" if r.held_out else "")
         lines.append(
-            f"{r.method:<6} {r.window_s:>5.2f} s {r.hits:>3d}/{r.n:<3d} {100 * r.accuracy:4.0f}% "
+            f"{tag:<8} {r.window_s:>5.2f} s {r.hits:>3d}/{r.n:<3d} {100 * r.accuracy:4.0f}% "
             f"{r.p:7.4f} {r.itr_bpm:6.1f} {100 * r.abstain:6.0f}% {go} | "
             f"{r.control_hits:>3d}/{r.n:<3d} {r.control_p:6.3f} {100 * r.control_abstain:4.0f}% | "
             f"          {base} {r.baseline_spread:7.4f}")
@@ -385,9 +434,9 @@ def parse_channels(text: str) -> list[str | int]:
 
 def _usage_problem(args: argparse.Namespace, methods: list[str],
                    channels: list[str | int]) -> str | None:
-    bad = [m for m in methods if m not in METHODS]
+    bad = [m for m in methods if m not in ALL_METHODS]
     if bad or not methods:
-        return f"unknown methods {bad or methods}; choose from {list(METHODS)}"
+        return f"unknown methods {bad or methods}; choose from {list(ALL_METHODS)}"
     if not channels:
         return f"no channels in {args.channels!r}"
     # names and indices are checked against each recording's own ch_names when it is scored
@@ -414,12 +463,13 @@ def _error_text(path: Path, exc: Exception) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m brainsync.score_cued",
-        description="CCA / FBCCA accuracy on cued multi-target recordings.",
+        description="CCA / FBCCA and trained spatial-filter accuracy on cued multi-target recordings.",
         epilog="exit status: 0 all scored, 1 some recording failed, 2 invalid options")
     ap.add_argument("files", nargs="*", type=Path,
                     help="*_cued.npz recordings (default: all in $BRAINSYNC_DATA_DIR/spectrum_checks)")
     ap.add_argument("--methods", nargs="+", default=list(METHODS),
-                    help="classifiers, space or comma separated (default cca fbcca)")
+                    help=f"classifiers, space or comma separated, from {' '.join(ALL_METHODS)} "
+                         f"(default cca fbcca; the trained ones are scored leave-one-trial-out)")
     ap.add_argument("--windows", type=float, nargs="+", default=list(WINDOWS),
                     help="window lengths in s; the recorded window is always added (default 1 2 3)")
     ap.add_argument("--margin", type=float, default=DEFAULT_MARGIN,

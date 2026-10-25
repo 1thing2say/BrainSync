@@ -212,6 +212,40 @@ Per subject (CCA, FBCCA at 1/2/4 s) the results go to stderr. Subject 1 is the h
 (CCA 24/44/64%), subject 8 the easiest (CCA 91/100/100%). Starting the window at sample 0
 instead drops subject 8's 1 s CCA accuracy from 90.6% to 48.9%.
 
+### Trained spatial filters (calibration-based)
+
+`brainsync/classify.py` also has the calibration-based filters from Wong et al. 2020
+("Spatial filtering in SSVEP-based BCIs: unified framework and new improvements", IEEE
+TBME 67(11)): TRCA and ensemble TRCA (Nakanishi 2018), their `-R` variants (the summed
+trials projected onto the sine-cosine subspace first) and msCCA (one filter shared by all
+targets, works from one trial per target). They are fitted on labelled trials with
+`fit(X, y)`, score a window by the signed correlation of the filtered window with the
+filtered template, and share the still-screen baseline and abstain rules with CCA. On the
+benchmark they are scored leave-one-block-out (14 training trials per target), which is
+the paper's protocol:
+
+```bash
+.venv/bin/python -m brainsync.nakanishi --windows 0.5 1 2 --methods cca fbcca trca etrca trca-r etrca-r mscca
+```
+
+| Method | 0.5 s | 1 s | 2 s |
+|---|---|---|---|
+| CCA | 23.3% | 56.8% | 83.7% |
+| FBCCA | 18.2% | 53.6% | 84.8% |
+| TRCA | 88.3% | 97.2% | 99.0% |
+| eTRCA | 91.3% | 97.8% | 99.5% |
+| TRCA-R | 86.9% | 96.0% | 98.9% |
+| eTRCA-R | 92.1% | 97.9% | 99.5% |
+| msCCA | 80.7% | 93.2% | 98.7% |
+
+With 8 wet channels, 12 targets and 14 training trials per target the gain is 40 points
+at 1 s; the paper's recommendation (eTRCA or eTRCA-R with a long calibration, msCCA with
+a short one) holds here. Templates are locked to stimulus onset; because every target's
+steady-state response repeats after a common period (1 s for integer frequencies at
+250 Hz), a training window of at least one period is folded into one cycle and the live
+decoder can score a window at any offset from the onset (`offset=`). Shorter training
+windows keep the raw template and need the same window length.
+
 ## Phase 2: two-target cued trials
 
 Each cued session has 20 trials: a 1 s cue, 4 s of 15 and 17 Hz flicker with the cue box
@@ -236,6 +270,23 @@ of the best cell keeps 162029 and 161131 clearly significant. 172130 is borderli
 (0.047). The still controls are consistent with chance in all three files. Options:
 `--methods`, `--windows`, `--margin`, `--channels` (names or board indices) and
 `--reject`.
+
+The trained filters (`--methods trca etrca trca-r etrca-r mscca`) are scored
+leave-one-trial-out on these files (fitted on the other trials, their row carries a `*`).
+On this 2-target, 4-dry-channel data with 7 to 10 trials per target none of them beats
+CCA or FBCCA (2026-10-25):
+
+| Session | n | CCA / FBCCA at 2 s | best trained at 2 s | at 3.86 s |
+|---|---|---|---|---|
+| 162029 (reference) | 19 | 15 / 17 | eTRCA 16 | eTRCA, TRCA 14 (FBCCA 14) |
+| 161131 | 14 | 13 / 11 | TRCA-R, msCCA 11 | msCCA 10 (FBCCA 10) |
+| 172130 | 17 | 12 / 12 | eTRCA-R, msCCA 10 | eTRCA-R 11 (CCA 14) |
+
+Several cells fall to chance (TRCA at 2 s on 161131: 6/14). This is what the paper
+predicts: a spatial filter has little to win over 4 channels and 2 classes, and 8 trials
+cannot estimate a covariance well. The methods matter for the 4-target page mode (more
+targets, and more channels once C3/C4 move to Oz/POz), where the gate recording in
+`PLAN.md` section 14 decides.
 
 ## Phase 3: live demo
 
@@ -960,7 +1011,7 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/recordings.py` | Load and save `.npz` sessions, parse markers, cut windows, reject artifacts |
 | `brainsync/synthetic.py` | Synthetic SSVEP trials and sessions for tests |
 | `brainsync/metrics.py` | Accuracy with abstention, Wolpaw ITR, confusion matrix, binomial p |
-| `brainsync/classify.py` | CCA and FBCCA with a still-screen baseline and abstain margin |
+| `brainsync/classify.py` | CCA and FBCCA, plus the trained TRCA / eTRCA (-R) and msCCA filters, with a still-screen baseline and abstain margin |
 | `brainsync/nakanishi.py` | Nakanishi 2015 loader and accuracy table (phase 1) |
 | `brainsync/select_freqs.py` | Phase 0 frequency selection report |
 | `brainsync/score_cued.py` | Phase 2 scoring of cued sessions |

@@ -954,6 +954,16 @@ minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 | 55–70 % | Train TRCA on the same recording (section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
 | Below that | List mode: options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
 
+**Trained spatial filters are built (2026-10-25, branch
+`implementing-spatial-filtering-improvements`).** `brainsync/classify.py` has TRCA, eTRCA,
+their -R variants and msCCA (Wong et al. 2020); `python -m brainsync.score_cued --methods
+fbcca etrca mscca` scores them leave-one-trial-out, so the gate's second row is one
+command on the gate recording. On the public Nakanishi set they lift 1 s accuracy from
+57 % (CCA) to 98 % (eTRCA); on our three 2-target recordings (4 dry channels, 7–10 trials
+per target) none beats CCA / FBCCA, as the paper's small-data caveat predicts (README,
+Phase 2). The live decoder runs one from a cued recording (`--trained`, README Phase 3);
+judge it only on held-out trials, never on its training trials.
+
 **Changed 2026-10-24 to 13/15/17/11 Hz**, the teammate's `four_diamond.toml`: 15 and 17 Hz keep
 their places from `two_targets.toml` (left and right), 13 Hz goes on top and 11 Hz at the bottom,
 so only one pair of neighbouring squares is 2 Hz apart. All four sit clear of the user's
