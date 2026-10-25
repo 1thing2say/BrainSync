@@ -1,0 +1,5 @@
+# Made by build_brainflow.sh next to itself: the pristine clone, the patched build tree and
+# the wheel. Rebuild them with ./build_brainflow.sh (INSTALL.md).
+/src/
+/build-src/
+/out/

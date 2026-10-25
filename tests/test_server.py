@@ -66,7 +66,19 @@ def test_partner_page_is_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "BCI Voice" in r.text
     assert client.get("/app.js").status_code == 200
-    assert client.get("/api/config").json() == {"tts_rate": BASE.speech.tts_rate, "keyboard_mode": False}
+    assert client.get("/api/config").json() == {
+        "tts_rate": BASE.speech.tts_rate, "keyboard_mode": False,
+        "stt_mode": "always", "listen_window_s": BASE.speech.listen_window_s,
+        "stt_gap_s": BASE.speech.stt_gap_s, "stt_max_line_s": BASE.speech.stt_max_line_s,
+        "stt_echo_s": BASE.speech.stt_echo_s, "cue_s": fast_config().stim.cue_s,
+        "max_trial_s": fast_config().stim.max_trial_s, "user_name": "Sam", "phone_url": "",
+        "app_link": ""}
+
+
+def test_a_connecting_page_gets_the_mic_state(kb_client):
+    with kb_client.websocket_connect("/ws/ui") as ui:
+        listen = recv_until(ui, "listen")
+    assert listen["reason"] == "reconnect" and listen["until_stopped"] is False  # idle: mic off
 
 
 def test_decoder_hello_exchange(client):
@@ -130,9 +142,12 @@ def test_cartesia_clip_is_prefetched_spoken_and_served(tmp_path):
         assert speak["audio_url"] and speak["audio_url"].startswith("/audio/")
         r = client.get(speak["audio_url"])
         assert r.status_code == 200 and r.headers["content-type"] == MP3 and r.content == CLIP
-    # The first page's 3 options were requested once each; NEXT needs no audio.
-    assert sorted(json.loads(q.content)["transcript"] for q in fake.requests) == sorted(
-        s["utterance"] for s in shown["slots"] if s["role"] == "option")
+    # The first page's 3 options were requested first, once each (NEXT needs no audio); the
+    # other fixed sentences are pre-generated behind them.
+    asked = [json.loads(q.content)["transcript"] for q in fake.requests]
+    options = [s["utterance"] for s in shown["slots"] if s["role"] == "option"]
+    assert sorted(asked[:3]) == sorted(options) and len(asked) == len(set(asked))
+    assert set(asked) <= set(app.state.intents.utterances)
     assert KEY not in next(tmp_path.glob("*.jsonl")).read_text()
 
 
@@ -248,3 +263,201 @@ def test_a_replacing_bridge_pauses_the_trial_then_resumes_after_its_hello(client
             recv_until(new, "hello_ack")
             answer_baseline(new)  # the new bridge gets a fresh baseline before any trial
             assert recv_until(new, "stim_start")["trial_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The profile page's API (/api/profile)
+# ---------------------------------------------------------------------------
+
+ANA = {"name": "Ana", "about": "Ana lives in Fresno.", "likes": ["salsa music"],
+       "personality": {"formality": "formal", "length": "medium"}}
+
+
+@pytest.fixture
+def profile_client(tmp_path):
+    fake = FakeClaude(reply(GOOD))
+    path = tmp_path / "profiles" / "user.yaml"
+    app = create_app(fast_config(), keyboard_mode=True, log_dir=tmp_path, llm_create=fake,
+                     profile_path=path)
+    with TestClient(app) as c:
+        c.profile_path, c.fake, c.log_dir = path, fake, tmp_path
+        yield c
+
+
+def test_profile_starts_as_the_demo_persona(profile_client):
+    state = profile_client.get("/api/profile").json()
+    assert state["source"] == "demo" and state["editable"] and state["llm"]
+    assert state["profile"]["name"] == "Sam Rivera"
+
+
+def test_saving_a_profile_writes_it_and_uses_it_for_the_next_page(profile_client):
+    state = profile_client.put("/api/profile", json=ANA).json()
+    assert state["source"] == "user" and state["profile"]["name"] == "Ana"
+    assert state["profile"]["fictional"] is False
+    assert "name: Ana" in profile_client.profile_path.read_text(encoding="utf-8")
+    assert "for Ana," in profile_client.app.state.menus.system
+    # Only which fields changed is logged, never what they say.
+    log_text = next(profile_client.log_dir.glob("*.jsonl")).read_text(encoding="utf-8")
+    assert "profile_saved" in log_text and "Fresno" not in log_text and "salsa" not in log_text
+
+
+def test_a_saved_profile_is_loaded_on_the_next_start(profile_client, tmp_path):
+    profile_client.put("/api/profile", json=ANA)
+    app = create_app(fast_config(), log_dir=tmp_path, profile_path=profile_client.profile_path)
+    assert app.state.profile_source == "user" and app.state.menus.profile.name == "Ana"
+
+
+def test_an_invalid_profile_is_rejected_with_the_problems(profile_client):
+    r = profile_client.put("/api/profile", json={"name": "", "personality": {"humour": "sarcastic"}})
+    assert r.status_code == 422
+    problems = r.json()["detail"]["problems"]
+    assert any(p.startswith("name") for p in problems)
+    assert any("humour" in p for p in problems)
+    assert not profile_client.profile_path.exists()
+
+
+def test_reset_goes_back_to_the_demo_persona(profile_client):
+    profile_client.put("/api/profile", json=ANA)
+    state = profile_client.delete("/api/profile").json()
+    assert state["source"] == "demo" and state["profile"]["name"] == "Sam Rivera"
+    assert not profile_client.profile_path.exists()
+    assert "for Sam," in profile_client.app.state.menus.system
+
+
+def test_preview_writes_replies_with_the_unsaved_profile(profile_client):
+    r = profile_client.post("/api/profile/preview",
+                            json={"profile": ANA, "partner_text": "How was your weekend?"})
+    assert r.status_code == 200 and len(r.json()["options"]) == 3
+    assert "for Ana," in profile_client.fake.calls[-1]["system"]
+    assert profile_client.get("/api/profile").json()["source"] == "demo"  # nothing saved
+
+
+def test_an_invalid_saved_profile_falls_back_to_the_demo_persona(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text("name: ''\nabout: secret detail\n", encoding="utf-8")
+    app = create_app(fast_config(), log_dir=tmp_path, profile_path=path)
+    assert app.state.profile_source == "demo" and app.state.menus.profile.name == "Sam Rivera"
+    log_text = next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8")
+    assert "profile_invalid" in log_text and "secret detail" not in log_text
+
+
+def test_without_a_profile_path_the_profile_is_read_only(client):
+    assert client.get("/api/profile").json()["editable"] is False
+    assert client.put("/api/profile", json=ANA).status_code == 403
+    assert client.delete("/api/profile").status_code == 403
+    assert client.post("/api/profile/preview", json={"profile": ANA, "partner_text": "Hi"}).status_code == 409
+
+
+def test_profile_page_is_served(client):
+    r = client.get("/profile.html")
+    assert r.status_code == 200 and "How they talk" in r.text
+    assert client.get("/profile.js").status_code == 200
+    assert 'href="/profile.html"' in client.get("/").text
+
+
+# -- /api/health (tools/preflight.py) ------------------------------------------------------
+
+
+def test_health_without_keys_bridge_or_page(client):
+    h = client.get("/api/health").json()
+    assert h["state"] == "IDLE" and h["ui_client"] == ""
+    assert h["decoder"] == {"connected": False, "ok": False, "display_ok": False, "board_ok": False,
+                            "message": "", "keyboard_mode": False, "fake_decoder": False,
+                            "name": "", "fake_flag": False}
+    assert h["partner_page"] == {"connected": False, "mic": "", "mic_muted": False,
+                                 "stt_mode": BASE.speech.stt_mode}
+    assert h["llm"]["enabled"] is False and "ANTHROPIC_API_KEY" in h["llm"]["why_disabled"]
+    assert h["llm"]["model"] == BASE.llm.model and h["llm"]["warm_ok"] is None
+    assert h["llm"]["dynamic"] is BASE.menus.dynamic
+    assert h["tts"]["enabled"] is False and "CARTESIA_API_KEY" in h["tts"]["why_disabled"]
+    assert h["tts"]["model"] == BASE.speech.model
+
+
+def test_health_follows_the_bridge_page_and_mic(client):
+    with client.websocket_connect("/ws/ui") as ui, client.websocket_connect("/ws/decoder") as dec:
+        recv_until(ui, "status")
+        dec.send_text(to_json(HELLO))
+        recv_until(dec, "hello_ack")
+        ui.send_text(json.dumps({"type": "mic_report", "state": "listening"}))
+        while not recv_until(ui, "status")["mic"]:
+            pass
+        h = client.get("/api/health").json()
+        assert h["decoder"]["connected"] and h["decoder"]["ok"] and h["decoder"]["display_ok"]
+        assert (h["decoder"]["name"], h["decoder"]["fake_decoder"]) == ("test", False)
+        assert h["partner_page"]["connected"] and h["partner_page"]["mic"] == "listening"
+        assert h["resume_ready"] and h["ui_client"] == "browser"  # no client parameter: a browser
+    # The page is gone: its last mic report no longer counts.
+    h = client.get("/api/health").json()
+    assert h["ui_client"] == ""
+    assert h["partner_page"] == {**h["partner_page"], "connected": False, "mic": ""}
+
+
+@pytest.mark.parametrize("flag, name, fake", [(False, "fake-decoder", True),
+                                              (True, "ssvep-fbcca", True),
+                                              (False, "ssvep-fbcca", False)])
+def test_health_counts_a_hand_started_fake_decoder_as_fake(tmp_path, flag, name, fake):
+    with TestClient(create_app(fast_config(), fake_decoder=flag, log_dir=tmp_path)) as client:
+        with client.websocket_connect("/ws/decoder") as dec:
+            dec.send_text(to_json(HELLO.model_copy(update={"name": name})))
+            recv_until(dec, "hello_ack")
+            d = client.get("/api/health").json()["decoder"]
+            assert (d["fake_decoder"], d["name"], d["fake_flag"]) == (fake, name, flag)
+        # The decoder is gone: only the flag is left.
+        d = client.get("/api/health").json()["decoder"]
+        assert (d["fake_decoder"], d["name"]) == (flag, "")
+
+
+def test_health_with_keys_carries_no_secrets_or_conversation(tmp_path):
+    app = create_app(fast_config(), keyboard_mode=True, log_dir=tmp_path, cartesia_api_key=KEY,
+                     tts_transport=FakeCartesia().transport, llm_create=FakeClaude(reply(GOOD)))
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.send_text(json.dumps({"type": "resume"}))
+            ui.send_text(json.dumps({"type": "partner_text", "text": "Do you want to go outside?",
+                                     "source": "typed"}))
+            recv_until(ui, "show_page")
+            r = client.get("/api/health")
+    h = r.json()
+    assert h["llm"]["enabled"] and h["tts"]["enabled"] and h["decoder"]["keyboard_mode"]
+    assert KEY not in r.text and "outside" not in r.text
+
+
+@pytest.mark.parametrize("query, want", [("?client=ios", "ios"), ("?client=browser", "browser"),
+                                         ("?client=android", "browser"), ("", "browser")])
+def test_health_says_which_partner_client_is_connected(client, query, want):
+    with client.websocket_connect("/ws/ui" + query) as ui:
+        recv_until(ui, "status")
+        assert client.get("/api/health").json()["ui_client"] == want
+    events = [e for e in read_events(next(client.log_dir.glob("*.jsonl"))) if e["event"] == "ui_client"]
+    assert [e["client"] for e in events] == [want]
+
+
+def test_the_iphone_app_replacing_a_browser_tab_closes_it_with_4000(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    with client.websocket_connect("/ws/ui") as tab:
+        recv_until(tab, "status")
+        with client.websocket_connect("/ws/ui?client=ios") as app:
+            recv_until(app, "status")
+            with pytest.raises(WebSocketDisconnect) as closed:
+                for _ in range(200):
+                    tab.receive_text()
+            assert closed.value.code == 4000
+            assert client.get("/api/health").json()["ui_client"] == "ios"
+
+
+def test_app_link_is_built_from_the_phone_link():
+    from app.server import app_link
+
+    assert app_link("https://abc.trycloudflare.com/?key=K-1_x") == (
+        "brainsync://pair?url=https%3A%2F%2Fabc.trycloudflare.com&key=K-1_x")
+    assert app_link("http://192.168.1.5:8000/?key=abc") == (
+        "brainsync://pair?url=http%3A%2F%2F192.168.1.5%3A8000&key=abc")
+    assert app_link("") == "" and app_link("http://192.168.1.5:8000/") == ""
+
+
+def test_lan_ip_is_an_address_or_empty():
+    from app.server import lan_ip
+
+    ip = lan_ip()
+    assert ip == "" or (ip.count(".") == 3 and not ip.startswith("127."))

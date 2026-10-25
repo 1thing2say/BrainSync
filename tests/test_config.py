@@ -42,12 +42,13 @@ def test_default_config_loads() -> None:
     assert isinstance(cfg, AppConfig)
     assert cfg.server.host == "127.0.0.1" and cfg.server.port == 8000
     assert [(s.slot, s.freq_hz) for s in cfg.stim.slots] == [
-        ("s1", 15.0), ("s2", 17.0), ("s3", 20.0), ("s4", 12.0)]
+        ("s1", 13.0), ("s2", 15.0), ("s3", 17.0), ("s4", 11.0)]
     assert cfg.stim.roles == {"s1": "option", "s2": "option", "s3": "option", "s4": "next"}
     assert cfg.stim.slot_for("next") == "s4"
     assert (cfg.stim.confirm.say, cfg.stim.confirm.back) == ("s1", "s4")
     assert cfg.stim.waveform == "sine"
-    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3
+    assert cfg.menus.mode == "page" and cfg.menus.option_count == 3 and cfg.menus.spare_options == 1
+    assert cfg.llm.timeout_s == 4.0 and cfg.llm.hedge_after_s == 2.5
     assert cfg.selection.confirm_mode == "always"
     assert cfg.speech.provider == "cartesia" and cfg.speech.model == "sonic-3.5"
 
@@ -174,10 +175,18 @@ INVALID_CONFIGS = [
     ("zero max trial", _set("stim", "max_trial_s", 0), "max_trial_s"),
     ("zero baseline", _set("baseline", "seconds", 0), "baseline.seconds"),
     ("zero llm timeout", _set("llm", "timeout_s", 0), "timeout_s"),
+    ("hedge not before the timeout", _set("llm", "hedge_after_s", 4.0),
+     "llm.hedge_after_s (4) must be shorter than llm.timeout_s (4)"),
+    ("negative hedge", _set("llm", "hedge_after_s", -1), "hedge_after_s"),
+    ("negative spares", _set("menus", "spare_options", -1), "spare_options"),
+    ("too many spares", _set("menus", "spare_options", 4), "spare_options"),
     ("zero option count", _set("menus", "option_count", 0), "option_count"),
     ("negative history", _set("context", "history_turns", -1), "history_turns"),
     ("bad confirm mode", _set("selection", "confirm_mode", "sometimes"), "confirm_mode"),
     ("bad stt mode", _set("speech", "stt_mode", "always_on"), "stt_mode"),
+    ("max line not over the gap", _set("speech", "stt_max_line_s", 1.0), "stt_max_line_s"),
+    ("negative cooldown", _set("speech", "stt_interrupt_cooldown_s", -1), "stt_interrupt_cooldown_s"),
+    ("bad stt interrupts", _set("speech", "stt_interrupts", "sometimes"), "stt_interrupts"),
     ("unpinned tts model", _set("speech", "model", "sonic-latest"), "pin a model version"),
     ("bad tts provider", _set("speech", "provider", "polly"), "provider"),
     ("zero tts timeout", _set("speech", "tts_timeout_s", 0), "tts_timeout_s"),
@@ -198,6 +207,15 @@ def test_invalid_config_raises(
     with pytest.raises(ConfigError) as exc:
         load_config(_write(tmp_path, raw))
     assert expected in str(exc.value)
+
+
+def test_hedge_and_spares_can_be_turned_off(tmp_path: Path) -> None:
+    raw = _raw(DEFAULT_CONFIG_PATH)
+    raw["llm"]["hedge_after_s"] = 0
+    raw["llm"]["timeout_s"] = 1.0
+    raw["menus"]["spare_options"] = 0
+    cfg = load_config(_write(tmp_path, raw))
+    assert cfg.llm.hedge_after_s == 0 and cfg.menus.spare_options == 0
 
 
 def test_square_wave_ok_when_frequencies_divide_refresh(tmp_path: Path) -> None:
@@ -305,6 +323,12 @@ INVALID_INTENTS = [
     ("duplicate labels", _intents(home=THREE + [_opt("Opt 0")]), "duplicate labels"),
     ("unknown option key", _intents(home=THREE + [{**_opt("X"), "rank": 1}]), "rank"),
     ("yaml boolean id", _with_intents([{"id": True, "description": "a"}]), "intents.0.id"),
+    ("match shows an unknown list", {**_intents(), "fallback_match": [{"when": "hi", "show": "nope"}]},
+     "unknown list 'nope'"),
+    ("match with a bad regex", {**_intents(), "fallback_match": [{"when": "(hi", "show": "home"}]},
+     "bad regex"),
+    ("match with an unknown key", {**_intents(), "fallback_match": [{"when": "hi", "show": "home",
+                                                                     "rank": 1}]}, "rank"),
 ]
 
 
@@ -343,3 +367,74 @@ def test_invalid_profile_raises(tmp_path: Path, change: dict[str, Any], expected
     with pytest.raises(ConfigError) as exc:
         load_profile(_write(tmp_path, data, "profile.yaml"))
     assert expected in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The user's own profile (profiles/user.yaml) and the personality map
+# ---------------------------------------------------------------------------
+
+from app.config import (  # noqa: E402
+    REPO_ROOT,
+    USER_PROFILE_PATH,
+    Personality,
+    Profile,
+    load_user_profile,
+    save_user_profile,
+)
+from pydantic import ValidationError  # noqa: E402
+
+
+def test_demo_persona_has_a_personality():
+    p = load_profile().personality
+    assert p.length == "brief" and p.formality in ("casual", "neutral", "formal")
+
+
+def test_a_minimal_user_profile_gets_defaults():
+    p = Profile(name="Ana")
+    assert not p.fictional and p.likes == [] and p.personality == Personality()
+    assert p.personality.length == "brief"  # basic replies unless the user says otherwise
+
+
+@pytest.mark.parametrize("raw, fragment", [
+    ({"name": ""}, "name"),
+    ({"name": "Ana", "personality": {"humour": "sarcastic"}}, "humour"),
+    ({"name": "Ana", "likes": ["x" * 61]}, "likes.0"),
+    ({"name": "Ana", "likes": [f"thing {i}" for i in range(16)]}, "likes"),
+    ({"name": "Ana", "about": "x" * 301}, "about"),
+    ({"name": "Ana", "people": [{"name": "", "relation": "sister"}]}, "people.0.name"),
+    ({"name": "Ana", "hometown": "Oakland"}, "hometown"),
+], ids=["empty name", "unknown humour", "long like", "too many likes", "long about",
+        "nameless person", "unknown key"])
+def test_invalid_user_profile_is_rejected(raw, fragment):
+    with pytest.raises(ValidationError) as exc:
+        Profile.model_validate(raw)
+    assert any(fragment in ".".join(str(p) for p in e["loc"]) for e in exc.value.errors())
+
+
+def test_list_entries_are_trimmed_and_blank_ones_rejected():
+    assert Profile(name="Ana", likes=["  jazz  "]).likes == ["jazz"]
+    with pytest.raises(ValidationError):
+        Profile(name="Ana", likes=["   "])
+
+
+def test_user_profile_round_trips_and_is_absent_until_saved(tmp_path):
+    path = tmp_path / "profiles" / "user.yaml"
+    assert load_user_profile(path) is None
+    profile = Profile(name="Ana", likes=["jazz"], personality=Personality(humour="playful"))
+    save_user_profile(profile, path)
+    assert load_user_profile(path) == profile
+    assert path.read_text(encoding="utf-8").startswith("# Personal profile")
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_invalid_saved_user_profile_raises(tmp_path):
+    path = tmp_path / "user.yaml"
+    path.write_text("name: ''\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="name"):
+        load_user_profile(path)
+
+
+def test_user_profiles_are_gitignored():
+    assert USER_PROFILE_PATH.parent.name == "profiles"
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "profiles/" in ignored

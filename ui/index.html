@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -11,11 +15,13 @@
   <div id="warning" class="overlay" role="dialog" aria-modal="true" aria-labelledby="warning-title">
     <div class="card">
       <h1 id="warning-title">Flicker warning</h1>
-      <p>The user's screen flickers at 12 to 20 Hz, mostly in the range most likely to trigger
+      <p>The user's screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
         photosensitive seizures, with up to four squares at once. Nobody with photosensitive
         epilepsy or flicker sensitivity should look at it.</p>
       <p><kbd>Esc</kbd> on the flicker display or <strong>Stop</strong> here turns the flicker off
         immediately.</p>
+      <p>While the session runs, the microphone listens to the conversation partner and Chrome
+        sends the speech to Google to turn it into text. Press <strong>Mute</strong> any time.</p>
       <button id="accept" class="primary">I understand, start</button>
     </div>
   </div>
@@ -32,27 +38,50 @@
 
   <main class="layout">
     <section class="mirror" aria-label="User's screen (mirror, no flicker)">
-      <header class="mirror-head">
-        <span id="state" class="state">Connecting…</span>
-        <span id="phase" class="phase"></span>
+      <header id="banner" class="banner tone-idle">
+        <span id="state" class="state" role="status" aria-live="polite">Connecting…</span>
+        <span class="banner-side">
+          <span id="flags" class="flags"></span>
+          <span id="phase" class="phase"></span>
+        </span>
       </header>
+      <!-- The sentence being spoken, big, while it plays. -->
+      <div id="speaking" class="speaking" hidden>
+        <span class="speaking-tag">Speaking</span>
+        <span id="speaking-text" class="speaking-text"></span>
+      </div>
+      <!-- How long the user has been looking: fills from the trial's start to stim.max_trial_s. -->
+      <div id="progress" class="progress" hidden>
+        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+        <span id="progress-text" class="progress-text"></span>
+      </div>
       <div id="option" class="option">
         <div id="option-count" class="option-count"></div>
-        <div id="option-text" class="option-text">Waiting for the server…</div>
+        <div id="option-text" class="option-text"></div>
       </div>
       <ol id="list" class="option-list" hidden></ol>
       <div id="targets" class="targets diamond"></div>
-      <div id="speaking" class="speaking" hidden></div>
     </section>
 
     <aside class="panel">
-      <div class="badges" id="badges"></div>
-      <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
-
       <div class="controls">
         <button id="stop" class="danger">Stop</button>
         <button id="resume">Resume</button>
       </div>
+
+      <!-- The partner's mic: on by itself during the session; their words show as they talk. -->
+      <section id="mic-card" class="mic-card tone-off" aria-label="Microphone">
+        <div class="mic-head">
+          <span class="mic-dot" aria-hidden="true"></span>
+          <span id="mic-title" class="mic-title">Mic off</span>
+        </div>
+        <p id="mic-heard" class="mic-heard" aria-live="polite"></p>
+        <p id="listen-status" class="mic-detail" role="status" aria-live="polite"></p>
+        <div class="mic-controls">
+          <button id="mute" class="mute" aria-pressed="false" title="Stop listening (nothing is heard or sent)">Mute</button>
+          <button id="ptt" class="ptt" title="Start the mic again now">Restart mic</button>
+        </div>
+      </section>
 
       <h2>Conversation</h2>
       <ol id="conversation" class="conversation" aria-live="polite"></ol>
@@ -62,19 +91,40 @@
                aria-label="Partner says">
         <button type="submit">Send</button>
       </form>
-      <button id="ptt" class="ptt" disabled title="Push-to-talk arrives in V4">Hold to talk</button>
 
-      <div class="judgment" aria-label="Mark the last spoken reply">
-        <span>Last reply:</span>
-        <button id="correct">Correct</button>
-        <button id="wrong">Wrong</button>
-        <span id="judged" class="judged" aria-live="polite"></span>
-      </div>
-
-      <p class="hint" id="hint"></p>
+      <!-- For whoever runs the demo, not the partner. -->
+      <footer class="operator" aria-label="Operator">
+        <button id="health" class="health level-ok" aria-expanded="false" aria-controls="health-details">
+          <span class="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span>
+        </button>
+        <div id="health-details" class="health-details" hidden>
+          <div class="badges" id="badges"></div>
+          <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
+        </div>
+        <div class="judgment" aria-label="Mark the last spoken reply">
+          <span>Last reply:</span>
+          <button id="correct">Correct</button>
+          <button id="wrong">Wrong</button>
+          <span id="judged" class="judged" aria-live="polite"></span>
+        </div>
+        <p class="hint" id="hint"></p>
+        <!-- With --tunnel (or on the LAN): the links for the partner's phone (they carry the
+             access key): the web page, and the pairing link for the BrainSync Partner iPhone app. -->
+        <div id="phone" class="phone-link" hidden>
+          <button id="copy-phone" type="button">Copy phone link</button>
+          <button id="copy-app" type="button" hidden>Copy iPhone app link</button>
+          <span id="phone-copied" class="judged" aria-live="polite"></span>
+          <code id="phone-url" class="phone-url"></code>
+          <code id="app-url" class="phone-url" hidden></code>
+        </div>
+        <a href="/profile.html" class="profile-link">Edit the user's profile</a>
+      </footer>
     </aside>
   </main>
 
+  <script src="listen_core.js"></script>
+  <script src="voice_core.js"></script>
+  <script src="view_core.js"></script>
   <script src="speech.js"></script>
   <script src="app.js"></script>
 </body>

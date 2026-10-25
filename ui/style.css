@@ -1,98 +1,188 @@
-/* Partner page. Nothing here flashes: the only flicker is on the teammate's PsychoPy display. */
+/* Partner page. Nothing here flashes: the only flicker is on the teammate's PsychoPy display.
+   Every colour is a variable here, so a new palette only changes this block. */
 :root {
   --bg: #0f1115;
   --panel: #171a21;
+  --surface: #232833;     /* boxes, bubbles, buttons */
+  --surface-hi: #2b3140;  /* a flickering box on the user's screen */
   --text: #e8eaee;
   --muted: #9097a3;
   --line: #2a2f3a;
-  --say: #3fb27f;
-  --next: #5b8def;
+  --say: #3fb27f;         /* replies, Say it, the mic listening, all fine */
+  --next: #5b8def;        /* More options, Back */
+  --look: #6cb6ff;        /* "look now" and the selection timer */
   --warn: #e0a43a;
   --danger: #e05252;
-  --pick: #ffd34d;
+  --pick: #ffd34d;        /* the picked box */
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-button { font: inherit; color: inherit; background: #252a35; border: 1px solid var(--line);
-  border-radius: 8px; padding: 0.55rem 1rem; cursor: pointer; }
+button { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.55rem 1rem; cursor: pointer; min-height: 2.75rem; }
 button:hover:not(:disabled) { border-color: var(--muted); }
+button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--look); outline-offset: 2px; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.primary { background: var(--say); border-color: var(--say); color: #08130d; font-weight: 600; }
 button.danger { background: var(--danger); border-color: var(--danger); color: #1a0606; font-weight: 700; }
 kbd { border: 1px solid var(--muted); border-radius: 4px; padding: 0 0.3rem; }
 
-.layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 100vh; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 100vh; min-height: 100dvh; }
 
 /* Mirror of the user's screen */
-.mirror { display: flex; flex-direction: column; padding: 1.5rem 2rem; gap: 1.5rem; }
-.mirror-head { display: flex; justify-content: space-between; align-items: center; }
-.state { font-size: 1.1rem; color: var(--muted); }
-.phase { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.6rem;
+.mirror { display: flex; flex-direction: column; padding: 1.25rem 2rem 1.5rem; gap: 1rem; min-width: 0; }
+
+/* The banner: what the user is doing now, coloured by its tone (app.js sets tone-*). */
+.banner { display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 0.8rem 1.1rem; border-radius: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-left: 6px solid var(--muted); }
+.banner .state { font-size: clamp(1.15rem, 1.8vw, 1.6rem); font-weight: 700; }
+.banner-side { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+.banner.tone-idle .state { color: var(--muted); }
+.banner.tone-cue { border-left-color: var(--text); }
+.banner.tone-look { border-left-color: var(--look); }
+.banner.tone-look .state { color: var(--look); }
+.banner.tone-picked { border-left-color: var(--pick); }
+.banner.tone-picked .state { color: var(--pick); }
+.banner.tone-say { border-left-color: var(--say); }
+.banner.tone-say .state { color: var(--say); }
+.banner.tone-warn { border-left-color: var(--warn); }
+.banner.tone-warn .state { color: var(--warn); }
+.banner.tone-stop { border-left-color: var(--danger); }
+.banner.tone-stop .state { color: var(--danger); }
+.flags { display: flex; gap: 0.4rem; }
+.phase { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.6rem;
   border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-.phase.flicker { border-color: var(--warn); color: var(--warn); }
+.phase:empty { display: none; }
+.phase.flicker { border-color: var(--look); color: var(--look); }
+
+/* The selection timer: a steady fill, never a blink. */
+.progress { display: flex; align-items: center; gap: 0.75rem; }
+.progress[hidden] { display: none; }
+.progress-track { flex: 1; height: 0.5rem; border-radius: 999px; background: var(--surface); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; background: var(--look); border-radius: 999px; transition: width 0.2s linear; }
+.progress-text { font-size: 0.9rem; color: var(--muted); min-width: 2.5rem; text-align: right;
+  font-variant-numeric: tabular-nums; }
 
 .option { text-align: center; }
-.option-count { color: var(--muted); margin-bottom: 0.5rem; }
-.option-text { font-size: clamp(1.8rem, 4vw, 3.2rem); font-weight: 600; line-height: 1.2; min-height: 2.4em; }
+.option-count { color: var(--muted); font-size: 0.9rem; }
+.option-text { font-size: clamp(1.8rem, 4vw, 3.2rem); font-weight: 600; line-height: 1.2; }
+.option-text:not(:empty) { margin-top: 0.4rem; }
 
-.targets { flex: 1; gap: 1rem; }
+.targets { flex: 1; gap: 0.9rem; }
 .targets.row { display: flex; justify-content: space-around; align-items: center; }
 /* Page and confirm screens: the diamond the user sees (s1 top, s2 left, s3 right, s4 bottom). */
 .targets.diamond { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-areas: ". top ." "left . right" ". bottom ."; align-items: center; justify-items: center; }
+  grid-template-areas: ". top ." "left . right" ". bottom ."; align-items: center; justify-items: center;
+  align-content: center; }
 .pos-top { grid-area: top; } .pos-left { grid-area: left; }
 .pos-right { grid-area: right; } .pos-bottom { grid-area: bottom; }
-.target { width: min(22vw, 230px); min-height: 9rem; border-radius: 12px; display: flex;
-  flex-direction: column; justify-content: center; align-items: center; gap: 0.35rem; padding: 0.75rem;
-  border: 4px solid transparent; background: #232833; text-align: center; }
-.target .role { font-size: 1.35rem; font-weight: 800; letter-spacing: 0.03em; }
-.target .sentence { font-size: 0.9rem; line-height: 1.3; color: var(--text); }
-.target .sentence:empty { display: none; }
-.target .slot { color: var(--muted); font-size: 0.8rem; }
-.target.option .role, .target.say .role { color: var(--say); }
-.target.next .role, .target.back .role { color: var(--next); }
-.target.active { background: #2b3140; }
-.target.picked { border-color: var(--pick); }
+.target { width: min(25vw, 290px); min-height: 7.5rem; border-radius: 14px; display: flex;
+  flex-direction: column; justify-content: center; align-items: center; gap: 0.4rem; padding: 0.9rem 1rem;
+  border: 3px solid transparent; background: var(--surface); text-align: center;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+/* The sentence (what gets spoken) is the big text; the short label is a tag above it. */
+.target-tag { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--say); }
+.target-tag:empty, .target-key:empty { display: none; }
+.target-text { font-size: clamp(1.05rem, 1.55vw, 1.4rem); font-weight: 600; line-height: 1.3; }
+.target.next .target-text, .target.say .target-text, .target.back .target-text {
+  font-size: clamp(1.3rem, 2vw, 1.75rem); font-weight: 800; }
+.target.next .target-text, .target.back .target-text { color: var(--next); }
+.target.say .target-text { color: var(--say); }
+.target-key { color: var(--muted); font-size: 0.8rem; }
+.target.active { background: var(--surface-hi); border-color: var(--line); }
+.target.picked { border-color: var(--pick); box-shadow: 0 0 0 6px rgba(255, 211, 77, 0.18); }
 
 .option-list { margin: 0 auto; padding-left: 1.5rem; max-width: 40rem; font-size: 1.2rem; }
 .option-list li { padding: 0.25rem 0.5rem; color: var(--muted); }
-.option-list li.current { color: var(--text); font-weight: 700; background: #232833; border-radius: 8px; }
+.option-list li.current { color: var(--text); font-weight: 700; background: var(--surface); border-radius: 8px; }
 
-.speaking { text-align: center; font-size: 1.4rem; color: var(--say); }
+/* The sentence being spoken, big, while it plays. */
+.speaking { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; text-align: center;
+  padding: 1rem 1.25rem; border-radius: 14px; border: 1px solid var(--say);
+  background: rgba(63, 178, 127, 0.1); }
+.speaking[hidden] { display: none; }
+.speaking-tag { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--say); }
+.speaking-text { font-size: clamp(1.4rem, 2.6vw, 2.2rem); font-weight: 600; }
 
-/* Side panel */
-.panel { background: var(--panel); border-left: 1px solid var(--line); padding: 1.25rem;
-  display: flex; flex-direction: column; gap: 0.9rem; }
-.panel h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0.5rem 0 0; }
-.badges { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.badge { font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--muted); }
-.badge.ok { border-color: var(--say); color: var(--say); }
-.badge.bad { border-color: var(--danger); color: var(--danger); }
-.badge.flag { border-color: var(--warn); color: var(--warn); }
-.decoder-message { margin: 0; font-size: 0.85rem; color: var(--warn); min-height: 1em; }
-.decoder-message:empty { display: none; }
-.controls { display: flex; gap: 0.5rem; }
-.controls button { flex: 1; }
+/* Side panel: Stop on top, then the partner's mic and conversation, the operator's tools last. */
+.panel { background: var(--panel); border-left: 1px solid var(--line); padding: 1rem 1.25rem 1.25rem;
+  display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+.panel h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0.25rem 0 0; }
+.controls { display: flex; gap: 0.5rem; position: sticky; top: 0; z-index: 2; background: var(--panel);
+  padding-top: 0.25rem; }
+.controls button { flex: 1; min-height: 3rem; }
+.controls #stop { flex: 1.4; font-size: 1.1rem; }
 button.danger.offline { background: transparent; color: var(--danger); font-weight: 600; }
 button.target { font: inherit; cursor: pointer; }
 button.target:disabled { cursor: default; opacity: 1; }
-.judgment { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); }
-.judged { color: var(--say); }
+
+/* The mic card: is the partner heard, and what has it heard so far. */
+.mic-card { border: 1px solid var(--line); border-radius: 12px; padding: 0.85rem 1rem; display: flex;
+  flex-direction: column; gap: 0.5rem; background: var(--bg); }
+.mic-head { display: flex; align-items: center; gap: 0.55rem; }
+.mic-dot { width: 0.8rem; height: 0.8rem; border-radius: 50%; background: var(--muted); flex: none; }
+.mic-title { font-size: 1.15rem; font-weight: 700; }
+.mic-card.tone-on { border-color: var(--say); }
+.mic-card.tone-on .mic-dot { background: var(--say); box-shadow: 0 0 0 4px rgba(63, 178, 127, 0.2); }
+.mic-card.tone-on .mic-title { color: var(--say); }
+.mic-card.tone-muted { border-color: var(--warn); }
+.mic-card.tone-muted .mic-dot { background: var(--warn); }
+.mic-card.tone-muted .mic-title { color: var(--warn); }
+.mic-card.tone-warn { border-color: var(--danger); }
+.mic-card.tone-warn .mic-dot { background: var(--danger); }
+.mic-card.tone-warn .mic-title { color: var(--danger); }
+.mic-heard { margin: 0; font-size: 1.15rem; line-height: 1.35; color: var(--text); opacity: 0.7; font-style: italic; }
+.mic-heard.final { opacity: 1; font-style: normal; }
+.mic-heard:empty, .mic-detail:empty { display: none; }
+.mic-detail { margin: 0; font-size: 0.85rem; color: var(--muted); }
+.mic-card.tone-warn .mic-detail { color: var(--text); }
+.mic-controls { display: flex; gap: 0.5rem; }
+.mic-controls button { flex: 1; min-height: 3.25rem; font-size: 1.05rem; }
+.mute { font-weight: 700; }
+.mute.muted { background: var(--warn); border-color: var(--warn); color: #1a1205; }
 
 .conversation { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; display: flex;
   flex-direction: column; gap: 0.5rem; min-height: 8rem; }
-.conversation li { padding: 0.5rem 0.75rem; border-radius: 10px; max-width: 90%; }
-.conversation li.partner { background: #252a35; align-self: flex-start; }
+.conversation li { padding: 0.55rem 0.8rem; border-radius: 12px; max-width: 90%; font-size: 1.05rem; line-height: 1.35; }
+.conversation li.partner { background: var(--surface); align-self: flex-start; }
 .conversation li.user { background: #18392b; align-self: flex-end; }
-.conversation .who { display: block; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+.conversation .who { display: block; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
 
 .say-form { display: flex; gap: 0.5rem; }
-.say-form input { flex: 1; font: inherit; color: var(--text); background: var(--bg);
-  border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.7rem; }
-.ptt { width: 100%; }
+.say-form input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.7rem; min-height: 2.75rem; }
+
+/* Operator footer: health, Correct / Wrong, profile. Smaller and quieter than the partner's part. */
+.operator { border-top: 1px solid var(--line); padding-top: 0.75rem; display: flex; flex-direction: column;
+  gap: 0.6rem; font-size: 0.85rem; }
+.health { display: flex; align-items: center; gap: 0.55rem; width: 100%; text-align: left;
+  background: transparent; min-height: 2.5rem; }
+.health-dot { width: 0.65rem; height: 0.65rem; border-radius: 50%; flex: none; background: var(--muted); }
+.health.level-ok .health-dot { background: var(--say); }
+.health.level-warn .health-dot { background: var(--warn); }
+.health.level-bad { border-color: var(--danger); color: var(--danger); font-weight: 600; }
+.health.level-bad .health-dot { background: var(--danger); }
+.health-details { display: flex; flex-direction: column; gap: 0.4rem; }
+.health-details[hidden] { display: none; }
+.badges { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.badge { font-size: 0.72rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.badge.ok { border-color: var(--say); color: var(--say); }
+.badge.bad { border-color: var(--danger); color: var(--danger); }
+.badge.flag { border-color: var(--warn); color: var(--warn); }
+.decoder-message { margin: 0; color: var(--warn); }
+.decoder-message:empty { display: none; }
+.decoder-name { color: var(--muted); }
+.judgment { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; color: var(--muted); }
+.judgment button { min-height: 2.25rem; padding: 0.3rem 0.8rem; }
+.judged { color: var(--say); }
+.phone-link { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.phone-link[hidden] { display: none; }
+.phone-link [hidden] { display: none; }
+.phone-url { flex-basis: 100%; font-size: 0.75rem; color: var(--muted); word-break: break-all;
+  user-select: all; }
 .hint { font-size: 0.8rem; color: var(--muted); margin: 0; }
 
 /* Warning */
@@ -102,7 +192,51 @@ button.target:disabled { cursor: default; opacity: 1; }
 .card { max-width: 34rem; background: var(--panel); border: 1px solid var(--warn); border-radius: 14px; padding: 1.5rem 1.75rem; }
 .card h1 { margin-top: 0; color: var(--warn); }
 
-@media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
-  .panel { border-left: none; border-top: 1px solid var(--line); }
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill, .target { transition: none; }
 }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .panel { border-left: none; border-top: 1px solid var(--line); }
+  .target { width: 100%; }
+}
+
+/* Phone (the partner page on the partner's phone, PLAN section 10): the partner's part first, a
+   compact mirror below it, Stop always at the bottom of the screen. */
+@media (max-width: 600px) {
+  /* iPhone: room for the notch and the home bar (viewport-fit=cover in index.html). */
+  body { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom)); padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  /* 16 px or more: iOS Safari zooms the page in on a smaller input when it gets focus. */
+  .say-form input { font-size: 16px; }
+  .panel { order: 1; border-top: none; padding: 0.75rem 1rem 1rem; }
+  .mirror { order: 2; padding: 1rem; border-top: 1px solid var(--line); }
+  .controls { position: fixed; top: auto; bottom: 0; left: 0; right: 0; padding: 0.6rem 1rem;
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+  .conversation { max-height: 40vh; }
+  .banner { flex-wrap: wrap; padding: 0.6rem 0.8rem; }
+  .targets.diamond { grid-template-columns: 1fr 1fr; grid-template-areas: "top top" "left right" "bottom bottom";
+    gap: 0.6rem; }
+  .target { width: 100%; min-height: 5.5rem; padding: 0.7rem; }
+  .option-text { font-size: 1.6rem; }
+}
+
+/* Profile page (ui/profile.html) */
+.profile-page { max-width: 46rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; display: flex;
+  flex-direction: column; gap: 1rem; }
+.profile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.profile-head h1 { margin: 0; }
+.back-link, .profile-link { color: var(--next); }
+.profile-page fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 1rem;
+  display: flex; flex-direction: column; gap: 0.75rem; margin: 0 0 1rem; }
+.profile-page legend { padding: 0 0.4rem; color: var(--muted); text-transform: uppercase;
+  font-size: 0.8rem; letter-spacing: 0.08em; }
+.profile-page label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.9rem; }
+.profile-page input:not([type="radio"]), .profile-page textarea { font: inherit; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.65rem; }
+.profile-page .choice { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem;
+  font-size: 0.9rem; }
+.profile-page .choice label { flex-direction: row; align-items: center; gap: 0.35rem; }
+.preview h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.preview .option-list li { color: var(--text); }

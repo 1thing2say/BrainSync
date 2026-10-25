@@ -297,6 +297,41 @@ def test_decoder_loss_pauses_and_reconnect_resumes():
     assert r.o.state is St.BASELINE
 
 
+@pytest.mark.parametrize("name, flag, fake", [
+    ("fake-decoder", False, True),  # tools/fake_decoder.py started by hand
+    ("Fake-random", False, True),
+    ("ssvep-fbcca", False, False),  # the teammate's bridge
+    ("ssvep-fbcca", True, True),  # --fake-decoder
+])
+def test_the_acked_hello_name_says_whether_the_decoder_is_fake(name, flag, fake):
+    r = Rig(fake_decoder=flag, bridge=False)
+    r.connect(name=name)
+    status = r.last(r.ui, UIStatus)
+    assert (status.fake_decoder, status.decoder_name) == (fake, name)
+
+
+def test_only_an_acked_hello_names_the_decoder_and_a_disconnect_clears_it():
+    r = Rig(bridge=False)
+    r.connect(name="fake-decoder")
+    r.o.on_decoder_message(bridge_hello(name="fake-decoder", refresh_hz=120.0))  # rejected
+    assert (r.o.decoder_name, r.last(r.ui, UIStatus).fake_decoder) == ("", False)
+    r.connect(name="fake-decoder")
+    r.o.on_decoder_disconnected()
+    status = r.last(r.ui, UIStatus)
+    assert (status.decoder_name, status.fake_decoder) == ("", False)
+
+
+def test_the_log_says_which_decoder_was_acked_and_whether_it_is_fake(tmp_path):
+    from app.log import EventLog, read_events
+
+    log = EventLog(tmp_path)
+    r = Rig(bridge=False, log=log)
+    r.connect(name="fake-decoder")
+    r.connect(name="ssvep-fbcca")
+    acked = [(e["name"], e["fake"]) for e in read_events(log.path) if e["event"] == "decoder_acked"]
+    assert acked == [("fake-decoder", True), ("ssvep-fbcca", False)]
+
+
 def test_reconnect_sends_baseline_only_after_hello_ack():
     r = Rig()
     r.to_trial()
@@ -934,6 +969,21 @@ def test_llm_ok_follows_the_last_page():
     assert len(statuses(r)) == n and not r.o.llm_ok
 
 
+def test_llm_status_tells_not_asked_yet_from_failed():
+    # Before Claude's first page the partner page must not warn "fixed replies only".
+    assert Rig().o.status().llm == "off"  # no Claude at all
+    r = LLMRig()
+    r.to_trial()
+    assert r.o.status().llm == "waiting" and not r.o.status().llm_ok
+    r.partner("Again?")
+    r.answer(None)
+    assert r.o.status().llm == "failed"
+    r.to_trial()
+    r.partner(QUESTION)
+    r.answer(LLM_OPTIONS)
+    assert r.o.status().llm == "ok" and r.o.status().llm_ok
+
+
 def test_partner_line_during_the_confirm_step_waits_for_the_new_page():
     r = LLMRig()
     r.to_trial()
@@ -1118,3 +1168,368 @@ def test_unattended_with_a_flaky_llm_and_partner_lines_at_any_moment(cfg):
     starts = [m.trial_id for m in r.decoder if isinstance(m, StimStart)]
     stops = [m.trial_id for m in r.decoder if isinstance(m, StimStop)]
     assert starts == sorted(set(starts)) and stops == starts[: len(stops)]
+
+
+# ---------------------------------------------------------------------------
+# V4: hands-free listening on the partner's turn; only questions interrupt a selection
+# ---------------------------------------------------------------------------
+
+from app.orchestrator import is_question  # noqa: E402
+from app.schemas import Listen  # noqa: E402
+
+
+def listens(r: Rig) -> list[Listen]:
+    return [m for m in r.ui if isinstance(m, Listen)]
+
+
+CFG_TURN = CFG.model_copy(update={"speech": CFG.speech.model_copy(update={"stt_mode": "turn"})})
+
+
+def test_the_mic_opens_at_the_start_and_after_each_spoken_reply_and_never_while_speaking():
+    r = Rig(CFG_TURN)
+    r.o.on_ui_message(Resume())
+    assert listens(r)[-1] == Listen(seconds=CFG.speech.listen_window_s, delay_s=0.0, reason="start")
+    r.pick_and_confirm_screen("s1")
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()  # SELECTED -> SPEAKING
+    assert r.o.state is St.SPEAKING
+    off, speak = listens(r)[-1], r.last(r.ui, Speak)
+    assert off.seconds == 0 and off.reason == "speaking"
+    assert r.ui.index(off) < r.ui.index(speak)  # the mic is off before the reply starts
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    on = listens(r)[-1]
+    assert on.reason == "turn" and on.seconds == CFG.speech.listen_window_s
+    assert on.delay_s == CFG.speech.stt_tail_s  # a short tail, so it never hears itself
+
+
+def test_pause_closes_the_mic():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(Stop())
+    assert listens(r)[-1].seconds == 0 and listens(r)[-1].reason == "paused"
+
+
+def test_push_to_talk_mode_never_opens_the_mic_by_itself():
+    cfg = CFG.model_copy(update={"speech": CFG.speech.model_copy(update={"stt_mode": "push_to_talk"})})
+    r = Rig(cfg)
+    r.o.on_ui_message(Resume())
+    assert all(m.seconds == 0 for m in listens(r))
+
+
+def test_a_spoken_remark_during_a_selection_waits_for_the_next_cue():
+    r = Rig()
+    r.to_trial()
+    trial = r.o.active_trial
+    r.o.on_ui_message(PartnerText(text="I just got back from the store", source="stt"))
+    assert r.o.state is St.STIMULATING and r.o.active_trial == trial  # the selection goes on
+    assert not any(isinstance(m, StimStop) for m in r.decoder)
+    assert r.last(r.ui, Transcript) == Transcript(who="partner", text="I just got back from the store")
+    r.select("s2")  # the user finishes the pick on the old page
+    r.run_out()
+    assert r.last(r.ui, ShowPage).mode == "confirm"  # their pick is kept
+    r.to_trial()
+    r.select(BACK)
+    r.run_out()  # back to a page: now the new replies (here the home fallback) are shown
+    r.run_out()
+    assert r.last(r.ui, ShowPage).mode == "page"
+
+
+@pytest.mark.parametrize("text, source", [
+    ("are you hungry", "stt"),  # a spoken question (no "?")
+    ("Do you want some tea", "stt"),
+    ("I just got back from the store", "typed"),  # typing is deliberate: always interrupts
+])
+def test_a_question_or_typed_text_interrupts_the_selection(text, source):
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text=text, source=source))
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.o.state is St.MENU_CUE
+
+
+def test_a_spoken_question_gets_the_yes_no_fallback():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="do you want to go outside", source="stt"))
+    shown = [s.utterance for s in r.last(r.ui, ShowPage).slots if s.role == "option"]
+    assert shown == [o.utterance for o in YES_NO]
+
+
+@pytest.mark.parametrize("text, question", [
+    ("Do you want to go outside?", True),
+    ("are you hungry", True),
+    ("how was your weekend", True),
+    ("so, are you cold", True),  # filler first
+    ("Sam, do you want tea", True),  # a name first
+    ("Ana, are you cold", True),
+    ("Ana is here", False),
+    ("you okay", True),
+    ("Didn't you like it", True),
+    ("I brought you some tea", False),
+    ("It's raining outside", False),
+    ("Good to see you", False),
+    ("um", False),
+    ("", False),
+])
+def test_is_question(text, question):
+    assert is_question(text) is question
+
+
+# ---------------------------------------------------------------------------
+# Active listening (stt_mode: always): the mic is on the whole session except while a reply
+# plays, paused, idle or muted; spoken lines never throw away a pick
+# ---------------------------------------------------------------------------
+
+from app.orchestrator import TRIAL_STATES as TRIAL_STATES_T  # noqa: E402
+from app.schemas import MicReport, MicSet  # noqa: E402
+
+
+def mic_on(m: Listen) -> bool:
+    return m.until_stopped or m.seconds > 0
+
+
+def say_it(r: Rig, slot: str = "s1") -> Speak:
+    r.pick_and_confirm_screen(slot)
+    r.to_trial()
+    r.select(SAY_IT)
+    r.run_out()
+    assert r.o.state is St.SPEAKING
+    return r.last(r.ui, Speak)
+
+
+def test_always_mode_listens_from_resume_to_stop_as_one_level():
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    assert listens(r)[-1] == Listen(seconds=0, until_stopped=True, delay_s=0.0, reason="start")
+    sent = len(listens(r))
+    for _ in range(5):  # baseline, cues, trials, not-caught, rest: no more listen messages
+        r.to_trial()
+        r.run_out()
+    assert len(listens(r)) == sent and mic_on(listens(r)[-1])
+    r.o.on_ui_message(Stop())
+    assert listens(r)[-1] == Listen(seconds=0, reason="paused")
+
+
+def test_always_mode_closes_the_mic_for_a_reply_and_reopens_after_the_tail():
+    r = Rig()
+    speak = say_it(r)
+    off = listens(r)[-1]
+    assert not mic_on(off) and off.reason == "speaking" and r.ui.index(off) < r.ui.index(speak)
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    on = listens(r)[-1]
+    assert on.until_stopped and on.reason == "turn" and on.delay_s == CFG.speech.stt_tail_s
+
+
+def test_always_mode_reopens_after_a_reply_that_never_reports_done():
+    r = Rig()
+    say_it(r)
+    r.run_out()  # max_speak_s with no tts_done
+    assert r.o.state is St.REST and listens(r)[-1].until_stopped
+
+
+def test_no_mic_on_message_is_ever_sent_while_speaking():
+    """Unattended run with spoken lines at random moments: the reply is never heard."""
+    r = Rig()
+    rng = random.Random(7)
+    for n in range(40):
+        r.to_trial()
+        if n % 4 == 0:
+            r.o.on_ui_message(PartnerText(text=rng.choice(["are you hungry", "nice day"]), source="stt"))
+            r.to_trial()
+        r.select(rng.choice(list(r.o.screen.roles)))
+        r.run_out()
+        if r.o.state is St.SPEAKING:
+            r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
+    for i, m in enumerate(r.ui):
+        if isinstance(m, Speak):
+            last = [x for x in r.ui[:i] if isinstance(x, Listen)][-1]
+            assert not mic_on(last), "the mic was on when a reply started"
+
+
+def test_a_reconnected_page_gets_the_mic_state():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_connected()
+    assert listens(r)[-1] == Listen(seconds=0, until_stopped=True, reason="reconnect")
+    say_it(r)
+    r.o.on_ui_connected()
+    assert listens(r)[-1] == Listen(seconds=0, until_stopped=False, reason="reconnect")
+
+
+def test_the_mic_reopens_after_a_decoder_reconnect_resume():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()
+    assert r.o.state is St.PAUSED and not mic_on(listens(r)[-1])
+    r.connect()  # the bridge comes back and its hello passes: automatic resume
+    assert r.o.state is St.BASELINE and listens(r)[-1].until_stopped
+
+
+def test_the_mic_reopens_after_a_decoder_reconnect_in_turn_mode_too():
+    r = Rig(CFG_TURN)
+    r.to_trial()
+    r.o.on_decoder_disconnected()
+    r.connect()
+    assert listens(r)[-1].reason == "start" and listens(r)[-1].seconds == CFG.speech.listen_window_s
+
+
+def test_mute_is_held_by_the_server_across_stop_resume_and_reconnect():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(MicSet(muted=True))
+    assert listens(r)[-1] == Listen(seconds=0, muted=True, reason="muted")
+    assert r.last(r.ui, UIStatus).mic_muted
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume())
+    assert not mic_on(listens(r)[-1])  # Resume does not open a muted mic
+    r.o.on_ui_connected()
+    assert listens(r)[-1].muted and not mic_on(listens(r)[-1])
+    r.o.on_ui_message(MicSet(muted=False))
+    assert listens(r)[-1].until_stopped and not listens(r)[-1].muted
+
+
+def test_a_line_heard_while_muted_is_ignored():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(MicSet(muted=True))
+    turns = len(r.o.conversation.turns)
+    r.o.on_ui_message(PartnerText(text="are you hungry", source="stt"))
+    assert len(r.o.conversation.turns) == turns and r.o.state is St.STIMULATING
+    r.o.on_ui_message(PartnerText(text="Typed still works", source="typed"))
+    assert r.o.conversation.turns[-1].text == "Typed still works"
+
+
+def test_mute_in_turn_mode_blocks_the_turn_window():
+    r = Rig(CFG_TURN)
+    r.o.on_ui_message(MicSet(muted=True))
+    speak = say_it(r)
+    r.o.on_ui_message(TTSDone(utterance_id=speak.utterance_id))
+    assert not any(mic_on(m) for m in listens(r)[-2:])
+
+
+def test_mic_report_shows_in_the_status():
+    r = Rig()
+    r.o.on_ui_message(MicReport(state="offline", restarts=3))
+    assert r.last(r.ui, UIStatus).mic == "offline"
+
+
+def test_a_spoken_question_on_the_confirm_screen_keeps_the_pick():
+    r = Rig()
+    r.pick_and_confirm_screen("s2")
+    r.to_trial()
+    assert r.o.state is St.CONFIRMING
+    r.o.on_ui_message(PartnerText(text="are you hungry", source="stt"))
+    assert r.o.state is St.CONFIRMING and r.o.picked is not None  # the pick goes on
+    r.select(SAY_IT)
+    r.run_out()
+    assert r.spoken() == [HOME[1].utterance]
+
+
+def test_a_spoken_remark_on_the_confirm_cue_keeps_the_pick():
+    r = Rig()
+    r.pick_and_confirm_screen("s3")  # MENU_CUE with the confirm screen
+    r.o.on_ui_message(PartnerText(text="it's sunny today", source="stt"))
+    assert r.o.state is St.MENU_CUE and r.last(r.ui, ShowPage).mode == "confirm"
+
+
+def test_typed_text_on_the_confirm_screen_still_drops_the_pick():
+    r = Rig()
+    r.pick_and_confirm_screen("s2")
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="Are you cold?", source="typed"))
+    assert r.o.picked is None and r.last(r.decoder, StimStop).reason == "context_changed"
+
+
+def test_spoken_question_interrupts_once_per_cooldown():
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="are you hungry", source="stt"))
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    stops = sum(isinstance(m, StimStop) for m in r.decoder)
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="do you want tea", source="stt"))  # within 20 s: queued
+    assert r.o.state is St.STIMULATING and sum(isinstance(m, StimStop) for m in r.decoder) == stops
+    r.clock.t += CFG.speech.stt_interrupt_cooldown_s
+    r.o.on_ui_message(PartnerText(text="are you cold", source="stt"))
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+
+
+def test_never_means_spoken_questions_wait_too():
+    cfg = CFG.model_copy(update={"speech": CFG.speech.model_copy(update={"stt_interrupts": "never"})})
+    r = Rig(cfg)
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text="are you hungry", source="stt"))
+    assert r.o.state is St.STIMULATING and not any(isinstance(m, StimStop) for m in r.decoder)
+
+
+def test_chatter_cannot_starve_the_trials():
+    """A spoken question every 3 s for 2 minutes: selections still happen."""
+    r = Rig()
+    r.o.on_ui_message(Resume())
+    picks = 0
+    end = r.clock.t + 120
+    next_line = r.clock.t
+    while r.clock.t < end:
+        if r.clock.t >= next_line:
+            r.o.on_ui_message(PartnerText(text="are you okay", source="stt"))
+            next_line = r.clock.t + 3
+        if r.o.state is St.BASELINE and r.o.expected_baseline is not None:
+            r.finish_baseline()
+        elif r.o.state in TRIAL_STATES_T and r.clock.t - r.o.deadline + CFG.stim.max_trial_s > 2:
+            r.select(next(iter(r.o.screen.roles)))
+            picks += 1
+        elif r.o.state is St.SPEAKING:
+            r.o.on_ui_message(TTSDone(utterance_id=r.o.speaking_id))
+        r.advance(0.5)
+    assert picks >= 8
+
+
+@pytest.mark.parametrize("text", ["it might not work right now. how was your weekend",
+                                  "I got tea. Do you want some"])
+def test_is_question_checks_each_sentence(text):
+    assert is_question(text)
+
+
+def test_stop_after_a_decoder_loss_stays_stopped_when_the_bridge_returns():
+    r = Rig()
+    r.to_trial()
+    r.o.on_decoder_disconnected()  # paused by the decoder: would resume by itself on reconnect
+    r.o.on_ui_message(Stop())  # the partner presses STOP while paused
+    r.connect()  # the bridge comes back and its hello passes
+    assert r.o.state is St.PAUSED  # STOP means stopped until Resume (rule 10)
+
+
+# -- keyword-matched fallback lists (config/intents.yaml fallback_match) ----------------------
+
+
+@pytest.mark.parametrize("text, name", [
+    ("How are you?", "feeling"),
+    ("hi sam how are you doing", "feeling"),  # "how are you" beats the greeting
+    ("Sam, are you okay", "feeling"),
+    ("you okay", "feeling"),
+    ("How was your weekend", "how_was"),
+    ("how did the appointment go", "how_was"),
+    ("Hello there", "greeting"),
+    ("good morning", "greeting"),
+    ("What would you like to drink", "open_question"),
+    ("so what do you want for dinner", "open_question"),
+    ("Ana, where should we go", "open_question"),
+    ("Do you want to go outside?", "yes_no"),
+    ("are you hungry", "yes_no"),
+    ("I don't know what to do", "home"),  # "what" in the middle is not a question
+    ("It's raining outside", "home"),
+])
+def test_a_partner_line_gets_its_matching_fallback_list(text, name):
+    assert INTENTS.fallback_for(text, is_question(text)) == name
+    r = Rig()
+    r.to_trial()
+    r.o.on_ui_message(PartnerText(text=text, source="typed"))
+    shown = [s.utterance for s in r.last(r.ui, ShowPage).slots if s.role == "option"]
+    assert shown == [o.utterance for o in INTENTS.fallback_lists[name]]
+
+
+def test_every_fallback_rule_shows_a_list_of_known_options():
+    assert INTENTS.fallback_match, "config/intents.yaml has no fallback_match rules"
+    for rule in INTENTS.fallback_match:
+        assert rule.show in INTENTS.fallback_lists

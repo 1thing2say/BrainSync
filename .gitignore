@@ -21,6 +21,12 @@ htmlcov/
 # Session logs (app/log.py)
 logs/
 
+# A real user's profile (personal data): stays on this computer, never committed
+profiles/
+
+# Cartesia clips cached on disk (app/tts.py)
+cache/
+
 # Editors and OS
 .vscode/
 .idea/
@@ -46,3 +52,11 @@ brainsyncos/**/*.iso
 # BrainSyncOS login credentials baked into a build (user-specific, never commit)
 brainsyncos/config/authorized_keys
 brainsyncos/config/brainsync-password.hash
+
+# dmux hook templates (tool config, not project code)
+.dmux-hooks/
+
+# TRIBE v2 heatmap: its own venv, model cache and rendered clips
+.venv-tribe/
+.tribe-cache/
+extension/heatmap/clips/

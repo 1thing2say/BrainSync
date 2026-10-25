@@ -11,7 +11,8 @@ only (in `.git/info/exclude`) and loads both:
 This plan covers **only the voice and UI side**, built by Elijah. His teammate builds the SSVEP
 decoder and the flicker display in a separate repo, `1thing2say/ssvep` (cloned at `../ssvep`,
 branch `feat/spectrum-check`). The two sides meet only at the message contract in `INTERFACE.md`.
-**Laptop only for now**; phone support comes later (section 10).
+The partner page runs on the laptop, an iPhone (Safari or the native app in `ios/`) or Android
+Chrome (section 10).
 
 At the start of each session, ask Elijah whether he wants code written or only the approach
 explained. All work happens on `dev` (or another non-`main` branch); `main` changes only through
@@ -37,7 +38,7 @@ pull requests.
   1. **Accuracy drops with every target.** On his dry-electrode Cerelog X8, 15 vs 17 Hz decodes at
      78–86 % single-target, and 64–93 % with both squares flickering (section 14); 3 targets
      (12/15/17) only reach 61–66 %; 4 targets were never recorded; 10 Hz is unusable (alpha).
-     **Decision (2026-10-24): try 4 targets first** (3 options + NEXT at 12/15/17/20 Hz), so the
+     **Decision (2026-10-24): try 4 targets first** (3 options + NEXT at 13/15/17/11 Hz, the teammate's `four_diamond.toml`), so the
      user sees 3 options at once. A cued 4-target recording decides whether it stays; if not, fall
      back to a list with a moving highlight decoded with 2 targets (section 14, "4-target gate").
   2. **His decoder is continuous, not per trial.** `SlidingDecoder` classifies a 4 s window every
@@ -68,9 +69,95 @@ pull requests.
   `llm.timeout_s` (4 s), then shows the fixed list; a later page is dropped. The page after a
   spoken reply is the fixed home list. A failed "More options" falls back to the fixed "more"
   list. Needs `ANTHROPIC_API_KEY` in `.env`; the log summary (latency, option-1 rate) is V6.
+  The server opens the Claude connection at start and keeps it open (a free `models.retrieve`
+  every `llm.keepalive_s` while idle, and right after a failed page), so a page does not pay
+  DNS + TCP + TLS inside the 4 s; `llm_failed` logs `ms`. On 2026-10-24 every page timed out on
+  congested venue Wi-Fi (1-4 s ping, TLS setup 3-9 s): no code change fixes that, see V6 preflight.
+- **Active listening (2026-10-24, branch `feat/partner-listening`):** `stt_mode: always` (default):
+  the mic listens the whole session, hands-free, and is off only while a reply plays (plus a
+  0.5 s tail), paused, idle or muted. The server owns the mic state (it follows the orchestrator's
+  state, a server-held Mute, re-sent to a reconnected page); `ui/listen_core.js` keeps Chrome's
+  recognition running (restart loop with backoff and a watchdog, node-tested) and reports its
+  state (MIC badge). Fixed on the way: STOP during a clip left the mic off for good, the echo
+  filter dropped the partner's "yes", a decoder-reconnect resume never reopened the mic, a spoken
+  remark on the confirm screen dropped the pick. The turn mode below remains as `stt_mode: turn`.
+- **V4 partner listening (2026-10-24, branch `feat/partner-listening`):** hands-free, no keys. The
+  server sends `listen` when it is the partner's turn (the session starts, a reply was spoken) and
+  closes the mic while a reply plays; Chrome's recognition joins the partner's sentences into one
+  line, drops filler and echoes of the reply. A spoken remark during a selection waits for the
+  next cue; a spoken question (detected by its first word, since speech-to-text adds no "?") or
+  typed text interrupts. A big Listen button stays for other moments. Needs a manual check in
+  Chrome (recognition needs internet and mic permission).
+- **User profile and plain replies (2026-10-24, branch `feat/personality-profile`):** replies say
+  only basic things (the main answers to a question; profile facts only when asked about) in the
+  user's own voice. `/profile.html` edits the user's facts and a personality map (formality,
+  length, humour, warmth, directness, phrases), saved to the gitignored `profiles/user.yaml`;
+  the fictional demo persona is the default. `python tools/llm_eval.py [--profile file]` runs 12
+  fixed partner lines through Claude and flags unasked profile details, claimed events, long
+  sentences and questions without different answers.
 - **Page mode built (2026-10-24):** server, mirror, fake decoder and `contract_check` run page
   mode (3 options + NEXT, confirm step on s1 / s4) with list mode as the config fallback; the v2
   draft describes 4 targets and 2-slot confirm trials.
+- **V6 hardening (2026-10-24, branch `feat/v6-hardening`):** `tools/preflight.py` prints PASS /
+  WARN / FAIL per demo check and a go / no-go line (`--url`, `--skip-network`, `--json`);
+  `tools/log_summary.py` reads the session logs (`--all`, `--json`, `--show-text`) for trials, the
+  C / W correct rate, seconds and selections per spoken reply, the option-1 rate and median / p95
+  Claude page latency (the V3 "Done when" numbers); `docs/DEMO.md` is the operator's runbook
+  (setup, start, preflight actions, headset checklist, demo script, fallbacks, honest claim).
+  Still to do: rehearse the script with the live decoder, and fill in the claim's numbers.
+- **From Lucid-Voice (2026-10-24, `feat/v6-hardening`):** Cartesia clips are also kept on disk
+  (`speech.cache_dir`, gitignored `cache/tts`, keyed by voice, model and format), so they survive a
+  restart and play with the network down; the server pre-generates every fixed-list sentence at
+  start, `tools/prerender_tts.py` does it ahead of time and preflight's `clips` line counts them.
+  `fallback_match` in `config/intents.yaml` picks the fixed page by keyword when Claude is slow
+  or down ("How are you?" → feeling, "How was your weekend?" → how_was, "Hi" → greeting,
+  "What…/Where…" → open_question; otherwise yes_no for a question, home for the rest). The
+  browser fallback voice (`ui/voice_core.js`) prefers local Premium / Enhanced English voices
+  and never a network voice.
+
+- **Quality fixes (2026-10-24, branch `feat/quality-fixes`):** fewer Claude pages lost to the
+  fallback: one spare candidate (`menus.spare_options`), repeats and duplicates compared without
+  case or punctuation, and a hedged second call after `llm.hedge_after_s` (live `llm_eval`: 11/12
+  pages valid, the miss was the cold first connection). A decoder whose hello name starts with
+  "fake" counts as fake even when started by hand: FAKE DECODER badge, preflight WARN,
+  `decoder_acked` in the log. `/api/health` uses public properties only.
+
+- **Partner page refresh (2026-10-24, branch `feat/ui-refresh`):** the mirror shows each option's
+  sentence as the big text (its label is a tag), a coloured status banner, a selection timer that
+  fills to `stim.max_trial_s`, a stronger picked box and the spoken sentence while it plays. The
+  panel puts Stop on top, then a mic card with the partner's words as they talk, the
+  conversation (the user's lines under their first name), and an operator footer: one health line
+  ("Ready" or what is wrong, details on a click), Correct / Wrong, the profile link. FAKE DECODER /
+  KEYBOARD stay on the mirror. Phone layout (≤ 600 px): partner's part first, Stop fixed at the
+  bottom. Logic in `ui/view_core.js` (node-tested); `python tools/ui_shots.py` screenshots every
+  state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root`, palette
+  still to choose.
+
+- **Phone version (2026-10-24, branch `feat/mobile`):** `python -m app.server --tunnel` opens a
+  Cloudflare quick tunnel (`app/tunnel.py`, `cloudflared`, no account) and prints a phone link
+  with a per-start access key; the laptop page offers **Copy phone link**. `app/remote.py` gates
+  every request from outside this computer: the key (link once, then an HttpOnly cookie), else
+  403 / 4403, and `/ws/decoder` is local only (rule 1). iPhone Safari: the start tap unlocks audio
+  (one reused audio element), the screen stays awake (Wake Lock), safe-area insets, 16 px inputs.
+  Checked through a real tunnel; the iPhone test itself is still to do. Server shutdown now runs
+  `app.state.on_shutdown` (tunnel, fake decoder) from the lifespan. The native app below is now
+  the main phone client; this Safari page stays its fallback.
+- **iOS partner app (2026-10-24, branch `feat/mobile`):** `ios/BrainSyncPartner`, a SwiftUI app
+  (iOS 17+, no dependencies) that replaces the Safari page. It is a `/ws/ui` client like the
+  browser (`?client=ios`): mirror, Stop, mic card, typing, conversation, Correct / Wrong. Pairing:
+  the server prints an app link, `brainsync://pair?url=…&key=…` (`--tunnel`, or `server.host:
+  0.0.0.0` for plain LAN http, where `main()` finds the LAN address), and the laptop page offers
+  **Copy iPhone app link**; the web phone link pasted into the app works too. Native parts:
+  on-device speech recognition (`SFSpeechRecognizer`, echo cancellation, the `listen_core.js`
+  rules ported), Cartesia clips through `AVPlayer` with the built-in `AVSpeechSynthesizer` voice
+  as fallback, screen kept awake. While it is connected it is the one partner page: the laptop's
+  page shows "Open on another page" (close code 4000), and `/api/health` / preflight say which
+  client is connected (`ui_client`). `ios/BrainSyncKit` (Swift package: links, messages, socket,
+  `ListenCore`) is tested against `ui_messages.json`, written from `app/schemas.py` by
+  `tools/ui_fixture.py` (`--check` fails when stale). Built on the teammate's Mac with Xcode 16
+  (`ios/README.md`); not yet compiled or run on a device.
+- **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
+  s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 
 ## System design
 
@@ -96,6 +183,7 @@ pull requests.
 | Bridge (`ssvep/online/bridge.py`) | Teammate | The board connection, the decoder, the display process | Server (websocket client), display (stdin/stderr) |
 | PsychoPy display (`ssvep.stimulus`) | Teammate | Frame-locked flicker, option text, the box, `Esc` | Bridge only |
 | Chrome partner page (`ui/`) | Elijah | Rendering, TTS, STT, STOP | Server only |
+| iPhone partner app (`ios/`), optional | Elijah | The same as the Chrome page, natively; replaces it while connected | Server only (`/ws/ui?client=ios`) |
 | Claude API | — | Ranked reply options | Server only (`app/menus.py`) |
 
 The server ↔ bridge contract is `INTERFACE-v2-draft.md` (protocol 2): the server speaks only
@@ -107,8 +195,8 @@ Design risks to settle:
 1. **One screen cannot show both windows.** The flicker must be full screen (the teammate's rule,
    enforced by PsychoPy), but the partner page needs a visible Chrome window for push-to-talk and
    STOP. Options: an external monitor for Chrome, with PsychoPy pinned to the built-in panel
-   (`screen = 0`, locked at 60 Hz); or the partner page on a phone (section 10, `server.host:
-   0.0.0.0`; check that the phone browser's speech recognition works). With Chrome, PsychoPy and
+   (`screen = 0`, locked at 60 Hz); or the partner page on the partner's iPhone (section 10:
+   the native app, Safari as fallback; speech recognition still to check on a device). With Chrome, PsychoPy and
    the decoder on one Mac, SYNC 1.5 measures dropped frames with Chrome open.
 2. **The contract is not confirmed yet.** The server speaks only protocol 2
    (`INTERFACE-v2-draft.md`), but the teammate has not agreed it, and the bridge cannot be built
@@ -204,8 +292,8 @@ confirmation. State the measured accuracy for the target count actually used.
    from the gitignored `.env` at the repo root if set there. Never commit, print or log them.
 10. **Safety:** flicker warning before the first trial (partner page and his display's start
     screen), `Esc` in his display stops all flicker immediately, and the partner page's STOP does
-    the same through the bridge. 15, 17 and 20 Hz are in the 15–25 Hz range most likely to
-    trigger photosensitive seizures, and 4 flickering squares cover more of the screen than 2:
+    the same through the bridge. 11, 13, 15 and 17 Hz are all in the photosensitive range (15 and
+    17 Hz in the 15–25 Hz band most likely to trigger seizures), and 4 flickering squares cover more of the screen than 2:
     nobody with photosensitive epilepsy or flicker sensitivity uses it.
 11. Ask before adding dependencies outside section 4. All tunable numbers live in
     `config/default.yaml`.
@@ -239,10 +327,24 @@ BrainSync/
     style.css
     app.js              # websocket client: conversation, status, STOP, mirror of the user's screen
     speech.js           # plays Cartesia audio, speechSynthesis fallback; STT (Web Speech API)
+    voice_core.js       # picks the fallback voice: local Premium / Enhanced English first
+    view_core.js        # banner, health line, mic card, selection timer (pure, node-tested)
+  ios/                  # native iPhone partner app; ios/README.md (install, pair)
+    BrainSyncPartner.xcodeproj   # Xcode 16+, iOS 17+
+    BrainSyncPartner/            # SwiftUI app: pair screen, warning, partner view, mirror,
+                                 #   Listener (on-device STT), Speaker (AVPlayer + system voice)
+    BrainSyncKit/                # Swift package: ServerLink, messages, UIConnection, ListenCore
+      Tests/BrainSyncKitTests/Fixtures/ui_messages.json   # every /ws/ui message, from schemas.py
   tools/
     fake_decoder.py     # stand-in bridge speaking protocol 2: keyboard / random / scripted modes
     contract_check.py   # stand-in server on :8000 for the bridge; PASS/FAIL per check, exit 0 = pass
     preflight.py        # demo go/no-go checks
+    prerender_tts.py    # Cartesia clips for every fixed-list sentence, into speech.cache_dir
+    ui_shots.py         # screenshots of the partner page's states (headless Chrome)
+    ui_fixture.py       # writes ios/.../ui_messages.json from app/schemas.py (--check: stale?)
+    log_summary.py      # V6 numbers from logs/*.jsonl (C/W rate, s per reply, option-1 rate, latency)
+  docs/
+    DEMO.md             # operator's demo runbook (V6 items 2-3)
   logs/                 # gitignored
   tests/
 
@@ -276,9 +378,9 @@ BrainSync/
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` later for phone or Jetson |
-| `stim.slots` | s1 15 Hz, s2 17 Hz, s3 20 Hz, s4 12 Hz | Mirrors his stimulus config; checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
-| `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 12 Hz, the weakest and alpha-biased frequency, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
+| `server.host` / `server.port` | `127.0.0.1` / `8000` | `0.0.0.0` for the iPhone app on the LAN (or use `--tunnel`), later the Jetson |
+| `stim.slots` | s1 13 Hz, s2 15 Hz, s3 17 Hz, s4 11 Hz | Mirrors his `four_diamond.toml` (changed 2026-10-24 from 15/17/20/12); checked against the decoder's `hello`. Pending the 4-target gate (section 14); list-mode fallback is s1 15 Hz, s2 17 Hz |
+| `stim.roles` | s1–s3 `option`, s4 `next` | Which slot does what. NEXT on 11 Hz, the lowest and nearest the user's alpha, so the likeliest error is a harmless page turn. Fallback: s1 `say`, s2 `next` |
 | `menus.mode` | `page` | `page` (all options on their own targets) or `list` (highlight + SAY/NEXT, the fallback) |
 | `stim.cue_s` | 1.0 | Option shown, no flicker, before each trial |
 | `stim.max_trial_s` | 10.0 | Decoder needs about 5 s (4 s window + 2 × 0.5 s votes) to commit; revisit with the decoder's tuned window, votes and margin (section 13, item 10) |
@@ -290,8 +392,11 @@ BrainSync/
 | `menus.label_max_chars` | 18 | |
 | `menus.label_max_words` | 3 | |
 | `menus.utterance_max_words` | 14 | |
+| `menus.spare_options` | 1 | Extra lower-ranked candidates Claude writes; a bad or repeated option is dropped and the next one fills the page, so one slip no longer loses it |
 | `llm.model` | `claude-haiku-5-5` | |
-| `llm.timeout_s` | 4.0 | One retry, then fallback |
+| `llm.timeout_s` | 4.0 | The whole budget per page: at most 3 calls (first, hedge, one retry), then fallback |
+| `llm.hedge_after_s` | 2.5 | No answer by then: the same call again, in parallel; the first usable answer wins. 0 = off; must be below `timeout_s` |
+| `llm.keepalive_s` | 20.0 | While idle, a free API call this often keeps the connection open; 0 = off |
 | `context.history_turns` | 8 | Partner + user turns sent to the LLM |
 | `speech.provider` | `cartesia` | `cartesia` or `browser` (speechSynthesis only) |
 | `speech.voice_id` | `47c38ca4-…` | Cartesia voice id |
@@ -300,8 +405,13 @@ BrainSync/
 | `speech.language` / `speech.format` | `en` / `mp3` | MP3 22050 Hz, 64 kbps: about 17 KB a sentence, 10x smaller than 44.1 kHz WAV, which the venue Wi-Fi needed; `wav` (`pcm_s16le`) still works |
 | `speech.tts_timeout_s` | 8.0 | Per clip; slower or failed → that slot has no audio, the browser speaks it. Was 2.0: on the venue Wi-Fi every clip timed out (1–3 s per request); a clip is needed ≥ 13 s after its page appears |
 | `speech.max_concurrent` | 2 | Cartesia plan limit; above it requests get HTTP 429 `concurrency_limited` |
+| `speech.cache_dir` | `cache/tts` | Clips on disk (gitignored), reused across restarts and offline; `""` = memory only |
 | `speech.tts_rate` | 1.0 | speechSynthesis fallback only |
-| `speech.stt_mode` | `push_to_talk` | Mic is off while TTS is speaking |
+| `speech.stt_mode` | `always` | Hands-free: the mic listens the whole session except while a reply plays, paused, idle or muted. `turn` = only at the start and after each reply (`listen_window_s`); `push_to_talk` = only the button |
+| `speech.listen_window_s` / `speech.stt_tail_s` | 10.0 / 0.5 | Turn mode and the Listen button while paused; the wait after a reply ends before the mic reopens (≈0.8 for a Bluetooth speaker) |
+| `speech.stt_interrupts` / `speech.stt_interrupt_cooldown_s` | `question` / 20.0 | A spoken question may stop a page trial, at most once per 20 s and never a pick in progress; `never` = spoken lines always wait for the next cue. Typed text always interrupts |
+| `speech.stt_gap_s` / `speech.stt_max_line_s` / `speech.stt_echo_s` | 1.2 / 15.0 / 4.0 | Silence that ends a partner line; a monologue is sent after this long; lines this soon after the mic reopens are checked for the reply's echo |
+| `speech.start_muted` | false | The partner's Mute (held by the server) at session start |
 | `speech.max_speak_s` | 15.0 | Move on if the page never reports `tts_done` |
 | `selection.confirm_mode` | `always` | `never` / `always` / `low_score` (needs decoder scores). `always` in page mode, so a wrong pick is never spoken; `never` in list mode |
 | `selection.chosen_highlight_s` | 0.6 | Show which target was picked |
@@ -327,10 +437,13 @@ Internal browser ↔ server messages (`/ws/ui`, JSON with a `type` field):
   slots[{slot, role: option|next|say|back, label, utterance}]} (one entry per target; in list mode
   the options ride along as `options[{label, utterance}]`), `trial` {trial_id, phase:
   cue|flicker|rest|baseline}, `highlight` {slot},
-  `speak` {text, utterance_id, audio_url?}, `state` {name, detail}, `transcript` {who, text},
+  `speak` {text, utterance_id, audio_url?}, `listen` {seconds, delay_s, until_stopped, muted,
+  reason} (what the partner's mic does; the server owns it), `state` {name, detail},
+  `transcript` {who, text},
   `status` {decoder_connected, decoder_ok, display_ok, llm_ok, fake_decoder, keyboard_mode}.
 - Browser → server: `tts_done` {utterance_id}, `partner_text` {text, source: stt|typed},
-  `key` {key}, `stop` {}, `resume` {}, `judgment` {utterance_id, correct}.
+  `key` {key}, `stop` {}, `resume` {}, `judgment` {utterance_id, correct}, `mic_set` {muted},
+  `mic_report` {state, restarts} (no transcript text).
 
 Times are Unix seconds. Flicker onsets come from his display (the flip of the first flickering
 frame, `--markers unix`), relayed by the bridge. His live decoder does not epoch on onsets (it
@@ -353,13 +466,17 @@ any state --STOP / display Esc / decoder lost--> PAUSED (flicker off) --(resume)
 
 - `MENU_CUE` waits for the next page up to `llm.timeout_s`, then uses a fallback page.
 - `CONFIRMING` is its own trial (new `trial_id`) with only two active slots: "Say it" on s1
-  (15 Hz) and "Back" on s4 (12 Hz), so the confirm step is a 2-class decision. A timeout counts as
+  (13 Hz) and "Back" on s4 (11 Hz), so the confirm step is a 2-class decision. A timeout counts as
   Back: nothing is ever spoken by default.
 - NEXT twice in a row on a "More options" page → home page.
 - **List mode** (fallback, `menus.mode: list`): `STIMULATING --selection(say)--> SPEAKING`;
   `--selection(next)-->` moves the highlight, past the last option loads a new page. No
   `CONFIRMING` (`confirm_mode: never`).
 - Each trial has a new `trial_id`. Selections with an old `trial_id` are logged and ignored.
+- **Spoken partner lines never throw away the user's work:** during a pick in progress (the Say it
+  / Back screen) they only change the screen after the pick; a remark during a page trial waits for
+  the next cue; a question interrupts at most once per `stt_interrupt_cooldown_s`. Typed text
+  always interrupts.
 - Implement as a class driven by events plus an injectable clock, so tests run without timers.
 
 ## 8. Phases (voice/UI track)
@@ -547,12 +664,18 @@ Take shifts with the teammate. Commit a working state before sleeping.
 - LLM calls are mocked in tests; one optional live smoke test behind `RUN_LLM_TESTS=1`.
 - The flicker is his: dropped frames come from his display's session log (SYNC 1.5).
 
-## 10. Later: phone and Jetson (not now)
+## 10. Phone (built) and Jetson (later)
 
-- The partner page is already a web page served by the laptop, so a phone can join over the local
-  network by setting `server.host: 0.0.0.0` and opening `http://<laptop-ip>:8000`.
-- Planned split: the partner page on the partner's phone (mic, transcript, conversation), while the
-  laptop runs his display for the user.
+- The partner page can run on the partner's phone (mic, transcript, conversation, Stop) while the
+  laptop runs his display for the user. Only one partner page is active; a new one replaces the
+  old (close code 4000).
+- **iPhone: the native app** (`ios/`, `ios/README.md`), installed from Xcode on the teammate's
+  Mac. It pairs with the app link the server prints. Two ways to reach the server:
+  `python -m app.server --tunnel` (Cloudflare https, any network) or `server.host: 0.0.0.0`
+  (plain http on the same Wi-Fi; the app allows local http, a phone browser gets no mic there).
+- Fallback: the web page in iPhone Safari or Android Chrome through the `--tunnel` phone link.
+- Remote requests always need the per-start access key (`app/remote.py`, 403 / 4403);
+  `/ws/decoder` is never remote.
 - The decoder could later run on a Jetson and connect to `/ws/decoder` over the network; the
   contract does not change. The vendored BrainFlow would need Linux ARM builds first.
 - BrainSyncOS (worktree `custom-operating-brain-seperate`) remasters NVIDIA's JetPack 7.2.1 ISO
@@ -567,9 +690,18 @@ pip install -e ".[dev]"
 pytest
 python -m app.server                        # real decoder connects to /ws/decoder
 python -m app.server --keyboard             # keys 1–4 select (confirm: 1 = Say it, 4 = Back)
+python -m app.server --tunnel               # + a phone link (https, access key) via cloudflared
 python tools/fake_decoder.py --random       # in a second terminal
 python tools/contract_check.py              # stand-in server for the bridge (instead of app.server)
-python tools/preflight.py
+python tools/llm_eval.py                    # live check of Claude's replies (needs ANTHROPIC_API_KEY)
+python tools/preflight.py                   # demo go/no-go (--url, --skip-network, --json)
+python tools/prerender_tts.py               # fixed-list clips to disk while the network is good
+python tools/ui_shots.py                    # partner page screenshots into cache/ui_shots/
+python tools/ui_fixture.py                  # rewrite the iOS message fixture (--check: exit 1 if stale)
+(cd ios/BrainSyncKit && swift test)         # BrainSyncKit tests (Mac or Linux Swift toolchain)
+python tools/log_summary.py                 # numbers from the newest log (--all, --json, --show-text)
+
+# demo runbook: docs/DEMO.md
 
 # in ../ssvep (his venv), once he adds the bridge
 python -m ssvep.online.bridge               # headset + PsychoPy display, connects to our server
@@ -683,7 +815,7 @@ questions for the teammate"), with a note asking the teammate's Claude session t
    - `stim_start` from the server means "start flickering now"; the decoder answers with
      `stim_onset` {trial_id, t_unix} from the display's first flickering frame.
    - `stim_stop` turns the flicker off; `reason` gains `no_selection`.
-   - Section 6 table filled in: 4 targets (s1–s3 options, s4 NEXT), 15 / 17 / 20 / 12 Hz, sine,
+   - Section 6 table filled in: 4 targets (s1–s3 options, s4 NEXT), 13 / 15 / 17 / 11 Hz, sine,
      rest 1 s, max trial 10 s, baseline 10 s; `stim_start.active_slots` can be 2 of them (confirm
      screen). Fallback: 2 targets, 15 / 17 Hz. (Done in the draft, 2026-10-24.)
 6. **Scores.** His `Decision.scores` exist already: send `scores` (and `score` for the chosen slot)
@@ -692,7 +824,7 @@ questions for the teammate"), with a note asking the teammate's Claude session t
 7. **Window length.** 4 s or 2 s. In the three cued 15/17 recordings the best 2 s cell was 13/14,
    17/19 and 12/17, against 10/14, 14/19 and 14/17 at 3.86 s (section 14). Shorter windows make
    each selection about 3 s instead of 5 s. *Recommended:* 2 s, if a live check agrees.
-8. **Frequency set.** 12/15/17/20 Hz for page mode, NEXT on 12 Hz; 15/17 for the list-mode
+8. **Frequency set.** 13/15/17/11 Hz for page mode (his `four_diamond.toml`), NEXT on 11 Hz; 15/17 for the list-mode
    fallback. Settled by the 4-target gate (section 14).
 9. **Where the decoder lives.** `../ssvep` (his repo) or the `brainsync/` rebuild on branch
    `check-implemtation-calhacks-desktop`. The bridge (item 3) has to be written against one of them.
@@ -764,7 +896,7 @@ Guidance from the same sessions, for 3 or 4 targets later:
 - 11–17 Hz is a plateau: each frequency is expected within 1 dB of 15 Hz (literature response
   curve over the teammate's measured noise floor). Below 9 Hz and above 20 Hz lose clearly.
 - Avoid harmonic clashes such as 7.5/15 and 10/20.
-- Candidate four-target sets: 12/15/17/20 (the current plan; 20 Hz never measured, though it was
+- Candidate four-target sets: 12/15/17/20 (the first plan; 20 Hz never measured, though it was
   the most phase-locked response seen, as the 10 Hz flicker's harmonic), or 11/13/15/17 with sine
   flicker (no shared harmonics below 45 Hz).
 
@@ -782,9 +914,9 @@ What this means:
 - **Safety does not change.** 12, 15 and 17 Hz are all in the photosensitive range (rule 10).
 
 **4-target gate (decided 2026-10-24; teammate, as early as possible, before the display work).**
-One cued recording with all 4 squares flickering at 12/15/17/20 Hz in the real page-mode layout
-(diamond, fixation marks, text beside each square), using `cued_trials -c` with a
-`four_targets.toml`: about 6–8 trials per target, roughly 5 minutes, headset settled for 20
+One cued recording with all 4 squares flickering at 13/15/17/11 Hz in the real page-mode layout
+(diamond, fixation marks, text beside each square), using `cued_trials -c` with his
+`four_diamond.toml`: about 6–8 trials per target, roughly 5 minutes, headset settled for 20
 minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 
 | 4-class accuracy | Decision |
@@ -793,11 +925,13 @@ minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 | 55–70 % | Train TRCA on the same recording (section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
 | Below that | List mode: options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
 
-Why 12/15/17/20 and not 11/13/15/17: wider spacing (3–5 Hz instead of 2 Hz), and it keeps the two
-strongest measured frequencies. 20 Hz is exactly 3 frames at 60 Hz and was the most phase-locked
-response seen, but has no direct recording, so the gate is its first real test. NEXT goes on 12 Hz
-because the still screen already favours it (alpha), so its errors turn a page instead of picking
-an option.
+**Changed 2026-10-24 to 13/15/17/11 Hz**, the teammate's `four_diamond.toml`: 15 and 17 Hz keep
+their places from `two_targets.toml` (left and right), 13 Hz goes on top and 11 Hz at the bottom,
+so only one pair of neighbouring squares is 2 Hz apart. All four sit clear of the user's
+eyes-closed alpha (9.25 Hz) and of the 18–21 Hz interference he measured at the venue, which
+rules out 20 Hz; with sine flicker they share no harmonics below 45 Hz. NEXT stays at the bottom
+on the lowest frequency, nearest alpha, so its errors turn a page instead of picking an option.
+(The first plan was 12/15/17/20 for wider spacing and the strong 20 Hz response.)
 
 The 12/17 two-target test above is now only relevant to the list-mode fallback: switch from 15/17
 only if it beats it by more than 10 points. Any switch is a config change on both sides: his

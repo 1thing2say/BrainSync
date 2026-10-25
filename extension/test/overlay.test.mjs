@@ -189,7 +189,7 @@ test("hello waits for Start, a refresh reading and an open socket, once per sock
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0], { type: "hello", agent: "extension",
                               url: "https://www.instagram.com/reels/x/", refresh_hz: 59.97,
-                              dropped: 0, accepted: true });
+                              dropped: 0, accepted: true, showing: true });
   measure(c, 59.97, 20, 10000);                                  // later readings: no repeat
   assert.equal(sent.filter((m) => m.type === "hello").length, 1);
   c.setConnection("closed");
@@ -326,6 +326,37 @@ test("config without phase or waveform gets the defaults; bad numbers are refuse
   assert.throws(() => O.parseConfig({ targets: [{ freq: 0, x: 0, y: 0, size: 1 }] }), /freq/);
   assert.throws(() => O.parseConfig({ targets: [{ freq: 1, x: "a", y: 0, size: 1 }] }), /x/);
   assert.throws(() => O.parseConfig({ refresh_hz: -60, targets: [{ freq: 1, x: 0, y: 0, size: 1 }] }));
+});
+
+test("config depth defaults to 1 and must lie in (0, 1]", () => {
+  assert.equal(O.DEFAULT_CONFIG.depth, 1);
+  assert.equal(O.parseConfig(CONFIG).depth, 1);
+  assert.equal(O.parseConfig({ ...CONFIG, depth: 0.5 }).depth, 0.5);
+  assert.ok(Object.isFrozen(O.parseConfig({ ...CONFIG, depth: 0.5 })));
+  for (const depth of [0, -0.5, 1.5, "0.5", null, NaN]) {
+    assert.throws(() => O.parseConfig({ ...CONFIG, depth }), /depth/, String(depth));
+  }
+  const { c, warnings } = controller();
+  c.handle({ ...CONFIG, depth: 2 });
+  assert.equal(warnings.length, 1);
+  assert.equal(c.state.config, O.DEFAULT_CONFIG);
+});
+
+test("run draws at the config depth", () => {
+  const { c } = controller();
+  c.handle({ ...CONFIG, depth: 0.5 });
+  c.accept();
+  let ts = measure(c, 60);
+  c.handle({ type: "phase", phase: "run", flicker: true, seconds: 120, text: "Look" });
+  const p = 1000 / 60;
+  ts += p;
+  for (let n = 0; n < 30; n++) {
+    assert.equal(c.frame(ts + n * p), "flicker");
+    const lum = c.lum();
+    assert.equal(lum[0], F.luminance(15, 0, n, 60, "sine", 0.5));
+    assert.equal(lum[1], F.luminance(17, 0, n, 60, "sine", 0.5));
+    assert.ok(lum.every((v) => v >= 0.25 && v <= 0.75));
+  }
 });
 
 // ------------------------------------------------------------------ scroll and quit
@@ -492,6 +523,50 @@ test("only an accepted, visible tab on Reels scrolls; the others ack ok false / 
   await c.idle();
   assert.equal(calls, 1);
   assert.deepEqual(sent[3], { type: "scrolled", id: 4, ok: true, method: "container" });
+});
+
+test("the server hears when the squares go out of view and come back, once per change", () => {
+  let shown = false;
+  const { c, sent } = controller({ visible: () => shown });
+  const views = () => sent.filter((m) => m.type === "view").map((m) => m.showing);
+  c.setConnection("open");
+  c.accept();
+  c.checkView();
+  assert.deepEqual(sent, [], "nothing before the hello");
+  shown = true;
+  measure(c, 60);
+  assert.equal(sent[0].type, "hello");
+  assert.equal(sent[0].showing, true);
+  shown = false;                                                 // another Space, a covered window
+  c.checkView();
+  c.checkView();
+  shown = true;
+  c.checkView();
+  assert.deepEqual(views(), [false, true]);
+  c.setPaused(true);                                             // navigated to Home
+  c.setPaused(false);
+  assert.deepEqual(views(), [false, true, false, true]);
+  c.handle({ type: "phase", phase: "stop", flicker: false, seconds: null, text: "" });
+  assert.deepEqual(views(), [false, true, false, true, false]);
+  c.setConnection("closed");                                     // a new socket greets afresh
+  c.setConnection("open");
+  const hellos = sent.filter((m) => m.type === "hello");
+  assert.equal(hellos.length, 2);
+  assert.equal(hellos[1].showing, false);
+  assert.equal(views().length, 5);
+});
+
+test("a hidden tab says so in its hello; nothing about the view after Escape", () => {
+  let shown = false;
+  const { c, sent } = controller({ visible: () => shown });
+  c.setConnection("open");
+  c.accept();
+  measure(c, 60);
+  assert.equal(sent[0].showing, false);
+  c.quit();
+  shown = true;
+  c.checkView();
+  assert.deepEqual(sent.map((m) => m.type), ["hello", "bye"]);
 });
 
 test("remaining seconds count down from the phase message", () => {

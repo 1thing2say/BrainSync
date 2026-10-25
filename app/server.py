@@ -11,6 +11,7 @@ gitignored .env.
     python -m app.server                    # real decoder connects to /ws/decoder
     python -m app.server --fake-decoder     # also start tools/fake_decoder.py --random
     python -m app.server --keyboard         # keys 1-4 on the partner page select
+    python -m app.server --tunnel           # also a public https link for the partner's phone
 """
 
 from __future__ import annotations
@@ -20,38 +21,77 @@ import asyncio
 import contextlib
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+from urllib.parse import parse_qs, quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.config import (
     REPO_ROOT,
+    USER_PROFILE_PATH,
     AppConfig,
+    ConfigError,
     IntentsConfig,
     Profile,
     load_config,
     load_env,
     load_intents,
     load_profile,
+    load_user_profile,
+    save_user_profile,
 )
 from app.log import DEFAULT_LOG_DIR, EventLog
-from app.menus import Create, MenuMaker
+from app.menus import Create, MenuMaker, first_name
 from app.orchestrator import Orchestrator
+from app.remote import RemoteGate, is_remote, new_key
 from app.schemas import Message, parse_decoder_to_server, parse_ui_to_server, to_json
 from app.tts import AUDIO_ROUTE, CartesiaTTS
 
 UI_DIR = REPO_ROOT / "ui"
 TICK_S = 0.02  # how often deadlines are checked; well below the shortest timing in config
 REPLACED = 4000  # websocket close code sent to a connection that a newer one replaced
+UI_CLIENTS = ("browser", "ios")  # /ws/ui?client=...: the iPhone app says ios; anything else is a browser
+APP_SCHEME = "brainsync"  # the BrainSync Partner iPhone app's pairing link: brainsync://pair?url=...&key=...
 
 log = logging.getLogger("app.server")
+
+
+def ui_client(raw: str | None) -> str:
+    """The /ws/ui ``client`` query parameter: "ios" or "browser" (anything else, or none)."""
+    return raw if raw in UI_CLIENTS else "browser"
+
+
+def app_link(phone_url: str) -> str:
+    """The iPhone app's pairing link for a phone link ``<base>/?key=K``:
+    ``brainsync://pair?url=<percent-encoded base>&key=K``; "" when there is no phone link (or it
+    has no key)."""
+    if not phone_url:
+        return ""
+    parts = urlsplit(phone_url)
+    key = (parse_qs(parts.query).get("key") or [""])[0]
+    if not (parts.scheme and parts.netloc and key):
+        return ""
+    base = f"{parts.scheme}://{parts.netloc}"
+    return f"{APP_SCHEME}://pair?url={quote(base, safe='')}&key={quote(key, safe='')}"
+
+
+def lan_ip() -> str:
+    """This computer's address on the local network, or "" if there is none. Connecting a UDP
+    socket only picks the outgoing interface: no packet is sent."""
+    with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith(("127.", "0.")):
+            return ip
+    return ""
 
 
 @dataclass
@@ -61,6 +101,7 @@ class Conn:
     ws: WebSocket
     queue: asyncio.Queue[Message] = field(default_factory=asyncio.Queue)
     task: asyncio.Task | None = None
+    client: str = "browser"  # partner pages only: "ios" (the iPhone app) or "browser"
 
     def send(self, msg: Message) -> None:
         self.queue.put_nowait(msg)
@@ -101,11 +142,22 @@ def create_app(
     anthropic_api_key: str | None = None,
     llm_create: Create | None = None,
     profile: Profile | None = None,
+    profile_path: str | Path | None = None,
+    tts_cache_dir: str | Path | None = None,
+    access_key: str | None = None,
 ) -> FastAPI:
     """Build the app. Without ``cartesia_api_key`` every reply uses the browser voice, and without
     ``anthropic_api_key`` (or ``llm_create``) every page is a fixed list (tests).
     ``tts_transport`` replaces the network for Cartesia requests (an ``httpx`` transport);
-    ``llm_create`` replaces ``AsyncAnthropic().messages.create``."""
+    ``llm_create`` replaces ``AsyncAnthropic().messages.create``.
+    ``profile_path`` is where the user's own profile is loaded from and saved to (``main`` passes
+    profiles/user.yaml); without it the profile page is read-only and the demo persona is used.
+    ``tts_cache_dir`` keeps Cartesia clips on disk (``main`` passes ``speech.cache_dir``); without
+    it they live in memory only, so tests never write to the repo.
+    ``access_key``: requests from outside this computer (a phone through ``--tunnel``) need it
+    (app/remote.py); None lets everything through (tests, a server reachable only locally).
+    ``app.state.on_shutdown`` holds callables run when the server stops (the tunnel, the fake
+    decoder): the lifespan runs them, since uvicorn ends the process before ``main``'s finally."""
     cfg = cfg or load_config()
     intents = intents or load_intents(
         option_count=cfg.menus.option_count,
@@ -115,8 +167,19 @@ def create_app(
     )
     hub = Hub()
     event_log = EventLog(log_dir, clock=clock)
-    tts = CartesiaTTS(cfg.speech, cartesia_api_key, log=event_log, transport=tts_transport)
-    menus = MenuMaker(cfg.menus, cfg.llm, intents, profile or load_profile(), anthropic_api_key,
+    tts = CartesiaTTS(cfg.speech, cartesia_api_key, log=event_log, transport=tts_transport,
+                      cache_dir=tts_cache_dir)
+    demo = load_profile()
+    source = "demo"
+    if profile is None and profile_path is not None:
+        try:
+            profile = load_user_profile(profile_path)
+        except ConfigError as exc:  # field names and reasons only, never the profile's contents
+            event_log.log("profile_invalid", problems=exc.problems)
+        source = "user" if profile is not None else "demo"
+    elif profile is not None:
+        source = "given"
+    menus = MenuMaker(cfg.menus, cfg.llm, intents, profile or demo, anthropic_api_key,
                       log=event_log, create=llm_create)
 
     def request_page(req) -> None:
@@ -137,26 +200,132 @@ def create_app(
         task = asyncio.create_task(ticker())
         event_log.log("server_start", keyboard_mode=keyboard_mode, fake_decoder=fake_decoder)
         await tts.start()  # also fetches the first page, set before the loop ran
+        tts.request(intents.utterances)  # the fixed lists, behind it; cached ones cost nothing
+        await menus.start()  # opens the Claude connection before the first partner line
         try:
             yield
         finally:
             task.cancel()
+            for stop in app.state.on_shutdown:
+                with contextlib.suppress(Exception):
+                    stop()
             await menus.stop()
             await tts.stop()
             event_log.log("server_stop")
             event_log.close()
 
     app = FastAPI(title="BCI Voice", lifespan=lifespan)
+    app.add_middleware(RemoteGate, key=access_key)
+    app.state.on_shutdown = []
+    app.state.phone_url = ""  # the tunnel's link with the key, shown on the laptop's page only
     app.state.orch = orch
     app.state.hub = hub
     app.state.event_log = event_log
     app.state.tts = tts
+    app.state.intents = intents
     app.state.menus = menus
+    app.state.profile_source = source
 
     @app.get("/api/config")
-    def page_config() -> dict:
-        """The few settings the partner page needs."""
-        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode}
+    def page_config(request: Request) -> dict:
+        """The few settings the partner page needs (``user_name``: the profile's first name, for
+        the conversation panel). ``phone_url`` / ``app_link``: the web link and the iPhone app's
+        pairing link for the partner's phone, to this computer's own page only."""
+        remote = is_remote(request.scope)
+        return {"tts_rate": cfg.speech.tts_rate, "keyboard_mode": keyboard_mode,
+                "stt_mode": cfg.speech.stt_mode, "listen_window_s": cfg.speech.listen_window_s,
+                "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
+                "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
+                "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile),
+                # The phone links carry the access key: only this computer's page gets them.
+                "phone_url": "" if remote else app.state.phone_url,
+                "app_link": "" if remote else app_link(app.state.phone_url)}
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        """What tools/preflight.py checks: the decoder, the partner page, Claude and the voice.
+        Names, flags and reasons only: no keys, no conversation text. Async, so it reads the
+        orchestrator on the event loop, between ticks."""
+        status = orch.status()
+        page = hub.ui is not None
+        return {
+            "state": orch.state.value,
+            "resume_ready": status.resume_ready,
+            # Which partner page is connected: "ios" (the iPhone app), "browser", or "" (none).
+            "ui_client": hub.ui.client if page else "",
+            "decoder": {"connected": status.decoder_connected, "ok": status.decoder_ok,
+                        "display_ok": status.display_ok, "board_ok": status.board_ok,
+                        "message": status.decoder_message, "keyboard_mode": keyboard_mode,
+                        # fake_decoder: the flag, or a hand-started tools/fake_decoder.py (its name)
+                        "fake_decoder": status.fake_decoder, "name": status.decoder_name,
+                        "fake_flag": fake_decoder},
+            # A closed page's last mic report says nothing about the next one.
+            "partner_page": {"connected": page, "mic": status.mic if page else "",
+                             "mic_muted": status.mic_muted, "stt_mode": cfg.speech.stt_mode},
+            "llm": {"enabled": menus.enabled, "why_disabled": menus.why_disabled,
+                    "dynamic": cfg.menus.dynamic,
+                    "ok": status.llm_ok, "model": cfg.llm.model,
+                    "keepalive_s": cfg.llm.keepalive_s,
+                    # None until the first keep-alive call answered (or with keep-alive off)
+                    "warm_ok": menus.warm_ok, "keepalive_running": menus.keepalive_running},
+            "tts": {"enabled": tts.enabled, "why_disabled": tts.why_disabled,
+                    "provider": cfg.speech.provider, "model": cfg.speech.model,
+                    "voice_id": cfg.speech.voice_id, "format": cfg.speech.format},
+        }
+
+    # -- the user's profile (ui/profile.html) ---------------------------------------------
+
+    def profile_state() -> dict:
+        return {"profile": menus.profile.model_dump(), "source": app.state.profile_source,
+                "editable": profile_path is not None, "llm": menus.enabled,
+                "llm_off_reason": menus.why_disabled}
+
+    def parse_profile(raw: Any) -> Profile:
+        try:
+            # A saved profile is the user's own, never the fictional persona.
+            return Profile.model_validate({**(raw or {}), "fictional": False, "note": ""})
+        except ValidationError as exc:
+            problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+            raise HTTPException(status_code=422, detail={"problems": problems}) from exc
+
+    @app.get("/api/profile")
+    def get_profile() -> dict:
+        return profile_state()
+
+    @app.put("/api/profile")
+    def put_profile(raw: dict = Body(...)) -> dict:
+        if profile_path is None:
+            raise HTTPException(status_code=403, detail="profile saving is off (no profile path)")
+        new = parse_profile(raw)
+        old = menus.profile.model_dump()
+        changed = [k for k, v in new.model_dump().items() if old.get(k) != v]
+        save_user_profile(new, profile_path)
+        menus.set_profile(new)
+        app.state.profile_source = "user"
+        event_log.log("profile_saved", changed=changed)  # which fields, never their contents
+        return profile_state()
+
+    @app.delete("/api/profile")
+    def delete_profile() -> dict:
+        """Back to the demo persona (removes the saved file)."""
+        if profile_path is None:
+            raise HTTPException(status_code=403, detail="profile saving is off (no profile path)")
+        Path(profile_path).unlink(missing_ok=True)
+        menus.set_profile(demo)
+        app.state.profile_source = "demo"
+        event_log.log("profile_reset")
+        return profile_state()
+
+    @app.post("/api/profile/preview")
+    async def preview_profile(raw: dict = Body(...)) -> dict:
+        """Three sample replies to ``partner_text`` written with ``profile`` (not saved)."""
+        if not menus.enabled:
+            raise HTTPException(status_code=409, detail=f"Claude is off: {menus.why_disabled}")
+        text = str(raw.get("partner_text") or "").strip()[:200]
+        if not text:
+            raise HTTPException(status_code=422, detail={"problems": ["partner_text: empty"]})
+        options = await menus.preview(parse_profile(raw.get("profile")), text, clock())
+        return {"options": None if options is None else [o.model_dump() for o in options]}
 
     @app.get(AUDIO_ROUTE + "/{clip_id}")
     def audio(clip_id: str) -> Response:
@@ -167,9 +336,9 @@ def create_app(
         content, media_type = clip
         return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
 
-    async def attach(ws: WebSocket, role: str) -> Conn:
+    async def attach(ws: WebSocket, role: str, client: str = "browser") -> Conn:
         await ws.accept()
-        conn = Conn(ws)
+        conn = Conn(ws, client=client)
         old = getattr(hub, role)
         setattr(hub, role, conn)
         if old is not None:
@@ -201,7 +370,9 @@ def create_app(
 
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:
-        conn = await attach(ws, "ui")
+        client = ui_client(ws.query_params.get("client"))
+        conn = await attach(ws, "ui", client)
+        event_log.log("ui_client", client=client)
         orch.on_ui_connected()
         try:
             await receive(ws, parse_ui_to_server, orch.on_ui_message, "ui")
@@ -235,42 +406,89 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--keyboard", action="store_true", help="keys 1-4 on the partner page select")
     p.add_argument("--fake-decoder", action="store_true",
                    help="also start tools/fake_decoder.py --random against this server")
+    p.add_argument("--tunnel", action="store_true",
+                   help="also open a Cloudflare quick tunnel and print a phone link (needs cloudflared)")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     cfg = load_config(args.config)
     load_env()  # API keys from the gitignored .env, unless already in the environment
+    host = cfg.server.host
+    local_only = host in ("127.0.0.1", "localhost", "::1") and not args.tunnel
+    # Anything reachable from outside this computer needs the key; a new one every start.
+    access_key = None if local_only else (os.environ.get("BRAINSYNC_ACCESS_KEY") or new_key())
+    tunnel = None
+    if args.tunnel:
+        from app.tunnel import Tunnel, find_cloudflared
+
+        binary = find_cloudflared()
+        if binary is None:
+            sys.exit("--tunnel needs cloudflared: brew install cloudflared (macOS), or the "
+                     "cloudflared-linux-amd64 binary from github.com/cloudflare/cloudflared/releases "
+                     "as ~/.local/bin/cloudflared (Linux / WSL)")
+        tunnel = Tunnel(cfg.server.port, binary)
     app = create_app(cfg, keyboard_mode=args.keyboard, fake_decoder=args.fake_decoder,
+                     access_key=access_key,
                      cartesia_api_key=os.environ.get("CARTESIA_API_KEY"),
-                     anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                     anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                     profile_path=USER_PROFILE_PATH,
+                     tts_cache_dir=REPO_ROOT / cfg.speech.cache_dir if cfg.speech.cache_dir else None)
     tts, menus = app.state.tts, app.state.menus
     voice = (f"Cartesia {cfg.speech.model}" if tts.enabled
              else f"browser speechSynthesis only ({tts.why_disabled})")
+    if tts.enabled:
+        ready, total = tts.cached_count(app.state.intents.utterances)
+        voice += f", {ready}/{total} fixed clips on disk"
     replies = (f"Claude {cfg.llm.model}" if menus.enabled
                else f"fixed lists only ({menus.why_disabled})")
-    print(f"voice: {voice}\nreplies: {replies}", file=sys.stderr)
-    host = cfg.server.host
+    who = ("your profile (profiles/user.yaml)" if app.state.profile_source == "user"
+           else "the demo persona (edit at /profile.html)")
+    print(f"voice: {voice}\nreplies: {replies}\nprofile: {who}", file=sys.stderr)
     url_host = "127.0.0.1" if host == "0.0.0.0" else host
     fake = None
     if args.fake_decoder:
         # It retries every second until the server is up, so starting it first is fine.
         # Its hello uses this server's config, so it passes the handshake check.
         slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+        # --parent-pid: it exits once this server is gone, however the server was stopped.
         fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
+                                 "--parent-pid", str(os.getpid()),
                                  "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
                                  "--slots", slots, "--waveform", cfg.stim.waveform,
                                  "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
                                 cwd=REPO_ROOT)
+        app.state.on_shutdown.append(fake.terminate)
     print(f"partner page: http://{url_host}:{cfg.server.port}", file=sys.stderr)
+    if tunnel is not None:
+        app.state.on_shutdown.append(tunnel.stop)
+        url = tunnel.wait(30.0)
+        if url:
+            app.state.phone_url = f"{url}/?key={access_key}"
+            print(f"phone link (secret, works until the server stops): {app.state.phone_url}",
+                  file=sys.stderr)
+        else:
+            print("tunnel: cloudflared printed no address within 30 s (no internet?); the laptop "
+                  "page still works", file=sys.stderr)
+    elif access_key is not None:
+        ip = lan_ip() if host in ("0.0.0.0", "::") else host
+        if ip:
+            app.state.phone_url = f"http://{ip}:{cfg.server.port}/?key={access_key}"
+            print(f"phone link (secret; no microphone in a phone browser over http: use --tunnel "
+                  f"or the app): {app.state.phone_url}", file=sys.stderr)
+        else:
+            print(f"other devices: http://<this computer's address>:{cfg.server.port}/?key={access_key} "
+                  "(no microphone on a phone over http: use --tunnel)", file=sys.stderr)
+    if app.state.phone_url:
+        print(f"iPhone app link (secret, open it on the iPhone or paste it into the app): "
+              f"{app_link(app.state.phone_url)}", file=sys.stderr)
     try:
         import uvicorn
 
         uvicorn.run(app, host=host, port=cfg.server.port, log_level="warning")
     finally:
-        if fake is not None:
-            fake.terminate()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                fake.wait(timeout=5)
+        for stop in app.state.on_shutdown:
+            with contextlib.suppress(Exception):
+                stop()
 
 
 if __name__ == "__main__":

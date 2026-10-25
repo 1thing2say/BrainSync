@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BCI Voice profile</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="profile-page">
+    <header class="profile-head">
+      <h1>Profile</h1>
+      <a href="/" class="back-link">Back to the partner page</a>
+    </header>
+    <p class="hint">Fill this in with or for the person who uses BCI Voice. Claude writes their
+      reply options from it: the facts are used only when someone asks about them, and the
+      personality decides how the replies sound. It is saved only on this computer
+      (<code>profiles/user.yaml</code>, never committed), and sent to Claude with each request.</p>
+    <p id="source" class="hint"></p>
+
+    <form id="profile-form" autocomplete="off">
+      <fieldset>
+        <legend>About them</legend>
+        <label>Name <input id="name" required maxlength="40"></label>
+        <label>About (one or two sentences) <textarea id="about" rows="2" maxlength="300"></textarea></label>
+        <label>Likes (one per line) <textarea id="likes" rows="3"></textarea></label>
+        <label>Dislikes (one per line) <textarea id="dislikes" rows="2"></textarea></label>
+        <label>People (one per line: name, relation) <textarea id="people" rows="3"
+          placeholder="Maya, sister"></textarea></label>
+        <label>Routines (one per line) <textarea id="routines" rows="2"></textarea></label>
+        <label>Topics never to bring up (one per line) <textarea id="avoid_topics" rows="2"></textarea></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>How they talk</legend>
+        <div class="choice">Formality
+          <label><input type="radio" name="formality" value="casual"> Casual</label>
+          <label><input type="radio" name="formality" value="neutral"> Neutral</label>
+          <label><input type="radio" name="formality" value="formal"> Formal</label>
+        </div>
+        <div class="choice">Length
+          <label><input type="radio" name="length" value="brief"> Brief (3–6 words)</label>
+          <label><input type="radio" name="length" value="medium"> Medium (5–10)</label>
+          <label><input type="radio" name="length" value="chatty"> Chatty</label>
+        </div>
+        <div class="choice">Humour
+          <label><input type="radio" name="humour" value="none"> None</label>
+          <label><input type="radio" name="humour" value="light"> Light</label>
+          <label><input type="radio" name="humour" value="playful"> Playful</label>
+        </div>
+        <div class="choice">Warmth
+          <label><input type="radio" name="warmth" value="reserved"> Reserved</label>
+          <label><input type="radio" name="warmth" value="warm"> Warm</label>
+        </div>
+        <div class="choice">Saying no
+          <label><input type="radio" name="directness" value="gentle"> Gentle ("Not right now, thanks")</label>
+          <label><input type="radio" name="directness" value="direct"> Direct ("No.")</label>
+        </div>
+        <label>Phrases they often say (one per line) <textarea id="phrases" rows="2"
+          placeholder="Sounds good"></textarea></label>
+        <label>Words or phrases they never use (one per line) <textarea id="avoid_phrases" rows="2"></textarea></label>
+        <label>How they talk, in their own words <textarea id="notes" rows="2" maxlength="300"></textarea></label>
+      </fieldset>
+
+      <div class="controls">
+        <button type="submit" id="save" class="primary">Save</button>
+        <button type="button" id="reset">Use the demo persona</button>
+      </div>
+      <p id="message" class="decoder-message" aria-live="polite"></p>
+    </form>
+
+    <section class="preview" aria-label="Preview">
+      <h2>Try it</h2>
+      <form id="preview-form" class="say-form">
+        <input id="preview-text" value="How was your weekend?" aria-label="Partner says">
+        <button type="submit" id="preview">Preview replies</button>
+      </form>
+      <ol id="preview-out" class="option-list"></ol>
+      <p class="hint">Uses the form as it is now, without saving it.</p>
+    </section>
+  </main>
+  <script src="profile.js"></script>
+</body>
+</html>

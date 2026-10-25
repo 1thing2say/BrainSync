@@ -91,6 +91,8 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
     (s.Trial(trial_id=7, phase="flicker"), s.parse_server_to_ui),
     (s.Highlight(slot="s2"), s.parse_server_to_ui),
     (s.Speak(text="Yes, let's go outside.", utterance_id="u1"), s.parse_server_to_ui),
+    (s.Listen(seconds=10.0, delay_s=0.5, reason="turn"), s.parse_server_to_ui),
+    (s.Listen(seconds=0.0, reason="speaking"), s.parse_server_to_ui),
     (s.State(name="MENU_CUE"), s.parse_server_to_ui),
     (s.Transcript(who="partner", text="Do you want to go outside?"), s.parse_server_to_ui),
     (
@@ -101,6 +103,18 @@ ROUND_TRIP_CASES: list[tuple[BaseModel, object]] = [
             llm_ok=True,
             fake_decoder=True,
             keyboard_mode=False,
+        ),
+        s.parse_server_to_ui,
+    ),
+    (
+        s.UIStatus(
+            decoder_connected=True,
+            decoder_ok=True,
+            display_ok=True,
+            llm_ok=False,
+            fake_decoder=True,
+            keyboard_mode=False,
+            decoder_name="fake-decoder",
         ),
         s.parse_server_to_ui,
     ),
@@ -192,6 +206,7 @@ def test_status_resolves_per_direction() -> None:
         "keyboard_mode": True,
     }
     assert isinstance(s.parse_server_to_ui(ui_status), s.UIStatus)
+    assert s.parse_server_to_ui(ui_status).decoder_name == ""  # optional: "" before an ack
 
 
 V2_HELLO = {"type": "hello", "protocol": 2, "name": "x", "refresh_hz": 60.0, "waveform": "sine",
@@ -377,3 +392,25 @@ def test_validate_option_uses_given_limits() -> None:
 def test_option_has_no_baked_in_limits() -> None:
     long = s.Option(label="x" * 200, utterance=" ".join(["w"] * 100), intent_id="i")
     assert len(long.label) == 200
+
+
+@pytest.mark.parametrize("raw", [
+    {"type": "mic_set", "muted": True},
+    {"type": "mic_report", "state": "offline", "restarts": 2},
+])
+def test_mic_messages_round_trip(raw):
+    msg = s.parse_ui_to_server(raw)
+    assert s.parse_ui_to_server(s.to_json(msg)) == msg
+
+
+@pytest.mark.parametrize("parse, raw", [
+    (s.parse_server_to_ui, {"type": "listen", "seconds": 5, "until_stopped": True, "reason": "start"}),
+    (s.parse_ui_to_server, {"type": "mic_report", "state": "dancing"}),
+    (s.parse_ui_to_server, {"type": "mic_report", "state": "listening", "text": "secret words"}),
+], ids=["until_stopped with seconds", "unknown mic state", "mic report never carries text"])
+def test_invalid_mic_messages(parse, raw):
+    if "text" in raw:  # extra fields are ignored by design; the model simply has no text field
+        assert not hasattr(parse(raw), "text")
+        return
+    with pytest.raises(ValidationError):
+        parse(raw)
