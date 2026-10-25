@@ -52,9 +52,8 @@ DecoderFactory = Callable[[tuple[float, ...], tuple[float, ...]], Decoder]
 
 def build_decoder(freqs: Sequence[float], phases: Sequence[float], fs: float = FS,
                   ch_names: Sequence[str] = MONTAGE) -> Decoder:
-    """The live demo's decoder: swipe_web.build_decoder's recipe (TUNED FBCCA, 3 harmonics,
-    the POSTERIOR channels, a 2 s pad), written here so the server does not import the
-    BrainSwipe page and its dependencies."""
+    """The live demo's f-VEP decoder (TUNED FBCCA, 3 harmonics, the POSTERIOR channels, a
+    2 s pad), the recipe the BrainSwipe mock used before it moved to c-VEP."""
     clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
                margin=TUNED.margin, threshold=TUNED.threshold)
     return Decoder(clf, fs, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,

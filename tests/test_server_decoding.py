@@ -47,9 +47,14 @@ def stream(bank: DecoderBank, board: FakeBoard, seconds: float, chunk: float = 0
 
 # -- recipe and construction --------------------------------------------------------------
 
-def test_build_decoder_matches_the_swipe_web_recipe():
-    from brainsync.swipe_web import build_decoder as swipe_build
-    ours, theirs = build_decoder((15.0, 17.0), (0.0, 0.0)), swipe_build((15.0, 17.0), (0.0, 0.0))
+def test_build_decoder_matches_the_live_demo_recipe():
+    # the f-VEP recipe the BrainSwipe mock used before it moved to c-VEP: TUNED FBCCA,
+    # 3 harmonics, the POSTERIOR channels, a 2 s pad
+    clf = make(TUNED.classifier, freqs=(15.0, 17.0), fs=FS, harmonics=3, phases=(0.0, 0.0),
+               margin=TUNED.margin, threshold=TUNED.threshold)
+    theirs = Decoder(clf, FS, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,
+                     channels=POSTERIOR, pad_s=2.0, ch_names=MONTAGE)
+    ours = build_decoder((15.0, 17.0), (0.0, 0.0))
     for attr in ("fs", "window_s", "step_s", "pad_s", "n_window", "n_step", "needed", "votes",
                  "ch_names", "band", "notch_hz"):
         assert getattr(ours, attr) == getattr(theirs, attr), attr
