@@ -5,6 +5,8 @@
     python -m brainsync.stimulus -c one_target_15 --no-wait     # single-target trials
     python -m brainsync.stimulus --free --feedback stdin        # live demo: cue box from a decoder
     python -m brainsync.stimulus --free --feedback stdin --hold-still   # still until the first line
+    python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --markers unix
+                                                                # page mode, driven by the bridge
     python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
     python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
@@ -17,6 +19,17 @@ line. Space starts, Escape quits.
 With --cards DIR the free run shows DIR/*.png (sorted by name) as a profile card between
 the targets, card 0 from the first frame; stdin lines "card <k>" swap it and "flash <k>"
 lights target k's box (see brainsync.stimulus.feedback).
+
+A bridge drives the free run with JSON lines on stdin next to the integer ones
+(brainsync.stimulus.feedback): {"labels": [...]} puts a sentence beside each square,
+{"text": "..."} a line at the centre, {"active": [0, 3]} picks the targets that flicker
+and {"flicker": true} / {"flicker": false} turns their flicker on and off. Once a JSON line
+has arrived only {"flicker": true} starts the flicker, so with --hold-still the targets
+stand still until then. "[marker <unix seconds>] flicker_on" is printed right after the
+flip of the first flickering frame, "[marker <unix seconds>] flicker_off" after the first
+still frame. Without --seconds the free run lasts until EOF on stdin or Escape. With
+--feedback stdin the lines are read from the start screen on: they apply at once (the pipe
+never fills while nobody presses space), and EOF there ends the run with code 0.
 
 --conditions mixes flicker conditions in one cued session (see brainsync.ab, which runs
 it with the headset): each block cues every (condition, target) pair once, the still
@@ -70,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(-1 = no box); EOF stops the run")
     p.add_argument("--hold-still", action="store_true",
                    help="with --feedback stdin: show the targets still (no flicker) until "
-                        "the first feedback line, e.g. while a decoder calibrates")
+                        "the first {\"flicker\": true} line (from a decoder that sends only "
+                        "integer lines: its first one), e.g. while a decoder calibrates")
     p.add_argument("--cards", metavar="DIR",
                    help="free run: show DIR/*.png (sorted by name) as a profile card between "
                         "the targets; 'card <k>' and 'flash <k>' lines on stdin drive it")
@@ -118,7 +132,8 @@ def _plan_lines(cfg: StimulusConfig, seed: int, free: bool,
         f"  {cfg.n_targets} target(s), {flicker}, refresh {hz:g} Hz, "
         f"side {cfg.size:g} screen heights, cue held through flicker: "
         f"{'yes' if cfg.hold_cue else 'no'}"
-        + ("" if cfg.conditions else f", flicker depth {cfg.depth:g}"),
+        + ("" if cfg.conditions else f", flicker depth {cfg.depth:g}")
+        + (f", fixation marks {cfg.fixation_size:g} wide" if cfg.fixation else ""),
     ]
     for t in cfg.targets:
         x, y = t.pos
@@ -208,15 +223,24 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
         # launchers wait for this line, so it comes only after the refresh check passed
         print(f"measured refresh: {measured:.2f} Hz", file=sys.stderr, flush=True)
         markers = MarkerWriter(args.markers)
+        # The free run's reader starts before the start screen, so a driver's lines never fill
+        # the stdin pipe while it waits for space (the screen stays still meanwhile), and a
+        # driver that closes stdin ends the start screen too instead of leaving the window up.
+        reader = (FeedbackReader(sys.stdin, cfg.n_targets, n_cards=len(cards)).start()
+                  if args.free and args.feedback == "stdin" else None)
         if not args.no_wait:
             try:
-                renderer.wait_for_start(still_luminances(cfg))
+                if reader is None:
+                    renderer.wait_for_start(still_luminances(cfg))
+                else:
+                    renderer.wait_for_start(still_luminances(cfg), stop=lambda: reader.done)
             except Aborted:
                 print("aborted before start", file=sys.stderr)
                 return 1
+            if reader is not None and reader.done:
+                print("stdin closed before start", file=sys.stderr)
+                return 0
         if args.free:
-            reader = (FeedbackReader(sys.stdin, cfg.n_targets, n_cards=len(cards)).start()
-                      if args.feedback == "stdin" else None)
             # without feedback nothing can swap the card, so card 0 stays up
             card = (None if not cards else (lambda: 0) if reader is None
                     else (lambda: reader.card))
@@ -226,7 +250,8 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                                  hold=None if reader is None or not args.hold_still
                                  else (lambda: not reader.heard),
                                  card=card,
-                                 flash=None if reader is None else (lambda: reader.flash))
+                                 flash=None if reader is None else (lambda: reader.flash),
+                                 control=None if reader is None else (lambda: reader.control))
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0
