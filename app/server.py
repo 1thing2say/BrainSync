@@ -10,6 +10,8 @@ gitignored .env.
 
     python -m app.server                    # real decoder connects to /ws/decoder
     python -m app.server --fake-decoder     # also start tools/fake_decoder.py --random
+    python -m app.server --bridge cerelog   # also start brainsync.voice_bridge (headset + display)
+    python -m app.server --bridge fake --bridge-headless   # the bridge on fake EEG, no window
     python -m app.server --keyboard         # keys 1-4 on the partner page select
     python -m app.server --tunnel           # also a public https link for the partner's phone
 """
@@ -433,6 +435,25 @@ def create_app(
     return app
 
 
+BRIDGE_KINDS = ("cerelog", "fake")  # --bridge: the Cerelog X8, or brainsync's FakeBoard
+BRIDGE_STOP_S = 12.0  # how long the bridge gets to clean up after SIGTERM
+
+
+def bridge_command(kind: str, url: str, parent_pid: int, headless: bool = False) -> list[str]:
+    """``python -m brainsync.voice_bridge`` for ``--bridge``: ``kind`` "cerelog" (the headset) or
+    "fake" (FakeBoard); ``headless`` adds --no-stimulus (no PsychoPy window). --parent-pid makes
+    it exit once this server is gone, however the server was stopped."""
+    if kind not in BRIDGE_KINDS:
+        raise ValueError(f"bridge kind must be one of {BRIDGE_KINDS}, got {kind!r}")
+    cmd = [sys.executable, "-m", "brainsync.voice_bridge", "--url", url,
+           "--parent-pid", str(parent_pid)]
+    if kind == "fake":
+        cmd.append("--fake")
+    if headless:
+        cmd.append("--no-stimulus")
+    return cmd
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="python -m app.server", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -442,7 +463,16 @@ def main(argv: list[str] | None = None) -> None:
                    help="also start tools/fake_decoder.py --random against this server")
     p.add_argument("--tunnel", action="store_true",
                    help="also open a Cloudflare quick tunnel and print a phone link (needs cloudflared)")
+    p.add_argument("--bridge", choices=BRIDGE_KINDS,
+                   help="also start python -m brainsync.voice_bridge against this server: cerelog = "
+                        "the Cerelog X8 and the PsychoPy display, fake = FakeBoard")
+    p.add_argument("--bridge-headless", action="store_true",
+                   help="with --bridge: no PsychoPy window (the bridge's --no-stimulus)")
     args = p.parse_args(argv)
+    if args.bridge and args.fake_decoder:
+        p.error("--bridge and --fake-decoder both connect to /ws/decoder: pick one")
+    if args.bridge_headless and not args.bridge:
+        p.error("--bridge-headless needs --bridge")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     cfg = load_config(args.config)
@@ -499,6 +529,17 @@ def main(argv: list[str] | None = None) -> None:
                                      "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
                                     cwd=REPO_ROOT)
             app.state.on_shutdown.append(lambda: stop_process(fake))
+        if args.bridge:
+            # Like the fake decoder: it retries every second until the server is up. The board
+            # connects once (about 16 s for the Cerelog X8) before its hello.
+            bridge = subprocess.Popen(bridge_command(args.bridge,
+                                                     f"ws://{url_host}:{cfg.server.port}/ws/decoder",
+                                                     os.getpid(), headless=args.bridge_headless),
+                                      cwd=REPO_ROOT)
+            # SIGTERM ends it like Ctrl-C; its cleanup (display EOF, terminate and kill, up to
+            # 3 s; the board thread, 2 s; then the board) must finish before a kill, or the
+            # display window and the Cerelog session are left behind.
+            app.state.on_shutdown.append(lambda: stop_process(bridge, timeout_s=BRIDGE_STOP_S))
         print(f"partner page: http://{url_host}:{cfg.server.port}", file=sys.stderr)
         if binary is None and access_key is not None:
             ip = lan_ip() if host in ("0.0.0.0", "::") else host

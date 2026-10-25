@@ -6,9 +6,15 @@ that flicker, an 8-channel Cerelog X8 EEG board picks it up, and a training-free
 (CCA or filter-bank CCA) works out which square you are looking at. The cue box then moves
 onto it and the label is spoken.
 
+On top of it sits **BCI Voice** ([below](#bci-voice-reply-with-your-eyes)): a partner speaks,
+Claude writes three ranked replies, each beside its own flickering square (four squares in all,
+the fourth for more options), and the reply the user looks at and confirms is spoken aloud. One
+command starts it: `python -m app.server --bridge cerelog`.
+
 > **Photosensitivity warning.** Flicker between 15 and 25 Hz is the band most likely to
 > trigger a seizure in people with photosensitive epilepsy. Both demo targets (15 and
-> 17 Hz) lie inside it. Ask about epilepsy before every session. Stop at once if anyone
+> 17 Hz) lie inside it; BCI Voice adds 11 and 13 Hz, also in the photosensitive range, on four
+> squares. Ask about epilepsy before every session. Stop at once if anyone
 > feels unwell. The stimulus prints this warning to stderr each time it starts.
 
 ## Setup
@@ -94,6 +100,105 @@ instead, so synthetic files never mix with real ones.
   EEG.
 - **Keep the cue box on.** Without a box around the target, gaze drifted after about
   2 s. The `two_targets` config holds it through the flicker.
+
+## BCI Voice: reply with your eyes
+
+BCI Voice turns the decoder into a way to talk. A conversation partner speaks (or types); Claude
+writes three short replies in the user's own voice, ranked most likely first; each reply sits
+beside its own flickering square on the full-screen display, with a fourth square, NEXT, for a
+new page of three. The user looks at a reply, confirms it on a second screen ("Say it" or
+"Back"), and the laptop speaks it in a Cartesia voice. Only the decoder (or keyboard mode)
+decides what was picked: Claude only writes the options, and nothing is spoken without a
+confirmation. `PLAN.md` is the design, `INTERFACE-v2-draft.md` the contract between the server
+and the bridge, `docs/DEMO.md` the operator's runbook.
+
+| Part | What it does |
+|---|---|
+| `app/` (`python -m app.server`) | The server: owns all state (pages, trials, what is shown and spoken), asks Claude for each page (`app/menus.py`), pre-generates the Cartesia clips (`app/tts.py`), logs every event to `logs/*.jsonl` |
+| `brainsync/voice_bridge.py` | The bridge: the Cerelog X8, the decoder (FBCCA, 1.5 s windows, `brainsync.online`) and the PsychoPy display, driven by the server over `/ws/decoder` (protocol 2) |
+| `brainsync/stimulus` with `four_diamond.toml` | The display: four squares in a diamond at 13 (top), 15 (left), 17 (right) and 11 Hz (bottom, NEXT), sine, a fixation mark in each, each option's sentence beside its square |
+| `ui/` | The partner page in Chrome: a mirror of the user's screen (no flicker), Stop, the mic and transcript, typing, the conversation, Correct / Wrong marks |
+| `ios/` | The native iPhone partner app, the same page with on-device speech recognition (`ios/README.md`) |
+
+### Run it
+
+Setup as above (one `.venv` with `.[dev,display]` and the Cerelog BrainFlow fork), then
+`ANTHROPIC_API_KEY` (Claude) and `CARTESIA_API_KEY` (the voice) in a gitignored `.env` at the repo
+root. Without them the app still runs, on fixed reply lists and the browser's voice.
+
+```bash
+.venv/bin/python -m app.server --bridge cerelog                  # server + bridge (headset + display)
+.venv/bin/python -m app.server --bridge fake                     # fake EEG, the real display
+.venv/bin/python -m app.server --bridge fake --bridge-headless   # fake EEG, no window
+.venv/bin/python -m app.server --keyboard                        # keys 1-4 select, no headset
+.venv/bin/python -m app.server --bridge cerelog --tunnel         # also a phone link and an iPhone app link
+.venv/bin/python tools/preflight.py                              # go / no-go, with the server running
+.venv/bin/python tools/log_summary.py                            # the numbers from the newest session
+```
+
+1. The server prints the partner page address; open `http://127.0.0.1:8000` in Chrome (the Web
+   Speech API needs it), on a second screen, or pair the iPhone app with the app link the
+   server prints (`--tunnel`, or `server.host: 0.0.0.0` on the same Wi-Fi).
+2. The bridge connects the board (about 16 s), opens the display full screen and checks its
+   refresh (60 Hz, ProMotion off). The partner page shows the bridge as connected while the
+   display still waits on its start screen: press Space on the display first.
+3. On the partner page, read the flicker warning and press **I understand, start**: a 10 s still
+   baseline, then the first page. That is shorter than the 30 s that phase 3 below recommends
+   for the tuned 1.5 s window (a 10 s rest offset is off by about 0.58 spreads, more than the
+   0.5 margin), so live accuracy may suffer until `baseline.seconds` in `config/default.yaml`
+   is raised; it is a value agreed in the protocol (`INTERFACE-v2-draft.md` section 6), so
+   change it with the teammate.
+
+`--bridge fake` and `--fake-decoder` show a FAKE DECODER badge and `--keyboard` a KEYBOARD badge;
+their picks are not the user's. The bridge can also run on its own,
+`python -m brainsync.voice_bridge [--fake] [--no-stimulus]`, against a server started without
+`--bridge`; `tools/contract_check.py` is a stand-in server that checks any bridge against
+protocol 2.
+
+### Safety
+
+- **Photosensitivity.** 11, 13, 15 and 17 Hz are all in the photosensitive range (15 and 17 Hz in
+  the 15-25 Hz band most likely to trigger seizures), and four squares cover more of the screen
+  than two. Nobody with photosensitive epilepsy or flicker sensitivity uses it or faces it. The
+  partner page and the iPhone app show a flicker warning, and nothing flickers until it is
+  accepted.
+- **`Esc` on the display** stops the flicker at once, locally, whatever the server says (it closes
+  the display; the bridge relaunches it held still and the session waits for **Resume**).
+- **Stop** on the partner page or the app turns the flicker off through the server and the bridge.
+  After Stop or `Esc` the flicker never comes back by itself: **Resume** runs a new baseline
+  first.
+- The flicker is on only during a trial and only on that trial's squares, and it goes off at once
+  when the bridge loses the server, on a pause, and on any error. A trial the server has not
+  stopped after 20 s (`--max-flicker-s`, twice `stim.max_trial_s`) turns it off at the bridge.
+
+### Honest claim
+
+"An LLM that writes context-aware replies turns a few-target SSVEP BCI on a dry-electrode headset
+into a conversation, with every option visible and nothing spoken without a confirmation." The
+numbers behind it, to fill in from the tools named before the claim is made. A cell that still
+reads **TBD** has not been measured: say so rather than quote another number.
+
+| Number | Value | Where it comes from |
+|---|---|---|
+| Targets and mode used | **TBD**: 4 targets, page mode / 2 targets, list mode | the 4-target gate decision (`docs/DEMO.md` section 2) |
+| 4-target accuracy, cued, offline (chance 25 %) | **TBD**: \_\_ % over \_\_ trials, FBCCA / CCA at \_\_ s | `python -m brainsync.score_cued <gate>_cued.npz --windows 2` |
+| Live correct rate | **TBD**: \_\_ % of \_\_ replies marked C | `python tools/log_summary.py` (C / W marks) |
+| Seconds per spoken reply | **TBD**: median \_\_ s | `tools/log_summary.py` |
+| Selections per spoken reply | **TBD** | `tools/log_summary.py` |
+| Spoken reply was option 1 | **TBD**: \_\_ % | `tools/log_summary.py` |
+| Claude page latency | **TBD**: median \_\_ ms, p95 \_\_ ms, \_\_ % fell back to a fixed list | `tools/log_summary.py` |
+
+What is measured today is two-target and offline: 15 vs 17 Hz at 78 % over 50 single-target
+trials, and 64-93 % in three cued recordings with both squares flickering (phase 0 and phase 2
+above). Never quote those for four targets. Not yet done or not yet true:
+
+- The bridge has run only on the fake board and with a stand-in display; never with the headset
+  or the real PsychoPy window. The 4-target layout has never been recorded on EEG.
+- The fake board's picks (`--bridge fake`, `--fake-decoder`) are random, and keyboard mode is a
+  person pressing keys: neither is the user's eyes, and each is labelled on screen.
+- The iPhone app has not been built or run on a device yet.
+- "Dry-electrode" holds only if O1 and O2 had no gel or paste (the reference and bias are gel
+  pads either way).
 
 ## Flicker depth and the Flicker Lab
 
@@ -1000,6 +1105,14 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 | `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
 | `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
+| `app/` | BCI Voice server: FastAPI, the orchestrator (pages, trials, confirm step), Claude pages, Cartesia clips, the session log, `--bridge` |
+| `brainsync/voice_bridge.py` | BCI Voice bridge: board, decoder and display over protocol 2 (`INTERFACE-v2-draft.md`) |
+| `brainsync/stimulus/configs/four_diamond.toml` | BCI Voice page mode: 13/15/17/11 Hz in a diamond, fixation marks, the 4-target gate session |
+| `ui/` | BCI Voice partner page (plain HTML/JS, served by `app.server`) |
+| `ios/` | BCI Voice iPhone partner app (SwiftUI) and `BrainSyncKit` |
+| `tools/fake_decoder.py`, `tools/contract_check.py` | A stand-in bridge, and a stand-in server that checks a bridge against protocol 2 |
+| `tools/preflight.py`, `tools/log_summary.py` | Demo go / no-go checks, and the numbers from the session logs |
+| `docs/DEMO.md` | The BCI Voice operator's runbook |
 
 ## Tests
 
@@ -1042,6 +1155,15 @@ takeover 4000), HTTP, the CLI's exit codes and SIGTERM, and the real JavaScript 
 page and extension agent against the server through Node's WebSocket
 (`tests/server_e2e_client.mjs`). Point mode uses the real Detector with a stub `create`, so
 no test calls the Anthropic API.
+
+The BCI Voice bridge and the display commands add 76: `test_voice_bridge.py` 24 (the bridge
+against a scripted server and a stub display), `test_bridge_display_contract.py` 4 (the bridge's
+exact stdin lines through the real stimulus command line, frame by frame, and the real display
+process with a stand-in window), `test_server_bridge.py` 5 (`app.server --bridge fake
+--bridge-headless` end to end) and `test_stimulus_commands.py` 43 (the JSON commands, markers,
+text layout and the renderer against a fake psychopy). The voice server's own tests are the
+`test_server.py`, `test_orchestrator.py`, `test_menus.py`, `test_tts.py`, `test_contract_check.py`
+and other `app/` and `tools/` files.
 
 The filter tests check passband gain within 2% at 12, 15, 17 and 30 Hz, stopband gain
 under 0.05 at 1, 2, 90 and 110 Hz, zero lag, and a 60 Hz notch deeper than -40 dB. The

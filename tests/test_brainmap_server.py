@@ -617,7 +617,15 @@ def test_end_to_end_fake_board_streams_frames() -> None:
             assert len(hello["channels"]) == 8
             assert set(hello["positions"]) == set(hello["channels"])
             assert "not a brain scan" in hello["label"]
-            seen = [ev.next() for _ in range(3)]
+            # A client that connects as soon as the URL is printed gets the server's own
+            # "starting" status and then run()'s "starting" and "streaming" ones before the
+            # first frame (2 s of samples later); one that connects later gets only the
+            # newest status. So read up to the first frame, not a fixed count.
+            seen: list[dict | None] = []
+            while len(seen) < 8 and not any(m and m["type"] == "frame" for m in seen):
+                seen.append(ev.next())
+                if seen[-1] is None:
+                    break
             if "ssvep_keys" in hello:
                 assert len(hello["ssvep_keys"]) == len(hello["ssvep_hz"])
         finally:
