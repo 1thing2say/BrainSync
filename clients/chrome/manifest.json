@@ -26,7 +26,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["flicker.js", "brainsync-client.js", "hints.js", "clicker.js", "point_overlay.js", "content.js"],
+      "js": ["flicker.js", "brainsync-client.js", "cvep.js", "hints.js", "clicker.js", "point_overlay.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

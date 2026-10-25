@@ -34,8 +34,24 @@
  * sends `gaze` null, because the server forgets a gaze whose patch moved (point mode reuses
  * the slot names: "b1" is a different element on every page) and the mouse may not move.
  *
- * The pure parts (hello fields, patch geometry, hit testing, label placement and the model)
- * are exported for clients/chrome/test/point_overlay.test.mjs.
+ * Code mode (the c-VEP standard, docs/CVEP-STANDARD.md): a welcome with paradigm "code"
+ * carries the code (63 bits, 21-frame lags, 63-frame cycles, 30 training cycles, fill white).
+ * Each layout target then has a `lag` in frames and `freq` null, and frame n (counted from
+ * the layout's first flickering frame, one bit per frame) of a target with lag L is white
+ * when bits[(n - L) mod 63] is 1 and black when 0 (cvep.js, BrainSyncCode.bit); a still
+ * patch is white. On every cycle's first frame (n mod 63 == 0) the model sends
+ * {type: "cycle", layout_id, n: <cycle number>, t_client: <Unix s of that flip>}; when the
+ * cycle's first frame was dropped, the next frame reports it with the time it was due. The
+ * phase "train" flickers too: its `cue` slot gets the cue box, the banner says where to look
+ * with "cycle k/30" from the `train` messages, and `trained` shows the template's held-out
+ * accuracy against chance. Every `decision` of the current layout puts a label line (label,
+ * 8-cell bar, signed score, "<" on the best) under each patch and the status line
+ * ("lead 0.31   choice: Sign in") in the banner; scores are correlations, never percentages.
+ * Freq-mode servers (no paradigm, or "freq") are drawn as before.
+ *
+ * The pure parts (hello fields, patch geometry, hit testing, label placement, the code
+ * config and confidence text, and the model) are exported for
+ * clients/chrome/test/point_overlay.test.mjs.
  */
 (function (root) {
   "use strict";
@@ -44,6 +60,8 @@
     (typeof require === "function" ? require("./brainsync-client.js") : null);
   if (!C) throw new Error("load brainsync-client.js before point_overlay.js");
   const F = C.flicker;
+  const K = root.BrainSyncCode || (typeof require === "function" ? require("./cvep.js") : null);
+  if (!K) throw new Error("load cvep.js before point_overlay.js");
 
   const CLIENT = Object.freeze({ name: "brainpoint-extension", kind: "extension", version: "0.1.0" });
   const HOST_ID = "brainpoint-overlay";
@@ -127,6 +145,86 @@
     return { x, y, where };
   }
 
+  // ------------------------------------------------------------- code mode (c-VEP)
+
+  const TRAINED_SHOW_MS = 6000;   // the template's accuracy stays in the banner this long
+
+  function posInt(v) {
+    return Number.isInteger(v) && v > 0;
+  }
+
+  /**
+   * The code of a welcome with paradigm "code": {bits, lagFrames, cycleFrames, trainCycles,
+   * fill, standard}; null for a freq-mode welcome. Missing or malformed fields fall back to
+   * the standard's values (cvep.js); `standard` is false when the welcome's bits differ.
+   */
+  function codeConfig(welcome) {
+    if (!welcome || welcome.paradigm !== "code") return null;
+    const c = welcome.code && typeof welcome.code === "object" ? welcome.code : {};
+    const goodBits = Array.isArray(c.bits) && c.bits.length > 0 &&
+      c.bits.every((b) => b === 0 || b === 1);
+    const bits = goodBits ? c.bits.slice() : K.BITS.slice();
+    return {
+      bits,
+      lagFrames: posInt(c.lag_frames) ? c.lag_frames : K.LAG_FRAMES,
+      cycleFrames: posInt(c.cycle_frames) ? c.cycle_frames : bits.length,
+      trainCycles: posInt(c.train_cycles) ? c.train_cycles : K.TRAIN_CYCLES,
+      fill: typeof c.fill === "string" && /^#[0-9a-fA-F]{6}$/.test(c.fill) ? c.fill : K.WHITE,
+      standard: bits.length === K.BITS.length && bits.every((b, i) => b === K.BITS[i]),
+      malformed: c.bits !== undefined && !goodBits,
+    };
+  }
+
+  /** 1 (white) or 0 (black): a target with code lag `lag` on flicker frame n. */
+  function codeBit(code, lag, n) {
+    return K.bit(0, n - lag, 0, code.bits);
+  }
+
+  /** "template ready: 83 % on held-out cycles (chance 33 %)", as brainsync.vep. */
+  function trainedLine(msg) {
+    const pct = (v) => Math.round(100 * Number(v));
+    const acc = Number(msg && msg.accuracy);
+    if (!Number.isFinite(acc)) return "template ready";
+    const chance = Number(msg.chance);
+    return "template ready: " + pct(acc) + " % on held-out cycles" +
+      (Number.isFinite(chance) ? " (chance " + pct(chance) + " %)" : "");
+  }
+
+  /** "Look at the Sign in patch   cycle 12/30": the banner of the train phase. */
+  function trainLine(phase, cueLabel, progress, trainCycles) {
+    const look = phase && phase.text ? phase.text : "Look at the " + (cueLabel || "first") + " patch";
+    const of = progress && posInt(progress.of) ? progress.of
+      : phase && posInt(phase.cycles) ? phase.cycles : trainCycles;
+    const k = progress && Number.isInteger(progress.cycle) && progress.cycle >= 0 ? progress.cycle : 0;
+    return look + "   cycle " + k + "/" + of;
+  }
+
+  /**
+   * The label line under each target for a decision, keyed by slot: "Sign in ███░░░░░ +0.42 <"
+   * (cvep.js labelLine; "<" on the decision's raw best). Without a decision, the plain label.
+   */
+  function confidenceLines(targets, decision) {
+    const out = {};
+    for (const t of targets || []) {
+      if (!t || typeof t.slot !== "string") continue;
+      const label = typeof t.label === "string" && t.label ? t.label : t.slot;
+      if (!decision || !decision.scores || typeof decision.scores !== "object") { out[t.slot] = label; continue; }
+      const s = decision.scores[t.slot];
+      out[t.slot] = K.labelLine(label, typeof s === "number" ? s : NaN, decision.raw === t.slot);
+    }
+    return out;
+  }
+
+  /** "lead 0.31   choice: Sign in *": the status line of a decision, with labels for slots. */
+  function decisionLine(targets, decision) {
+    if (!decision) return "";
+    const t = (targets || []).find((x) => x && x.slot === decision.committed);
+    const committed = decision.committed == null ? null
+      : (t && t.label ? t.label : String(decision.committed));
+    return K.statusLine(typeof decision.lead === "number" ? decision.lead : NaN, committed,
+                        decision.changed === true);
+  }
+
   // ------------------------------------------------------------------ the model
 
   /**
@@ -164,7 +262,14 @@
       hiddenTab: false,          // the tab is hidden: paused until it shows
       gazeSent: undefined,       // the slot of the last gaze sent on this connection
       rttMs: null,
+      code: null,                // codeConfig(welcome): the c-VEP code, null in freq mode
+      train: null,               // the last train progress {cycle, of}
+      trained: null,             // the last trained message, with `at` (ms)
+      decision: null,            // the last decision of the current layout
+      cycles: 0,                 // cycle messages sent on this connection
     };
+    // The cycle reports of the layout on screen: its id, the flicker's t0, the last cycle sent.
+    let cyc = { layoutId: null, t0: null, last: -1 };
 
     function held() {
       return state.paused || state.hiddenTab;
@@ -212,7 +317,10 @@
       if (C.CONN_STATES.indexOf(s) < 0) return;
       state.conn = s;
       flicker.setOpen(s === "open");
-      if (s !== "open") { state.gazeSent = undefined; state.phase = null; state.welcome = null; }
+      if (s !== "open") {
+        state.gazeSent = undefined; state.phase = null; state.welcome = null;
+        state.decision = null; state.train = null;
+      }
       if (s === "connecting") state.ended = null;
     }
 
@@ -231,12 +339,33 @@
           state.error = null;
           state.refreshError = false;
           state.ended = null;
+          state.code = codeConfig(msg);
+          if (state.code && state.code.malformed) {
+            state.note = "the server's code bits are malformed; drawing the standard 63-bit code";
+          }
           if (held()) send({ type: "pause" });
           break;
         case "phase":
           state.phase = msg;
           state.phaseAt = now();
+          if (msg.phase === "train") state.trained = null;
           break;
+        case "layout":
+          state.decision = null;
+          break;
+        case "train":
+          if (Number.isInteger(msg.cycle)) state.train = { cycle: msg.cycle, of: msg.of };
+          break;
+        case "trained":
+          state.trained = Object.assign({}, msg, { at: now() });
+          state.train = null;
+          break;
+        case "decision": {
+          const l = flicker.layout;
+          if (!l || (msg.layout_id !== undefined && msg.layout_id !== l.layout_id)) break;
+          state.decision = msg;
+          break;
+        }
         case "selection": {
           const l = flicker.layout;
           if (!l || msg.layout_id !== l.layout_id) break;
@@ -301,26 +430,78 @@
         !(state.phase && state.phase.phase === "stop") && flicker.targets().length > 0;
     }
 
+    /** The code when the welcome is code mode; layouts are then drawn as c-VEP patches. */
+    function codeMode() {
+      return state.code;
+    }
+
+    /** The slot the cue box goes on: the train phase's `cue`, else null. */
+    function cueSlot() {
+      const p = state.phase;
+      return p && p.phase === "train" && typeof p.cue === "string" ? p.cue : null;
+    }
+
     /**
-     * One animation frame at rAF time ts (ms): sends onset and frames when due and returns
-     * {mode: "hidden" | "still" | "flicker", items: [{slot, label, kind, lum, flash, gaze, rects}]}
-     * with rects still normalized.
+     * The cycle message due on flicker frame n (rAF time ts), or null: once per cycle of the
+     * layout on screen, on the cycle's first frame; a cycle whose first frame was dropped is
+     * reported on the next frame with the time that first frame was due.
+     */
+    function cycleDue(ts, n) {
+      const code = state.code;
+      const l = flicker.layout;
+      if (!code || n === null || !l) return null;
+      if (cyc.layoutId !== l.layout_id || cyc.t0 !== flicker.t0) {
+        cyc = { layoutId: l.layout_id, t0: flicker.t0, last: -1 };
+      }
+      const c = Math.floor(n / code.cycleFrames);
+      if (c <= cyc.last) return null;
+      cyc.last = c;
+      const first = c * code.cycleFrames;
+      const t = n === first ? ts : flicker.t0 + first * flicker.periodMs();
+      state.cycles++;
+      return { type: "cycle", layout_id: l.layout_id, n: c, t_client: flicker.wall(t) };
+    }
+
+    /**
+     * One animation frame at rAF time ts (ms): sends onset, cycle (code mode) and frames when
+     * due and returns {mode: "hidden" | "still" | "flicker", code: bool, status: "" or the
+     * decision's status line, items: [{slot, label, line, kind, lum, color, flash, gaze, cue,
+     * rects}]} with rects still normalized. `line` is the label line (with the confidence
+     * after a decision in code mode); `color` is set in code mode (fill or black).
      */
     function frame(ts) {
       const targets = flicker.targets();
+      const code = codeMode();
+      const n = code ? flicker.frame(ts) : null;
+      const lines = code ? confidenceLines(targets, state.decision) : null;
+      const cue = cueSlot();
       const items = [];
       const flashing = state.flash !== null && now() < state.flash.until;
       for (const t of targets) {
-        items.push({ slot: t.slot, label: t.label || t.slot, kind: t.kind, rects: t.rects || [],
-                     lum: flicker.luminance(t, ts), flash: flashing && state.flash.slot === t.slot,
-                     gaze: state.gazeSent === t.slot });
+        const label = t.label || t.slot;
+        const item = { slot: t.slot, label, line: label, kind: t.kind, rects: t.rects || [],
+                       lum: 0.5, color: null, flash: flashing && state.flash.slot === t.slot,
+                       gaze: state.gazeSent === t.slot, cue: cue === t.slot };
+        if (code) {
+          // still (n null) or a target without a lag: drawn white, as the standard says
+          const bit = n === null || !Number.isInteger(t.lag) ? 1 : codeBit(code, t.lag, n);
+          item.lum = bit;
+          item.color = bit ? code.fill : K.BLACK;
+          item.line = lines[t.slot] || label;
+        } else {
+          item.lum = flicker.luminance(t, ts);
+        }
+        items.push(item);
       }
       const onset = flicker.onsetDue(ts);
       if (onset) send(onset);
+      const cycle = cycleDue(ts, n);
+      if (cycle) send(cycle);
       const frames = flicker.framesDue(ts);
       if (frames) send(frames);
-      if (!showTargets()) return { mode: "hidden", items: [] };
-      return { mode: flicker.shouldFlicker() ? "flicker" : "still", items };
+      if (!showTargets()) return { mode: "hidden", code: Boolean(code), status: "", items: [] };
+      return { mode: flicker.shouldFlicker() ? "flicker" : "still", code: Boolean(code),
+               status: code ? decisionLine(targets, state.decision) : "", items };
     }
 
     /** Seconds left in a timed phase (calibrate), or null. */
@@ -348,9 +529,41 @@
       if (p.phase === "stop") return p.text || "The server stopped.";
       if (p.phase === "wait") return p.text || "Waiting for the server…";
       if (p.phase === "pause") return p.text || (state.activity || "Paused by the server.");
+      if (p.phase === "train") return trainBanner();
       if (state.activity) return state.activity;
       if (flicker.targets().length === 0) return p.text || "Looking at the page…";
+      if (state.code) {
+        if (state.decision) return decisionLine(flicker.targets(), state.decision);
+        if (state.trained && now() - state.trained.at < TRAINED_SHOW_MS) return trainedLine(state.trained);
+      }
       return p.text || "";
+    }
+
+    function trainBanner() {
+      const slot = cueSlot();
+      const t = flicker.targets().find((x) => x && x.slot === slot);
+      return trainLine(state.phase, t ? t.label || t.slot : slot,
+                       state.train, state.code ? state.code.trainCycles : K.TRAIN_CYCLES);
+    }
+
+    /** The HUD line of code mode: training progress or the template, and the cycle count. */
+    function codeHud() {
+      const c = state.code;
+      if (!c) return null;
+      let what;
+      if (state.phase && state.phase.phase === "train") {
+        const slot = cueSlot();
+        const t = flicker.targets().find((x) => x && x.slot === slot);
+        const of = state.train && posInt(state.train.of) ? state.train.of : c.trainCycles;
+        what = "training: keep looking at " + (t ? t.label || t.slot : slot || "-") + "   cycle " +
+          (state.train ? state.train.cycle : 0) + "/" + of;
+      } else if (state.trained) {
+        what = trainedLine(state.trained);
+      } else {
+        what = "no template yet";
+      }
+      return "c-VEP " + c.bits.length + "-bit code, lag " + c.lagFrames + " frames" +
+        (c.standard ? "" : " (not the standard code)") + " · " + what + " · cycles sent " + state.cycles;
     }
 
     /** HUD lines. */
@@ -368,6 +581,9 @@
       lines.push("refresh " + (state.refreshHz === null ? "measuring…" : state.refreshHz.toFixed(2) + " Hz") +
                  (w ? " (want " + rateList(flicker.refreshRates) + " ± " + w.refresh_tolerance_hz + ")" : "") +
                  " · dropped " + flicker.dropped);
+      const codeLine = codeHud();
+      if (codeLine) lines.push(codeLine);
+      if (state.code && state.decision) lines.push(decisionLine(flicker.targets(), state.decision));
       const s = state.scan;
       if (s) {
         lines.push("scan #" + s.scan_id + (s.ok ? ": " + s.n_candidates + " targets of " + s.n_elements +
@@ -394,12 +610,13 @@
 
     return {
       state, flicker, accept, measured, onState, onClose, onMessage, escape, resume, setVisible,
-      hover, quit, showTargets, frame, remaining, banner, hud, warnings, held,
+      hover, quit, showTargets, frame, remaining, banner, hud, warnings, held, codeMode, cueSlot,
     };
   }
 
   // -------------------------------------------------------------------- the view
 
+  const CUE_COLOR = "#ff3b30";
   const GREYS = [];
   for (let i = 0; i < 256; i++) GREYS.push("rgb(" + i + "," + i + "," + i + ")");
 
@@ -427,9 +644,11 @@
   `;
 
   const WARNING = [
-    "BrainPoint flickers up to four patches over this page, at the frequencies the BrainSync " +
-      "server picks (15, 17, 12 and 20 Hz by default). Flicker between 15 and 25 Hz is the band " +
-      "most likely to trigger a seizure in people with photosensitive epilepsy.",
+    "BrainPoint flickers up to four patches over this page: three white patches that switch " +
+      "between white and black in a fast code (up to 30 changes a second, the BrainSync " +
+      "standard), or, with a frequency server, patches at 15, 17, 12 and 20 Hz. Flicker between " +
+      "15 and 25 Hz is the band most likely to trigger a seizure in people with photosensitive " +
+      "epilepsy, and the code flickers in that band too.",
     "Do you, or does anyone who can see this screen, have epilepsy or a history of seizures? " +
       "If so, press Cancel.",
     "Press Escape at any time to stop the flicker; if Escape does not work, press Alt+Shift+B " +
@@ -511,20 +730,28 @@
       if (view.mode === "hidden") { boxes = []; return; }
       boxes = [];
       const fontPx = Math.max(13, Math.round(0.022 * vh));
-      ctx.font = "600 " + fontPx + "px -apple-system, system-ui, sans-serif";
+      // code mode: monospace, so the confidence bars of the label lines line up
+      ctx.font = view.code ? "600 " + fontPx + "px ui-monospace, Menlo, monospace"
+        : "600 " + fontPx + "px -apple-system, system-ui, sans-serif";
       ctx.textBaseline = "top";
       ctx.textAlign = "left";
       for (const it of view.items) {
         const b = patchBoxes([it], vw, vh)[0];
         if (!b) continue;
         boxes.push(b);
-        const grey = GREYS[Math.max(0, Math.min(255, Math.round(it.lum * 255)))];
+        const fill = it.color || GREYS[Math.max(0, Math.min(255, Math.round(it.lum * 255)))];
         for (const r of b.rects) {
           const pad = borderPx(r);
           ctx.fillStyle = "#000";
           ctx.fillRect(r.x - pad, r.y - pad, r.w + 2 * pad, r.h + 2 * pad);
-          ctx.fillStyle = grey;
+          ctx.fillStyle = fill;
           ctx.fillRect(r.x, r.y, r.w, r.h);
+          if (it.cue) {
+            // the training cue box: red, outside the black border, never over the patch
+            ctx.strokeStyle = CUE_COLOR;
+            ctx.lineWidth = Math.max(4, pad);
+            ctx.strokeRect(r.x - 3 * pad, r.y - 3 * pad, r.w + 6 * pad, r.h + 6 * pad);
+          }
           if (it.flash || it.gaze) {
             ctx.strokeStyle = it.flash ? "#3ddc84" : "#7aa7ff";
             ctx.lineWidth = it.flash ? Math.max(4, pad) : 2;
@@ -533,7 +760,7 @@
         }
         if (!b.rects.length) continue;
         const r = b.rects[0];
-        const text = b.label;
+        const text = it.line || b.label;
         const tw = ctx.measureText(text).width + 12, th = fontPx + 8;
         const at = labelBox(r, tw, th, vw, vh);
         ctx.fillStyle = "rgba(0,0,0,0.8)";
@@ -698,8 +925,9 @@
   }
 
   const api = Object.freeze({
-    CLIENT, HOST_ID, FLASH_MS, CLOSE_TEXT, LABEL_PAD, helloFields, patchBoxes, hitTest, borderPx,
-    labelBox, createModel, create, photosensitive: F.photosensitive,
+    CLIENT, HOST_ID, FLASH_MS, CLOSE_TEXT, LABEL_PAD, TRAINED_SHOW_MS, CUE_COLOR, helloFields,
+    patchBoxes, hitTest, borderPx, labelBox, codeConfig, codeBit, trainLine, trainedLine,
+    confidenceLines, decisionLine, createModel, create, photosensitive: F.photosensitive,
   });
   root.BrainPointOverlay = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
