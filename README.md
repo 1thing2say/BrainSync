@@ -1056,6 +1056,134 @@ HUD, does no per-frame work, and keeps its backdrop up for reels without a predi
 scene does not change after calibration. Still to measure on the headset: decoder
 accuracy and dropped frames with the panel on versus off.
 
+## VEP paradigms: time, frequency and code modulation (Bin et al. 2009)
+
+Everything above is an f-VEP (SSVEP) system: each target flickers at its own frequency.
+Bin, Gao, Wang, Hong and Gao, "VEP-based brain-computer interfaces: time, frequency, and
+code modulations" (IEEE Computational Intelligence Magazine, 2009) sort VEP BCIs into three
+codings, like TDMA, FDMA and CDMA in radio, and `python -m brainsync.vep` runs a demo of
+each on the same board and PsychoPy display:
+
+| Paradigm | Stimulus | Decoder | Config | Paper |
+|---|---|---|---|---|
+| t-VEP | Brief flashes that never overlap; targets flash in rounds of one slot each, so each flashes once a second | Average the 0.5 s after each target's own flashes; the largest peak-to-valley response wins (`vep.tvep`) | `tvep_4` | under 30 bits/min; no online run |
+| f-VEP | Each target at its own frequency; the paper's six: 15, 12, 10, 8.6, 7.5, 6 Hz (4 to 10 frames per cycle) | FFT, SNR of the peak against its neighbouring bins, argmax (`vep.fvep.SNR`, the paper's rule; `--classifier cca` / `fbcca` also work) | `fvep_6` | 85 %, 39.7 bits/min |
+| c-VEP | One 63-bit m-sequence; every target shows it delayed by k lags (the paper: 16 targets, 4-frame lags) | One template trained while looking at square 0, shifted per target, Pearson correlation, argmax (`vep.cvep`) | `cvep_4` (diamond, 16-frame lags), `cvep_2` (two squares), `cvep_16` (the paper's grid) | 91 %, 92.8 bits/min |
+
+```bash
+# plans and synthetic runs (no headset)
+.venv/bin/python -m brainsync.stimulus -c cvep_4 --plan          # the sequences, no display
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --plan          # the two-square pair (YES / NO)
+.venv/bin/python -m brainsync.vep --compare --fake               # all three on the synthetic board
+.venv/bin/python -m brainsync.vep --paradigm code --fake --fast --no-stimulus   # instant dry run
+.venv/bin/python -m brainsync.vep --paradigm code --fake --seconds 120          # 4-square display + fake user
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --fake --seconds 20 --train-cycles 10 --no-voice
+
+# live: Cerelog X8 + the PsychoPy display (train on the first square, then decode)
+.venv/bin/python -m brainsync.vep --paradigm code                # 4 squares in a diamond, cvep_4 (YES / NO / HELP / WATER)
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_3      # 3 white squares in a row (YES / NO / HELP), 350 ms lags
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2      # 2 squares, labels + confidence line
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --cycles 3 --votes 2 --margin 0.1 --train-cycles 40 --seconds 120
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --template data/spectrum_checks/<stamp>_cvep_template.npz
+.venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --no-scores        # bare squares
+.venv/bin/python -m brainsync.vep --paradigm time                # t-VEP, tvep_4
+.venv/bin/python -m brainsync.vep --paradigm freq                # f-VEP, brainsync.demo with the SNR rule
+
+# the display alone, driven by hand: {"flicker": true} to start, then a cue index or
+# {"text": "..."} / {"labels": [...]} lines on stdin
+.venv/bin/python -m brainsync.stimulus -c cvep_2 --free --feedback stdin --labels --hold-still --no-wait
+```
+
+Live-run knobs: `--cycles` (c-VEP cycles averaged per decision, 1.05 s each), `--votes`
+(agreeing decisions before a commit), `--margin` (abstain unless the best target's
+correlation leads by this much; 0 commits on any lead), `--train-cycles` (cycles on the
+first square for the template; its held-out accuracy prints and shows on screen),
+`--template FILE` (skip training), `--seconds`, `--port` (the board's serial port, else
+auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The display
+needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
+venv with PsychoPy is the one described in "Install"; run the commands with its python.
+
+`web/vep-lab/index.html` is a static explainer for an audience: the three codings' stimulus
+sequences, the toy model's responses (the same kernel as `synthetic.vep_kernel`, ported to
+`vep_core.js` and checked against the Python), the paper's Figures 2 to 4 as a flash
+response, a response spectrum and the m-sequence autocorrelation, and a live preview of
+each paradigm's squares behind a photosensitivity warning and a start button. No network,
+no libraries; `node --test web/vep-lab/test/vep_core.test.mjs` runs its tests.
+
+How it fits the code base. A stimulus config may carry a `[code]` table (m-sequence length,
+lag in frames, frames per bit) or a `[time]` table (flash and gap frames, round order)
+instead of frequencies; `brainsync.stimulus.coded` turns either into per-frame luminances
+and the display draws them with the same `play` loop, stamping a `cycle:<n>` marker on
+every m-sequence cycle's first frame and a `flash:<k>` marker on every flash onset,
+because both decoders are onset-locked. `vep.sync.SyncDecoder` buffers samples and
+markers, filters the stretch around each epoch (1 to 30 Hz, the 60 Hz notch) and decides
+at cycle and flash boundaries with the same `Decision` and votes as the sliding f-VEP
+decoder; a marker whose epoch is not in the buffer gives no decision. The c-VEP cycle is
+63 frames, 1.05 s at 60 Hz, 262 samples at 250 Hz; each cycle is cut from its own marker,
+so the half sample per cycle never accumulates, and the lag of 16 frames is 66.7 samples.
+
+The live run starts the display in free-run mode with Unix markers and reads them from
+its log. c-VEP trains first: `--train-cycles` cycles (default 30, about 32 s) with the cue
+box on square 0, the leave-one-cycle-out accuracy printed (the paper's "training
+accuracy", 95 % for c-VEP against 88 % for f-VEP), the template saved as
+`<stamp>_cvep_template.npz` in the recordings folder and reusable with `--template`. Then
+every committed change moves the cue box and speaks the label. The display carries each
+square's label as signage (`cvep_2`, the two-square live pair: YES left, NO right) with a
+confidence bar from the decoder's scores, and a centre line with the lead and the committed
+choice, all redrawn after every decision (`--no-scores` for a bare display). It runs the
+stimulus as `--free --feedback stdin --hold-still --labels` and speaks the display's JSON
+control lines (the same ones the BCI Voice bridge uses): `{"flicker": true}` once to start
+the sequence, then `{"labels": [...]}` and `{"text": ...}` next to the cue index;
+redrawing the text on every flicker frame dropped 1 frame in 7592 on the demo Mac.
+The 4-square demo (`cvep_4`) uses the diamond of the four-target SSVEP studies (top,
+left, right, bottom, `[layout] shape = "diamond"`, `spacing` up and down and a wider
+`spacing_x` to the sides, white squares on black; `[stimulus] fill = [1, 0, 0]` gives the
+figure's red) with the signage YES / NO / HELP /
+WATER: each square's label line carries its bar and score, placed beside its square
+clockwise as in `four_diamond`, and the lead / choice line sits in the free centre. `--fake` swaps the board
+for `vep.fake.SequenceFakeBoard`: a made-up flash VEP (`synthetic.vep_kernel`, a damped
+sine after a 60 ms latency) convolved with the fixated target's sequence, on the posterior
+channels over Gaussian noise, with the markers coming from the fake board itself. It
+checks the pipeline, not anyone's visual cortex, and only the fixated target evokes
+anything (the paper's peripheral targets evoke smaller responses too). `--compare --fake` runs cued trials of
+each paradigm and prints accuracy, abstain rate, seconds per selection and Wolpaw's ITR
+beside the paper's figures; `--amp` and `--noise` set how easy the data are.
+
+What to expect on the headset, and why the defaults differ from the paper:
+
+- The paper had 47 channels, Oz with a tuned bipolar reference, and a CRT; this is four
+  dry posterior electrodes. c-VEP leans on timing, so `cvep_4` spreads four targets 16
+  frames (267 ms) apart, the widest four lags allow in a 63-frame cycle, where a one-frame
+  slip costs nothing; the 16-target grid with 4-frame lags (67 ms) is `cvep_16` for the
+  brave. The paper's wrap-around border is not drawn.
+- First headset runs (2026-10-25, `cvep_2`, one wearer, no alpha check first): the
+  template's held-out accuracy was 63 % and then 52 % (chance 50 %). The first run's mean
+  cycle was 140-420 uV RMS per channel, 20-40 times EEG, so the occipital electrodes were
+  not in contact; the second was 7-12 uV but held no stimulus-locked response after 40
+  cycles. With a chance template the live correlations are noise against noise, and the
+  decoder alternates YES / NO every few seconds whatever the margin. Settle the headset
+  (20 min, gel on O1 / O2), pass the eyes-closed alpha check, and fixate the square's
+  centre during training before reading anything into a live c-VEP run.
+- Marker-to-sample alignment has not been measured on the demo Mac (PLAN.md V5). A constant
+  offset is absorbed by training; jitter between cycles is not. Run a live or fake run with
+  `--save` (every sample plus the marker text go to `<stamp>_vep.npz`, and the demo prints
+  the stimulus log's path), then `python -m brainsync.vep.timing <that file> [-c cvep_2]`:
+  PASS / WARN / FAIL lines for the cycle (or flash) spacing against the config's grid
+  (1.0500 s a cycle; a single dropped frame is a WARN, a two-frame slip a FAIL), the marker
+  clock's drift in ppm, every marker's gap to the nearest sample (under one sample period),
+  the markers inside the recording, the board's sample rate against 250 Hz, and the log's
+  measured refresh and dropped-frame summary. Exit 0 means nothing failed. It cannot see
+  the flip-to-photons latency of the panel; that is a constant and a photodiode's job.
+- `tvep_4` flashes each target once a second (`config_warnings` flags a `[time]` table
+  above 4 Hz per target). The paper's 4 Hz bound keeps one target's consecutive responses
+  apart; here the screen as a whole flashes four times a second, so a 0.5 s epoch also
+  holds the start of another target's response, which the per-target average cancels. A
+  decision needs at least `--min-flashes` rounds: slow, as in the paper.
+- `fvep_6` is on/off flicker as on the paper's CRT, so its 5- and 7-frame cycles have an
+  uneven duty cycle (warned), and 10 Hz sits on the user's alpha (PLAN.md section 14).
+- Safety: an m-sequence is broadband and includes 15 to 25 Hz, and t-VEP is bright brief
+  flashes. The photosensitivity warning and Escape apply unchanged.
+
 ## Module map
 
 | Module | Role |
@@ -1105,6 +1233,16 @@ accuracy and dropped frames with the panel on versus off.
 | `brainsync/heatmap/` | Optional TRIBE v2 predicted-brain panel frames for the Reels demo (own venv) |
 | `brainsync/brainmap/` | Live scalp map: electrode layout, per-window band power, SNR and contact quality, frame stream and replay, stdlib SSE server, CLI |
 | `extension/brainmap/` | The live map's page: `index.html` and `map.js` (interpolation, colour scales, message checks, DOM; tested with node) |
+| `brainsync/vep/codes.py` | m-sequences (LFSR), lagged code matrices, non-overlapping flash schedules (Bin et al. 2009) |
+| `brainsync/stimulus/coded.py` | c-VEP and t-VEP frames from `[code]` / `[time]` configs, `cycle:<n>` and `flash:<k>` markers |
+| `brainsync/vep/fvep.py` | `SNR`: the paper's FFT peak-SNR f-VEP rule in the CCA interface |
+| `brainsync/vep/cvep.py` | c-VEP `Template`: fit from cued cycles, shift per target, correlate, leave-one-out, save / load |
+| `brainsync/vep/tvep.py` | `FlashAverager`: flash-locked averages, peak-to-valley amplitude, abstain until enough flashes |
+| `brainsync/vep/sync.py` | `cut_epochs` at marker times; `SyncDecoder`, the live c-VEP / t-VEP decoder over samples and markers |
+| `brainsync/vep/fake.py` | `SequenceFakeBoard`: synthetic board that follows a coded stimulus and emits its markers |
+| `brainsync/vep/__main__.py` | `python -m brainsync.vep`: live t-VEP / f-VEP / c-VEP demos, c-VEP training, `--save`, `--compare` table |
+| `brainsync/vep/timing.py` | `python -m brainsync.vep.timing`: marker spacing, drift and marker-to-sample alignment of a run, PASS / WARN / FAIL |
+| `web/vep-lab/` | The three codings explained: sequences, toy responses, the paper's figures, a live preview (`vep_core.js` tested with node) |
 | `app/` | BCI Voice server: FastAPI, the orchestrator (pages, trials, confirm step), Claude pages, Cartesia clips, the session log, `--bridge` |
 | `brainsync/voice_bridge.py` | BCI Voice bridge: board, decoder and display over protocol 2 (`INTERFACE-v2-draft.md`) |
 | `brainsync/stimulus/configs/four_diamond.toml` | BCI Voice page mode: 13/15/17/11 Hz in a diamond, fixation marks, the 4-target gate session |
@@ -1141,6 +1279,20 @@ BrainSwipe adds 220: `test_swipe.py` 53, `test_swipe_cli.py` 29, `test_swipe_web
 run the whole swipe loop on the fake board. They check that stale windows never vote, that the
 voice line names the profile on screen, and that a card or flash command never changes a
 square's luminance.
+
+The VEP paradigms add 96: `test_vep_codes.py` 33 (every listed m-sequence has full period
+and the N / -1 autocorrelation, lagged codes are mutually orthogonal, flashes never
+overlap, the `[code]` / `[time]` tables validate), `test_vep_frames.py` 12 (frame
+luminances equal the code matrix, cycle and flash markers land on the flip times, the CLI
+plans, labels and refuses flicker-only flags), `test_vep_fake.py` 6 (the kernel's shape, a
+stream free of chunking artifacts, the response tells the fixated target apart),
+`test_vep_decoders.py` 10 (SNR, Template, FlashAverager and SyncDecoder each above 90 %
+on synthetic data, the SNR ring clear of the Hann lobe, abstention without enough flashes
+or without a marker), `test_vep_cli.py` 12 (fake live runs of all three paradigms that
+follow the fake user's gaze, the confidence text, `--save`, the comparison table, the
+argument checks), `test_vep_timing.py` 14 (slips, drift, markers against samples, the
+CLI's exit codes) and `test_vep_lab.py` 9 (the explainer page has no external URL, its JS
+m-sequence and kernel match the Python bit for bit, its node tests pass).
 
 The client/server split and BrainPoint add 929 Python tests and 153 node tests
 (`node --test 'clients/js/test/*.test.mjs' 'clients/chrome/test/*.test.mjs'`):

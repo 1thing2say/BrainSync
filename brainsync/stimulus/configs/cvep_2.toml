@@ -1,0 +1,37 @@
+# c-VEP (Bin et al. 2009) with two targets, the live-demo pair: one 63-bit m-sequence, the
+# right square shows it delayed by 31 frames (517 ms, the widest spacing two lags allow in a
+# 63-frame cycle), so timing slips of several frames cost nothing. Same layout as
+# two_targets: two large squares one screen height apart (YES left, NO right), the cue box held on
+# through the run. Each cycle is 63 frames = 1.05 s at 60 Hz.
+name = "cvep_2"
+
+[targets]
+labels = ["YES", "NO"]   # the signage under each square, and what is spoken
+
+[code]
+length = 63
+lag_frames = 31
+frames_per_bit = 1
+
+[layout]
+rows = 1
+cols = 2
+size = 0.4      # side length, screen heights
+spacing = 1.0   # centre to centre, screen heights
+
+[stimulus]
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

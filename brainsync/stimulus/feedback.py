@@ -38,7 +38,7 @@ import dataclasses
 import json
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
@@ -77,9 +77,14 @@ class Control:
     flickering: tuple[int, ...] = ()
 
 
-def initial_control(n_targets: int) -> Control:
-    """Before any JSON line: no text, every target active, nothing flickering."""
-    return Control(labels=("",) * n_targets, active=tuple(range(n_targets)))
+def initial_control(n_targets: int, labels: Sequence[str] = ()) -> Control:
+    """Before any JSON line: no text, every target active, nothing flickering. ``labels``
+    (one per target) is the text beside the squares until a {"labels": ...} line; none by
+    default."""
+    if labels and len(labels) != n_targets:
+        raise ValueError(f"{len(labels)} labels for {n_targets} targets")
+    return Control(labels=tuple(labels) if labels else ("",) * n_targets,
+                   active=tuple(range(n_targets)))
 
 
 def parse_control(text: str, n_targets: int) -> dict[str, Any]:
@@ -187,11 +192,13 @@ class FeedbackReader:
     """Holds the latest cue, card and flash read from ``stream``; ``done`` once it hits EOF.
 
     ``n_cards`` is how many card images the display has loaded (0: none, so every card
-    line is refused).
+    line is refused). ``labels`` is the text beside the squares until a {"labels": ...}
+    line replaces it (see initial_control).
     """
 
     def __init__(self, stream: TextIO, n_targets: int,
-                 note: Callable[[str], None] = _stderr_note, n_cards: int = 0) -> None:
+                 note: Callable[[str], None] = _stderr_note, n_cards: int = 0,
+                 labels: Sequence[str] = ()) -> None:
         if n_targets < 1:
             raise ValueError(f"need at least one target, got {n_targets}")
         if n_cards < 0:
@@ -205,7 +212,7 @@ class FeedbackReader:
         # one tuple, replaced whole, so the display never reads a target from one flash
         # with the serial of another
         self._flash = (NONE, 0)
-        self._control = initial_control(n_targets)
+        self._control = initial_control(n_targets, labels)
         self._eof = threading.Event()
         self._heard = threading.Event()
         self._thread: threading.Thread | None = None

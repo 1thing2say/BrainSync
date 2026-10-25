@@ -30,8 +30,10 @@ from typing import Protocol, TextIO
 import numpy as np
 
 from .config import StimulusConfig, Trial, card_overlap
+from ..vep.codes import bit_luminance
 from .feedback import Control
-from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
+from .flicker import (dropped_frames, frame_luminances, n_frames, to_psychopy_fill,
+                      to_psychopy_rgb)
 
 # The flash box's line is this many times the cue box's, so a swipe reads at a glance.
 FLASH_LINE_SCALE = 2.0
@@ -131,10 +133,14 @@ def still_luminances(cfg: StimulusConfig) -> np.ndarray:
     """What the targets show between flickers: the flicker's frame 0, so onset has no jump.
 
     A mixed-condition session shows mid-grey 0.5 instead (the mean of every waveform at
-    every depth), so the still screen is the same whatever condition comes next.
+    every depth), so the still screen is the same whatever condition comes next. A [code]
+    config also rests at 0.5 (the m-sequence is bright half the time); a [time] config
+    rests at its "off" level (0.5 - depth / 2), since a flash is the only bright state.
     """
-    if cfg.conditions:
+    if cfg.conditions or cfg.code is not None:
         return np.full(cfg.n_targets, 0.5)
+    if cfg.time is not None:
+        return bit_luminance(np.zeros(cfg.n_targets), cfg.depth)
     return frame_luminances(cfg.freqs, cfg.phases, 0, cfg.refresh, cfg.waveform, cfg.depth)
 
 
@@ -199,7 +205,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 hold: Callable[[], bool] | None = None,
                 card: Callable[[], int] | None = None,
                 flash: Callable[[], tuple[int, int]] | None = None,
-                control: Callable[[], Control] | None = None) -> Iterator[Frame]:
+                control: Callable[[], Control] | None = None,
+                seq: FrameSequence | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
@@ -219,10 +226,25 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
     after it "flicker_off"; the frames of each flicker run share a ``trial`` number (0, 1,
     ...), so play() times every run and counts its dropped frames. The cue box follows
     ``cue`` on every frame, and the labels and centre text show on every frame (hidden
-    while flickering with [stimulus] labels_during_flicker = false).
+    while flickering with [stimulus] labels_during_flicker = false). Before the first JSON
+    line the labels are the Control's starting ones (FeedbackReader ``labels``).
+
+    ``seq`` replaces the frequency flicker for a [code] or [time] config
+    (brainsync.stimulus.coded): flicker frame ``i`` of a run shows ``seq.luminance(i)`` and
+    carries ``seq.events(i)`` (cycle:<n>, flash:<k>), the still screen is ``seq.still``, and
+    every flicker-on restarts the sequence.
     """
     r = cfg.refresh
-    still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform, cfg.depth)
+    if seq is None:
+        still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform, cfg.depth)
+
+        def lum_at(i: int) -> np.ndarray:
+            return frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth)
+
+        def events_at(i: int) -> tuple[str, ...]:
+            return ()
+    else:
+        still, lum_at, events_at = seq.still, seq.luminance, seq.events
     total = None if seconds is None else n_frames(seconds, r)
     flash_len = n_frames(cfg.card_spec.flash_s, r)
     holding = hold is not None
@@ -252,6 +274,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
             if ctl.flicker and ctl.serial != run_serial:
                 # a new flicker-on: phase back to 0, only the targets active right now
                 run_serial, run, i, flickering = ctl.serial, run + 1, 0, True
+                if seq is not None:
+                    seq.restart()
                 mask = np.zeros(cfg.n_targets, dtype=bool)
                 mask[list(ctl.flickering)] = True
                 events = (FLICKER_ON,)
@@ -265,22 +289,32 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 yield Frame(still, cue=k, events=events, card=image, flash=lit,
                             labels=labels, centre=centre)
                 continue
-            lum = np.where(mask, frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform,
-                                                  cfg.depth), still)
-            yield Frame(lum, cue=k, events=events, trial=run, card=image, flash=lit,
-                        labels=labels, centre=centre)
+            lum = np.where(mask, lum_at(i), still)
+            yield Frame(lum, cue=k, events=events + events_at(i), trial=run, card=image,
+                        flash=lit, labels=labels, centre=centre)
             i += 1
             shown += 1
             continue
+        start = ctl.labels if ctl is not None else ()
         if held:
-            yield Frame(still, card=image, flash=lit)
+            yield Frame(still, card=image, flash=lit, labels=start)
             continue
         holding, flickering = False, True
         k = cue() if cue is not None else -1
-        yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
-                    cue=k, card=image, flash=lit)
+        yield Frame(lum_at(i), cue=k, events=events_at(i), card=image, flash=lit,
+                    labels=start if cfg.labels_during_flicker else ())
         i += 1
         shown += 1
+
+
+class FrameSequence(Protocol):
+    """A coded stimulus (brainsync.stimulus.coded) as free_frames draws it."""
+
+    still: np.ndarray
+
+    def restart(self) -> None: ...
+    def luminance(self, i: int) -> np.ndarray: ...
+    def events(self, i: int) -> tuple[str, ...]: ...
 
 
 @dataclass
@@ -442,10 +476,12 @@ class TextBox:
 def _label_side(cfg: StimulusConfig, k: int) -> str:
     """Which side of target ``k`` its sentence goes on.
 
-    In a single row every sentence goes below its square. Otherwise each one goes on the
-    side a clockwise turn around the layout's centre points to (top square: right, right
-    square: below, bottom: left, left: above), so in the diamond each sentence gets a
-    corner of the screen to itself and none crosses another square.
+    In a single row every sentence goes below its square. In a grid of several rows and
+    columns each one goes to the outer side of its square (left half: left, right half:
+    right, a middle column: below), clear of the squares above and below it. Otherwise each
+    one goes on the side a clockwise turn around the layout's centre points to (top square:
+    right, right square: below, bottom: left, left: above), so in the diamond each sentence
+    gets a corner of the screen to itself and none crosses another square.
     """
     xs = [t.pos[0] for t in cfg.targets]
     ys = [t.pos[1] for t in cfg.targets]
@@ -454,6 +490,8 @@ def _label_side(cfg: StimulusConfig, k: int) -> str:
         return "below"
     x, y = cfg.targets[k].pos
     dx, dy = x - cx, y - cy
+    if cfg.shape == "grid" and not cfg.positioned and cfg.rows > 1 and cfg.cols > 1:
+        return "below" if abs(dx) < 1e-9 else "right" if dx > 0 else "left"
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return "below"
     tx, ty = dy, -dx   # clockwise tangent
@@ -511,9 +549,10 @@ def text_boxes(cfg: StimulusConfig, aspect: float | None = None
     below = [t.pos[1] + reach for t in cfg.targets
              if t.pos[1] < cy and abs(t.pos[0] - cx) < reach + width / 2.0]
     tall = min(above, default=half_h) - max(below, default=-half_h) - 2.0 * gap
-    if width >= CENTRE_TEXT_MIN_WRAP and tall >= hc:
+    if width >= CENTRE_TEXT_MIN_WRAP and tall >= CENTRE_TEXT_HEIGHT * LINE_SPACING:
+        # between the squares, with fewer lines when the gap is too low for all of them
         x = min(max(cx, -half_w + width / 2.0), half_w - width / 2.0)   # stay on screen
-        centre = TextBox((x, cy), width, hc, ("center", "center"), "center")
+        centre = TextBox((x, cy), width, min(hc, tall), ("center", "center"), "center")
     else:
         # a square on the centre: the line goes along the bottom of the screen instead
         centre = TextBox((0.0, -half_h), min(CENTRE_TEXT_WRAP * 2.0, 2.0 * half_w), hc,
@@ -640,7 +679,8 @@ class PsychoPyRenderer:
     The decoder's sentences (one TextStim per target, placed by text_boxes for this
     window's aspect) and its centre line are created once, empty, and drawn only while
     they hold text. With [stimulus] fixation each square gets a small plus in the cue
-    colour at its centre, drawn over the square on every frame.
+    colour at its centre, drawn over the square on every frame. The squares are grey unless
+    the config's [stimulus] fill tints them.
     """
 
     def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = ()) -> None:
@@ -749,7 +789,7 @@ class PsychoPyRenderer:
         if 0 <= card < len(self.cards):
             self.cards[card].draw()
         for k, square in enumerate(self.squares):
-            square.fillColor = to_psychopy_rgb(lum[k])
+            square.fillColor = to_psychopy_fill(lum[k], self.cfg.fill)
             square.draw()
         for mark in self.fixations:
             mark.draw()

@@ -1,0 +1,43 @@
+# c-VEP (Bin et al. 2009) with four targets in the diamond of the four-target SSVEP
+# studies (top, left, right, bottom; the Nakanishi et al. 2013 layout, the centre free;
+# white squares here, red in the paper's figure): one 63-bit m-sequence, every square shows it delayed by
+# k * 16 frames (267 ms apart, the widest spacing four lags allow in a 63-frame cycle),
+# so a one-frame timing slip costs nothing. Each cycle lasts 63 frames = 1.05 s at 60 Hz;
+# the decoder correlates every cycle with one trained template shifted per target.
+# The labels are the demo's signage (spoken on a commit); the confidence bars sit under
+# each square and the lead / choice line in the free centre, clear of a MacBook's notch.
+# cvep_16 is the paper's 4 x 4 grid.
+name = "cvep_4"
+
+[targets]
+labels = ["YES", "NO", "HELP", "WATER"]   # top, left, right, bottom
+
+[code]
+length = 63
+lag_frames = 16
+frames_per_bit = 1
+
+[layout]
+shape = "diamond"
+size = 0.18       # side, screen heights (about 3.4 cm on a 14-inch MacBook)
+spacing = 0.32    # top and bottom squares from the centre: as far as the notch above
+                  # and the bottom square's label below allow
+spacing_x = 0.55  # left and right squares from the centre (a 1.54:1 screen has the room)
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white; [1, 0, 0] is red on black, as in the four-target studies
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

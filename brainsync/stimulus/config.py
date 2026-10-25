@@ -42,6 +42,18 @@ A session can also mix flicker conditions (``conditions``, set from the stimulus
 --conditions, never from TOML): each one is a waveform and depth, such as "square:1" or
 "sine:0.5". Every block then cues every (condition, target) pair once, and each trial
 flickers with its own condition instead of [stimulus] waveform and depth.
+
+Two optional tables pick another VEP coding (Bin et al. 2009) instead of frequencies; a
+config has at most one of them, and with either ``[targets] freqs`` may be left out (the
+targets are then ``labels``, or ``count`` of them):
+
+    [code]  length = 63; lag_frames = 4; frames_per_bit = 1    # c-VEP: one m-sequence,
+                                                               # target k delayed k * lag
+    [time]  flash_frames = 2; gap_frames = 13; order = "random"  # t-VEP: flashes in
+                                                               # rounds, never overlapping
+
+``paradigm`` is then "code" or "time" ("freq" for an ordinary flicker config), and the
+targets' ``freq`` is nan.
 """
 from __future__ import annotations
 
@@ -55,18 +67,24 @@ from typing import Any
 
 import numpy as np
 
+from ..vep.codes import ORDERS, degree_for_length, flash_rate_hz
 from .flicker import WAVEFORMS, photosensitive, square_duty_even
 
 CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 DEFAULT_CONFIG = "two_targets"
+PARADIGMS = ("freq", "time", "code")
 _TWO_PI = 2.0 * math.pi
 _PHASE_TOL = 1e-9
 
 _KEYS: dict[str, frozenset[str]] = {
-    "targets": frozenset({"freqs", "phases_pi", "labels"}),
-    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "positions"}),
+    "targets": frozenset({"freqs", "phases_pi", "labels", "count"}),
+    "code": frozenset({"length", "lag_frames", "frames_per_bit"}),
+    "time": frozenset({"flash_frames", "gap_frames", "order"}),
+    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "shape", "spacing_x",
+                         "positions"}),
     "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px",
-                           "depth", "fixation", "fixation_size", "labels_during_flicker"}),
+                           "depth", "fill", "fixation", "fixation_size",
+                           "labels_during_flicker"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
@@ -141,6 +159,35 @@ class Condition:
 
 
 @dataclass(frozen=True)
+class CodeSpec:
+    """c-VEP: one m-sequence of ``length`` bits, each bit shown for ``frames_per_bit``
+    frames; target k shows it delayed by ``k * lag_frames`` frames."""
+
+    length: int = 63
+    lag_frames: int = 4
+    frames_per_bit: int = 1
+
+    @property
+    def cycle_frames(self) -> int:
+        return self.length * self.frames_per_bit
+
+
+@dataclass(frozen=True)
+class TimeSpec:
+    """t-VEP: flashes of ``flash_frames`` bright frames in slots of ``flash_frames +
+    gap_frames``; every round flashes each target once, in ``order`` (roundrobin or
+    random)."""
+
+    flash_frames: int = 2
+    gap_frames: int = 13
+    order: str = "random"
+
+    @property
+    def slot_frames(self) -> int:
+        return self.flash_frames + self.gap_frames
+
+
+@dataclass(frozen=True)
 class StimulusConfig:
     name: str
     targets: tuple[Target, ...]
@@ -157,13 +204,29 @@ class StimulusConfig:
     cols: int = 1
     spacing: float = 0.0
     x_offset: float = 0.0   # screen heights the grid is shifted right (negative: left)
+    shape: str = "grid"     # or "diamond": 4 targets at top, left, right, bottom
+    spacing_x: float = 0.0  # diamond: the left and right squares' distance from the centre
+                            # (default: spacing); the screen is wider than it is high
+    fill: tuple[float, float, float] = (1.0, 1.0, 1.0)   # per-channel tint of the squares
     path: Path | None = None
     card: Card | None = None   # None: the config has no [card] table
     conditions: tuple[Condition, ...] = ()   # mixed per trial; empty: waveform and depth
+    code: CodeSpec | None = None   # the [code] table (c-VEP), else None
+    time: TimeSpec | None = None   # the [time] table (t-VEP), else None
     positioned: bool = False   # True: [layout] positions placed the targets, not the grid
     fixation: bool = False     # a small mark at the centre of every square
     fixation_size: float = 0.03   # the mark's width, screen heights
     labels_during_flicker: bool = True   # decoder-sent text stays up while flickering
+
+    @property
+    def paradigm(self) -> str:
+        """"code" (c-VEP), "time" (t-VEP) or "freq" (flicker frequencies)."""
+        return "code" if self.code is not None else "time" if self.time is not None else "freq"
+
+    @property
+    def coded(self) -> bool:
+        """True for a [code] or [time] config, whose targets have no flicker frequency."""
+        return self.paradigm != "freq"
 
     @property
     def card_spec(self) -> Card:
@@ -347,6 +410,18 @@ def load_config(name_or_path: str | Path = DEFAULT_CONFIG) -> StimulusConfig:
     return parse_config(data, default_name=path.stem, path=path)
 
 
+def diamond_positions(n: int, spacing: float,
+                      spacing_x: float | None = None) -> list[tuple[float, float]]:
+    """Four targets at top, left, right, bottom (the layout of the four-target SSVEP
+    studies, e.g. Nakanishi et al. 2013): ``spacing`` from the centre up and down,
+    ``spacing_x`` (default ``spacing``) to the sides."""
+    if n != 4:
+        raise ValueError(f"[layout] shape = \"diamond\" needs 4 targets, got {n}")
+    sy = float(spacing)
+    sx = sy if spacing_x is None else float(spacing_x)
+    return [(0.0, sy), (-sx, 0.0), (sx, 0.0), (0.0, -sy)]
+
+
 def grid_positions(n: int, rows: int, cols: int, spacing: float) -> list[tuple[float, float]]:
     """Centres of ``n`` cells filled row by row from the top left, grid centred on (0, 0)."""
     if rows < 1 or cols < 1:
@@ -373,17 +448,40 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     tg, lay, stim, disp, ses = (_Table(data, k) for k in
                                 ("targets", "layout", "stimulus", "display", "session"))
 
-    if "freqs" not in tg:
+    if "code" in data and "time" in data:
+        raise ValueError("a config has [code] (c-VEP) or [time] (t-VEP), not both")
+    code = time = None
+    if "code" in data:
+        ct = _Table(data, "code")
+        code = CodeSpec(length=ct.integer("length", 63), lag_frames=ct.integer("lag_frames", 4),
+                        frames_per_bit=ct.integer("frames_per_bit", 1))
+    if "time" in data:
+        tt = _Table(data, "time")
+        time = TimeSpec(flash_frames=tt.integer("flash_frames", 2),
+                        gap_frames=tt.integer("gap_frames", 13), order=tt.text("order", "random"))
+    coded = code is not None or time is not None
+
+    if "freqs" in tg:
+        freqs = tg.numbers("freqs")
+        n = len(freqs)
+        if n == 0:
+            raise ValueError("[targets] freqs is empty")
+        if "count" in tg and tg.integer("count", n) != n:
+            raise ValueError(f"[targets] count {tg.integer('count', n)} disagrees with "
+                             f"{n} freqs")
+    elif not coded:
         raise ValueError("[targets] needs freqs")
-    freqs = tg.numbers("freqs")
-    n = len(freqs)
-    if n == 0:
-        raise ValueError("[targets] freqs is empty")
+    else:
+        n = tg.integer("count", len(tg.texts("labels", [])))
+        if n < 1:
+            raise ValueError("[targets] needs labels or count with [code] or [time]")
+        freqs = [math.nan] * n
     phases_pi = tg.numbers("phases_pi", [0.0] * n)
-    labels = tg.texts("labels", [f"{f:g}" for f in freqs])
+    labels = tg.texts("labels", [str(k) for k in range(n)] if coded
+                      else [f"{f:g}" for f in freqs])
     for what, got in (("phases_pi", len(phases_pi)), ("labels", len(labels))):
         if got != n:
-            raise ValueError(f"[targets] has {got} {what} for {n} freqs")
+            raise ValueError(f"[targets] has {got} {what} for {n} target(s)")
 
     positioned = "positions" in lay
     if positioned:
@@ -397,10 +495,24 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     x_offset = lay.number("x_offset", 0.0)
     if not math.isfinite(x_offset):
         raise ValueError(f"[layout] x_offset must be finite, got {x_offset}")
+    shape = lay.text("shape", "grid")
+    if shape not in ("grid", "diamond"):
+        raise ValueError(f'[layout] shape must be "grid" or "diamond", got {shape!r}')
+    if positioned and "shape" in lay:
+        raise ValueError("[layout] positions places the targets by hand; drop shape")
+    spacing_x = lay.number("spacing_x", spacing)
+    if "spacing_x" in data.get("layout", {}) and shape != "diamond":
+        raise ValueError('[layout] spacing_x is for shape = "diamond"')
+    fill = stim.numbers("fill", [1.0, 1.0, 1.0])
+    if len(fill) != 3 or not all(0.0 <= v <= 1.0 for v in fill) or max(fill) <= 0.0:
+        raise ValueError(f"[stimulus] fill must be three values in [0, 1], not all 0, "
+                         f"got {fill}")
     if positioned:
         given = lay.points("positions")
         if len(given) != n:
-            raise ValueError(f"[layout] has {len(given)} positions for {n} freqs")
+            raise ValueError(f"[layout] has {len(given)} positions for {n} target(s)")
+    elif shape == "diamond":
+        given = diamond_positions(n, spacing, spacing_x)
     else:
         given = grid_positions(n, rows, cols, spacing)
 
@@ -440,8 +552,13 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         cols=cols,
         spacing=spacing,
         x_offset=x_offset,
+        shape=shape,
+        spacing_x=spacing_x,
+        fill=(fill[0], fill[1], fill[2]),
         path=path,
         card=card,
+        code=code,
+        time=time,
         positioned=positioned,
         fixation=stim.flag("fixation", False),
         fixation_size=stim.number("fixation_size", 0.03),
@@ -474,6 +591,32 @@ def _check_targets(cfg: StimulusConfig) -> None:
                                  f"{b.phase / math.pi:g} pi), so they are the same stimulus")
 
 
+def _check_coding(cfg: StimulusConfig) -> None:
+    """The [code] or [time] table against the target count."""
+    if any(math.isfinite(t.freq) for t in cfg.targets):
+        raise ValueError(f"[targets] freqs do not apply to a [{cfg.paradigm}] config; drop "
+                         "them (use labels or count)")
+    if cfg.code is not None:
+        c = cfg.code
+        degree_for_length(c.length)   # raises for anything but 2^n - 1
+        for key in ("lag_frames", "frames_per_bit"):
+            if getattr(c, key) < 1:
+                raise ValueError(f"[code] {key} must be >= 1, got {getattr(c, key)}")
+        if (cfg.n_targets - 1) * c.lag_frames >= c.cycle_frames:
+            raise ValueError(f"[code] {cfg.n_targets} targets {c.lag_frames} frames apart "
+                             f"need {(cfg.n_targets - 1) * c.lag_frames + 1} frames, but one "
+                             f"cycle has {c.cycle_frames}; fewer targets, a shorter "
+                             "lag_frames or a longer length")
+    if cfg.time is not None:
+        t = cfg.time
+        if t.flash_frames < 1:
+            raise ValueError(f"[time] flash_frames must be >= 1, got {t.flash_frames}")
+        if t.gap_frames < 0:
+            raise ValueError(f"[time] gap_frames must be >= 0, got {t.gap_frames}")
+        if t.order not in ORDERS:
+            raise ValueError(f"[time] unknown order {t.order!r}; expected one of {ORDERS}")
+
+
 def _check_geometry(cfg: StimulusConfig) -> None:
     if cfg.size <= 0:
         raise ValueError(f"[layout] size must be positive, got {cfg.size}")
@@ -483,6 +626,10 @@ def _check_geometry(cfg: StimulusConfig) -> None:
     if cfg.n_targets > 1 and not cfg.positioned and cfg.spacing < cfg.size:
         raise ValueError(f"[layout] spacing {cfg.spacing:g} < size {cfg.size:g}: "
                          "targets would overlap")
+    if cfg.shape == "diamond" and cfg.spacing_x < cfg.size and cfg.spacing < cfg.size:
+        raise ValueError(f"[layout] diamond spacing {cfg.spacing:g} and spacing_x "
+                         f"{cfg.spacing_x:g} are both under size {cfg.size:g}: "
+                         "neighbouring squares would overlap")
     for i, a in enumerate(cfg.targets):
         for b in cfg.targets[i + 1:]:
             if (abs(a.pos[0] - b.pos[0]) < cfg.size - 1e-9
@@ -581,7 +728,10 @@ def validate(cfg: StimulusConfig) -> None:
     if not 0.0 <= d.background <= 1.0:
         raise ValueError(f"[display] background must be a luminance in [0, 1], got "
                          f"{d.background}")
-    _check_targets(cfg)
+    if cfg.coded:
+        _check_coding(cfg)
+    else:
+        _check_targets(cfg)
     _check_geometry(cfg)
     _check_card(cfg)
     s = cfg.session
@@ -605,7 +755,19 @@ def config_warnings(cfg: StimulusConfig) -> list[str]:
         notes.append(f"photosensitivity: {listed} Hz lies inside 15-25 Hz, where flicker "
                      "is most likely to provoke a seizure in photosensitive people; ask "
                      "about epilepsy before every session")
-    if cfg.waveform == "square" or any(c.waveform == "square" for c in cfg.conditions):
+    if cfg.code is not None:
+        notes.append("photosensitivity: an m-sequence flicker is broadband and includes the "
+                     "15-25 Hz band most likely to provoke a seizure in photosensitive "
+                     "people; ask about epilepsy before every session")
+    elif cfg.time is not None:
+        hz = flash_rate_hz(cfg.n_targets, cfg.time.flash_frames, cfg.time.gap_frames,
+                           cfg.refresh)
+        if hz > 4.0:
+            notes.append(f"t-VEP: each target flashes {hz:.2f} times a second, above the "
+                         "4 Hz where consecutive flash responses start to overlap; raise "
+                         "[time] gap_frames")
+    if not cfg.coded and (cfg.waveform == "square"
+                          or any(c.waveform == "square" for c in cfg.conditions)):
         hz = cfg.refresh
         for t in cfg.targets:
             if not square_duty_even(t.freq, hz):
