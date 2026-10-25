@@ -362,7 +362,9 @@ from brainsync.synthetic import ssvep_trials  # noqa: E402
 
 def trained_model(periodic: bool | None = None):
     X, y = ssvep_trials(FREQS, FS, n_per_target=4, seconds=2.0, snr_db=0.0, seed=3)
-    return make("etrca", freqs=FREQS, fs=FS, periodic=periodic).fit(preprocess(X, FS), y)
+    # windows cut at onset + latency, as online.trained_from_recording cuts them
+    return make("etrca-sf", freqs=FREQS, fs=FS, periodic=periodic).fit(preprocess(X, FS), y,
+                                                                        LATENCY_S)
 
 
 def test_build_decoder_with_a_trained_model():
@@ -371,7 +373,7 @@ def test_build_decoder_with_a_trained_model():
     clf = dec.classifier
     assert isinstance(clf, ETRCA) and clf.freqs.tolist() == [17.0, 15.0]
     assert clf.margin == TUNED.margin and clf.threshold == TUNED.threshold
-    assert dec.uses_offsets and dec.window_s == TUNED.window_s
+    assert dec.needs_onset and dec.window_s == TUNED.window_s
     assert model.n_targets == 4                          # the model itself is untouched
     with pytest.raises(ValueError, match="not one of the trained"):
         build_decoder((15.0, 11.0), (0.0, 0.0), trained=model)
@@ -391,15 +393,19 @@ def test_bank_with_trained_model_aligns_to_the_onset(calib):
     bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
     dec = bank.decoder
     assert isinstance(dec.classifier, ETRCA) and dec.classifier.has_baseline
-    assert dec.aligned and dec._align == pytest.approx(T0 + 6.0 + LATENCY_S)
+    assert dec.onset == pytest.approx(T0 + 6.0)
     bank.set_onset(T0 + 6.5)
-    assert dec._align == pytest.approx(T0 + 6.5 + LATENCY_S)
+    assert dec.onset == pytest.approx(T0 + 6.5) and bank.gate == pytest.approx(T0 + 6.5 + LATENCY_S)
     board = FakeBoard(FREQS, seed=1, t0=T0 + 6.0)
     board.set_target(0)
     out = stream(bank, board, 4.0)
     assert out and all(d.scores.shape == (2,) for d in out)
     with pytest.raises(ValueError, match="either a decoder factory or a trained"):
         DecoderBank(factory=lambda f, p: build_decoder(f, p), trained=model)
+    with pytest.raises(ValueError, match="either a saved model or a trained"):
+        DecoderBank(model="calibrated.npz", trained=model)          # --decoder-model and --trained
+    with pytest.raises(ValueError, match="either a saved model or a trained"):
+        build_decoder((15.0, 17.0), (0.0, 0.0), model="calibrated.npz", trained=model)
 
 
 def test_learn_adds_a_confirmed_trial_and_rebuilds_the_decoder(calib):
@@ -418,8 +424,8 @@ def test_learn_adds_a_confirmed_trial_and_rebuilds_the_decoder(calib):
     assert bank.learn(15.0, bank.gate) is True
     assert model.n_train.tolist() == [before[0] + 1, *before[1:]]
     new = bank.decoder
-    assert new is not old and new.classifier.has_baseline and new.aligned
-    assert new._align == pytest.approx(bank.gate) and new.classifier.freqs.tolist() == [15.0, 17.0]
+    assert new is not old and new.classifier.has_baseline and new.onset == old.onset
+    assert new.onset == pytest.approx(T0 + 9.0) and new.classifier.freqs.tolist() == [15.0, 17.0]
     out = stream(bank, board, 2.0)
     assert out and all(d.scores.shape == (2,) for d in out)
     assert bank.learn(15.0, T0 - 100.0) is False             # before any history

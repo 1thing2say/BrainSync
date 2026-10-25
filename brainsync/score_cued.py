@@ -2,12 +2,15 @@
 
     python -m brainsync.score_cued                        # every *_cued.npz in recordings_dir()
     python -m brainsync.score_cued path/a_cued.npz --methods fbcca --windows 1 2 --margin 1.5
-    python -m brainsync.score_cued --methods fbcca etrca mscca   # trained methods, held out
+    python -m brainsync.score_cued --methods fbcca etrca etrca-sf mscca   # trained, held out
 
-The trained methods (trca, trca-r, etrca, etrca-r, mscca) are scored leave-one-trial-out:
-for every trial the classifier is fitted on the recording's other trials (and its
-baseline on their still windows) and then scores the left-out trial, so no number comes
-from a trial the filter has seen. Their rows carry a ``*`` in the report.
+Two families of trained methods, neither ever scored on a trial it was fitted on. The
+template classifiers of ``brainsync.templates`` (itcca, ecca, trca, etrca, etrcar, sfcca)
+are scored leave-one-block-out (rows marked ``*``). The spatial filters of
+``brainsync.classify`` (trca-sf, trca-r-sf, etrca-sf, etrca-r-sf, mscca) are scored
+leave-one-trial-out: for every trial the filter is fitted on the recording's other trials
+(and its baseline on their still windows) and then scores the left-out trial (rows marked
+``+``).
 
 Every trial is cut into a flicker window (stim_on + latency) and a "still" window
 (stim_off + latency) of the recorded length; shorter analysis windows take the first
@@ -38,10 +41,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .classify import ABSTAIN, METHODS as ALL_METHODS, is_trained, make
+from .classify import ABSTAIN, NAMES, SPATIAL_FILTERS, TRAINED, make
 from .metrics import abstain_rate, accuracy, binom_p, confusion_matrix, itr_bpm
 from .recordings import POSTERIOR, Recording, Windows, cut_windows, \
     list_recordings, load_recording, reject_artifacts
+from .signal import Band, default_bands
+from .templates import cross_val_predict
 
 METHODS = ("cca", "fbcca")      # the default; ALL_METHODS adds the trained ones
 WINDOWS = (1.0, 2.0, 3.0)
@@ -75,7 +80,8 @@ class Row:
     pred_margin: np.ndarray = field(repr=False)
     scores: np.ndarray = field(repr=False)
     control_pred: np.ndarray = field(repr=False)
-    held_out: bool = False      # trained method: every trial scored by a fit on the other trials
+    held_out: bool = False      # spatial filter: every trial scored by a fit on the other trials
+    folds: int = 0              # > 0: a trained method, scored leave-one-block-out over this many blocks
 
     @property
     def control_accuracy(self) -> float:
@@ -185,10 +191,11 @@ def resolve_windows(windows: Sequence[float], recorded_s: float) -> list[float]:
     return split_windows(windows, recorded_s)[0]
 
 
-def _held_out(clf, X_on: np.ndarray, X_off: np.ndarray, y: np.ndarray):
-    """Leave-one-trial-out scores for a trained classifier.
+def _held_out(clf, X_on: np.ndarray, X_off: np.ndarray, y: np.ndarray, latency: float = 0.0):
+    """Leave-one-trial-out scores for a spatial filter (``classify.Trained``).
 
-    For trial t the classifier is fitted on the other flicker windows, its baseline on the
+    The flicker windows start ``latency`` s after the onset (the filter's ``t0``, where
+    it scores them). For trial t the classifier is fitted on the other flicker windows, its baseline on the
     other still windows, and it then scores trial t's flicker and still window. Returns
     the margin predictions, baseline-corrected scores, still-window scores and their
     margin predictions (all per trial), and the mean baseline over the folds.
@@ -203,7 +210,7 @@ def _held_out(clf, X_on: np.ndarray, X_off: np.ndarray, y: np.ndarray):
     for t in range(n):
         train = np.arange(n) != t
         try:
-            clf.fit(X_on[train], y[train])
+            clf.fit(X_on[train], y[train], latency)
         except ValueError as exc:
             raise ValueError(f"{clf.name}: cannot hold trial {t} out: {exc}") from None
         clf.fit_baseline(X_off[train])
@@ -217,11 +224,17 @@ def _held_out(clf, X_on: np.ndarray, X_off: np.ndarray, y: np.ndarray):
 def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequence[float],
                   fs: float, windows: Sequence[float], methods: Sequence[str] = METHODS,
                   phases: Sequence[float] | None = None, margin: float = DEFAULT_MARGIN,
-                  harmonics: int = 3) -> list[Row]:
+                  harmonics: int = 3, blocks: Sequence[int] | None = None,
+                  latency: float = 0.0, bands: Sequence[Band] | None = None) -> list[Row]:
     """Score labelled flicker windows ``on`` against still-window baselines ``off``.
 
     ``on``/``off`` are (n_trials, n_ch, n) preprocessed and channel-picked; each window
-    length uses the first round(w * fs) samples of both.
+    length uses the first round(w * fs) samples of both. Training-free methods take every
+    still window as their baseline and score every trial. Trained methods (``TRAINED``) are
+    scored leave-one-block-out over ``blocks`` (one per trial): each block's trials and still
+    windows are scored by a classifier fitted, baseline included, on the other blocks. The
+    flicker windows start ``latency`` s after the onset, which the templates need to know.
+    ``bands`` turns on the filter bank for FBCCA and the trained methods.
     """
     on = np.asarray(on, dtype=float)
     off = np.asarray(off, dtype=float)
@@ -243,14 +256,30 @@ def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequenc
             raise ValueError(f"window {w} s ({n} samples) does not fit in {on.shape[-1]} samples")
         X_on, X_off = on[..., :n], off[..., :n]
         for m in methods:
-            clf = make(m, freqs=freqs, fs=fs, harmonics=harmonics, phases=phases, margin=margin)
-            held_out = is_trained(m)
+            kw = dict(freqs=freqs, fs=fs, harmonics=harmonics, phases=phases, margin=margin)
+            if bands is not None and m != "cca" and m not in SPATIAL_FILTERS:
+                kw["bands"] = list(bands)
+            clf = make(m, **kw)
+            folds = 0
+            held_out = m in SPATIAL_FILTERS
             if held_out:
-                fold = _held_out(clf, X_on, X_off, y)
+                fold = _held_out(clf, X_on, X_off, y, latency)
                 pred_margin, s, rest, control_margin, base_mean, base_spread = fold
+            elif clf.needs_fit:
+                if blocks is None:
+                    raise ValueError(f"{m} is a trained method and needs one block per trial")
+                cv = cross_val_predict(lambda: make(m, **kw), X_on, y, blocks, latency, rest=X_off)
+                pred_margin, s, rest = cv.pred, cv.scores, cv.rest_scores
+                assert rest is not None
+                folds = cv.n_folds
+                clf.baseline_mean = cv.baseline_means.mean(axis=0)
+                clf.baseline_spread = float(cv.baseline_spreads.mean())
+                clf.has_baseline = True
+                control_margin = clf.predict_scores(rest)
+                base_mean, base_spread = clf.baseline_mean.copy(), clf.baseline_spread
             else:
                 clf.fit_baseline(X_off)
-                pred_margin, s = clf.decide(X_on)
+                pred_margin, s = clf.decide(X_on, latency)
                 rest = clf.scores(X_off)
                 control_margin = clf.predict_scores(rest)
                 base_mean, base_spread = clf.baseline_mean.copy(), clf.baseline_spread
@@ -272,7 +301,7 @@ def score_windows(on: np.ndarray, off: np.ndarray, y: np.ndarray, freqs: Sequenc
                 baseline_mean=base_mean, baseline_spread=base_spread,
                 confusion=confusion_matrix(y, pred, n_targets),
                 pred=pred, pred_margin=pred_margin, scores=s, control_pred=control,
-                held_out=held_out))
+                folds=folds, held_out=held_out))
     return rows
 
 
@@ -317,20 +346,46 @@ def still_timing(rec: Recording, w: Windows) -> StillTiming:
                        sample_s=1.0 / rec.fs)
 
 
+_BLOCK_RE = re.compile(r"^\s*\[marker\s+([-+0-9.eE]+)\]\s+block_start:(\d+)\s*$", re.MULTILINE)
+
+
+def trial_blocks(kept: np.ndarray, n_targets: int, on_times: np.ndarray | None = None,
+                 marker_text: str = "") -> np.ndarray:
+    """Block of each kept trial, for the leave-one-block-out folds.
+
+    From the display's ``block_start`` markers when the recording has them (each trial
+    belongs to the last block that started at or before its flicker), else by position: the
+    record tool cues every target once per block, so complete trial ``i`` is in block
+    ``i // n_targets`` (which shifts if an early trial was dropped).
+    """
+    kept = np.asarray(kept, dtype=int)
+    starts = sorted((float(m.group(1)), int(m.group(2))) for m in _BLOCK_RE.finditer(marker_text))
+    if starts and on_times is not None and len(on_times) == kept.size:
+        stamps = np.array([t for t, _ in starts])
+        ids = np.array([b for _, b in starts])
+        idx = np.searchsorted(stamps, np.asarray(on_times, dtype=float), side="right") - 1
+        if np.all(idx >= 0):
+            return ids[idx]
+    return kept // int(n_targets)
+
+
 def score_recording(rec: Recording, methods: Sequence[str] = METHODS,
                     windows: Sequence[float] = WINDOWS, margin: float = DEFAULT_MARGIN,
                     channels: Sequence[str | int] | None = POSTERIOR, reject: float = 3.0,
-                    harmonics: int = 3) -> Report:
+                    harmonics: int = 3, bands: Sequence[Band] | None = None) -> Report:
     """Score one cued recording at ``windows`` (clipped to, and including, the recorded one).
 
     Requested windows longer than the recorded one are listed in ``Report.skipped_windows``.
+    Trained methods are cross-validated block by block (``trial_blocks``).
     """
     if rec.n_targets < 2:
         raise ValueError(f"{rec.path}: needs at least 2 targets, has freqs {rec.freqs.tolist()}")
     w, kept, n_total = trial_windows(rec, channels, reject)
     lengths, too_long = split_windows(windows, w.on.shape[-1] / rec.fs)
     rows = score_windows(w.on, w.off, w.labels, rec.freqs, rec.fs, lengths, methods,
-                         phases=rec.phases, margin=margin, harmonics=harmonics)
+                         phases=rec.phases, margin=margin, harmonics=harmonics,
+                         blocks=trial_blocks(kept, rec.n_targets, rec.t[w.on_start], rec.marker_text),
+                         latency=rec.latency, bands=bands)
     return Report(path=rec.path, freqs=rec.freqs.copy(), channels=tuple(w.ch_names),
                   n_total=n_total, kept=kept, labels=w.labels.copy(), margin=float(margin),
                   rows=rows, skipped_windows=tuple(too_long), still=still_timing(rec, w))
@@ -388,23 +443,27 @@ def format_report(rep: Report, n_perm: int = N_PERMUTATIONS) -> str:
         lines += _still_note(rep.still)
 
     if any(r.held_out for r in rep.rows):
-        lines.append("* held out: fitted on the recording's other trials (baseline on their still "
+        lines.append("+ held out: fitted on the recording's other trials (baseline on their still "
                      "windows), scored on each left-out trial; the rest mean is the fold average")
 
     base_hdr = " ".join(f"{_hz(f):>8}" for f in rep.freqs)
-    lines.append(f"{'method':<8} {'window':>7} {'hits/n':>7} {'acc':>5} {'p':>7} {'ITR':>6} "
+    lines.append(f"{'method':<11} {'window':>7} {'hits/n':>7} {'acc':>5} {'p':>7} {'ITR':>6} "
                  f"{'abstain':>7} {'acc|go':>6} | {'still':>7} {'p':>6} {'abst':>5} | "
                  f"rest mean {base_hdr} {'spread':>7}")
     for r in rep.rows:
         go = "  -  " if np.isnan(r.committed_accuracy) else f"{100 * r.committed_accuracy:5.0f}%"
         base = " ".join(f"{v:8.4f}" for v in r.baseline_mean)
-        tag = r.method + ("*" if r.held_out else "")
+        tag = r.method + ("*" if r.folds else "+" if r.held_out else "")
         lines.append(
-            f"{tag:<8} {r.window_s:>5.2f} s {r.hits:>3d}/{r.n:<3d} {100 * r.accuracy:4.0f}% "
+            f"{tag:<11} {r.window_s:>5.2f} s {r.hits:>3d}/{r.n:<3d} {100 * r.accuracy:4.0f}% "
             f"{r.p:7.4f} {r.itr_bpm:6.1f} {100 * r.abstain:6.0f}% {go} | "
             f"{r.control_hits:>3d}/{r.n:<3d} {r.control_p:6.3f} {100 * r.control_abstain:4.0f}% | "
             f"          {base} {r.baseline_spread:7.4f}")
 
+    cv = [r.folds for r in rep.rows if r.folds]
+    if cv:
+        lines.append(f"* trained method: each block scored by a fit on the other "
+                     f"{cv[0] - 1} blocks ({cv[0]} folds, rest mean/spread averaged over folds)")
     longest = max(r.window_s for r in rep.rows)
     for r in rep.rows:
         if r.window_s == longest:
@@ -434,9 +493,9 @@ def parse_channels(text: str) -> list[str | int]:
 
 def _usage_problem(args: argparse.Namespace, methods: list[str],
                    channels: list[str | int]) -> str | None:
-    bad = [m for m in methods if m not in ALL_METHODS]
+    bad = [m for m in methods if m not in NAMES]
     if bad or not methods:
-        return f"unknown methods {bad or methods}; choose from {list(ALL_METHODS)}"
+        return f"unknown methods {bad or methods}; choose from {list(NAMES)}"
     if not channels:
         return f"no channels in {args.channels!r}"
     # names and indices are checked against each recording's own ch_names when it is scored
@@ -468,8 +527,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("files", nargs="*", type=Path,
                     help="*_cued.npz recordings (default: all in $BRAINSYNC_DATA_DIR/spectrum_checks)")
     ap.add_argument("--methods", nargs="+", default=list(METHODS),
-                    help=f"classifiers, space or comma separated, from {' '.join(ALL_METHODS)} "
-                         f"(default cca fbcca; the trained ones are scored leave-one-trial-out)")
+                    help="classifiers, space or comma separated (default cca fbcca); template "
+                         f"classifiers {list(TRAINED)} are scored leave-one-block-out, spatial "
+                         f"filters {list(SPATIAL_FILTERS)} leave-one-trial-out")
     ap.add_argument("--windows", type=float, nargs="+", default=list(WINDOWS),
                     help="window lengths in s; the recorded window is always added (default 1 2 3)")
     ap.add_argument("--margin", type=float, default=DEFAULT_MARGIN,
@@ -480,6 +540,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--reject", type=float, default=3.0,
                     help="drop trials with RMS above this x median (0 keeps all; default 3)")
     ap.add_argument("--harmonics", type=int, default=3)
+    ap.add_argument("--fb-bands", metavar="N:UPPER",
+                    help="filter bank for fbcca and the trained methods: N sub-bands from 8m Hz "
+                         "to UPPER Hz (default: fbcca's 3 bands to 45 Hz; none for trained)")
     args = ap.parse_args(argv)
 
     methods = [m.lower() for m in _split(args.methods)]
@@ -499,8 +562,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     for path in files:
         print(f"scoring {path}", file=sys.stderr)
         try:
-            rep = score_recording(load_recording(path), methods, args.windows, args.margin,
-                                  channels, args.reject, args.harmonics)
+            rec = load_recording(path)
+            bands = None
+            if args.fb_bands:
+                n, upper = args.fb_bands.split(":")
+                bands = default_bands(rec.fs, float(upper), int(n))
+            rep = score_recording(rec, methods, args.windows, args.margin,
+                                  channels, args.reject, args.harmonics, bands)
         except (FileNotFoundError, KeyError, ValueError) as exc:
             print(f"error: {_error_text(path, exc)}", file=sys.stderr)
             status = 1

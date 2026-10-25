@@ -1,0 +1,40 @@
+# c-VEP (Bin et al. 2009) with three targets in a row: one 63-bit m-sequence, every square
+# shows it delayed by k * 21 frames (350 ms apart, the widest spacing three lags allow in a
+# 63-frame cycle), so timing slips of several frames cost nothing. Each cycle lasts 63
+# frames = 1.05 s at 60 Hz; the decoder correlates every cycle with one trained template
+# shifted per target. White squares (full luminance contrast), larger than cvep_4's, one
+# row across the middle: clear of a MacBook's notch, labels with their confidence bars
+# under each square and the lead / choice line under those.
+name = "cvep_3"
+
+[targets]
+labels = ["YES", "NO", "HELP"]   # left, middle, right; spoken on a commit
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+rows = 1
+cols = 3
+size = 0.26       # side, screen heights (about 5 cm on a 14-inch MacBook)
+spacing = 0.55    # centre to centre
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

@@ -25,6 +25,7 @@ Two client modes:
 - One port (default 8765) serves both HTTP and WebSocket.
   - `GET /` serves the reference page and `GET /static/<name>` its files.
   - `GET /health` returns `{"ok": true, "board": "<state>", "controller": bool, "viewers": n}`.
+  - `GET /api/speech?text=…` returns the text as WAV (v3.1, section 5).
   - `GET /ws` upgrades to WebSocket.
 - The default bind is `127.0.0.1`. Other machines reach the server through a Cloudflare quick
   tunnel (`cloudflared tunnel --url http://127.0.0.1:8765`), which gives an
@@ -113,6 +114,8 @@ was. Decoding is not affected.
 **`pause`** / **`resume`**: the user pressed Esc or Resume. `pause` sets phase `pause` (flicker
 off). `resume` returns to `run`, without recalibrating if the pause lasted under 120 s and
 recalibrating otherwise.
+
+**`rescan`** (point mode, v3.1): the focused app or window changed; see section 5.
 
 **`bye`**: the user is leaving. The server treats it like a disconnect.
 
@@ -305,10 +308,84 @@ many frames (see `frames`); `text` then says why.
    - Screenshots are not stored unless `--log-scans DIR` is given.
 6. Only the server process reads the board's serial port.
 
-## 5. Testing
+## 5. Version 3.1: desktop clients
+
+These additions only add fields and routes; `protocol` stays 3, and a v3 client works
+unchanged. They let a native desktop client (BrainPoint Desktop on macOS) send the focused
+window's accessibility tree instead of a screenshot.
+
+**`scan.source`**: `"screenshot"` (the default; section 2 as before) or `"ax"`.
+
+```json
+{"type": "scan", "scan_id": 4, "source": "ax",
+ "viewport": {"w": 900, "h": 600, "dpr": 2},
+ "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 412},
+ "window": {"title": "All iCloud"},
+ "hints": [{"id": 0, "x": 12, "y": 40, "w": 80, "h": 24, "role": "AXButton",
+            "tag": "", "text": "New Note", "actions": ["AXPress"], "enabled": true}]}
+```
+
+- `viewport` is the size in points of the **screen holding the focused window**, and the hints
+  are in points from that screen's top-left corner. Rects in `layout` and `scan_result` are
+  normalized to that screen. The desktop client (`clients/macos/`) sends, in this order: the
+  items of an open menu, the focused window's pressable items, two scroll strips for its main
+  scroll area (role `AXScrollArea`, tag `BPScrollUp` / `BPScrollDown`), the front app's
+  menu-bar items (`AXMenuBarItem`) and the visible Dock's items (`AXDockItem`, the app
+  switcher). An older client may send only the window, with the window as the viewport.
+- `app` (`bundle_id` and `name` strings, which may be empty, and an integer `pid`) and
+  `window.title` are required. `image` is optional (a screenshot of the viewport, as in v3).
+- A hint's `role` holds the AX role and `tag` the subrole. A hint may add `actions` (AX
+  action names, at most 8 of at most 40 characters; more are cut) and `enabled`. At most 200
+  hints, as before.
+- A screenshot scan keeps neither `actions` nor `enabled`.
+
+**Ranking.** With 5 or more hints, or with no image, the server ranks the hints with one
+text-only Claude Haiku call (no image) in structured JSON. Each element names a `hint_id`
+and gets `label`, `p_button`, `p_next`, `risky` and `enabled`. The box is always the hint's
+own, and an element without a valid `hint_id` is dropped. `role` comes from the AX role
+(`button`, `link`, `checkbox`, `tab`, `menu_item`, `input` or `other`), and `enabled` from
+the hint when it has one. Rule 5's `risky` rule still applies, and at most 15 elements come
+back. With fewer than 5 hints and an image, the screenshot path (rule 5) runs instead. With
+no hints and no image (no usable window), the answer is `scan_result` `ok: true` with no
+elements, the layout stays `idle`, and a new `scan_request` follows after 3 s.
+
+**Rank cache.** The server keeps the last 64 rankings (least recently used dropped first),
+keyed on the bundle id, the window title, the hints' sorted (role, label, box rounded to
+whole points) and the click history. A hit makes no model call, and its hint ids are mapped
+onto the new scan's.
+
+**`scan_result.cached`**: every `scan_result` now carries `"cached": true` or `false`. It is
+true when the ranking came from the cache (`ms` is then a few milliseconds).
+
+**Streaming gate.** A decoder commit becomes a `selection`, and so a `click`, only while the
+board streams: no board error, and samples delivered within 1.0 s before the read that
+produced the commit. Otherwise the pick is dropped and logged (`selection_dropped`), and the
+voter is re-armed, so a gaze still held commits again once the board streams.
+
+**`GET /api/speech?text=…`**: the text (whitespace collapsed) as WAV (`audio/wav`) in the
+server's Cartesia voice, so a client can speak status changes ("headset disconnected")
+without the API key. It returns 400 when the text is empty or over 300 characters, and 503
+when the server has no voice (no `CARTESIA_API_KEY`, `BRAINSYNC_TTS=off`, or the synthesis
+failed or took over 12 s). The Origin rule of section 1 applies. With auth on, the request
+must carry the server token as `Authorization: Bearer <token>` (else 401): a clip costs
+Cartesia credits, and behind a tunnel anyone could reach the URL.
+
+**`rescan`** (client → server, controller in point mode only): `{"type": "rescan"}`, sent
+when the focused app or window changed. The server drops the pages, the confirm stage, a
+pending scan and a click in flight (a late `clicked` for it is ignored), and answers with a
+`scan_request` (`settle_ms` 300) and an `idle` layout; a held `pause` for a click goes back
+to `run`. At most one rescan goes out every 0.5 s: one that comes sooner is answered when the
+0.5 s are up. A viewer gets `not_allowed`, and so does a slots-mode controller. A `resume` in
+point mode also asks for a fresh scan, because the screen may have changed while paused.
+
+**`click`** is unchanged. A desktop client presses `element.hint_id` from its own registry of
+the last walk, and `x` and `y` are informational.
+
+## 6. Testing
 
 - `python -m brainsync.server --board fake --no-auth` runs the server, and `http://127.0.0.1:8765/`
   opens the reference page (`slots` mode). Hovering a square sends `gaze`.
 - `python -m brainsync.server.client --url ws://127.0.0.1:8765/ws --token … --slots yes,no`
   prints selections.
-- `tools/screen_eval.py` scores Haiku detection against DOM ground truth (see its docstring).
+- `tools/screen_eval.py` scores Haiku detection against DOM ground truth, and with `--ax DIR`
+  the text-only ranking of accessibility dumps (see its docstring).

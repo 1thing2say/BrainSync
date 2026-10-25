@@ -1,0 +1,36 @@
+# The paper's f-VEP set: six targets at 15, 12, 10, 8.6, 7.5 and 6 Hz, which are 4, 5, 6,
+# 7, 8 and 10 frames per cycle on a 60 Hz display (8.6 Hz is written as 60/7 here so the
+# frame count is exact). On/off flicker as on the paper's CRT, so the 5- and 7-frame cycles
+# have an uneven duty cycle (config_warnings says so). Note 10 Hz sits on the user's
+# alpha rhythm (PLAN.md section 14): expect it to be the weak one. Decode with the paper's
+# FFT-SNR rule (brainsync.vep.fvep) or with CCA / FBCCA.
+name = "fvep_6"
+
+[targets]
+freqs = [15.0, 12.0, 10.0, 8.571428571428571, 7.5, 6.0]   # 60/7 to the last digit
+phases_pi = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+labels = ["15", "12", "10", "8.6", "7.5", "6"]
+
+[layout]
+rows = 2
+cols = 3
+size = 0.3
+spacing = 0.42
+
+[stimulus]
+waveform = "square"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 5
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 2.0
+shuffle = true

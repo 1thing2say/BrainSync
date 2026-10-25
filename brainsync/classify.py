@@ -1,6 +1,8 @@
 """SSVEP classifiers: training-free CCA and filter-bank CCA against sine/cosine templates,
 and the calibration-based spatial filters TRCA, eTRCA (plus their "-R" variants) and msCCA
-fitted on the user's own labelled trials (Wong et al. 2020's unified framework).
+fitted on the user's own labelled trials (Wong et al. 2020's unified framework; registered
+as "trca-sf", "trca-r-sf", "etrca-sf", "etrca-r-sf" and "mscca", beside the template
+classifiers of ``brainsync.templates``).
 
 For CCA a target's score is the largest canonical correlation between the EEG window and
 that target's templates. ``fit_baseline`` on still-screen windows learns how much each template
@@ -27,8 +29,9 @@ from scipy.linalg import eigh
 from .metrics import ABSTAIN
 from .signal import Band, default_bands, filterbank, filterbank_weights
 
-__all__ = ["ABSTAIN", "CCA", "FBCCA", "Trained", "TRCA", "ETRCA", "MSCCA", "make", "references",
-           "min_samples", "period_samples", "is_trained", "TRAINED", "TRAINING_FREE", "METHODS"]
+__all__ = ["ABSTAIN", "CCA", "FBCCA", "Trained", "TRCA", "ETRCA", "MSCCA", "NAMES", "METHODS",
+           "TRAINED", "SPATIAL_FILTERS", "TRAINING_FREE", "kinds", "make", "is_trained",
+           "references", "min_samples", "period_samples"]
 
 CACHE_SIZE = 4   # template bases kept per classifier (one per window length)
 
@@ -62,18 +65,24 @@ def _check_harmonics(harmonics: int) -> int:
 
 
 def references(freqs: Sequence[float], fs: float, n_samples: int, harmonics: int = 3,
-               phases: Sequence[float] | None = None) -> np.ndarray:
+               phases: Sequence[float] | None = None, t0: float = 0.0) -> np.ndarray:
     """Templates (n_targets, 2 * harmonics, n_samples).
 
     For each target the first ``harmonics`` rows are sin(h * theta) for h = 1..H and the
-    next H rows cos(h * theta), where theta = 2 pi f t + phase.
+    next H rows cos(h * theta), where theta = 2 pi f (t0 + k / fs) + phase for sample k.
+    ``t0`` is the first sample's time since the stimulus onset, so templates for windows
+    cut at different offsets stay phase-locked to the same flicker.
     """
     f = _target_freqs(freqs, fs)
     H = _check_harmonics(harmonics)
     if n_samples < 2:
         raise ValueError(f"templates need at least 2 samples, got {n_samples}")
+    t0 = float(t0)
+    if not np.isfinite(t0):
+        raise ValueError(f"t0 must be a finite time in seconds, got {t0}")
     p = _target_phases(phases, f.size)
-    theta = 2.0 * np.pi * np.outer(f, np.arange(int(n_samples))) / float(fs) + p[:, None]
+    times = t0 + np.arange(int(n_samples)) / float(fs)
+    theta = 2.0 * np.pi * np.outer(f, times) + p[:, None]
     orders = np.arange(1, H + 1, dtype=float)
     phasor = np.exp(1j * orders[None, :, None] * theta[:, None, :])  # (n_targets, H, n)
     return np.concatenate([phasor.imag, phasor.real], axis=1)
@@ -97,9 +106,17 @@ def _span(A: np.ndarray) -> np.ndarray:
 
 
 class CCA:
-    """Standard CCA (Lin et al. 2006): first canonical correlation with each target's templates."""
+    """Standard CCA (Lin et al. 2006): first canonical correlation with each target's templates.
+
+    ``offset`` (seconds from the stimulus onset to the window's first sample) is accepted by
+    every scoring method for API compatibility with the trained classifiers in
+    ``brainsync.templates``; the sine/cosine span is shift-invariant, so it changes nothing
+    here (``uses_offset`` says whether a classifier needs it).
+    """
 
     name = "cca"
+    uses_offset = False   # scores do not depend on where the window sits in the trial
+    needs_fit = False     # training-free: no calibration trials required
 
     def __init__(self, freqs: Sequence[float], fs: float, harmonics: int = 3,
                  phases: Sequence[float] | None = None, margin: float = 0.0,
@@ -168,19 +185,19 @@ class CCA:
         top = np.linalg.svd(cross, compute_uv=False)[..., 0]
         return np.clip(top, 0.0, 1.0)
 
-    def raw_scores(self, X: np.ndarray, offset: int = 0) -> np.ndarray:
-        """Uncorrected scores (n_trials, n_targets) for X (n_trials, n_ch, n) or (n_ch, n).
-
-        ``offset`` (samples since stimulus onset) is accepted for a common calling convention
-        with the trained classifiers and ignored: CCA does not depend on the phase.
-        """
+    def raw_scores(self, X: np.ndarray, offset: float = 0.0) -> np.ndarray:
+        """Uncorrected scores (n_trials, n_targets) for X (n_trials, n_ch, n) or (n_ch, n)."""
         return self._rho(self._windows(X))
 
     # -- resting baseline ------------------------------------------------------------
 
-    def fit_baseline(self, X_rest: np.ndarray) -> CCA:
-        """Learn each template's mean rest score and the pooled within-template rest std."""
-        rest = self.raw_scores(X_rest)
+    def fit_baseline(self, X_rest: np.ndarray, offset: float = 0.0) -> CCA:
+        """Learn each template's mean rest score and the pooled within-template rest std.
+
+        ``offset`` is passed to ``raw_scores``; a trained classifier with raw templates
+        needs one inside its calibration epoch (its override supplies it).
+        """
+        rest = self.raw_scores(X_rest, offset)
         if rest.shape[0] < 2:
             raise ValueError(f"baseline needs at least 2 rest windows, got {rest.shape[0]}")
         spread = float(np.sqrt(np.mean(np.var(rest, axis=0, ddof=1))))
@@ -197,13 +214,13 @@ class CCA:
         self.baseline_spread = 1.0
         self.has_baseline = False
 
-    def scores(self, X: np.ndarray, offset: int = 0) -> np.ndarray:
+    def scores(self, X: np.ndarray, offset: float | None = None) -> np.ndarray:
         """Raw scores minus each template's rest mean (unchanged before fit_baseline).
 
-        ``offset`` is passed on only when non-zero, so a subclass may keep a plain
-        ``raw_scores(X)``.
+        ``offset`` is passed on only when given, so each subclass keeps its own default
+        (0 s for ``brainsync.templates``, the training alignment for ``Trained``).
         """
-        raw = self.raw_scores(X) if not offset else self.raw_scores(X, offset)
+        raw = self.raw_scores(X) if offset is None else self.raw_scores(X, offset)
         return raw - self.baseline_mean
 
     # -- decisions -------------------------------------------------------------------
@@ -235,12 +252,13 @@ class CCA:
             keep &= self.levels(s) >= self.threshold
         return np.where(keep, best, ABSTAIN)
 
-    def decide(self, X: np.ndarray, offset: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    def decide(self, X: np.ndarray,
+               offset: float | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Predictions (n_trials,) and baseline-corrected scores (n_trials, n_targets)."""
         s = self.scores(X, offset)
         return self.predict_scores(s), s
 
-    def predict(self, X: np.ndarray, offset: int = 0) -> np.ndarray:
+    def predict(self, X: np.ndarray, offset: float | None = None) -> np.ndarray:
         return self.decide(X, offset)[0]
 
 
@@ -270,7 +288,7 @@ class FBCCA(CCA):
     def __repr__(self) -> str:
         return f"{super().__repr__()[:-1]}, bands={self.bands})"
 
-    def raw_scores(self, X: np.ndarray, offset: int = 0) -> np.ndarray:
+    def raw_scores(self, X: np.ndarray, offset: float = 0.0) -> np.ndarray:
         X = self._windows(X)
         total = np.zeros((X.shape[0], self.n_targets))
         for w, Xb in zip(self.weights, filterbank(X, self.fs, self.bands)):
@@ -339,8 +357,8 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 class Trained(CCA):
     """Base for classifiers fitted on the user's own labelled trials (calibration-based).
 
-    ``fit(X, y)`` learns one template per target (the mean trial) and spatial filters from
-    windows cut at the same point after stimulus onset. A window's raw score for target i
+    ``fit(X, y, t0)`` learns one template per target (the mean trial) and spatial filters
+    from windows that all start ``t0`` seconds after the stimulus onset. A window's raw score for target i
     is the signed Pearson correlation between the filtered window and the filtered
     template, so the subject's own phase counts, which calibration-free CCA cannot use.
     The baseline and abstain rules are inherited unchanged: ``fit_baseline`` learns what
@@ -350,9 +368,10 @@ class Trained(CCA):
     offset from it. Once the response is steady it repeats every ``period_samples`` (1 s for
     integer frequencies at 250 Hz), so when the training window holds at least one period
     the template is folded into one steady-state cycle and any window length and offset can
-    be scored (``offset`` samples from the training alignment). With a shorter training
+    be scored. ``offset`` is, as for every classifier here, the window's first sample in
+    seconds since the onset (None: ``t0``, the training alignment). With a shorter training
     window the raw template is used, the window must match its length, and ``offset`` must
-    be 0. ``periodic`` forces either behaviour.
+    be ``t0`` (``covers`` says so). ``periodic`` forces either behaviour.
 
     ``shrink`` in [0, 1) pulls the covariance the filters divide by towards a scaled identity
     (0 = plain, 1 would be the identity), which steadies filters fitted on few trials.
@@ -361,6 +380,8 @@ class Trained(CCA):
     name = "trained"
     ensemble = False       # score with every target's filter at once (the eTRCA idea)
     min_trials = 2         # per target; inter-trial covariance needs two
+    uses_offset = True     # templates are locked to the onset (the decoder needs set_onset)
+    needs_fit = True
 
     def __init__(self, freqs: Sequence[float], fs: float, harmonics: int = 3,
                  phases: Sequence[float] | None = None, margin: float = 0.0,
@@ -377,6 +398,7 @@ class Trained(CCA):
         self.cycle: np.ndarray | None = None       # (n_targets, n_ch, period) or None
         self.n_train: np.ndarray | None = None     # trials per target
         self.period: int | None = None
+        self.t0 = 0.0                               # seconds from onset to the training windows
 
     def __repr__(self) -> str:
         state = "unfitted" if not self.fitted else (
@@ -388,18 +410,28 @@ class Trained(CCA):
     def fitted(self) -> bool:
         return self.templates is not None
 
+    @property
+    def n_ch(self) -> int:
+        """Channels the classifier was fitted on (0 before fit)."""
+        return 0 if self.templates is None else int(self.templates.shape[1])
+
     # -- fitting ----------------------------------------------------------------------
 
     def _fit_filters(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
         """Spatial filters (n_ch, k) from centred training windows; ``self.templates`` is set."""
         raise NotImplementedError
 
-    def fit(self, X: np.ndarray, y: Sequence[int]) -> Trained:
-        """Learn templates and filters from windows X (n_trials, n_ch, n) with labels y.
+    def fit(self, X: np.ndarray, y: Sequence[int], t0: float = 0.0) -> Trained:
+        """Learn templates and filters from windows X (n_trials, n_ch, n) with labels y that
+        start ``t0`` s after the onset (the visual latency, as ``recordings.cut_windows``
+        cuts them).
 
         Every target needs at least ``min_trials`` windows. Fitting forgets the baseline,
         because the rest scores depend on the templates: call ``fit_baseline`` again.
         """
+        t0 = float(t0)
+        if not np.isfinite(t0):
+            raise ValueError(f"t0 must be a finite time in seconds, got {t0}")
         X = self._windows(X)
         y = np.asarray(y).reshape(-1)
         if y.size != X.shape[0]:
@@ -426,6 +458,7 @@ class Trained(CCA):
             raise ValueError(f"periodic templates need a training window of at least one "
                              f"common period ({self.period} samples), got {n}")
         self.cycle = _fold(self.templates, self.period) if use_cycle else None
+        self.t0 = t0
         self.clear_baseline()
         return self
 
@@ -442,28 +475,53 @@ class Trained(CCA):
         if X.shape[1:] != self.train_X.shape[1:]:
             raise ValueError(f"new windows must be shaped (n, {self.train_X.shape[1]}, "
                              f"{self.train_X.shape[2]}) like the training windows, got {X.shape}")
-        return self.fit(np.concatenate([self.train_X, X]), np.concatenate([self.train_y, y]))
+        return self.fit(np.concatenate([self.train_X, X]), np.concatenate([self.train_y, y]),
+                        self.t0)
 
-    def templates_for(self, n: int, offset: int = 0) -> np.ndarray:
-        """Templates (n_targets, n_ch, n) for a window of ``n`` samples starting ``offset``
-        samples after the training alignment."""
+    def _shift(self, offset: float | None) -> int:
+        """Samples from the training alignment to a window starting ``offset`` s after the onset."""
+        if offset is None:
+            return 0
+        offset = float(offset)
+        if not np.isfinite(offset):
+            raise ValueError(f"offset must be a finite time in seconds, got {offset}")
+        return int(round((offset - self.t0) * self.fs))
+
+    def covers(self, n: int, offset: float | None) -> bool:
+        """Can a window of ``n`` samples starting ``offset`` s after the onset be scored?
+        Always with periodic templates; a raw template only at its own length and ``t0``."""
+        if self.cycle is not None:
+            return True
+        return (self.templates is not None and n == self.templates.shape[-1]
+                and self._shift(offset) == 0)
+
+    def templates_for(self, n: int, offset: float | None = None) -> np.ndarray:
+        """Templates (n_targets, n_ch, n) for a window of ``n`` samples starting ``offset`` s
+        after the onset (None: at the training alignment ``t0``)."""
         if not self.fitted:
             raise ValueError(f"{type(self).__name__} is not fitted; call fit(X, y) first")
-        offset = int(offset)
+        shift = self._shift(offset)
         if self.cycle is None:
-            if offset != 0:
-                raise ValueError("this classifier has no periodic templates (training window "
-                                 "shorter than one period), so offset must be 0")
+            if shift != 0:
+                raise ValueError(f"this classifier has no periodic templates (training window "
+                                 f"shorter than one period), so the offset must be its t0 "
+                                 f"({self.t0:g} s)")
             if n != self.templates.shape[-1]:
                 raise ValueError(f"window of {n} samples does not match the training window of "
                                  f"{self.templates.shape[-1]}; fit on the same length")
             return self.templates
-        idx = (offset + np.arange(int(n))) % self.period
+        idx = (shift + np.arange(int(n))) % self.period
         return self.cycle[..., idx]
 
     # -- scoring ----------------------------------------------------------------------
 
-    def raw_scores(self, X: np.ndarray, offset: int = 0) -> np.ndarray:
+    def fit_baseline(self, X_rest: np.ndarray, offset: float | None = None) -> Trained:
+        """As for CCA; still windows carry no flicker, so they are scored at ``t0`` by default,
+        which a raw template always covers."""
+        super().fit_baseline(X_rest, self.t0 if offset is None else float(offset))
+        return self
+
+    def raw_scores(self, X: np.ndarray, offset: float | None = None) -> np.ndarray:
         """Signed correlations (n_trials, n_targets) of filtered windows with filtered templates."""
         X = self._windows(X)
         if not self.fitted:
@@ -539,13 +597,13 @@ class TRCA(Trained):
     onto the target's sine-cosine subspace, which steadies the filter when trials are few.
     """
 
-    name = "trca"
+    name = "trca-sf"     # "-sf": brainsync.templates already registers "trca" and "etrca"
 
     def __init__(self, *args, reference: bool = False, **kw) -> None:
         super().__init__(*args, **kw)
         self.reference = bool(reference)
         if self.reference:
-            self.name = f"{type(self).name}-r"
+            self.name = type(self).name.replace("-sf", "-r-sf")
 
     def _fit_filters(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
         n = X.shape[-1]
@@ -570,7 +628,7 @@ class ETRCA(TRCA):
     and the correlation is taken over all filtered channels at once. ``reference=True`` is
     eTRCA-R."""
 
-    name = "etrca"
+    name = "etrca-sf"
     ensemble = True
 
 
@@ -593,27 +651,49 @@ class MSCCA(Trained):
 
 
 TRAINING_FREE = ("cca", "fbcca")
-TRAINED = ("trca", "trca-r", "etrca", "etrca-r", "mscca")
-METHODS = TRAINING_FREE + TRAINED
+TRAINED = ("itcca", "ecca", "trca", "etrca", "etrcar", "sfcca")   # brainsync.templates (save_model)
+SPATIAL_FILTERS = ("trca-sf", "trca-r-sf", "etrca-sf", "etrca-r-sf", "mscca")   # Trained, above
+NAMES = TRAINING_FREE + TRAINED + SPATIAL_FILTERS
+METHODS = NAMES
 
-_KINDS: dict[str, tuple[type[CCA], dict]] = {
-    "cca": (CCA, {}), "fbcca": (FBCCA, {}),
-    "trca": (TRCA, {}), "trca-r": (TRCA, {"reference": True}),
-    "etrca": (ETRCA, {}), "etrca-r": (ETRCA, {"reference": True}),
+_SPATIAL: dict[str, tuple[type[Trained], dict]] = {
+    "trca-sf": (TRCA, {}), "trca-r-sf": (TRCA, {"reference": True}),
+    "etrca-sf": (ETRCA, {}), "etrca-r-sf": (ETRCA, {"reference": True}),
     "mscca": (MSCCA, {}),
 }
 
 
+def _key(name: str) -> str:
+    return str(name).strip().lower().replace("_", "-")
+
+
 def is_trained(name: str) -> bool:
-    """True for classifiers that need ``fit(X, y)`` on labelled trials before scoring."""
-    return str(name).strip().lower().replace("_", "-") in TRAINED
+    """True for classifiers that need ``fit`` on labelled trials before scoring (either
+    family: ``TRAINED`` from brainsync.templates or the ``SPATIAL_FILTERS`` here)."""
+    key = _key(name)
+    return key in TRAINED or key in SPATIAL_FILTERS
+
+
+def kinds() -> dict[str, type[CCA]]:
+    """Every classifier class by name: the training-free ones and the template classifiers
+    of ``brainsync.templates`` (the spatial filters here are built by ``make``, since two
+    names share a class)."""
+    from . import templates  # here, not at the top: templates imports this module
+
+    out = {cls.name: cls for cls in (CCA, FBCCA)}
+    out.update({cls.name: cls for cls in templates.CLASSES})
+    return out
 
 
 def make(name: str, **kw) -> CCA:
-    """Build a classifier by name (case-insensitive): "cca", "fbcca", "trca", "trca-r",
-    "etrca", "etrca-r" or "mscca". The trained ones still need ``fit``."""
-    key = str(name).strip().lower().replace("_", "-")
-    if key not in _KINDS:
-        raise ValueError(f"unknown classifier {name!r}; choose from {list(METHODS)}")
-    cls, fixed = _KINDS[key]
-    return cls(**kw, **fixed)
+    """Build a classifier by name (case-insensitive): "cca", "fbcca", a template classifier
+    ("itcca", "ecca", "trca", "etrca", "etrcar", "sfcca") or a spatial filter ("trca-sf",
+    "trca-r-sf", "etrca-sf", "etrca-r-sf", "mscca"). The trained ones need ``fit`` first."""
+    key = _key(name)
+    if key in _SPATIAL:
+        cls, fixed = _SPATIAL[key]
+        return cls(**kw, **fixed)
+    cls = kinds().get(key)
+    if cls is None:
+        raise ValueError(f"unknown classifier {name!r}; choose from {list(NAMES)}")
+    return cls(**kw)

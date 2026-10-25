@@ -144,14 +144,14 @@ def test_subject8_real_1s_accuracy() -> None:
 def test_trained_classifier_is_held_out_by_block(fake) -> None:
     ds = nk.load(1, fake[0])
     assert nk.subject_accuracy(ds, "mscca", 2.0) == 1.0          # one training block is enough
-    with pytest.raises(ValueError, match="etrca with block 0 held out of 2.*at least 2"):
-        nk.subject_accuracy(ds, "etrca", 2.0)                     # TRCA needs 2 trials per target
+    with pytest.raises(ValueError, match="etrca-sf held out by block \\(2 blocks\\).*at least 2"):
+        nk.subject_accuracy(ds, "etrca-sf", 2.0)                     # TRCA needs 2 trials per target
     # with three blocks the fit has two trials per target and runs
     three = nk.Dataset(X=np.concatenate([ds.X, ds.X[ds.blocks == 0]]),
                        y=np.concatenate([ds.y, ds.y[ds.blocks == 0]]),
                        blocks=np.concatenate([ds.blocks, np.full(12, 2)]),
                        freqs=ds.freqs, phases=ds.phases)
-    assert nk.subject_accuracy(three, "etrca", 2.0) == 1.0
+    assert nk.subject_accuracy(three, "etrca-sf", 2.0) == 1.0
 
 
 def test_cli_accepts_trained_methods(fake, capsys: pytest.CaptureFixture[str]) -> None:

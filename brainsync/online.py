@@ -10,15 +10,22 @@ classifier abstains on a small lead (margin) or a low level above rest (threshol
 target is committed once ``votes`` consecutive windows name it; ``votes`` consecutive
 abstentions withdraw the commitment.
 
+Trained classifiers (``brainsync.templates``) compare each window with templates that are
+phase-locked to the flicker, so the decoder must know when the flicker started:
+``set_onset(t_unix)`` (the display's first flickering frame, ``stim_onset`` in the bridge
+protocol) and every window is scored at its offset from that time. Replaying a recording
+sets the onset from its stim_on markers; ``train_blocks`` fits the classifier on the first
+blocks of the recording and scores the trials after them.
+
     python -m brainsync.online <cued.npz>...          # replay recordings with the demo defaults
     python -m brainsync.online --grid <cued.npz>...   # small tuning grid
-    python -m brainsync.online --classifier etrca <cued.npz>   # trained filter, held out per trial
+    python -m brainsync.online --classifier etrca-sf <cued.npz>   # spatial filter, held out per trial
 
-A trained classifier (``brainsync.classify.Trained``) needs the time the flicker's response
-began: ``Decoder.align(t)`` sets it (the server does from the client's onset), and every
-window is then scored at its offset from that moment, since the steady-state templates
-repeat every common period. ``trained_from_recording`` fits one on a cued recording for
-the live server.
+The spatial filters of ``brainsync.classify`` (``Trained``: trca-sf, etrca-sf, their -R
+variants, mscca) use the same onset: their steady-state templates repeat every common
+period, so any window is scored at its offset from the onset. Without ``train_blocks`` a
+replay refits one before each trial on the recording's other trials (held out per trial);
+``trained_from_recording`` fits one on a cued recording for the live server.
 """
 from __future__ import annotations
 
@@ -34,10 +41,12 @@ from pathlib import Path
 import numpy as np
 
 from .board import Board, record
-from .classify import ABSTAIN, CCA, METHODS, Trained, is_trained, make, min_samples
+from .classify import (ABSTAIN, CCA, NAMES, SPATIAL_FILTERS, TRAINED, Trained, make,
+                       min_samples)
 from .recordings import (MONTAGE, POSTERIOR, Recording, channel_indices, cut_windows,
                          load_recording, pair_trials, reject_artifacts)
-from .signal import Band, preprocess
+from .signal import Band, default_bands, preprocess
+from .templates import TEMPLATE_KINDS
 
 __all__ = ["ABSTAIN", "TUNED", "Settings", "RingBuffer", "Decision", "Voter", "Decoder", "Calibration",
            "calibrate", "fit_rest", "replay", "replay_grid", "ReplayResult", "TrialOutcome", "consistency",
@@ -145,6 +154,7 @@ class Decision:
     end: int = 0
     gap: float = 0.0
     level: float = 0.0
+    offset_s: float = math.nan   # window start in seconds after the onset; nan without one
 
 
 class Voter:
@@ -178,7 +188,8 @@ class Decoder:
     def __init__(self, classifier: CCA, fs: float, window_s: float = 4.0, step_s: float = 0.5,
                  votes: int = 3, channels: Sequence[str | int] | None = POSTERIOR,
                  pad_s: float = 2.0, band: Band | None = (1.0, 100.0), notch_hz: float = 60.0,
-                 ch_names: Sequence[str] = MONTAGE) -> None:
+                 ch_names: Sequence[str] = MONTAGE,
+                 prior: Callable[[], np.ndarray | None] | None = None) -> None:
         self.fs = float(fs)
         if not np.isfinite(self.fs) or self.fs <= 0:
             raise ValueError(f"fs must be positive, got {fs}")
@@ -196,17 +207,30 @@ class Decoder:
         self.n_window = int(round(window_s * self.fs))
         self.n_pad = int(round(pad_s * self.fs))
         self.n_step = max(1, int(round(step_s * self.fs)))
+        n_fit = getattr(classifier, "n_ch", 0) if getattr(classifier, "fitted", False) else 0
+        if n_fit and n_fit != len(self.rows):
+            raise ValueError(f"the classifier was fitted on {n_fit} channels but the decoder "
+                             f"selects {len(self.rows)} ({list(self.channel_names_for(self.rows, ch_names))})")
         need = min_samples(len(self.rows), classifier.harmonics)
         if self.n_window < need:
             raise ValueError(f"window of {window_s} s ({self.n_window} samples) is too short for "
                              f"{len(self.rows)} channels (need >= {need} samples)")
         self.band = band
         self.notch_hz = float(notch_hz)
+        # A prior (brainsync.eog.GazeDecoder.bonus, say) returns one value per target in
+        # baseline spreads, or None to leave the window alone; it is added to the scores
+        # before the margin and threshold rules, so it can resolve an abstention.
+        self.prior = prior
         self.voter = Voter(votes)
         self._data = RingBuffer(len(self.rows), self.needed)
         self._times = RingBuffer(1, self.needed)
-        self._align: float | None = None
+        self.onset: float | None = None   # unix time of the flicker's first frame, if known
+        self.train_trials = 0             # replay: trials used to fit the classifier
         self.reset()
+
+    @staticmethod
+    def channel_names_for(rows: Sequence[int], ch_names: Sequence[str]) -> list[str]:
+        return [str(ch_names[i]) for i in rows]
 
     @property
     def needed(self) -> int:
@@ -231,45 +255,25 @@ class Decoder:
         return tuple(self.ch_names[i] for i in self.rows)
 
     def reset(self) -> None:
-        """Empty the buffer and forget votes; the classifier's baseline is kept."""
+        """Empty the buffer and forget votes; the classifier's baseline and onset are kept."""
         self._data.clear()
         self._times.clear()
         self.voter.reset()
         self._next_due = self.needed
 
-    # -- onset alignment (trained classifiers) -----------------------------------------
-
     @property
-    def aligned(self) -> bool:
-        """True once ``align`` gave the time the trained templates are locked to."""
-        return self._align is not None
+    def needs_onset(self) -> bool:
+        """True when the classifier's scores depend on the window's offset from the onset."""
+        return bool(getattr(self.classifier, "uses_offset", False))
 
-    @property
-    def uses_offsets(self) -> bool:
-        """Whether the classifier can score a window at an offset from the stimulus onset
-        (a trained classifier with periodic templates)."""
-        return getattr(self.classifier, "cycle", None) is not None
+    def set_onset(self, t_unix: float | None) -> None:
+        """Record when the flicker started (same clock as the sample times), or forget it."""
+        if t_unix is not None and not math.isfinite(float(t_unix)):
+            raise ValueError(f"onset must be a finite unix time or None, got {t_unix}")
+        self.onset = None if t_unix is None else float(t_unix)
 
-    def align(self, t_unix: float | None) -> None:
-        """Tell the decoder when the flicker's response began (onset + latency), in the
-        same clock as the fed timestamps, or None to forget it.
-
-        A trained classifier's templates start at that moment; every later window is then
-        scored with its offset from it, so the sliding window no longer has to line up
-        with the stimulus. Calibration-free classifiers ignore it.
-        """
-        if t_unix is not None:
-            t_unix = float(t_unix)
-            if not np.isfinite(t_unix):
-                raise ValueError(f"alignment time must be finite or None, got {t_unix}")
-        self._align = t_unix
-
-    def offset_for(self, t_first: float) -> int:
-        """Samples between the alignment and a window whose first sample is at ``t_first``
-        (0 when unaligned or the classifier does not use offsets)."""
-        if self._align is None or not self.uses_offsets:
-            return 0
-        return int(round((float(t_first) - self._align) * self.fs))
+    def clear_onset(self) -> None:
+        self.onset = None
 
     # -- windows -----------------------------------------------------------------------
 
@@ -349,15 +353,36 @@ class Decoder:
 
     def _score(self) -> Decision:
         window = self.prepare(self._data.last(self.needed))
-        offset = self.offset_for(self._times.last(self.n_window)[0, 0])
-        pred, scores = self.classifier.decide(window, offset=offset)
-        gap = float(self.classifier.gaps(scores)[0])
-        level = float(self.classifier.levels(scores)[0])
-        raw = int(pred[0])
+        offset = math.nan
+        if self.onset is not None:
+            offset = float(self._times.last(self.n_window)[0, 0]) - self.onset
+        clf = self.classifier
+        covers = getattr(clf, "covers", None)
+        if self.needs_onset and (math.isnan(offset)
+                                 or (covers is not None and not covers(self.n_window, offset))):
+            # templates cannot be placed: no onset yet, or a raw template that does not
+            # reach this window. Abstain rather than score a misaligned template.
+            raw = ABSTAIN
+            scores = np.zeros((1, clf.n_targets))
+            gap = level = 0.0
+        else:
+            # an offset only for classifiers that use it: one that ignores it keeps its default
+            scores = clf.scores(window, offset) if self.needs_onset else clf.scores(window)
+            bonus = None if self.prior is None else self.prior()
+            if bonus is not None:
+                bonus = np.asarray(bonus, dtype=float).reshape(-1)
+                if bonus.shape != (clf.n_targets,) or not np.all(np.isfinite(bonus)):
+                    raise ValueError(f"the prior must return {clf.n_targets} finite "
+                                     f"values (one per target), got {bonus.tolist()}")
+                scores = scores + bonus * clf.baseline_spread
+            pred = clf.predict_scores(scores)
+            gap = float(clf.gaps(scores)[0])
+            level = float(clf.levels(scores)[0])
+            raw = int(pred[0])
         changed = self.voter.push(raw)
         return Decision(time=float(self._times.last(1)[0, 0]), scores=scores[0], raw=raw,
                         committed=self.committed, changed=changed, end=self.n_seen, gap=gap,
-                        level=level)
+                        level=level, offset_s=offset)
 
 
 # -- calibration -----------------------------------------------------------------------
@@ -443,6 +468,7 @@ class ReplayResult:
     decoder: Decoder = field(repr=False)
     recording: Recording = field(repr=False)
     spans: list[tuple[int, int, int]] = field(repr=False, default_factory=list)
+    n_train: int = 0      # leading trials the classifier was fitted on (not scored)
 
     @property
     def n_trials(self) -> int:
@@ -481,9 +507,10 @@ class ReplayResult:
 
     def summary(self) -> str:
         p = self.params
+        trained = f" fitted on the first {self.n_train} trials" if self.n_train else ""
         return (f"{p['classifier']} window {p['window_s']:g} s step {p['step_s']:g} s "
                 f"votes {p['votes']} margin {p['margin']:g} threshold "
-                f"{_thr(p.get('threshold'))}: correct {self.correct}/"
+                f"{_thr(p.get('threshold'))}{trained}: correct {self.correct}/"
                 f"{self.n_trials} wrong {self.wrong} none {self.n_trials - self.correct - self.wrong}"
                 f", median {self.median_delay_s:.2f} s to a correct commit, window abstain "
                 f"{_pct(self.abstain_rate)}, still commits {self.still_commits}/{self.n_still}")
@@ -557,12 +584,44 @@ def default_decoder(rec: Recording, classifier: str = TUNED.classifier,
                     window_s: float = TUNED.window_s, step_s: float = TUNED.step_s,
                     votes: int = TUNED.votes, margin: float = TUNED.margin,
                     channels: Sequence[str | int] | None = POSTERIOR, pad_s: float = 2.0,
-                    harmonics: int = 3, threshold: float | None = TUNED.threshold) -> Decoder:
-    """Decoder for a recording's targets, sampling rate, montage and preprocessing."""
-    clf = make(classifier, freqs=rec.freqs, fs=rec.fs, harmonics=harmonics, phases=rec.phases,
-               margin=margin, threshold=threshold)
-    return Decoder(clf, rec.fs, window_s=window_s, step_s=step_s, votes=votes, channels=channels,
-                   pad_s=pad_s, band=rec.band, notch_hz=rec.notch, ch_names=rec.ch_names)
+                    harmonics: int = 3, threshold: float | None = TUNED.threshold,
+                    train_blocks: int = 0, template: str = "harmonic",
+                    bands: Sequence[Band] | None = None) -> Decoder:
+    """Decoder for a recording's targets, sampling rate, montage and preprocessing.
+
+    A trained classifier is fitted on the recording's first ``train_blocks`` blocks (one
+    cued trial per target each, in order), cut and preprocessed as ``score_cued`` does; the
+    decoder then scores only the trials after them (``Decoder.train_trials``). A
+    training-free classifier with ``train_blocks`` skips the same trials, so the two can be
+    compared on the same held-out trials. A spatial filter (``SPATIAL_FILTERS``) without
+    ``train_blocks`` is instead refitted before every trial on the others (``replay``).
+    ``bands`` and ``template`` apply to FBCCA and the template classifiers (``TRAINED``).
+    """
+    kw: dict[str, object] = dict(freqs=rec.freqs, fs=rec.fs, harmonics=harmonics,
+                                 phases=rec.phases, margin=margin, threshold=threshold)
+    name = str(classifier).strip().lower()
+    if bands is not None and (name == "fbcca" or name in TRAINED):
+        kw["bands"] = list(bands)
+    if name in TRAINED:
+        kw["template"] = template
+    clf = make(classifier, **kw)
+    dec = Decoder(clf, rec.fs, window_s=window_s, step_s=step_s, votes=votes, channels=channels,
+                  pad_s=pad_s, band=rec.band, notch_hz=rec.notch, ch_names=rec.ch_names)
+    if int(train_blocks) != train_blocks or train_blocks < 0:
+        raise ValueError(f"train_blocks must be a whole number >= 0, got {train_blocks}")
+    if clf.needs_fit and train_blocks < 1 and not isinstance(clf, Trained):
+        raise ValueError(f"{classifier} is a trained classifier: pass train_blocks >= 1 "
+                         f"(blocks of {rec.n_targets} trials to fit on)")
+    if train_blocks:
+        w = cut_windows(rec, band=rec.band, notch_hz=rec.notch).pick(channels)
+        n_train = int(train_blocks) * rec.n_targets
+        if n_train >= len(w):
+            raise ValueError(f"train_blocks {train_blocks} uses {n_train} of the {len(w)} "
+                             f"complete trials; nothing would be left to score")
+        if clf.needs_fit:
+            clf.fit(w.on[:n_train], w.labels[:n_train], rec.latency)   # type: ignore[attr-defined]
+        dec.train_trials = n_train
+    return dec
 
 
 def _training_windows(rec: Recording, decoder: Decoder, lat: float,
@@ -580,11 +639,12 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
             reject: float) -> tuple[list, list, Calibration, list[Decision]]:
     """Calibrate on the still screens, then feed the recording in chunks.
 
-    At every flicker response's start the decoder is aligned to it (``Decoder.align``), as
-    the live server does from the client's onset. A trained classifier is refitted there
-    on the recording's other trials, with its baseline on the still windows again, so each
-    trial is decoded by a filter that never saw it (leave-one-trial-out), and the
-    reported calibration is the first fold's.
+    Every chunk sets the decoder's onset to the latest stim_on marker, as the live server
+    does from the client's onset. A spatial filter (``classify.Trained``) not fitted by
+    ``train_blocks`` is refitted at every trial's response start on the recording's other
+    trials, with its baseline on the still windows again, so each trial is decoded by a
+    filter that never saw it (leave-one-trial-out), and the reported calibration is the
+    first fold's.
     """
     if chunk_s <= 0:
         raise ValueError(f"chunk_s must be positive, got {chunk_s}")
@@ -598,8 +658,8 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
               if s + decoder.n_pad >= a]
     still_windows = decoder.windows(rec.X, starts)
     clf = decoder.classifier
-    trained = isinstance(clf, Trained)
-    if trained:
+    held_out = isinstance(clf, Trained) and not decoder.train_trials
+    if held_out:
         on, y, keep = _training_windows(rec, decoder, lat, reject)
         if y.size != len(spans):
             raise ValueError(f"{rec.path}: {y.size} training windows for {len(spans)} trials")
@@ -607,29 +667,32 @@ def _stream(rec: Recording, decoder: Decoder, chunk_s: float, lat: float,
         """Fit the trained classifier without trial k, then its baseline on the still windows."""
         train = keep[keep != k]
         try:
-            clf.fit(on[train], y[train])
+            clf.fit(on[train], y[train], lat)
         except ValueError as exc:
             raise ValueError(f"{rec.path}: {clf.name} with trial {k} held out: {exc}") from None
         return fit_rest(decoder, still_windows, reject)
 
     # fold 0 is fitted before any data is fed: the lead-in before the first trial can be
     # longer than window + pad, and an unfitted classifier cannot score those windows
-    calib = refit(0) if trained else fit_rest(decoder, still_windows, reject)
+    calib = refit(0) if held_out else fit_rest(decoder, still_windows, reject)
     decoder.reset()
-    decoder.align(None)
+    decoder.clear_onset()
     chunk = max(1, int(round(chunk_s * rec.fs)))
+    onsets = np.array(sorted(t_on for t_on, _, _ in pair_trials(rec.markers)))
     decisions: list[Decision] = []
-    cuts = [a for a, _, _ in spans] + [n_total]
+    # held out: cut at every trial's response start, so the spatial filter can be refitted
+    # without that trial before its first window is fed
+    cuts = ([a for a, _, _ in spans] if held_out else []) + [n_total]
     pos = 0
     for k, stop in enumerate(cuts):
         for a in range(pos, stop, chunk):
-            decisions.extend(decoder.feed(rec.X[:, a:min(a + chunk, stop)],
-                                          rec.t[a:min(a + chunk, stop)]))
+            b = min(a + chunk, stop)
+            past = np.searchsorted(onsets, rec.t[b - 1], side="right")
+            decoder.set_onset(float(onsets[past - 1]) if past else None)
+            decisions.extend(decoder.feed(rec.X[:, a:b], rec.t[a:b]))
         pos = stop
-        if k < len(spans):
-            if trained and k > 0:
-                refit(k)
-            decoder.align(rec.t[stop])
+        if held_out and 0 < k < len(spans):
+            refit(k)
     return spans, still, calib, decisions
 
 
@@ -643,7 +706,7 @@ def _relabel(decisions: list[Decision], margin: float, votes: int,
         raw = int(np.argmax(d.scores)) if keep else ABSTAIN
         changed = voter.push(raw)
         out.append(Decision(d.time, d.scores, raw, voter.committed, changed, d.end, d.gap,
-                            d.level))
+                            d.level, d.offset_s))
     return out
 
 
@@ -661,6 +724,10 @@ def _evaluate(rec: Recording, decoder: Decoder, lat: float, spans: list, still: 
               margin: float, threshold: float | None) -> ReplayResult:
     ends = np.array([d.end for d in decisions])
     n_win = decoder.n_window
+    n_train = decoder.train_trials
+    if n_train:
+        spans = spans[n_train:]
+        still = _still_spans(spans, rec.X.shape[1])
     trials = []
     for a, b, target in spans:
         inside = [decisions[k] for k in np.flatnonzero((ends > a) & (ends <= b))]
@@ -681,11 +748,12 @@ def _evaluate(rec: Recording, decoder: Decoder, lat: float, spans: list, still: 
     used = {"classifier": decoder.classifier.name, "window_s": decoder.window_s,
             "step_s": decoder.step_s, "votes": votes, "margin": margin,
             "threshold": threshold, "pad_s": decoder.pad_s,
-            "held_out": isinstance(decoder.classifier, Trained)}
+            "held_out": isinstance(decoder.classifier, Trained) and not decoder.train_trials}
     return ReplayResult(path=rec.path, params=used, trials=trials, decisions=decisions,
                         calibration=calib, still_windows=still_windows,
                         still_abstain=still_abstain, still_commits=still_commits,
-                        n_still=len(still), decoder=decoder, recording=rec, spans=spans)
+                        n_still=len(still), decoder=decoder, recording=rec, spans=spans,
+                        n_train=n_train)
 
 
 def replay(path: str | Path | Recording,
@@ -772,28 +840,30 @@ def consistency(result: ReplayResult) -> dict[str, tuple[int, float]]:
     first (as score_cued and cut_windows do) and cuts the window from that: the real
     online-vs-offline comparison. They differ because zero-phase filtering of a live
     segment has an edge transient at its newest end, which no pad can remove.
-    Returns {mode: (n_windows, fraction agreeing)}. A trained classifier was refitted for
-    every trial during the replay, so only the last trial's windows can be re-scored with
-    the classifier as it now stands; the others are left out of the count.
+    Returns {mode: (n_windows, fraction agreeing)}. A spatial filter refitted for every
+    trial during the replay (``params["held_out"]``) can only re-score the last trial's
+    windows with the classifier as it now stands; the others are left out of the count.
+    Classifiers that need the onset re-score each window at its decision's ``offset_s``.
     """
     dec, rec = result.decoder, result.recording
     spans = result.spans
-    if isinstance(dec.classifier, Trained) and spans:
+    if result.params.get("held_out") and spans:
         spans = spans[-1:]
-    picked = [(d, a) for d in result.decisions for a, b, _ in spans
-              if a <= d.end - dec.n_window and d.end <= b]
+    picked = [d for d in result.decisions
+              if any(a <= d.end - dec.n_window and d.end <= b for a, b, _ in spans)]
+    if dec.needs_onset:
+        picked = [d for d in picked if math.isfinite(d.offset_s)]
     if not picked:
         return {"same": (0, math.nan), "whole": (0, math.nan)}
-    raw = np.array([d.raw for d, _ in picked])
-    offsets = [d.end - dec.n_window - a for d, a in picked]
-    same = dec.windows(rec.X, [d.end - dec.needed for d, _ in picked])
+    raw = np.array([d.raw for d in picked])
+    same = dec.windows(rec.X, [d.end - dec.needed for d in picked])
     Y = preprocess(rec.X[dec.rows], rec.fs, band=dec.band, notch_hz=dec.notch_hz)
-    whole = np.stack([Y[:, d.end - dec.n_window:d.end] for d, _ in picked])
+    whole = np.stack([Y[:, d.end - dec.n_window:d.end] for d in picked])
     clf = dec.classifier
 
     def agree(windows: np.ndarray) -> float:
-        if dec.uses_offsets:
-            pred = np.array([clf.predict(w, offset=o)[0] for w, o in zip(windows, offsets)])
+        if dec.needs_onset:
+            pred = np.array([clf.predict(w, d.offset_s)[0] for w, d in zip(windows, picked)])
         else:
             pred = clf.predict(windows)
         return float(np.mean(pred == raw))
@@ -801,13 +871,14 @@ def consistency(result: ReplayResult) -> dict[str, tuple[int, float]]:
     return {"same": (len(picked), agree(same)), "whole": (len(picked), agree(whole))}
 
 
-def trained_from_recording(path: str | Path | Recording, classifier: str = "etrca",
+def trained_from_recording(path: str | Path | Recording, classifier: str = "etrca-sf",
                            channels: Sequence[str | int] | None = POSTERIOR, harmonics: int = 3,
                            margin: float = TUNED.margin, threshold: float | None = TUNED.threshold,
                            shrink: float = 0.0, reject: float = REJECT_FACTOR,
                            latency: float | None = None,
                            window_s: float | None = TRAIN_WINDOW_S) -> Trained:
-    """Fit a trained classifier on every artifact-free trial of a cued recording.
+    """Fit a spatial filter (``SPATIAL_FILTERS``) on every artifact-free trial of a cued
+    recording.
 
     The flicker windows are cut as score_cued cuts them (the whole recording preprocessed
     with its own band and notch, from stim_on + latency) over ``channels`` in that order,
@@ -819,9 +890,10 @@ def trained_from_recording(path: str | Path | Recording, classifier: str = "etrc
     channel count must match the live board and layout; ``Trained.for_freqs`` picks a
     layout's subset.
     """
-    if not is_trained(classifier):
-        raise ValueError(f"{classifier!r} is not a trained classifier; choose from "
-                         f"{[m for m in METHODS if is_trained(m)]}")
+    if str(classifier).strip().lower().replace("_", "-") not in SPATIAL_FILTERS:
+        raise ValueError(f"{classifier!r} is not a spatial filter; choose from "
+                         f"{list(SPATIAL_FILTERS)} (a template classifier is saved by "
+                         f"brainsync.calibrate instead)")
     rec = path if isinstance(path, Recording) else load_recording(path)
     if rec.n_targets < 2:
         raise ValueError(f"{rec.path}: a trained classifier needs at least 2 targets, the "
@@ -838,7 +910,7 @@ def trained_from_recording(path: str | Path | Recording, classifier: str = "etrc
     clf = make(classifier, freqs=rec.freqs, fs=rec.fs, harmonics=harmonics, phases=rec.phases,
                margin=margin, threshold=threshold, shrink=shrink)
     try:
-        clf.fit(picked.on[keep], picked.labels[keep])
+        clf.fit(picked.on[keep], picked.labels[keep], lat)
     except ValueError as exc:
         raise ValueError(f"{rec.path}: {exc}") from None
     return clf
@@ -884,9 +956,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.online", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("paths", nargs="+", type=Path, help="*_cued.npz recordings")
-    p.add_argument("--classifier", default=TUNED.classifier, choices=METHODS,
-                   help="cca / fbcca, or a trained one (trca, trca-r, etrca, etrca-r, mscca), "
-                        "which is refitted on the other trials before each trial (held out)")
+    p.add_argument("--classifier", default=TUNED.classifier, choices=list(NAMES),
+                   help="training-free (cca, fbcca); a template classifier (itcca, ecca, trca, "
+                        "etrca, etrcar, sfcca; needs --train-blocks); or a spatial filter "
+                        "(trca-sf, trca-r-sf, etrca-sf, etrca-r-sf, mscca), refitted on the "
+                        "other trials before each trial (held out) unless --train-blocks is given")
+    p.add_argument("--train-blocks", type=int, default=0,
+                   help="trained classifiers: fit on the recording's first N blocks (one trial "
+                        "per target each) and score the trials after them")
+    p.add_argument("--template", choices=TEMPLATE_KINDS, default="harmonic",
+                   help="template classifiers: harmonic-projected templates (any window offset) "
+                        "or raw trial averages (windows inside the calibration epochs only)")
+    p.add_argument("--fb-bands", metavar="N:UPPER",
+                   help="filter bank for fbcca and the template classifiers: N sub-bands from "
+                        "8m Hz to UPPER Hz")
     p.add_argument("--window", type=float, default=TUNED.window_s, help="window seconds")
     p.add_argument("--step", type=float, default=TUNED.step_s, help="hop seconds")
     p.add_argument("--votes", type=int, default=TUNED.votes, help="agreeing windows to commit")
@@ -946,9 +1029,14 @@ def main(argv: list[str] | None = None) -> int:
             return _grid(list(args.paths), channels, args.windows or GRID["window_s"])
         for p in args.paths:
             print(f"replaying {p}", file=sys.stderr)
+            bands = None
+            if args.fb_bands:
+                n, upper = args.fb_bands.split(":")
+                bands = default_bands(load_recording(p).fs, float(upper), int(n))
             res = replay(p, classifier=args.classifier, window_s=args.window, step_s=args.step,
                          votes=args.votes, margin=args.margin, threshold=args.threshold,
-                         channels=channels)
+                         channels=channels, train_blocks=args.train_blocks,
+                         template=args.template, bands=bands)
             lines = res.report()
             print("\n".join(lines if args.trials else lines[:4]))
             agree = consistency(res)

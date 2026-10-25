@@ -465,7 +465,7 @@ def test_demo_calibration_length_pins_the_rest_offset():
     assert rms[CALIBRATE_S] < TUNED.margin, rms
 
 
-# -- trained classifiers: onset alignment, held-out replay, loading --------------------------
+# -- spatial filters (classify.Trained): onset, held-out replay, loading -------------------
 
 from brainsync.synthetic import ssvep_trials  # noqa: E402
 
@@ -473,37 +473,38 @@ from brainsync.synthetic import ssvep_trials  # noqa: E402
 def _trained_clf(seed: int = 11):
     X, y = ssvep_trials(FREQS, FS, n_per_target=6, seconds=3.0, snr_db=0.0, seed=seed)
     X = preprocess(X, FS)
-    return make("etrca", freqs=FREQS, fs=FS).fit(X[..., :500], y), X, y
+    return make("etrca-sf", freqs=FREQS, fs=FS).fit(X[..., :500], y), X, y
 
 
-def test_align_passes_the_window_offset_to_a_trained_classifier():
+def test_onset_passes_the_window_offset_to_a_spatial_filter():
     clf, X, y = _trained_clf()
     names = ("a", "b", "c", "d")
     dec = Decoder(clf, FS, window_s=2.0, step_s=0.5, votes=1, pad_s=1.0, channels=None,
                   ch_names=names)
-    assert dec.uses_offsets and not dec.aligned
-    assert dec.offset_for(123.0) == 0                 # unaligned: no offset
-    dec.align(100.0)
-    assert dec.aligned and dec.offset_for(101.0) == 250 and dec.offset_for(99.5) == -125
+    assert dec.needs_onset and dec.onset is None
     with pytest.raises(ValueError, match="finite"):
-        dec.align(float("nan"))
-    trial = X[0]                                      # response aligned at t = 100.0
+        dec.set_onset(float("nan"))
+    trial = X[0]                                      # fitted with t0 = 0: onset at t = 100.0
     t = 100.0 + np.arange(trial.shape[1]) / FS
+    out = dec.feed(trial, t)                          # no onset yet: the templates cannot be placed
+    assert len(out) == 1 and out[0].raw == ABSTAIN
+    dec.reset()
+    dec.set_onset(100.0)
     out = dec.feed(trial, t)
-    assert len(out) == 1
+    assert len(out) == 1 and out[0].offset_s == pytest.approx(1.0)
     window = dec.prepare(trial)                       # the pad is the first second
-    np.testing.assert_allclose(out[0].scores, clf.scores(window, offset=250)[0])
+    np.testing.assert_allclose(out[0].scores, clf.scores(window, offset=1.0)[0])
     assert out[0].raw == y[0]
-    # a calibration-free decoder ignores the alignment
+    # a calibration-free decoder ignores the onset
     plain = make_decoder(window_s=2.0, pad_s=1.0, votes=1)
-    plain.align(100.0)
-    assert not plain.uses_offsets and plain.offset_for(101.0) == 0
+    assert not plain.needs_onset
 
 
 def test_replay_trained_classifier_is_refitted_per_trial(synthetic_recording):
-    res = replay(synthetic_recording, classifier="etrca", margin=0.0, threshold=None, votes=2)
-    assert res.params["held_out"] is True and res.params["classifier"] == "etrca"
-    assert res.decoder.classifier.fitted and res.decoder.aligned
+    res = replay(synthetic_recording, classifier="etrca-sf", margin=0.0, threshold=None, votes=2)
+    assert res.params["held_out"] is True and res.params["classifier"] == "etrca-sf"
+    assert res.decoder.classifier.fitted and res.decoder.onset is not None
+    assert res.decoder.classifier.t0 == load_recording(synthetic_recording).latency
     assert res.decoder.classifier.has_baseline
     assert res.correct >= 0.75 * res.n_trials and res.wrong <= 2
     plain = replay(synthetic_recording, classifier="cca", margin=0.0, threshold=None, votes=2)
@@ -512,17 +513,27 @@ def test_replay_trained_classifier_is_refitted_per_trial(synthetic_recording):
     assert agree["same"][1] == 1.0 and agree["same"][0] > 0
 
 
+def test_spatial_filter_replay_can_fit_once_on_the_first_blocks(synthetic_recording):
+    res = replay(synthetic_recording, classifier="etrca-sf", train_blocks=3, window_s=2.0,
+                 step_s=0.25, votes=3, margin=0.5)
+    assert res.params["held_out"] is False and res.n_train == 6 and res.n_trials == 6
+    assert res.correct >= 5 and res.wrong == 0
+
+
 def test_trained_from_recording(synthetic_recording):
     clf = online.trained_from_recording(synthetic_recording)
-    assert clf.name == "etrca" and clf.fitted and clf.freqs.tolist() == list(FREQS)
+    assert clf.name == "etrca-sf" and clf.fitted
+    assert clf.t0 == load_recording(synthetic_recording).latency and clf.freqs.tolist() == list(FREQS)
     assert clf.templates.shape[1] == 4 and clf.cycle is not None and not clf.has_baseline
     assert clf.margin == TUNED.margin and clf.threshold == TUNED.threshold
     sub = clf.for_freqs([17.0, 15.0])
     assert sub.freqs.tolist() == [17.0, 15.0]
     other = online.trained_from_recording(synthetic_recording, "mscca", channels=["O1", "O2"])
     assert other.name == "mscca" and other.templates.shape[1] == 2
-    with pytest.raises(ValueError, match="not a trained classifier"):
+    with pytest.raises(ValueError, match="not a spatial filter"):
         online.trained_from_recording(synthetic_recording, "cca")
+    with pytest.raises(ValueError, match="not a spatial filter"):
+        online.trained_from_recording(synthetic_recording, "etrca")     # a template classifier
     with pytest.raises(KeyError):
         online.trained_from_recording(synthetic_recording, channels=["Oz"])
 
@@ -543,7 +554,7 @@ def test_replay_trained_classifier_survives_a_long_lead_in(tmp_path):
     X2 = np.concatenate([X[:, :lead] * 0 + X[:, :lead].mean(axis=1, keepdims=True), X], axis=1)
     t2 = np.concatenate([t[0] - (lead - np.arange(lead)) / FS, t])
     path = save_recording(tmp_path / "2026-01-01_000001_cued.npz", X2, t2, FS, MONTAGE, FREQS, text)
-    res = replay(path, classifier="etrca", margin=0.0, threshold=None, votes=2)
+    res = replay(path, classifier="etrca-sf", margin=0.0, threshold=None, votes=2)
     assert res.n_trials == 12 and res.params["held_out"] is True
     assert res.correct >= 0.75 * res.n_trials
 
@@ -557,3 +568,76 @@ def test_trained_from_recording_window_length(synthetic_recording):
     assert clipped.templates.shape[-1] == full.templates.shape[-1]
     with pytest.raises(ValueError, match="window_s"):
         online.trained_from_recording(synthetic_recording, window_s=0.0)
+# -- onsets and trained classifiers ---------------------------------------------------------
+
+def test_set_onset_gives_each_window_its_offset():
+    dec = make_decoder(window_s=2.0, step_s=0.5, pad_s=1.0)
+    X, t = board_data(5.0, seed=3)
+    assert dec.onset is None and not dec.needs_onset
+    dec.set_onset(float(t[0]) + 1.0)
+    out = dec.feed(X, t)
+    assert out, "no decisions"
+    for d in out:
+        first = t[d.end - dec.n_window]
+        assert d.offset_s == pytest.approx(first - (t[0] + 1.0), abs=1e-9)
+    dec.clear_onset()
+    assert np.isnan(dec.feed(*board_data(1.0, seed=4))[-1].offset_s)
+    with pytest.raises(ValueError, match="onset"):
+        dec.set_onset(float("inf"))
+    dec.set_onset(5.0)
+    dec.reset()
+    assert dec.onset == 5.0           # kept across a reset, like the baseline
+
+
+def test_trained_replay_fits_on_first_blocks_and_scores_the_rest(synthetic_recording):
+    res = replay(synthetic_recording, classifier="etrcar", train_blocks=3, window_s=2.0,
+                 step_s=0.25, votes=3, margin=0.5)
+    assert res.n_train == 6 and res.n_trials == 6          # 12 trials, 2 per block
+    assert res.decoder.needs_onset and res.decoder.train_trials == 6
+    assert res.correct >= 5 and res.wrong == 0
+    assert "fitted on the first 6 trials" in res.summary()
+    offsets = [d.offset_s for d in res.decisions if not np.isnan(d.offset_s)]
+    assert offsets and min(offsets) > -5.0 and max(offsets) < 10.0
+    # the same held-out trials for a training-free classifier
+    base = replay(synthetic_recording, classifier="fbcca", train_blocks=3, window_s=2.0,
+                  step_s=0.25, votes=3, margin=0.5)
+    assert base.n_train == 6 and base.n_trials == 6 and base.decoder.train_trials == 6
+
+
+def test_trained_replay_needs_train_blocks(synthetic_recording):
+    with pytest.raises(ValueError, match="train_blocks"):
+        replay(synthetic_recording, classifier="etrca")
+    with pytest.raises(ValueError, match="nothing would be left"):
+        replay(synthetic_recording, classifier="etrca", train_blocks=6)
+
+
+def test_trained_decoder_abstains_without_an_onset_or_outside_raw_templates(synthetic_recording):
+    from brainsync.recordings import POSTERIOR, cut_windows
+    rec = load_recording(synthetic_recording)
+    w = cut_windows(rec, band=rec.band, notch_hz=rec.notch).pick(POSTERIOR)
+    clf = make("etrca", freqs=rec.freqs, fs=rec.fs).fit(w.on[:6], w.labels[:6], rec.latency)
+    dec = Decoder(clf, rec.fs, window_s=2.0, step_s=0.5, votes=2, pad_s=1.0, ch_names=rec.ch_names)
+    X, t = rec.X[:, :2000], rec.t[:2000]
+    out = dec.feed(X, t)                     # no onset known: every decision abstains
+    assert out and all(d.raw == ABSTAIN and np.isnan(d.offset_s) for d in out)
+    dec.set_onset(float(t[0]))
+    out = dec.feed(rec.X[:, 2000:4000], rec.t[2000:4000])
+    assert out and any(d.raw != ABSTAIN for d in out) and all(np.isfinite(d.offset_s) for d in out)
+    # raw templates reach only 3.86 s after the onset: later windows abstain instead of raising
+    raw = make("etrca", freqs=rec.freqs, fs=rec.fs, template="raw").fit(w.on[:6], w.labels[:6], rec.latency)
+    dec2 = Decoder(raw, rec.fs, window_s=2.0, step_s=0.5, votes=2, pad_s=1.0, ch_names=rec.ch_names)
+    dec2.set_onset(float(rec.t[0]))
+    late = dec2.feed(rec.X[:, :3000], rec.t[:3000])
+    assert late and all(d.raw == ABSTAIN for d in late if d.offset_s > 2.0)   # 0.14 + 3.86 - 2 s
+    res = replay(synthetic_recording, classifier="etrcar", train_blocks=3, template="raw",
+                 window_s=2.0, step_s=0.25, votes=3, margin=0.5)
+    assert res.n_trials == 6                 # runs to the end instead of raising
+
+
+def test_decoder_rejects_a_classifier_fitted_on_other_channels(synthetic_recording):
+    from brainsync.recordings import cut_windows
+    rec = load_recording(synthetic_recording)
+    w = cut_windows(rec, band=rec.band, notch_hz=rec.notch).pick(("O1", "O2"))
+    clf = make("etrca", freqs=rec.freqs, fs=rec.fs).fit(w.on[:6], w.labels[:6], rec.latency)
+    with pytest.raises(ValueError, match="fitted on 2 channels"):
+        Decoder(clf, rec.fs, window_s=2.0, step_s=0.5, pad_s=1.0, ch_names=rec.ch_names)

@@ -64,8 +64,9 @@ again runs it again.
 The laptop runs the server; the app needs its address and access key.
 
 1. Start the server in one of two ways:
-   - `python -m app.server --tunnel` (add `--fake-decoder` or `--keyboard` as usual): a
-     Cloudflare `https://….trycloudflare.com` address that works from any network.
+   - `python -m app.server --tunnel` (add `--bridge cerelog`, `--bridge fake`, `--fake-decoder`
+     or `--keyboard` as usual): a Cloudflare `https://….trycloudflare.com` address that works
+     from any network.
    - `server.host: 0.0.0.0` in `config/default.yaml`, then `python -m app.server`: plain
      `http://<laptop-ip>:8000` on the same Wi-Fi.
 2. Open the partner page on the laptop. It offers the **app link**

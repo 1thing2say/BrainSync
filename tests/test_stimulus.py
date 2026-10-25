@@ -217,7 +217,10 @@ def test_overrides():
 
 def test_depth_defaults_to_full_and_is_checked():
     assert _cfg().depth == 1.0
-    assert all(load_config(name).depth == 1.0 for name in available_configs())
+    shipped = [load_config(name) for name in available_configs()]
+    # every flicker config is full depth; tvep_4 (flashes) rests at 0.1 by design
+    assert all(c.depth == 1.0 for c in shipped if not c.coded)
+    assert all(0.0 < c.depth <= 1.0 for c in shipped if c.coded)   # tvep_4 is pinned in test_vep_fake
     half = _cfg(stimulus={"depth": 0.5})
     assert half.depth == 0.5 and _cfg(stimulus={"depth": 1}).depth == 1.0
     for bad in (0.0, 1.5, -0.2, math.nan, math.inf):
@@ -799,3 +802,124 @@ def test_four_targets_config_has_the_gate_frequencies():
     assert cfg.freqs.tolist() == [13.0, 15.0, 17.0, 11.0]
     assert cfg.phases.tolist() == [0.0] * 4
     assert cfg.labels == ("13", "15", "17", "11")
+
+
+def test_feedback_reader_takes_text_lines_on_the_same_stream():
+    notes: list[str] = []
+    r = FeedbackReader(io.StringIO('{"text": "hello"}\n0\n{"nope": 1}\n{bad\n{"text": ""}\n'),
+                       2, note=notes.append)
+    assert r.control.text == ""
+    assert not r.heard
+    r.run()
+    assert r.current == 0 and r.heard
+    assert r.control.text == ""   # the last line cleared it
+    assert r.n_lines == 5 and r.n_ignored == 2 and len(notes) == 2
+    r2 = FeedbackReader(io.StringIO('{"text": "YES  ####  0.42"}\n'), 2, note=notes.append)
+    r2.run()
+    assert r2.control.text == "YES  ####  0.42" and r2.current == -1
+
+
+def test_free_frames_show_the_centre_text_on_flicker_frames_too():
+    from brainsync.stimulus.feedback import Control
+    cfg = load_config("two_targets")
+    states = iter([Control(used=True, labels=("", ""), text="a", active=(0, 1)),
+                   Control(used=True, labels=("", ""), text="b", active=(0, 1), flicker=True,
+                           serial=1, flickering=(0, 1)),
+                   Control(used=True, labels=("", ""), text="c", active=(0, 1), flicker=True,
+                           serial=1, flickering=(0, 1))])
+    frames = list(free_frames(cfg, seconds=2 / 60, control=lambda: next(states)))
+    assert [f.centre for f in frames] == ["a", "b", "c"]
+    assert frames[0].trial == -1 and frames[1].trial == frames[2].trial == 0
+    plain = list(free_frames(cfg, seconds=2 / 60))
+    assert all(f.centre == "" and not any(f.labels) for f in plain)
+
+
+def test_labels_flag_in_a_free_run():
+    with pytest.raises(SystemExit):
+        cli.main(["--labels", "--plan"])
+    with pytest.raises(SystemExit):   # a free run's text comes as JSON lines on --feedback
+        cli.main(["--free", "--feedback", "stdin", "--status", "stdin", "--plan"])
+    assert cli.main(["--free", "--feedback", "stdin", "--labels", "--plan"]) == 0
+    assert cli.main(["--free", "--labels", "--plan"]) == 0
+
+
+def test_feedback_reader_takes_label_lines_for_every_target():
+    notes: list[str] = []
+    r = FeedbackReader(io.StringIO('{"labels": ["YES  .4", "NO  .1"]}\n{"labels": ["one"]}\n'
+                                   '{"labels": [1, 2]}\n0\n'), 2, note=notes.append)
+    assert r.control.labels == ("", "")
+    r.run()
+    assert r.control.labels == ("YES  .4", "NO  .1") and r.current == 0
+    assert r.n_ignored == 2 and all("labels" in n for n in notes)
+    seeded = FeedbackReader(io.StringIO(""), 2, labels=("YES", "NO"))
+    assert seeded.control.labels == ("YES", "NO") and not seeded.control.used
+    with pytest.raises(ValueError, match="labels"):
+        FeedbackReader(io.StringIO(""), 2, labels=("YES",))
+
+
+def test_free_frames_show_the_starting_labels_until_a_labels_line():
+    from brainsync.stimulus.feedback import apply_control, initial_control
+    cfg = load_config("two_targets")
+    start = initial_control(2, ("YES", "NO"))
+    on = apply_control(start, {"labels": ("a", "b"), "flicker": True})
+    states = iter([start, start, on])
+    held = iter([True, False])
+    frames = list(free_frames(cfg, seconds=2 / 60, hold=lambda: next(held),
+                              control=lambda: next(states)))
+    assert [f.labels for f in frames] == [("YES", "NO"), ("YES", "NO"), ("a", "b")]
+    # held, then the legacy flicker, then the JSON branch's first flicker run
+    assert [f.trial for f in frames] == [-1, -1, 0] and frames[2].events == ("flicker_on",)
+
+
+def test_diamond_layout_and_fill():
+    cfg = load_config("cvep_4")
+    assert cfg.shape == "diamond" and cfg.fill == (1.0, 1.0, 1.0)
+    assert [t.pos for t in cfg.targets] == [(0.0, 0.32), (-0.55, 0.0), (0.55, 0.0),
+                                            (0.0, -0.32)]
+    from brainsync.stimulus.config import diamond_positions, parse_config
+    with pytest.raises(ValueError, match="needs 4 targets"):
+        diamond_positions(3, 0.3)
+    assert diamond_positions(4, 0.3) == [(0.0, 0.3), (-0.3, 0.0), (0.3, 0.0), (0.0, -0.3)]
+    base = {"targets": {"freqs": [10.0, 12.0, 14.0, 16.0]}, "layout": {"shape": "diamond",
+            "size": 0.2, "spacing": 0.3}}
+    assert parse_config(base).shape == "diamond" and parse_config(base).spacing_x == 0.3
+    with pytest.raises(ValueError, match="overlap"):
+        parse_config({**base, "layout": {"shape": "diamond", "size": 0.25, "spacing": 0.2,
+                                         "spacing_x": 0.2}})
+    with pytest.raises(ValueError, match="shape"):
+        parse_config({**base, "layout": {"shape": "ring"}})
+    with pytest.raises(ValueError, match="spacing_x"):
+        parse_config({**base, "layout": {"rows": 2, "cols": 2, "spacing_x": 0.5}})
+    with pytest.raises(ValueError, match="fill"):
+        parse_config({**base, "stimulus": {"fill": [0.0, 0.0, 0.0]}})
+    from brainsync.stimulus.flicker import to_psychopy_fill
+    assert to_psychopy_fill(1.0, (1.0, 0.0, 0.0)) == (1.0, -1.0, -1.0)
+    assert to_psychopy_fill(0.5) == (0.0, 0.0, 0.0)
+
+
+def test_vep_configs_place_their_text_clear_of_every_square():
+    from brainsync.stimulus.display import text_boxes, text_overlaps
+    for name in ("cvep_2", "cvep_3", "cvep_4", "tvep_4"):
+        for aspect in (1.5, 1.6, 16 / 9):
+            assert text_overlaps(load_config(name), aspect) == [], name
+    slots, centre = text_boxes(load_config("cvep_4"))
+    assert [b.side for b in slots] == ["right", "above", "below", "left"]
+    assert centre.pos == (0.0, 0.0)
+    # a 2 x 2 grid: each label on its outer side, the one-line centre between the rows
+    slots, centre = text_boxes(load_config("tvep_4"))
+    assert [b.side for b in slots] == ["left", "right", "left", "right"]
+    assert centre.side == "centre" and centre.height < 3 * 0.035 * 1.25
+
+
+def test_cvep_3_is_a_white_row_of_three_with_the_widest_lags():
+    from brainsync.stimulus.display import text_boxes
+    from brainsync.vep.codes import min_lag_distance
+    cfg = load_config("cvep_3")
+    assert cfg.labels == ("YES", "NO", "HELP") and cfg.fill == (1.0, 1.0, 1.0)
+    assert [t.pos for t in cfg.targets] == [(-0.55, 0.0), (0.0, 0.0), (0.55, 0.0)]
+    assert cfg.code.lag_frames == 21
+    assert min_lag_distance(3, 21, cfg.code.cycle_frames) == 21
+    assert 0.55 + cfg.reach <= cfg.display.aspect / 2
+    slots, centre = text_boxes(cfg)
+    assert all(b.side == "below" for b in slots)
+    assert centre.side == "bottom"   # a square sits on the centre

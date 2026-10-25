@@ -493,14 +493,15 @@ def test_reference_recording_decodes() -> None:
 
 def test_trained_methods_are_scored_leave_one_trial_out(arrays) -> None:
     on, off, y = arrays
-    rows = score_windows(on, off, y, FREQS, FS, [2.0], ["cca", "etrca", "mscca"], margin=0.0)
-    assert [(r.method, r.held_out) for r in rows] == [("cca", False), ("etrca", True), ("mscca", True)]
+    rows = score_windows(on, off, y, FREQS, FS, [2.0], ["cca", "etrca-sf", "mscca"], margin=0.0)
+    assert [(r.method, r.held_out) for r in rows] == [("cca", False), ("etrca-sf", True),
+                                                      ("mscca", True)]
     et = rows[1]
     assert et.accuracy >= 0.9 and et.n == y.size and et.abstain == 0.0
     # trial 5 scored by a fit on every other trial, baseline on their still windows
     t = 5
     train = np.arange(y.size) != t
-    clf = make("etrca", freqs=FREQS, fs=FS).fit(on[train], y[train]).fit_baseline(off[train])
+    clf = make("etrca-sf", freqs=FREQS, fs=FS).fit(on[train], y[train]).fit_baseline(off[train])
     np.testing.assert_allclose(et.scores[t], clf.scores(on[t])[0])
     np.testing.assert_allclose(et.control_pred[t], clf.scores(off[t]).argmax())
     assert et.pred[t] == et.scores[t].argmax()
@@ -511,20 +512,20 @@ def test_trained_methods_are_scored_leave_one_trial_out(arrays) -> None:
 def test_held_out_needs_enough_trials_per_target(arrays) -> None:
     on, off, y = arrays
     few = np.flatnonzero(y == 0)[:2].tolist() + np.flatnonzero(y == 1)[:3].tolist()
-    with pytest.raises(ValueError, match="trca.*hold trial.*at least 2"):
-        score_windows(on[few], off[few], y[few], FREQS, FS, [1.0], ["trca"])
+    with pytest.raises(ValueError, match="trca-sf.*hold trial.*at least 2"):
+        score_windows(on[few], off[few], y[few], FREQS, FS, [1.0], ["trca-sf"])
     rows = score_windows(on[few], off[few], y[few], FREQS, FS, [1.0], ["mscca"])  # 1 trial is enough
     assert rows[0].held_out and rows[0].n == 5
 
 
 def test_report_marks_held_out_rows(session: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main([str(session), "--methods", "fbcca,etrca", "--windows", "2"])
+    rc = main([str(session), "--methods", "fbcca,etrca-sf", "--windows", "2"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "* held out" in out
-    assert re.search(r"^etrca\*\s+2\.00 s", out, re.MULTILINE)
+    assert "+ held out" in out
+    assert re.search(r"^etrca-sf\+\s+2\.00 s", out, re.MULTILINE)
     assert re.search(r"^fbcca\s+2\.00 s", out, re.MULTILINE)
-    rep = score_recording(load_recording(session), ["etrca"], [2.0])
+    rep = score_recording(load_recording(session), ["etrca-sf"], [2.0])
     assert rep.rows[0].held_out and rep.rows[0].accuracy >= 0.9
 
 
@@ -533,4 +534,14 @@ def test_cli_rejects_unknown_but_accepts_trained_names(capsys: pytest.CaptureFix
     assert "choose from" in capsys.readouterr().err
     assert score_cued._usage_problem(
         type("A", (), {"windows": [1.0], "margin": 1.0, "reject": 3.0, "harmonics": 3,
-                       "channels": "O1"})(), ["trca-r", "etrca-r"], ["O1"]) is None
+                       "channels": "O1"})(), ["trca-r-sf", "etrca-r-sf"], ["O1"]) is None
+def test_trial_blocks_prefer_block_markers() -> None:
+    from brainsync.score_cued import trial_blocks
+    text = ("[marker 100.0] block_start:0\n[marker 108.0] block_end:0\n"
+            "[marker 108.1] block_start:1\n[marker 116.0] block_end:1\n")
+    kept = np.array([1, 2, 3])                       # trial 0 dropped: by position blocks would shift
+    on = np.array([105.0, 109.0, 113.0])
+    np.testing.assert_array_equal(trial_blocks(kept, 2, on, text), [0, 1, 1])
+    np.testing.assert_array_equal(trial_blocks(kept, 2), [0, 1, 1])      # positional fallback
+    np.testing.assert_array_equal(trial_blocks(np.array([0, 1, 2, 3]), 2, np.array([101., 105., 109., 113.]), text), [0, 0, 1, 1])
+    np.testing.assert_array_equal(trial_blocks(kept, 2, np.array([99.0, 109.0, 113.0]), text), [0, 1, 1])  # before any block: fallback

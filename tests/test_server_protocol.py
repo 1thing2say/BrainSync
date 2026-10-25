@@ -59,7 +59,7 @@ def test_constants_match_the_contract():
                              "protocol", "not_allowed", "detect_unavailable", "scan_failed",
                              "internal"}
     assert p.CLIENT_TYPES == {"hello", "onset", "frames", "ping", "pause", "resume", "bye",
-                              "gaze", "scan", "clicked"}
+                              "gaze", "scan", "clicked", "rescan"}
     assert p.VIEWER_TYPES == {"ping", "bye"} and p.VIEWER_TYPES < p.CLIENT_TYPES
     assert (p.LATENCY_S, p.ONSET_TIMEOUT_S, p.COOLDOWN_S, p.SETTLE_MS) == (0.14, 2.0, 1.5, 800)
     assert p.PING == {"type": "ping"}
@@ -403,6 +403,86 @@ def image(**over) -> dict:
     return {"media_type": "image/jpeg", "data": JPEG, "w": 1280, "h": 725, **over}
 
 
+# -- validate_client: ax scans (v3.1) -----------------------------------------------------------
+
+def ax_scan(**over) -> dict:
+    msg = {"type": "scan", "scan_id": 7, "source": "ax",
+           "viewport": {"w": 900, "h": 600, "dpr": 2},
+           "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 412},
+           "window": {"title": "All iCloud", "frame": {"x": 0, "y": 0, "w": 900, "h": 600}},
+           "hints": [{"id": 0, "x": 10, "y": 20, "w": 30, "h": 20, "role": "AXButton",
+                      "text": "New Note", "tag": "", "actions": ["AXPress"],
+                      "enabled": True}]}
+    msg.update(over)
+    return msg
+
+
+def test_ax_scan_ok_without_image():
+    out = p.validate_client({**ax_scan(), "extra": 1})
+    assert out == {"type": "scan", "scan_id": 7, "source": "ax", "image": None,
+                   "viewport": {"w": 900.0, "h": 600.0, "dpr": 2.0}, "url": "", "title": "",
+                   "hints": [{"id": 0, "x": 10.0, "y": 20.0, "w": 30.0, "h": 20.0,
+                              "role": "AXButton", "text": "New Note", "tag": "",
+                              "actions": ["AXPress"], "enabled": True}],
+                   "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 412},
+                   "window": {"title": "All iCloud"}}
+
+
+def test_ax_scan_with_an_image_and_no_hints():
+    out = p.validate_client(ax_scan(image=image(), hints=[], app={"bundle_id": "", "name": "",
+                                                                  "pid": 0}))
+    assert out["image"]["media_type"] == "image/jpeg" and out["hints"] == []
+    assert out["app"] == {"bundle_id": "", "name": "", "pid": 0}
+
+
+def test_ax_hint_actions_are_cut_to_8_of_40_characters_and_fields_are_optional():
+    hints = [{"id": 0, "x": 0, "y": 0, "w": 1, "h": 1, "actions": ["A" * 50] * 12},
+             {"id": 1, "x": 0, "y": 0, "w": 1, "h": 1}]
+    out = p.validate_client(ax_scan(hints=hints))
+    assert out["hints"][0]["actions"] == ["A" * 40] * 8
+    assert "actions" not in out["hints"][1] and "enabled" not in out["hints"][1]
+
+
+def test_screenshot_scans_are_unchanged_and_drop_ax_fields():
+    plain = p.validate_client(scan_msg())
+    assert "source" not in plain and "app" not in plain
+    explicit = p.validate_client(scan_msg(source="screenshot", app={"x": 1},
+                                          hints=[hint(actions=["AXPress"], enabled=False)]))
+    assert explicit == p.validate_client(scan_msg(hints=[hint()]))
+    bad("protocol", p.validate_client, {**scan_msg(source="screenshot"), "image": None})
+
+
+@pytest.mark.parametrize("over, words", [
+    ({"source": "dom"}, "scan.source"),
+    ({"source": None}, "scan.source"),
+    ({"app": None}, "app"),
+    ({"app": "Notes"}, "scan.app must be an object"),
+    ({"app": {"name": "Notes", "pid": 1}}, "bundle_id"),
+    ({"app": {"bundle_id": "x", "pid": 1}}, "name"),
+    ({"app": {"bundle_id": "x", "name": "y"}}, "pid"),
+    ({"app": {"bundle_id": "x", "name": "y", "pid": -1}}, "pid"),
+    ({"app": {"bundle_id": "x", "name": "y", "pid": 1.5}}, "pid"),
+    ({"app": {"bundle_id": 5, "name": "y", "pid": 1}}, "bundle_id"),
+    ({"window": None}, "window"),
+    ({"window": {}}, "title"),
+    ({"window": {"title": 3}}, "title"),
+    ({"viewport": None}, "viewport"),
+    ({"image": image(media_type="image/gif")}, "media_type"),
+    ({"hints": [hint(actions="AXPress")]}, "actions must be a list"),
+    ({"hints": [hint(actions=["AXPress", 3])]}, r"actions\[1\]"),
+    ({"hints": [hint(enabled="yes")]}, "enabled"),
+])
+def test_ax_scan_rejects_bad_fields(over, words):
+    msg = ax_scan(**over)
+    if over.get("app", 0) is None:
+        del msg["app"]
+    if over.get("window", 0) is None:
+        del msg["window"]
+    if over.get("viewport", 0) is None:
+        del msg["viewport"]
+    bad("protocol", p.validate_client, msg, match=words)
+
+
 @pytest.mark.parametrize("img", [
     None, "data", [1],
     image(media_type="image/gif"), image(media_type=None), image(media_type="IMAGE/JPEG"),
@@ -730,8 +810,9 @@ def test_scan_result():
     msg = p.scan_result(4, True, 1840.4, elements, 9, "Login page")
     assert msg == {"type": "scan_result", "scan_id": 4, "ok": True, "ms": 1840,
                    "n_elements": 1, "n_candidates": 9, "summary": "Login page",
-                   "elements": [{"id": 0, "label": "Sign in"}]}
+                   "elements": [{"id": 0, "label": "Sign in"}], "cached": False}
     assert msg["elements"][0] is not elements[0]
+    assert p.scan_result(6, True, 3, [], 0, cached=True)["cached"] is True
     assert p.scan_result(5, False, 0, [], 0)["n_elements"] == 0
     with pytest.raises(ValueError):
         p.scan_result(5, False, float("nan"), [], 0)
@@ -793,3 +874,7 @@ def test_builders_refuse_non_numbers(value):
         Target("a", value, 0.0, "A", "slot")
     with pytest.raises(ValueError):
         p.pong(1, value, 2.0)
+
+
+def test_rescan_is_a_bare_message():
+    assert p.validate_client({"type": "rescan", "why": "app changed"}) == {"type": "rescan"}

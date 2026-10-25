@@ -102,8 +102,8 @@ def test_single_trial_input_gives_one_row(task) -> None:
 
 def test_baseline_removes_constant_bias(task, rest) -> None:
     class Biased(CCA):
-        def raw_scores(self, X):
-            return super().raw_scores(X) + np.array([0.5, 0.0, 0.0])
+        def raw_scores(self, X, offset=0.0):
+            return super().raw_scores(X, offset) + np.array([0.5, 0.0, 0.0])
 
     X, y = task
     R, _ = rest
@@ -142,8 +142,8 @@ def test_fit_baseline_stats(rest) -> None:
 def test_baseline_spread_is_pooled_within_template(rest) -> None:
     """Spread = sqrt of the mean per-template rest variance; offsets between templates don't count."""
     class Offset(CCA):
-        def raw_scores(self, X):
-            return super().raw_scores(X) + np.array([0.6, 0.0, -0.3])
+        def raw_scores(self, X, offset=0.0):
+            return super().raw_scores(X, offset) + np.array([0.6, 0.0, -0.3])
 
     R, _ = rest
     plain = CCA(FREQS, FS).fit_baseline(R)
@@ -197,8 +197,8 @@ def test_margin_is_in_baseline_spread_units(rest) -> None:
 
 def test_abstain_decisions_invariant_to_score_scale(task, rest) -> None:
     class Scaled(CCA):
-        def raw_scores(self, X):
-            return 10.0 * super().raw_scores(X)
+        def raw_scores(self, X, offset=0.0):
+            return 10.0 * super().raw_scores(X, offset)
 
     X, _ = task
     held = np.concatenate([X, rest[1]])
@@ -234,6 +234,9 @@ def test_make_and_validation() -> None:
     assert type(make("cca", freqs=FREQS, fs=FS)) is CCA
     with pytest.raises(ValueError, match="nope"):
         make("nope", freqs=FREQS, fs=FS)
+    with pytest.raises(ValueError, match="tdca"):
+        make("tdca", freqs=FREQS, fs=FS)
+    assert make("trca", freqs=FREQS, fs=FS).needs_fit and not make("cca", freqs=FREQS, fs=FS).needs_fit
     with pytest.raises(ValueError, match="-1"):
         CCA(FREQS, FS, margin=-1.0)
     with pytest.raises(ValueError, match="200"):
@@ -331,10 +334,10 @@ def test_threshold_validation_and_repr() -> None:
 
 # -- trained spatial filters (TRCA, eTRCA, -R variants, msCCA) ---------------------------
 
-from brainsync.classify import (ETRCA, METHODS, MSCCA, TRAINED, TRCA, Trained, is_trained,  # noqa: E402
-                                period_samples)
+from brainsync.classify import (ETRCA, METHODS, MSCCA, NAMES, SPATIAL_FILTERS, TRAINED,  # noqa: E402
+                                TRCA, Trained, is_trained, period_samples)
 
-TRAINED_NAMES = list(TRAINED)
+TRAINED_NAMES = list(SPATIAL_FILTERS)
 
 
 @pytest.fixture(scope="module")
@@ -355,13 +358,16 @@ def test_period_samples() -> None:
 
 
 def test_make_trained_names_and_is_trained() -> None:
-    assert METHODS == ("cca", "fbcca") + TRAINED
-    assert make("trca", freqs=FREQS, fs=FS).name == "trca"
-    assert make("TRCA-R", freqs=FREQS, fs=FS).name == "trca-r"
-    assert make("etrca_r", freqs=FREQS, fs=FS).name == "etrca-r"
-    assert isinstance(make("etrca", freqs=FREQS, fs=FS), ETRCA)
+    assert METHODS == NAMES == ("cca", "fbcca") + TRAINED + SPATIAL_FILTERS
+    assert make("trca-sf", freqs=FREQS, fs=FS).name == "trca-sf"
+    assert make("TRCA-R-SF", freqs=FREQS, fs=FS).name == "trca-r-sf"
+    assert make("etrca_r_sf", freqs=FREQS, fs=FS).name == "etrca-r-sf"
+    assert isinstance(make("etrca-sf", freqs=FREQS, fs=FS), ETRCA)
     assert isinstance(make("mscca", freqs=FREQS, fs=FS), MSCCA)
-    assert all(is_trained(n) for n in TRAINED) and not is_trained("cca") and not is_trained("fbcca")
+    assert not isinstance(make("etrca", freqs=FREQS, fs=FS), Trained)    # brainsync.templates'
+    assert all(is_trained(n) for n in SPATIAL_FILTERS + TRAINED)
+    assert not is_trained("cca") and not is_trained("fbcca")
+    assert all(make(n, freqs=FREQS, fs=FS).needs_fit for n in SPATIAL_FILTERS)
     with pytest.raises(ValueError, match="unknown classifier"):
         make("trca-x", freqs=FREQS, fs=FS)
     with pytest.raises(ValueError, match="shrink"):
@@ -423,7 +429,7 @@ def test_trained_held_out_accuracy(name: str, split) -> None:
     assert clf.raw_scores(Xte[0]).shape == (1, 3)
 
 
-@pytest.mark.parametrize("name", ["trca", "etrca", "mscca"])
+@pytest.mark.parametrize("name", ["trca-sf", "etrca-sf", "mscca"])
 def test_subset_matches_full_scores(name: str, split) -> None:
     Xtr, ytr, Xte, _ = split
     clf = make(name, freqs=FREQS, fs=FS).fit(Xtr, ytr)
@@ -454,15 +460,20 @@ def test_periodic_templates_follow_the_window_offset() -> None:
     aligned = clf.raw_scores(X[..., :n])
     shift = 137
     later = X[..., shift:shift + n]
-    with_offset = clf.raw_scores(later, offset=shift)
+    with_offset = clf.raw_scores(later, offset=shift / FS)             # seconds since the onset
     np.testing.assert_allclose(with_offset, aligned, atol=0.1)      # off-target cells are noise
     assert np.all(with_offset.argmax(axis=1) == y)
     without = clf.raw_scores(later)
     assert np.mean(without[np.arange(y.size), y]) < np.mean(with_offset[np.arange(y.size), y]) - 0.2
     # any window length works with periodic templates
     assert clf.raw_scores(X[..., :300]).shape == (y.size, 2)
-    assert clf.templates_for(600, offset=250).shape == (2, 4, 600)
-    np.testing.assert_allclose(clf.templates_for(300, offset=250), clf.templates_for(300, offset=0))
+    assert clf.templates_for(600, offset=1.0).shape == (2, 4, 600)
+    np.testing.assert_allclose(clf.templates_for(300, offset=1.0), clf.templates_for(300, offset=0))
+    # fitted with t0 (windows cut at onset + t0), offsets count from the onset
+    late = ETRCA(freqs, FS).fit(X[..., :n], y, t0=0.14)
+    np.testing.assert_allclose(late.raw_scores(later, offset=0.14 + shift / FS), with_offset)
+    np.testing.assert_allclose(late.raw_scores(X[..., :n]), aligned)  # None: at t0
+    assert late.covers(n, 5.0) and late.uses_offset and late.n_ch == 4
 
 
 def test_raw_templates_need_the_training_length_and_no_offset() -> None:
@@ -471,8 +482,10 @@ def test_raw_templates_need_the_training_length_and_no_offset() -> None:
     clf = TRCA(freqs, 256.0).fit(X, y)
     assert clf.cycle is None and clf.period == 1024
     assert clf.raw_scores(X).shape == (y.size, 2)
-    with pytest.raises(ValueError, match="offset must be 0"):
+    with pytest.raises(ValueError, match="offset must be its t0"):
         clf.raw_scores(X, offset=3)
+    assert clf.covers(X.shape[-1], 0.0) and not clf.covers(X.shape[-1], 3.0)
+    assert not clf.covers(200, 0.0)
     with pytest.raises(ValueError, match="does not match the training window"):
         clf.raw_scores(X[..., :200])
     with pytest.raises(ValueError, match="at least one common period"):
@@ -524,7 +537,7 @@ def test_etrca_beats_cca_on_the_hardest_nakanishi_subject() -> None:
     hits = 0
     for b in range(ds.n_blocks):
         te = ds.blocks == b
-        clf = make("etrca", freqs=ds.freqs, fs=ds.fs, phases=ds.phases).fit(X[~te], ds.y[~te])
+        clf = make("etrca-sf", freqs=ds.freqs, fs=ds.fs, phases=ds.phases).fit(X[~te], ds.y[~te])
         hits += int(np.sum(clf.predict(X[te]) == ds.y[te]))
     assert cca < 0.5
     assert hits / ds.y.size > 0.9
