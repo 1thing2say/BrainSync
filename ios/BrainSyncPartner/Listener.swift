@@ -79,6 +79,11 @@ final class Listener {
     private static let interruptionGiveUp: TimeInterval = 30
     @ObservationIgnored private var engineObserver: NSObjectProtocol?
     @ObservationIgnored private var sessionObservers: [NSObjectProtocol] = []
+    /// Engines torn down in the last few seconds, kept alive: AVFoundation finishes a voice
+    /// processing engine's teardown on its own queues after stop(), and freeing the engine under
+    /// them crashed the app (EXC_BAD_ACCESS in objc_retain / objc_release, 2026-10-25).
+    @ObservationIgnored private var retiredEngines: [(engine: AVAudioEngine, until: TimeInterval)] = []
+    private static let retireS: TimeInterval = 5
 
     private func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
 
@@ -497,13 +502,13 @@ final class Listener {
     }
 
     /// The engine's configuration changed. It stops itself then; one that kept running (voice
-    /// processing settling after start) is left alone, so this never loops.
-    private func engineConfigChanged() {
+    /// processing settling after start) is left alone, so this never loops. Whether it stopped is
+    /// read here, while the notification still holds the engine: the timer only rebuilds and
+    /// never touches the old engine again (that crashed, 2026-10-25).
+    private func engineConfigChanged(_ changed: AVAudioEngine?) {
         guard wanted, !suspended, !interrupted, timers["audioPath"] == nil else { return }
-        setTimer("audioPath", 0.3) { [weak self] in
-            guard let self, self.engine?.isRunning != true else { return }
-            self.restartAudio()
-        }
+        guard let changed, changed === engine, !changed.isRunning else { return }
+        setTimer("audioPath", 0.3) { [weak self] in self?.restartAudio() }
     }
 
     /// Keep what was heard, rebuild the engine on the new route and start a fresh task.
@@ -574,8 +579,9 @@ final class Listener {
         }
         // The engine stops itself when the hardware configuration changes.
         engineObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.engineConfigChanged() }
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] note in
+            let changed = note.object as? AVAudioEngine
+            MainActor.assumeIsolated { self?.engineConfigChanged(changed) }
         }
         return engine
     }
@@ -592,7 +598,16 @@ final class Listener {
         if engine.inputNode.isVoiceProcessingEnabled {
             try? engine.inputNode.setVoiceProcessingEnabled(false)  // so replies are not ducked
         }
+        retire(engine)
         self.engine = nil
+    }
+
+    /// Keep a stopped engine alive for `retireS` seconds instead of freeing it now (see
+    /// `retiredEngines`); older ones are let go here.
+    private func retire(_ engine: AVAudioEngine) {
+        let t = now()
+        retiredEngines.removeAll { $0.until <= t }
+        retiredEngines.append((engine, t + Listener.retireS))
     }
 
     private func cancelTask() {
