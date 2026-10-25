@@ -1289,6 +1289,13 @@ auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The
 needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
 venv with PsychoPy is the one described in "Install"; run the commands with its python.
 
+Targets need not be squares. `[targets] shapes` gives each target a circle, a plus or an
+arrow (`arrow-up`, `-down`, `-left`, `-right`) instead, one name per target; every shape
+fits the square's box, so the layout stays the same. `cvep_4_arrows` is `cvep_4` with
+arrows pointing outward, `cvep_3_plus` is `cvep_3` with plus signs (`-c cvep_4_arrows`).
+An arrow lights 45 % of its box and a plus 56 %, so both configs use a larger size, and
+the stimulus prints a warning that the response will be weaker than a square's.
+
 `web/vep-lab/index.html` is a static explainer for an audience: the three codings' stimulus
 sequences, the toy model's responses (the same kernel as `synthetic.vep_kernel`, ported to
 `vep_core.js` and checked against the Python), the paper's Figures 2 to 4 as a flash
