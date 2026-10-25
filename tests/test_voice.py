@@ -185,7 +185,15 @@ def test_player_command_preference():
     assert all(p[0] != "say" for p in voice.PLAYERS)
 
 
-def test_player_command_windows_fallback():
+def test_player_command_powershell_only_on_windows(monkeypatch):
+    only_ps = lambda n: n if n == "powershell" else None          # noqa: E731
+    for platform in ("darwin", "linux"):                         # e.g. Linux's snap PowerShell
+        monkeypatch.setattr(voice.sys, "platform", platform)
+        assert voice.player_command(Path("/tmp/x.wav"), which=only_ps) is None
+
+
+def test_player_command_windows_fallback(monkeypatch):
+    monkeypatch.setattr(voice.sys, "platform", "win32")
     path = Path("C:/Users/o'brien/clip.wav")
     cmd = voice.player_command(path, which=lambda n: n if n == "powershell" else None)
     assert cmd[:4] == list(voice.WINDOWS_PLAYER)

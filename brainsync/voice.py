@@ -102,7 +102,7 @@ def player_command(path: Path, which: Callable[[str], str | None] = shutil.which
     for cmd in PLAYERS:
         if which(cmd[0]):
             return [*cmd, str(path)]
-    if which(WINDOWS_PLAYER[0]):
+    if sys.platform == "win32" and which(WINDOWS_PLAYER[0]):
         # a PowerShell single-quoted string: doubling a quote escapes it, and PowerShell
         # also ends the string at the typographic single quotes U+2018 to U+201B
         quoted = "".join(c * 2 if c in "'‘’‚‛" else c for c in str(path))
