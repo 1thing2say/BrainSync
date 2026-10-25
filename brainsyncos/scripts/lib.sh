@@ -352,7 +352,10 @@ installed_size() {
 # STAGING (the file tree plus DEBIAN/control). Writes DEBIAN/md5sums, makes
 # directories 755, gives every file root ownership and, when
 # BSOS_SOURCE_DATE_EPOCH is set (builder.sh: the commit time), that mtime
-# (dpkg-deb gets it as SOURCE_DATE_EPOCH). Prints the .deb's path.
+# (dpkg-deb gets it as SOURCE_DATE_EPOCH). Compressed with xz, or with
+# BSOS_DEB_COMPRESS (dpkg-deb -Z: none, zstd, ...) at level BSOS_DEB_LEVEL
+# (dpkg-deb -z; set it for zstd, whose dpkg-deb default is far slower than
+# zstd's own). Prints the .deb's path.
 build_deb() {
     local s="$1" out="$2" pkg ver arch deb
     pkg="$(sed -n 's/^Package: //p' "$s/DEBIAN/control")"
@@ -366,7 +369,8 @@ build_deb() {
     [ -z "$epoch" ] || find "$s" -exec touch -h -d "@$epoch" {} +
     mkdir -p "$out"
     deb="$out/${pkg}_${ver}_${arch}.deb"
-    SOURCE_DATE_EPOCH="${epoch:-$(date +%s)}" dpkg-deb --root-owner-group -Zxz --build "$s" "$deb" > /dev/null \
+    SOURCE_DATE_EPOCH="${epoch:-$(date +%s)}" dpkg-deb --root-owner-group -Z"${BSOS_DEB_COMPRESS:-xz}" ${BSOS_DEB_LEVEL:+-z"$BSOS_DEB_LEVEL"} \
+        --build "$s" "$deb" > /dev/null \
         || die "dpkg-deb failed for $pkg"
     printf '%s\n' "$deb"
 }
