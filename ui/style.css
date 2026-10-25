@@ -111,32 +111,30 @@ a { color: var(--text); }
 .centre-text:empty, .centre-text[hidden], .state:empty { display: none; }
 /* Nothing to show: no box at all, so a phone's list has no extra gap. */
 .target-centre:not(:has(.centre-text:not(:empty):not([hidden]), .state:not(:empty))) { display: none; }
-/* A target is a card: 1 px border. While it flickers, its .flicker layer does (below). */
+/* A target is a card, black and white only: a black card with white text, still or flickering,
+   so nothing changes colour when the flicker stops. While it flickers, its .flicker layer does
+   (below). */
 .target { position: relative; isolation: isolate; overflow: hidden; width: 260px; max-width: 100%; min-height: 7.5rem; border-radius: 12px; display: flex;
   flex-direction: column; justify-content: center; align-items: center; gap: 0.45rem; padding: 1rem;
-  border: 1px solid var(--line); background: var(--surface); text-align: center; color: var(--text);
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+  border: 1px solid var(--line-strong); background: #000000; text-align: center; color: #ffffff;
+  transition: border-color 0.2s, box-shadow 0.2s; }
 /* The sentence (what gets spoken) is the big text; the short label is a tag above it. */
 /* In the diamond, at most 28 % of its width, so the top target always clears the side ones. */
 .targets.diamond .target { width: min(28cqw, 260px); }
-.target-tag { font-size: 0.7rem; font-weight: 500; color: var(--say); }
+.target-tag { font-size: 0.7rem; font-weight: 500; }
 .target-tag:empty, .target-key:empty { display: none; }
 .target-text { font-size: clamp(1.05rem, 1.55vw, 1.35rem); font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
 .target.next .target-text, .target.say .target-text, .target.back .target-text {
   font-size: clamp(1.3rem, 2vw, 1.7rem); font-weight: 700; letter-spacing: -0.02em; }
-.target.next .target-text, .target.back .target-text { color: var(--next); }
-.target.say .target-text { color: var(--say); }
 .target-key { color: var(--muted); font-size: 0.7rem; }
-/* Flickering: a black card under a white layer whose opacity app.js sets every frame (0 = black,
-   1 = white). The text above it is white with a black outline, so it reads on every frame, from
-   black through mid-grey to white. */
+/* Flickering: the black card under a white layer whose opacity app.js sets every frame (0 = black,
+   1 = white). The text is white with a black outline at all times, so it reads on every frame,
+   from black through mid-grey to white, and looks the same once the flicker stops. */
 .flicker { position: absolute; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; }
-.target > :not(.flicker) { position: relative; }
-.target.active { background: #000000; border-color: var(--line-strong); }
-.target.active > :not(.flicker) { color: #ffffff;
+.target > :not(.flicker) { position: relative;
   text-shadow: 0 0 2px #000000, 0 0 2px #000000, 0 0 3px #000000, 1px 1px 0 #000000, -1px -1px 0 #000000; }
-/* The one shadow on the page: a ring round the picked box. */
-.target.picked { border-color: var(--pick); box-shadow: 0 0 0 1px var(--pick), 0 0 0 5px rgba(255, 211, 77, 0.16); }
+/* The one shadow on the page: a white ring round the picked box. */
+.target.picked { border-color: #ffffff; box-shadow: 0 0 0 1px #ffffff, 0 0 0 5px rgba(255, 255, 255, 0.2); }
 
 .option-list { margin: 0 auto; padding-left: 1.5rem; max-width: 40rem; font-size: 1.2rem; }
 .option-list li { padding: 0.35rem 0.6rem; color: var(--muted); }
@@ -164,7 +162,9 @@ a { color: var(--text); }
 .controls #stop.offline, .controls #stop.offline:hover:not(:disabled) { background: transparent;
   color: var(--danger); font-weight: 600; font-size: 1rem; line-height: 1.2; }
 button.target { font: inherit; cursor: pointer; }
-button.target:disabled { cursor: default; color: var(--text); background: var(--surface); }
+button.target:disabled { cursor: default; color: #ffffff; background: #000000; }
+/* Hover never greys a card: its black is the flicker's dark frame. */
+button.target:hover:not(:disabled) { background: #000000; border-color: var(--line-strong); }
 
 /* The mic card: is the partner heard, and what has it heard so far. */
 .mic-card { border: 1px solid var(--line); border-radius: 12px; padding: 0.85rem 1rem; display: flex;

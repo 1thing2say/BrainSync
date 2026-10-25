@@ -201,7 +201,8 @@ pull requests.
   0.5 * (1 + sin(2 pi f n / refresh + phase)), with the frame index n from the
   requestAnimationFrame timestamp rounded to the measured frame period, so a dropped frame never
   shifts the phase; each card is black under a white layer whose opacity follows it, the text
-  white with a black outline. The flicker warning measures the refresh and flags a rate more than
+  white with a black outline. The cards are black and white in every state (no green or blue
+  text, a white ring for the pick), so nothing changes colour when the flicker stops. The flicker warning measures the refresh and flags a rate more than
   1 Hz off `display.expected_refresh_hz` or uneven frames. The page flickers only between the
   server's flicker and the next phase, and only after its own start button; Esc, Stop, a lost
   connection or a hidden tab stop it on the page at once (a hidden tab also sends Stop). The
