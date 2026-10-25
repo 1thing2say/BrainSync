@@ -23,7 +23,7 @@ import pytest
 from brainsync import swipe_web
 from brainsync.classify import ABSTAIN
 from brainsync.profiles import load_deck, render_deck
-from brainsync.swipe import LIKE, PASS, card_order
+from brainsync.swipe import FREQ_LIKE as LIKE, FREQ_PASS as PASS, card_order
 from brainsync.swipe_web import Engine, Subscriber, build_engine
 
 ROOT = Path(__file__).resolve().parents[1]

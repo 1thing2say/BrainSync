@@ -66,7 +66,7 @@ from .online import TUNED, Decision, Decoder, calibrate
 from .profiles import Profile, load_deck, render_deck
 from .recordings import MONTAGE, POSTERIOR
 from .stimulus import load_config
-from .swipe import LIKE, PASS, Feed, Swiper, card_order, voice_line
+from .swipe import FREQ_LIKE as LIKE, FREQ_PASS as PASS, Feed, Swiper, card_order, voice_line
 
 __all__ = ["GAZES", "CardChanged", "Engine", "NoDecoder", "Subscriber", "SwipeServer",
            "build_engine", "make_server", "main"]

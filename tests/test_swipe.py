@@ -8,7 +8,7 @@ from brainsync import swipe
 from brainsync.board import FakeBoard
 from brainsync.classify import ABSTAIN, make
 from brainsync.online import TUNED, Decision, Decoder, calibrate
-from brainsync.swipe import LIKE, PASS, Feed, Outcome, Swiper
+from brainsync.swipe import FREQ_LIKE as LIKE, FREQ_PASS as PASS, Feed, Outcome, Swiper
 
 FS = 250.0
 FREQS = (15.0, 17.0)

@@ -478,18 +478,27 @@ def session(args: argparse.Namespace, cfg: StimulusConfig, board: Any, decoder: 
 
 # -- c-VEP: the standard (docs/CVEP-STANDARD.md) ---------------------------------------------
 
+def is_standard_code(cfg: StimulusConfig) -> bool:
+    """True when ``cfg`` flickers the standard's code: three targets of one 63-bit
+    m-sequence, 21 frames apart, one frame per bit (cvep_3, swipe_cvep)."""
+    c = cfg.code
+    return (c is not None and cfg.n_targets == live.N_TARGETS and c.length == live.LENGTH
+            and c.lag_frames == live.LAG_FRAMES and c.frames_per_bit == 1)
+
+
 def build_code(args: argparse.Namespace, cfg: StimulusConfig) -> tuple[Any, live.CodeVepDecoder]:
     """The board (not yet connected) and the self-training c-VEP decoder for ``cfg``.
 
-    --fake gives the standard's synthetic board (vep.live.standard_fake_board; any other
-    [code] config gets the same SequenceFakeBoard over its own code). --template loads a
-    saved template, so the decoder skips training. Raises one of BUILD_ERRORS.
+    --fake gives the standard's synthetic board (vep.live.standard_fake_board) for a
+    config with the standard's code, and the same SequenceFakeBoard over its own code for
+    any other [code] config. --template loads a saved template, so the decoder skips
+    training. Raises one of BUILD_ERRORS.
     """
     if cfg.code is None:
         raise ValueError(f"config {cfg.name!r} has no [code] table; c-VEP needs one")
     if args.fake:
         clock = None if args.fast else time.time
-        if cfg.name == live.CONFIG:
+        if is_standard_code(cfg):
             board: Any = live.standard_fake_board(0, seed=args.seed, clock=clock,
                                                   refresh=cfg.refresh)
         else:
