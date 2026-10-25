@@ -1,0 +1,4 @@
+# Requires-Dist of the brainflow wheel, one per line (read by build.sh).
+numpy
+# The fork imports pkg_resources, which setuptools 81 removed.
+setuptools<81
