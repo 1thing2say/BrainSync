@@ -57,3 +57,4 @@ extension/heatmap/clips/
 # Xcode per-user state and SwiftPM caches
 xcuserdata/
 .swiftpm/
+.build/
