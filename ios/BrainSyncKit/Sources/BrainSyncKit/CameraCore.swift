@@ -9,18 +9,31 @@ import Foundation
 /// newest. The gallery opens on the newest, and Next photo steps back in time (to the next
 /// older one), wrapping from the oldest to the newest, like swiping through a camera roll.
 ///
-/// | Screen        | t0         | t1             | t2                      |
-/// | ------------- | ---------- | -------------- | ----------------------- |
-/// | viewfinder    | Shutter    | Flip camera    | Gallery (No photos: off)|
-/// | gallery       | Next photo | Back to camera | Delete                  |
-/// | confirmDelete | Delete     | (off)          | Keep                    |
+/// Two squares at most (docs/CVEP-STANDARD.md), so each screen's main action sits on t0 and
+/// t1 opens a second pair of actions ("More"):
 ///
-/// Delete needs two looks (Delete, then Delete again on the confirm screen), so a single
-/// misread never loses a photo. Keep sits on t2, where the user is already looking after
-/// choosing Delete, so the likeliest repeat look keeps the photo.
+/// | Screen        | t0          | t1                                  |
+/// | ------------- | ----------- | ----------------------------------- |
+/// | viewfinder    | Shutter     | More                                |
+/// | cameraMenu    | Flip camera | Gallery (No photos: Back)           |
+/// | gallery       | Next photo  | More                                |
+/// | galleryMenu   | Delete      | Back to camera                      |
+/// | confirmDelete | Delete      | Keep                                |
+///
+/// Delete needs two looks on Delete (the gallery's menu, then the confirm screen), so a single
+/// misread never loses a photo. Keep sits on t1, the square More and Back to camera use, so
+/// the confirm screen's other answer is the harmless one.
 public struct CameraCore: SuiteAppCore, Equatable, Sendable {
     public enum Screen: Equatable, Sendable {
-        case viewfinder, gallery, confirmDelete
+        case viewfinder, cameraMenu, gallery, galleryMenu, confirmDelete
+
+        /// True on the screens that show a photo (the gallery and its menus).
+        public var showsPhoto: Bool {
+            switch self {
+            case .gallery, .galleryMenu, .confirmDelete: return true
+            case .viewfinder, .cameraMenu: return false
+            }
+        }
     }
 
     public enum Lens: Equatable, Sendable {
@@ -33,7 +46,11 @@ public struct CameraCore: SuiteAppCore, Equatable, Sendable {
     public enum Effect: Equatable, Sendable {
         /// Take a photo with this lens; call `photoAdded()` once it is saved.
         case capture(Lens)
-        /// Switch the viewfinder to this lens.
+        /// The squares now show the screen's second pair of actions (`screen` says which).
+        case openMenu
+        /// The menu closed without doing anything (Back on the camera menu with no photos).
+        case closeMenu
+        /// Switch the viewfinder to this lens (the camera menu closes).
         case flip(to: Lens)
         /// Open the gallery on this photo.
         case openGallery(photo: Int)
@@ -75,19 +92,16 @@ public struct CameraCore: SuiteAppCore, Equatable, Sendable {
 
     public var labels: [String] {
         switch screen {
-        case .viewfinder: return ["Shutter", "Flip camera", photoCount > 0 ? "Gallery" : "No photos"]
-        case .gallery: return ["Next photo", "Back to camera", "Delete"]
-        case .confirmDelete: return ["Delete", "", "Keep"]
+        case .viewfinder: return ["Shutter", "More"]
+        case .cameraMenu: return ["Flip camera", photoCount > 0 ? "Gallery" : "Back"]
+        case .gallery: return ["Next photo", "More"]
+        case .galleryMenu: return ["Delete", "Back to camera"]
+        case .confirmDelete: return ["Delete", "Keep"]
         }
     }
 
-    public var enabled: [Bool] {
-        switch screen {
-        case .viewfinder: return [true, true, photoCount > 0]
-        case .gallery: return [true, true, true]
-        case .confirmDelete: return [true, false, true]
-        }
-    }
+    /// Both squares do something on every screen.
+    public var enabled: [Bool] { [true, true] }
 
     public var trainingLabel: String { "Shutter" }
 
@@ -96,22 +110,33 @@ public struct CameraCore: SuiteAppCore, Equatable, Sendable {
         switch (screen, target) {
         case (.viewfinder, 0):
             return .capture(lens)
-        case (.viewfinder, 1):
-            lens = lens.flipped
-            return .flip(to: lens)
         case (.viewfinder, _):
+            screen = .cameraMenu
+            return .openMenu
+        case (.cameraMenu, 0):
+            lens = lens.flipped
+            screen = .viewfinder
+            return .flip(to: lens)
+        case (.cameraMenu, _):
+            guard photoCount > 0 else {
+                screen = .viewfinder
+                return .closeMenu
+            }
             screen = .gallery
             photoIndex = photoCount - 1
             return .openGallery(photo: photoIndex)
         case (.gallery, 0):
             photoIndex = older(than: photoIndex, count: photoCount)
             return .showPhoto(photoIndex)
-        case (.gallery, 1):
-            screen = .viewfinder
-            return .closeGallery
         case (.gallery, _):
+            screen = .galleryMenu
+            return .openMenu
+        case (.galleryMenu, 0):
             screen = .confirmDelete
             return .confirmDelete(photo: photoIndex)
+        case (.galleryMenu, _):
+            screen = .viewfinder
+            return .closeGallery
         case (.confirmDelete, 0):
             let deleted = photoIndex
             photoCount -= 1

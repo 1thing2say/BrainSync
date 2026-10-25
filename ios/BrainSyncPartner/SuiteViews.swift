@@ -1,7 +1,7 @@
 // The suite's screens: Home (pair, the flicker warning, the app tiles), the shared top bar with
-// Stop, the three c-VEP squares with their labels and confidence, and the Camera and Reels apps.
-// Voice is the existing partner screen (VoiceRootView), unchanged. Every app shows the same three
-// squares (slots t0, t1, t2); SuiteModel turns the server's pick into the app's effect.
+// Stop, the two c-VEP squares (never more) with their labels and confidence, and the Camera and
+// Reels apps. Voice is the existing partner screen (VoiceRootView), unchanged. Every app shows the
+// same two squares (slots t0, t1); SuiteModel turns the server's pick into the app's effect.
 
 import Photos
 import SwiftUI
@@ -47,7 +47,7 @@ struct SuiteRootView: View {
 
 // MARK: - Shared pieces
 
-/// Back to Home, by touch (the operator's hands; the apps' three squares are all in use).
+/// Back to Home, by touch (the operator's hands; the apps' two squares are both in use).
 struct HomeButton: View {
     @Environment(SuiteModel.self) private var suite
 
@@ -185,33 +185,37 @@ struct SuiteTarget: View {
     }
 }
 
-/// The three targets in a row, as large as the width allows (Home and Camera).
+/// The two targets in a row, one at each edge, as far apart as the width allows (Home and
+/// Camera).
 struct SuiteTargetRow: View {
-    var maxSize: CGFloat = 112
+    var maxSize: CGFloat = 132
 
     var body: some View {
         GeometryReader { geo in
-            let size = max(40, min(maxSize, (geo.size.width - 4 * 24) / 3, geo.size.height - 70))
+            let size = max(40, min(maxSize, (geo.size.width - 3 * 24) / 2, geo.size.height - 70))
             HStack(spacing: 24) {
-                ForEach(0..<SuiteSlots.count, id: \.self) { i in
-                    SuiteTarget(index: i, size: size)
-                }
+                SuiteTarget(index: 0, size: size)
+                Spacer(minLength: 24)
+                SuiteTarget(index: 1, size: size)
             }
+            .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
 
-/// The three targets stacked (Reels' right rail): Up on top, Like in the middle, Down below.
+/// The two targets stacked (Reels' right rail): Like on top, Next at the bottom, as far apart
+/// as the rail allows.
 struct SuiteTargetColumn: View {
     var size: CGFloat = 76
 
     var body: some View {
         VStack(spacing: 28) {
-            ForEach(0..<SuiteSlots.count, id: \.self) { i in
-                SuiteTarget(index: i, size: size)
-            }
+            SuiteTarget(index: 0, size: size)
+            Spacer(minLength: 28)
+            SuiteTarget(index: 1, size: size)
         }
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -249,7 +253,7 @@ struct SuiteHomeView: View {
                             AppTile(app: app)
                         }
                     }
-                    Text("Look at a square below to open its app, or tap a tile. Inside an app the three squares do that app's actions; Home goes back.")
+                    Text("Look at Next to move the highlight and at Open to open that app, or tap a tile. Inside an app the two squares do that app's actions; Home goes back.")
                         .font(.footnote)
                         .foregroundStyle(Palette.muted)
                     Button("Settings") { showSettings = true }
@@ -292,7 +296,8 @@ private struct AppTile: View {
             }
             .frame(maxWidth: .infinity, minHeight: 84)
         }
-        .buttonStyle(FilledButtonStyle(.secondary))
+        // The app the Open square opens now (Next moves this highlight).
+        .buttonStyle(FilledButtonStyle(suite.home.current == app ? .primary : .secondary))
     }
 
     private var icon: String {
@@ -355,7 +360,7 @@ struct SuiteWarningCard: View {
         VStack(alignment: .leading, spacing: 14) {
             Callout(title: "Flicker warning", icon: "exclamationmark.triangle.fill", tint: Palette.warn) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("The three squares flash black and white in a code, changing up to 60 times a second. Flashing in this range can trigger seizures in people with photosensitive epilepsy. Nobody with epilepsy or flicker sensitivity should look at them.")
+                    Text("The two squares flash black and white in a code, changing up to 60 times a second. Flashing in this range can trigger seizures in people with photosensitive epilepsy. Nobody with epilepsy or flicker sensitivity should look at them.")
                     Text("**Stop** turns the flicker off at once, and it stops by itself whenever the app leaves the screen.")
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -383,12 +388,14 @@ struct CameraAppView: View {
         VStack(spacing: 0) {
             SuiteTopBar(title: "Camera")
             switch suite.camera.screen {
-            case .viewfinder:
+            case .viewfinder, .cameraMenu:
+                // The camera menu (Flip camera / Gallery) keeps the viewfinder; only the two
+                // squares' labels change.
                 CameraViewfinder(capture: suite.capture, store: suite.photos,
                                  shutterTrigger: suite.shutterTrigger, stripMinHeight: 200) {
                     SuiteTargetRow()
                 }
-            case .gallery, .confirmDelete:
+            case .gallery, .galleryMenu, .confirmDelete:
                 CameraGalleryView(store: suite.photos, index: suite.camera.photoIndex,
                                   confirmingDelete: suite.camera.screen == .confirmDelete,
                                   stripMinHeight: 200) {
@@ -411,7 +418,7 @@ struct ReelsAppView: View {
             SuiteTopBar(title: "Reels")
             ReelFeedView(index: suite.reels.index, liked: suite.reels.liked, paused: suite.reels.paused,
                          dimmed: suite.dimReels && suite.driver.isFlickering,
-                         topBumps: suite.reelTopBumps, railWidth: 124) {
+                         railWidth: 124) {
                 SuiteTargetColumn()
             }
         }

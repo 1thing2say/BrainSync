@@ -3,7 +3,7 @@
 //
 // Layout: both screens are one column. On top, a 3:4 frame (the shape of the photos) with the
 // live preview or the photo; below it a plain black strip that takes the rest of the height
-// (at least `stripMinHeight`) and holds whatever view the app passes, meant for the three c-VEP
+// (at least `stripMinHeight`) and holds whatever view the app passes, meant for the two c-VEP
 // squares in a row. The strip never overlaps the moving preview, and the frame sits in the same
 // place on both screens, so the squares never move when the user switches between them.
 //

@@ -318,6 +318,11 @@ pull requests.
   the Python server and `clients/js/cvep.js`. Checked in the iOS Simulator against `--board
   fake` (pair, train, Home → Reels, Reels down twice, two photos). Not yet run on a device or
   with the headset; the response to a phone-sized square is unmeasured. `ios/README.md`.
+  **Two squares max (2026-10-25, branch `cvep2/ios-37`):** the suite now draws two squares,
+  `t0` / `t1` at lags 0 / 31 (the project-wide cap, `brainsync/vep/live.py` on `feat/cvep2-max`):
+  Home: Open (the highlighted app) / Next; Camera: Shutter / More, then Flip camera / Gallery;
+  gallery: Next photo / More, then Delete / Back to camera; Reels: Like-pause / Next. A square's
+  lag follows the layout, else the welcome's `lag_frames`.
 - **EOG gaze prior (2026-10-25, branch `electrode-downloads`):** the C3/C4 pins never reach
   the scalp, so their leads go to gel pads at the left and right outer canthus (channels `LO`,
   `RO`; montage `EOG_MONTAGE` in `brainsync/recordings.py`). REF stays on the mastoid and DRL

@@ -1,5 +1,5 @@
-// A debug screen for the c-VEP flicker on this phone: the three standard squares (lags 0, 21,
-// 42 frames), the measured refresh, dropped frames, missed cycle starts and the live frame
+// A debug screen for the c-VEP flicker on this phone: the two standard squares (lags 0 and 31
+// frames; never more than two), the measured refresh, dropped frames, missed cycle starts and the live frame
 // index, so the timing can be checked on a device before a headset session. It needs no
 // server. It has its own warning: nothing flickers until "I understand, start" is tapped, and
 // Stop, leaving the screen or leaving the app stops it at once (PLAN rule 10).
@@ -15,13 +15,13 @@ struct FlickerLabView: View {
     @State private var onsets = 0
     @State private var lastReport = ""
 
-    private static let slots = ["t0", "t1", "t2"]
+    private static let slots = SuiteSlots.ids   // two squares, never more
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Heading("Flicker lab")
-                Text("The c-VEP squares as the server's apps use them: one 63-bit code, each square 21 frames later than the one before, one bit a frame at 60 Hz.")
+                Text("The c-VEP squares as the server's apps use them: one 63-bit code, the second square 31 frames behind the first, one bit a frame at 60 Hz.")
                     .foregroundStyle(Palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
 

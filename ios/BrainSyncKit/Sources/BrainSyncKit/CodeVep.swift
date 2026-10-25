@@ -1,8 +1,8 @@
 import Foundation
 
 /// The BrainSync c-VEP standard (docs/CVEP-STANDARD.md), ported from clients/js/cvep.js so the
-/// phone draws exactly what the browser and the PsychoPy display draw: three white squares on
-/// black showing one 63-bit m-sequence, target k delayed by k × 21 frames. Frame n of a target
+/// phone draws exactly what the browser and the PsychoPy display draw: two white squares on
+/// black showing one 63-bit m-sequence, target k delayed by k × 31 frames. Frame n of a target
 /// at lag L is white when `bits[(n - L) mod 63]` is 1, black when 0; n counts frames since the
 /// layout's first flickering frame, so a cycle starts on every n with n mod 63 == 0.
 ///
@@ -20,15 +20,17 @@ public enum CodeVep {
         1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1,
     ]
     public static let length = 63
-    public static let targetCount = 3
-    /// 63 / 3: the widest spacing three targets allow (350 ms at 60 Hz).
-    public static let lagFrames = 21
+    public static let targetCount = 2
+    /// The project-wide cap: never more than two squares (docs/CVEP-STANDARD.md).
+    public static let maxTargets = 2
+    /// 63 // 2: the widest spacing two targets allow (517 ms at 60 Hz).
+    public static let lagFrames = 31
     /// One frame per bit: 1.05 s at 60 Hz.
     public static let cycleFrames = 63
     /// Cycles recorded on target 0 before the template is ready (about 32 s).
     public static let trainCycles = 30
     public static let barCells = 8
-    /// The lag of target k (0, 21, 42 frames).
+    /// The lag of target k (0, 31 frames).
     public static func lag(ofTarget k: Int) -> Int { k * lagFrames }
 
     // MARK: - The code a server sends
@@ -57,7 +59,7 @@ public enum CodeVep {
             self.fill = fill
         }
 
-        /// The standard: 63 bits, 21-frame lags, 30 training cycles, white.
+        /// The standard: 63 bits, 31-frame lags, 30 training cycles, white.
         public static let standard = Code(bits: CodeVep.bits, lagFrames: CodeVep.lagFrames,
                                           cycleFrames: CodeVep.cycleFrames,
                                           trainCycles: CodeVep.trainCycles, fill: "#ffffff")
