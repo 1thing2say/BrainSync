@@ -58,9 +58,16 @@ class Tunnel:
         return self.url
 
     def stop(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        stop_process(self.proc)
+
+
+def stop_process(proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
+    """Terminate a child and wait for it, killing it if it is still there after ``timeout_s``.
+    Blocks up to that long, so the server runs it outside the event loop."""
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()

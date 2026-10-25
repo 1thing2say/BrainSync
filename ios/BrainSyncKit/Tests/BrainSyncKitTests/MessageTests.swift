@@ -16,6 +16,12 @@ final class MessageTests: XCTestCase {
         XCTAssertEqual(m, .trial(Trial(trialId: 3, phase: .flicker)))
     }
 
+    func testTrialPaused() throws {
+        // STOP ends a trial with phase "paused"; a phase the enum lacks would fail the whole message.
+        XCTAssertEqual(try ServerMessage.decode(#"{"type": "trial", "trial_id": 4, "phase": "paused"}"#),
+                       .trial(Trial(trialId: 4, phase: .paused)))
+    }
+
     func testStatusDefaults() throws {
         let m = try ServerMessage.decode(#"{"type": "status", "decoder_connected": true}"#)
         XCTAssertEqual(m, .status(UIStatus(decoderConnected: true)))

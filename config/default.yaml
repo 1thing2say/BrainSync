@@ -4,6 +4,8 @@
 server:
   host: 127.0.0.1              # 0.0.0.0 later for a phone or the Jetson
   port: 8000
+  tunnel_wait_s: 30.0          # --tunnel: how long to wait for cloudflared's address (the server
+                               # listens meanwhile)
 
 display:
   expected_refresh_hz: 60      # the bridge's hello must report this within 1 Hz (ProMotion off)

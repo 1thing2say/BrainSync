@@ -90,6 +90,26 @@ final class ServerLinkTests: XCTestCase {
         XCTAssertNil(ServerLink(pairURL: URL(string: "brainsync://pair?url=notaurl&key=k")!))
     }
 
+    func testSameServer() throws {
+        let link = try XCTUnwrap(ServerLink(string: "https://abc.trycloudflare.com/?key=K1"))
+        // A new key from the same server: the app re-pairs without asking.
+        XCTAssertTrue(link.sameServer(as: try XCTUnwrap(ServerLink(string: "https://ABC.trycloudflare.com/?key=K2"))))
+        // Another host (a restarted tunnel, or a stranger's link), port or scheme: ask first.
+        XCTAssertFalse(link.sameServer(as: try XCTUnwrap(ServerLink(string: "https://xyz.trycloudflare.com/?key=K1"))))
+        XCTAssertFalse(link.sameServer(as: try XCTUnwrap(ServerLink(string: "https://abc.trycloudflare.com:8443/?key=K1"))))
+        XCTAssertFalse(link.sameServer(as: try XCTUnwrap(ServerLink(string: "http://abc.trycloudflare.com/?key=K1"))))
+        let lan = try XCTUnwrap(ServerLink(string: "http://192.168.1.5:8000/?key=k"))
+        XCTAssertTrue(lan.sameServer(as: try XCTUnwrap(ServerLink(string: "brainsync://pair?url=http%3A%2F%2F192.168.1.5%3A8000&key=k2"))))
+        XCTAssertFalse(lan.sameServer(as: try XCTUnwrap(ServerLink(string: "http://192.168.1.5:9000/?key=k"))))
+    }
+
+    func testHostLabel() throws {
+        XCTAssertEqual(try XCTUnwrap(ServerLink(string: "https://abc.trycloudflare.com/?key=k")).hostLabel,
+                       "abc.trycloudflare.com")
+        XCTAssertEqual(try XCTUnwrap(ServerLink(string: "http://192.168.1.5:8000/?key=k")).hostLabel,
+                       "192.168.1.5:8000")
+    }
+
     func testCodable() throws {
         let link = try XCTUnwrap(ServerLink(string: "https://host/?key=k"))
         let data = try JSONEncoder().encode(link)

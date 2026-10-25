@@ -46,11 +46,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.log import DEFAULT_LOG_DIR, read_events  # noqa: E402
-
-
-def is_fake_name(name: str) -> bool:
-    """The orchestrator's rule (Orchestrator.decoder_fake): a bridge named "fake..." is a fake."""
-    return name.lower().startswith("fake")
+from app.schemas import is_fake_name  # noqa: E402
 
 TRIAL_STATES = ("STIMULATING", "CONFIRMING")
 LLM_LIST = "llm"  # app/orchestrator.py: the name of a page Claude wrote

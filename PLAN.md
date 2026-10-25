@@ -436,7 +436,7 @@ Internal browser ↔ server messages (`/ws/ui`, JSON with a `type` field):
 - Server → browser: `show_page` {list_id, page, mode: page|list|confirm, highlight_index,
   slots[{slot, role: option|next|say|back, label, utterance}]} (one entry per target; in list mode
   the options ride along as `options[{label, utterance}]`), `trial` {trial_id, phase:
-  cue|flicker|rest|baseline}, `highlight` {slot},
+  cue|flicker|rest|baseline|paused}, `highlight` {slot},
   `speak` {text, utterance_id, audio_url?}, `listen` {seconds, delay_s, until_stopped, muted,
   reason} (what the partner's mic does; the server owns it), `state` {name, detail},
   `transcript` {who, text},
