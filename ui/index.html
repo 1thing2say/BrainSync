@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body class="session">
   <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
@@ -16,9 +16,10 @@
     <div class="card callout warn">
       <p class="callout-title">Safety</p>
       <h1 id="warning-title">Flicker warning</h1>
-      <p>This screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
-        photosensitive seizures, with up to four boxes at once. Nobody with photosensitive
-        epilepsy or flicker sensitivity should look at it.</p>
+      <p>This screen flickers: up to four boxes switch between black and white many times a
+        second (11 to 17 Hz, or a fast black-and-white code), in the range most likely to
+        trigger photosensitive seizures. Nobody with photosensitive epilepsy or flicker
+        sensitivity should look at it.</p>
       <p><kbd>Esc</kbd> or <strong>Stop</strong> turns the flicker off immediately, and so does
         leaving this tab.</p>
       <!-- Filled by app.js when the screen's refresh does not suit the flicker. -->
@@ -81,6 +82,8 @@
           <span id="state" class="state" role="status" aria-live="polite"></span>
         </div>
       </div>
+      <!-- c-VEP: the decoder's lead and choice so far ("lead 0.31   choice: …"). -->
+      <p id="code-status" class="code-status" aria-live="off"></p>
     </section>
 
     <aside class="panel">
@@ -119,9 +122,11 @@
   <!-- ?v= makes browsers that cached these before the server sent no-cache fetch them again. -->
   <script src="listen_core.js?v=2"></script>
   <script src="voice_core.js?v=2"></script>
-  <script src="view_core.js?v=2"></script>
+  <script src="view_core.js?v=3"></script>
   <script src="flicker_core.js?v=2"></script>
+  <script src="cvep.js?v=3"></script>
+  <script src="code_core.js?v=3"></script>
   <script src="speech.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

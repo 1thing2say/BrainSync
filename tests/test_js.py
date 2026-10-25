@@ -44,4 +44,12 @@ def test_the_page_loads_its_scripts_in_order():
     # the page tags each script with ?v=N so a reload never runs a cached old copy
     scripts = [s.split("?")[0] for s in re.findall(r'<script src="([^"]+)"', page)]
     assert scripts == ["listen_core.js", "voice_core.js", "view_core.js", "flicker_core.js",
-                       "speech.js", "app.js"]
+                       "cvep.js", "code_core.js", "speech.js", "app.js"]
+
+
+def test_the_pages_cvep_js_is_the_shared_renderer():
+    """ui/cvep.js is a byte-identical copy of clients/js/cvep.js (the standard's bits, frame rule
+    and bar text), like every other app's copy."""
+    assert (REPO_ROOT / "ui" / "cvep.js").read_bytes() == \
+        (REPO_ROOT / "clients" / "js" / "cvep.js").read_bytes(), \
+        "copy clients/js/cvep.js to ui/cvep.js"

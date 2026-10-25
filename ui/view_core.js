@@ -37,7 +37,10 @@ const ViewCore = (() => {
 
   function status(name, detail, mode) {
     const b = banner(name, detail, mode);
-    return QUIET.has(name) ? { text: "", tone: b.tone } : b;
+    // c-VEP training: the training card says where to look and counts the cycles, so the state
+    // line between the flickering squares stays empty too.
+    const training = name === "BASELINE" && /^Training:/.test(detail || "");
+    return QUIET.has(name) || training ? { text: "", tone: b.tone } : b;
   }
 
   const MIC_PROBLEMS = new Set(["denied", "nomic", "offline", "unsupported", "error", "needs_tap", "hidden"]);

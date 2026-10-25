@@ -109,3 +109,11 @@ test("the banner shows the training detail in place of the baseline", () => {
   assert.equal(VC.banner("BASELINE", "Keep still and look at the screen", "page").text,
     "Baseline: keep still — Keep still and look at the screen");
 });
+
+test("the state line between the squares stays empty while training (the card counts)", () => {
+  assert.equal(VC.status("BASELINE", "Training: look at the left square, cycle 12/30", "page").text, "");
+  assert.equal(VC.status("BASELINE", "Keep still and look at the screen", "page").text,
+    "Baseline: keep still — Keep still and look at the screen");
+  assert.equal(VC.status("PAUSED", "Training failed: interrupted", "page").text,
+    "Paused — Training failed: interrupted");
+});
