@@ -1,4 +1,7 @@
-"""Tests for tools/fake_decoder.py against an in-process stub server playing the server role."""
+"""Tests for tools/fake_decoder.py against an in-process stub server playing the server role.
+
+These run it on the f-VEP page config (config/fvep_page.yaml, 4 frequency-coded slots); code mode
+(the default config) is in test_fake_decoder_code.py."""
 
 from __future__ import annotations
 
@@ -28,7 +31,10 @@ from app.schemas import (
     parse_decoder_to_server,
     to_json,
 )
+from app.config import FVEP_PAGE_CONFIG_PATH, load_config
 from tools.fake_decoder import FakeDecoder, load_script, parse_args
+
+FVEP = load_config(FVEP_PAGE_CONFIG_PATH)
 
 SLOTS = ["s1", "s2", "s3", "s4"]  # active_slots the stub sends; the fake answers any
 WAIT = 2.0  # generous upper bound for anything that should happen
@@ -112,7 +118,8 @@ async def start_decoder(server: StubServer) -> AsyncIterator:
     tasks: list[asyncio.Task] = []
 
     async def start(*argv: str) -> tuple[FakeDecoder, asyncio.Task]:
-        args = parse_args(["--url", server.url, "--seed", "1", "--reconnect-s", "0.05", *argv])
+        args = parse_args(["--url", server.url, "--seed", "1", "--reconnect-s", "0.05", *argv],
+                          cfg=FVEP)
         decoder = FakeDecoder(args, stdin=None)  # keyboard tests feed decoder.keys directly
         task = asyncio.create_task(decoder.run())
         tasks.append(task)
@@ -134,7 +141,7 @@ async def wait_until(predicate, timeout: float = WAIT) -> None:
 
 
 async def test_hello_exchange(server: StubServer) -> None:
-    args = parse_args(["--url", server.url])
+    args = parse_args(["--url", server.url], cfg=FVEP)
     decoder = FakeDecoder(args, stdin=None)
     task = asyncio.create_task(decoder.run())
     try:
