@@ -25,6 +25,8 @@
 #   /md5sum.txt              vendor entries + the staged files
 # The squashfs layers, casper/SHA256SUMS, the ESP (shim + signed GRUB) and the
 # MBR are Ubuntu's, byte for byte (-boot_image any replay).
+# The size limit ISO_MAX_BYTES (config/brainsyncos.env) is checked on an
+# estimate before the base ISO is read, and on the finished image.
 # BUILD_ID defaults to the host's git revision (BSOS_GIT_REV, set by builder.sh).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -38,6 +40,8 @@ require_cmd xorriso python3 grub-script-check md5sum sha256sum sfdisk truncate s
 [ -d /scratch ] && [ -w /scratch ] || die "/scratch (tmpfs) is missing; run this through scripts/builder.sh run"
 validate_logins
 validate_repo "$REPO_SRC" vm
+# Size first (ISO_MAX_BYTES); write_stage_iso checks the finished image again.
+iso_size_check "estimated ISO size" $((BASE_ISO_SIZE + $(iso_tree_bytes "$REPO_SRC" "$BRAINSYNCOS_ROOT/payload")))
 
 iso="$(resolve_vm_base_iso)"
 "$BRAINSYNCOS_ROOT/scripts/verify-base-iso.sh" --edition vm --iso "$iso"

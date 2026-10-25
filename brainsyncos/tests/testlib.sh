@@ -8,9 +8,15 @@ nfail=0
 failed=""
 
 # check NAME CMD...: run CMD with output in $LOGS/NAME.log, report PASS/FAIL.
+# With BSOS_TEST_ONLY=NAME[,NAME...] set, other checks are skipped (for
+# re-running some checks against a build/tmp tree left by --keep).
 check() {
     local name="$1" t0 rc
     shift
+    case ",${BSOS_TEST_ONLY:-$name}," in
+        *,"$name",*) ;;
+        *) printf 'SKIP  %s (BSOS_TEST_ONLY)\n' "$name"; return 0 ;;
+    esac
     t0="$(date +%s)"
     # Subshell outside any if/&&/|| so set -e stays in force inside the check.
     set +e
@@ -33,11 +39,14 @@ check() {
 # their signed repository under DIR (relative to brainsyncos/, as the builder
 # sees it): DIR/key, DIR/debs, DIR/repo, with the edition's mirrored .debs
 # (scripts/fetch-mirror.sh; offline once cached). Never touches config/repo-signing-key.asc.
+# The model (brainsyncos-model, 1.3 GB) is left out: the hook checks unpack
+# their target on the /scratch tmpfs, and 86-model.sh's install is checked
+# in tests/test_phase3.sh.
 test_repo() {
     local e="$1" d="$2" b="$BRAINSYNCOS_ROOT/scripts/builder.sh"
     force_rm_tree "${BRAINSYNCOS_ROOT:?}/$d"
     "$b" run scripts/make-repo-key.sh --out "$d/key"
-    "$b" run scripts/build-packages.sh --edition "$e" --key "$d/key/repo-signing-key.asc" --out "$d/debs"
+    "$b" run scripts/build-packages.sh --edition "$e" --key "$d/key/repo-signing-key.asc" --out "$d/debs" --skip brainsyncos-model
     "$b" run scripts/fetch-mirror.sh --edition "$e"
     "$b" run scripts/build-repo.sh --edition "$e" --debs "$d/debs" --key "$d/key/repo-signing-key.asc" --out "$d/repo"
 }

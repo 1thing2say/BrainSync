@@ -20,7 +20,10 @@
 # brainsync-udev) and 75-usb-serial.sh installing them there; NVIDIA's CUDA
 # runtime mirrored into the jetson repository (mirror/nvidia-jetson: fetched
 # into build/downloads/mirror unless cached, signature and sha256 pins checked
-# offline) and 80-cuda.sh installing it there. In a test-only
+# offline) and 80-cuda.sh installing it there; the model
+# package (config/model.env pins, checked against Hugging Face when online)
+# and 86-model.sh installing it there; the ISO size limit (ISO_MAX_BYTES).
+# In a test-only
 # Ubuntu container with Xvfb (tests/runtime-checks.sh): the two BrainSync
 # packages installed, imported, PsychoPy drawing, every command, and
 # brainsync-voice serving its page offline. Then the BrainFlow wheel in
@@ -31,15 +34,18 @@
 # Builds no ISO: tests/test_phase2.sh and test_vm.sh build test ISOs that
 # carry a repository and run the full hook. Everything goes to
 # build/tmp/phase3/ (deleted at the end unless --keep). Per-check logs:
-# build/test-logs/phase3/.
+# build/test-logs/phase3/. BSOS_TEST_ONLY=NAME,... runs only those checks
+# (tests/testlib.sh), e.g. again on a tree kept with --keep.
 
 BSOS_SCRIPT=test_phase3.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
+source "$BRAINSYNCOS_ROOT/scripts/model.sh"
 
 load_config
 load_product_config
 load_packages_config
 load_build_config
+load_model_config
 
 keep=0
 while [ "$#" -gt 0 ]; do
@@ -200,7 +206,7 @@ t_packages() {
         (cd "$BRAINSYNCOS_ROOT/$TD/debs/$e" && LC_ALL=C ls ./*.deb) | sed 's|^\./||' | sed 's/_.*//' | tr '\n' ' ' > "$TMP_DIR/names.$e"
         echo "$e: $(cat "$TMP_DIR/names.$e")"
     done
-    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra espeak-ng " ] \
+    [ "$(cat "$TMP_DIR/names.jetson")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring brainsyncos-ch341-tegra brainsyncos-model-$MODEL_ID espeak-ng " ] \
         && [ "$(cat "$TMP_DIR/names.vm")" = "brainsync-runtime brainsync-udev brainsync brainsyncos-archive-keyring " ] \
         || die "wrong package sets per edition"
     expect_fail '--edition jetson.vm is required' "$B" run scripts/build-packages.sh --key "$KEY"
@@ -256,6 +262,49 @@ t_repo() {
     echo "repositories for both editions signed and validated; bad input refused; rebuild replaces"
 }
 
+# config/model.env and the edition switch; the pins against Hugging Face's
+# API when it can be reached (the build itself checks the sha256 of the file).
+t_model_pin() {
+    local bad="$TMP_DIR/bad.env" kv out api
+    mkdir -p "$TMP_DIR"
+    /bin/bash -c 'source "$1/scripts/lib.sh"; source "$1/scripts/model.sh"; load_model_config
+        echo "model: $(model_package): $MODEL_HF_REPO@$MODEL_HF_REVISION/$MODEL_FILE, $MODEL_SIZE bytes, sha256 $MODEL_SHA256, args \"$(model_llama_args)\""' \
+        _ "$BRAINSYNCOS_ROOT"
+    for kv in MODEL_ID=Qwen3.5 MODEL_HF_URL=http://huggingface.co MODEL_HF_REPO=unsloth MODEL_HF_REVISION=main \
+        MODEL_FILE=model.bin MODEL_SIZE=1.3G MODEL_SHA256=aaf42c8b MODEL_FILE_TYPE=Q4_K_M MODEL_QUANT=Q4-K-M MODEL_LLAMA_ARGS=c,4096; do
+        sed "s|^${kv%%=*}=.*|$kv|" "$BSOS_MODEL_CONFIG" > "$bad"
+        if out="$(BSOS_MODEL_CONFIG="$bad" /bin/bash -c 'source "$1/scripts/lib.sh"; source "$1/scripts/model.sh"; load_model_config' \
+            _ "$BRAINSYNCOS_ROOT" 2>&1)"; then
+            rm -f "$bad"; die "accepted $kv"
+        fi
+        printf '%s\n' "$out" | grep -q "${kv%%=*} must" || die "rejected $kv for the wrong reason: $out"
+        echo "rejects $kv: ${out##*ERROR: }"
+    done
+    rm -f "$bad"
+    grep -qx 'PKG_EDITIONS=jetson' "$PACKAGES_DIR/brainsyncos-model/package.env" || die "the model is not Jetson-only by default"
+    "$B" run scripts/build-packages.sh --edition vm --only brainsyncos-model --key "$KEY" --out "$TD/model-vm" 2>&1 \
+        | tee "$TMP_DIR/vm.out" | grep 'not built for vm'
+    [ -z "$(ls "$BRAINSYNCOS_ROOT/$TD/model-vm")" ] || die "a model package was built for the vm edition"
+    echo "edition switch: PKG_EDITIONS=jetson, so the vm edition gets no model"
+    api="$MODEL_HF_URL/api/models/$MODEL_HF_REPO/tree/$MODEL_HF_REVISION"
+    if ! command -v curl > /dev/null 2>&1 || ! curl -fsS -m 30 -o "$TMP_DIR/tree.json" "$api" 2> /dev/null \
+        || ! curl -fsS -m 30 -o "$TMP_DIR/ltree.json" "$MODEL_HF_URL/api/models/$MODEL_LICENSE_HF_REPO/tree/$MODEL_LICENSE_HF_REVISION" 2> /dev/null; then
+        echo "note: Hugging Face not reachable; the pins were not compared with its API"
+        return 0
+    fi
+    python3 -I - "$TMP_DIR/tree.json" "$MODEL_FILE" "$MODEL_SIZE" "$MODEL_SHA256" "$TMP_DIR/ltree.json" "$MODEL_LICENSE_FILE" "$MODEL_LICENSE_SIZE" <<'PY'
+import json, sys
+tree, name, size, sha, ltree, lname, lsize = sys.argv[1:]
+f = {e["path"]: e for e in json.load(open(tree))}.get(name)
+if not f or f.get("size") != int(size) or (f.get("lfs") or {}).get("oid") != sha:
+    sys.exit("Hugging Face lists %s as %s, the pin says %s bytes, sha256 %s" % (name, f, size, sha))
+l = {e["path"]: e for e in json.load(open(ltree))}.get(lname)
+if not l or l.get("size") != int(lsize):
+    sys.exit("Hugging Face lists %s as %s, the pin says %s bytes" % (lname, l, lsize))
+print("Hugging Face at the pinned revisions: %s %s bytes, sha256 %s; %s %s bytes" % (name, size, sha, lname, lsize))
+PY
+}
+
 # The BrainSync packages installed in a stock Ubuntu arm64 container with
 # Xvfb (docker/Dockerfile.runtime-test, test only) and run there
 # (tests/runtime-checks.sh). Its image is built on first use (needs the network).
@@ -286,6 +335,7 @@ check builder-caps         t_builder_caps
 check build-sh             t_build_sh
 check repo-key             t_repo_key
 if [ "$nfail" -gt 0 ]; then log "aborting: prerequisites failed"; exit 1; fi
+check model-pin            t_model_pin
 check packages             t_packages
 check mirror               t_mirror
 check repo                 t_repo
@@ -299,6 +349,9 @@ if [ -f "$BRAINSYNCOS_ROOT/$TD/repo/jetson/dists/$REPO_SUITE/InRelease" ]; then
     check board-debs       in_builder debs
     check usb-serial       in_builder usbserial
     check cuda             in_builder cuda
+    check model-deb        in_builder model-deb
+    check model-step       in_builder model-step
+    check iso-size         in_builder iso-size
 fi
 check wheel                t_wheel
 check shellcheck           t_shellcheck

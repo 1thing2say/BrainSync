@@ -453,11 +453,12 @@ brainsyncos/
   Makefile                   thin wrapper around scripts/build.sh (make, make EDITION=vm, ...)
   .gitignore                 build/, ISOs and the user-specific secrets in config/
   config/base-iso.env        pinned base ISO + release identity (KEY=value)
-  config/brainsyncos.env     product: version, board, hooked autoinstall, boot menu
+  config/brainsyncos.env     product: version, board, hooked autoinstall, boot menu, ISO size limit
   config/vm-base-iso.env     VM edition: pinned Ubuntu Server arm64 ISO (same keys + BASE_ISO_URL)
   config/vm.env              VM edition: EDITION, boot menu, consoles, UTM VM defaults
   config/build.env           builder container resources: CPUs, jobs, memory, /scratch
   config/packages.env        package repository: suite, component, key lifetime, maintainer
+  config/model.env           the local LLM's default model: Hugging Face repo, revision, file, sha256, licence
   config/repo-signing-key{,.pub}.asc   the repository signing key (gitignored; scripts/build.sh key)
   docker/Dockerfile.builder  ubuntu:24.04 pinned by digest + ISO/squashfs/grub/apt-repo tooling
   docker/Dockerfile.runtime-test  test only: the same base + Xvfb and GL, for tests/runtime-checks.sh
@@ -470,6 +471,7 @@ brainsyncos/
     brainsync/               the apps: their wheel in that venv, /usr/bin links, /etc/brainsync, /usr/share/brainsync
   mirror/NAME/               third-party .debs shipped unchanged: mirror.env, the source's key, debs.lock (sha256 pins)
     nvidia-jetson/           NVIDIA's CUDA 13.2 runtime (cudart, cuBLAS) for the Jetson repository
+    brainsyncos-model/       the local LLM's model (config/model.env) and model.conf (Jetson only by default)
   python/                    the venv's inputs: brainsync.in, brainsync.lock.txt (hash-locked wheels),
                              psychopy-excludes.txt, pip.env (pinned pip), local-wheels.txt, check-lock.py
   wheels/NAME/               one folder per Python wheel BrainSyncOS compiles: wheel.env + build.sh
@@ -483,6 +485,7 @@ brainsyncos/
   scripts/
     lib.sh                   strict mode, log/warn/die, paths, config loaders, ISO and package helpers
     venv.sh                  the BrainSync venv: wheelhouse, pinned pip, build at /opt/brainsyncos/venv
+    model.sh                 the model pin: config loader, cached and checked download, GGUF header
     build.sh                 one entry point: doctor | key | wheels | packages | repo | iso | all | test | clean
     builder.sh               host entrypoint: build | run CMD | shell | image | clean
     make-repo-key.sh         the repository signing key (Ed25519, sign-only, expiring)
@@ -517,7 +520,8 @@ brainsyncos/
     vm-checks.sh             its in-container checks
     test_phase3.sh           Phase 3: configs, caps, build.sh, key, packages, repository, wheel (host side)
     phase3-checks.sh         its in-container checks: apt helper, BrainSync debs, md5 maps, hook + 60/70,
-                             board packages, 75-usb-serial.sh, the CUDA mirror + 80-cuda.sh, the BrainFlow wheel
+                             board packages, 75-usb-serial.sh, the CUDA mirror + 80-cuda.sh, the BrainFlow wheel,
+                             the model package, 86-model.sh, the ISO size limit
     runtime-checks.sh        the BrainSync packages installed and run (runtime test container)
     runtime/*.py             its Xvfb smoke scripts and the import-everything check
     boot-smoke.py            boots a VM ISO under QEMU to the menu, kernel and initramfs
@@ -537,6 +541,7 @@ brainsyncos/
     downloads/               the Ubuntu ISO, its .verified stamp, SHA256SUMS(.gpg);
                              brainflow-cerelog.git (sparse partial clone of the fork);
                              mirror/NAME/ (InRelease, Packages.gz and the pinned .debs)
+                             models/<sha256>/ (the model and its licence)
     wheels/                  built wheels, NAME.env manifests, SHA256SUMS, requirements.txt
     out/                     ISOs (+ .sha256, xorriso log, tree-changes.txt / manifest.txt)
     test-logs/{phase1,phase2,phase3,vm}/  one log per test check
@@ -710,7 +715,7 @@ packages.
   - The venv build fails when a listed wheel is missing or does not match `SHA256SUMS`, and refuses unlisted ones. Their own dependencies must already be in the lock.
   - The `runtime` check requires BrainFlow in the installed venv to report the Cerelog X8 at 250 Hz.
 
-**Verified by `tests/test_phase3.sh`** (17 checks):
+**Verified by `tests/test_phase3.sh`** (21 checks; `BSOS_TEST_ONLY=NAME,...` runs some of them):
 - the container really runs at the configured CPU and memory caps;
 - the key, packages and repositories for both editions; every package, the venv included, is byte-identical between the two editions' separate builds;
 - `app-debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
@@ -722,10 +727,14 @@ packages.
 - `75-usb-serial.sh` in NVIDIA's target layer with `nvidia-l4t-kernel` from the pool: modprobe resolves `ch341` to `updates/ch341.ko` after `usbserial.ko`, a re-run works, a purge takes it out of `modules.dep`, and the VM edition gets the rules only;
 - the BrainFlow wheel: manifest, contents, a `--require-hashes` install into a fresh venv that reports 250 Hz and EEG channels 1 to 8, and a tampered copy refused;
 - `mirror` and `cuda`: the CUDA cache verifies with no network, and the Jetson repository has exactly the pinned debs at their pinned sha256 (the VM one none). They refuse a tampered InRelease, another key, a stale lock, a `libnvidia-compute` root, a tampered deb, and `build-repo.sh` with a tampered cache. In NVIDIA's target layer, `80-cuda.sh` installs exactly the 5 debs, their postinsts run, ldconfig resolves the libraries, nothing provides `libcuda.so`, and a re-run installs nothing. The VM edition skips the step.
+- `model-pin`: `config/model.env` refuses bad values, the VM edition builds no model, and the pins match Hugging Face's API (skipped offline);
+- `model-deb`: the model package's fields, its six files, the model and licence against the pins, the GGUF file type, and `model.conf` in `EnvironmentFile` syntax, not a conffile;
+- `model-step`: `86-model.sh` in NVIDIA's real target layer (on disk) installs the model and checks its sha256, a re-run works, a damaged model fails the step, a purge removes `model.conf`, and a repository without a model is skipped;
+- `iso-size`: the estimate, bad `ISO_MAX_BYTES` values refused, `finalize_iso` refusing an image over the limit, `build-iso.sh` stopping at its first estimate, and the test repository fitting the default limit.
 
 **Not tested here:** anything on hardware. Nobody has loaded the module on an Orin, plugged in a board, or streamed from BrainFlow on Linux.
 
-`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository, and run all ten steps in each edition's target.
+`tests/test_phase2.sh` and `tests/test_vm.sh` build their test ISOs with a throwaway repository (without the model), and run every step in each edition's target.
 
 **The EEG board (Phase 3c).** The Cerelog X8 is a USB serial device: V1 boards have a CH340 bridge (vendor `1a86`, driver `ch341`, `/dev/ttyUSB*`), V2 boards an ESP32-S3 (vendor `303a`, driver `cdc_acm`, `/dev/ttyACM*`).
 - `brainsyncos-ch341-tegra` (Jetson only) is the CH340 driver. NVIDIA's kernel leaves `CONFIG_USB_SERIAL_CH341` unset.
@@ -744,6 +753,36 @@ packages.
   - Before it lands in `build/wheels/`, the build installs it with pip into a fresh venv, where `BoardShim.get_sampling_rate(BoardIds.CERELOG_X8_BOARD)` must print 250.
   - Output: the wheel; `brainflow-cerelog.env`, a KEY=value manifest (file, sha256, size, version, source commit and tree, patches, CMake flags, toolchain, inputs hash); `SHA256SUMS`; `requirements.txt` for `pip install --no-index --find-links build/wheels --require-hashes --no-deps -r build/wheels/requirements.txt`.
   - A rebuild is skipped while the inputs hash (the recipe, `pack-wheel.py`, the builder's Dockerfile) and the wheel's sha256 still match; `--force` rebuilds. Under x86-64 emulation the compile takes about 47 minutes at 3 jobs.
+
+**The local LLM's model (Phase 3d).** The default model is Qwen3.5-2B, quantized to Q4_K_M, as one GGUF file of 1,280,835,840 bytes (Apache-2.0).
+- `config/model.env` pins it: the Hugging Face repository `unsloth/Qwen3.5-2B-GGUF`, the revision `f6d5376b…` (a commit, never a branch), the file, its size and sha256, and the GGUF file type (15, Q4_K_M). The licence text is pinned the same way, from the official `Qwen/Qwen3.5-2B`. The file says why this GGUF: Qwen and ggml-org publish none of the 2B, and unsloth's is converted from Qwen's own release and by far the most used.
+- `scripts/model.sh` downloads only `https://huggingface.co/<repo>/resolve/<revision>/<file>`, once, into `build/downloads/models/<sha256>/` (an interrupted download resumes). Every build checks the size and sha256 again, about 7 s under qemu.
+- `packages/brainsyncos-model` builds `brainsyncos-model-qwen3.5-2b-q4km` (Architecture `all`). It installs:
+  - `/opt/brainsyncos/models/Qwen3.5-2B-Q4_K_M.gguf`, and its `.sha256` beside it;
+  - `/etc/brainsyncos/llama.d/model.conf`, the file the llama-server unit reads (see below);
+  - the licence, a copyright file and a README in `/usr/share/doc/`.
+  - It Provides, Conflicts with and Replaces `brainsyncos-model`, so one model is installed at a time.
+  - The build checks the GGUF header (version 3, architecture `qwen35`, file type 15).
+  - It is staged on disk under `build/tmp`, with the model hard-linked from the download cache, never on the `/scratch` tmpfs. `build-packages.sh` now builds every package on disk, under its output folder.
+  - It is compressed with zstd at level 3: Q4_K_M weights barely compress (21 MB saved, in 19 s under qemu at 1 CPU). xz would take about 45 minutes. dpkg-deb's own zstd default level is about 60 times slower than level 3.
+- **Editions.** `PKG_EDITIONS=jetson` in its `package.env` is the switch: the Orin Nano ISO carries the model, the VM ISO does not. Set it to `all` to give the VM the model too.
+- **`86-model.sh`** installs the one `brainsyncos-model-*` package the repository has, then checks `model.conf` and the model's sha256. When the repository has no model package (the VM by default) it says so and does nothing.
+- **The contract with the llama-server unit** (`brainsyncos-llama.service`, Phase 3d, `85-llama.sh`). `/etc/brainsyncos/llama.d/model.conf` is an `EnvironmentFile`:
+
+  ```
+  BSOS_LLAMA_MODEL=/opt/brainsyncos/models/Qwen3.5-2B-Q4_K_M.gguf
+  BSOS_LLAMA_ARGS="-c 4096"
+  ```
+
+  - The unit uses `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf` and `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `-m ${BSOS_LLAMA_MODEL} $BSOS_LLAMA_ARGS` in `ExecStart`. Unbraced, `$BSOS_LLAMA_ARGS` splits into separate options.
+  - `BSOS_LLAMA_ARGS` holds model options only (`MODEL_LLAMA_ARGS` in `config/model.env`). Host, port, key, GPU layers and limits belong to the unit.
+  - `model.conf` is not a conffile: an upgrade replaces it, and removing the package removes it, so the unit no longer starts. Local options go in `/etc/brainsyncos/llama.d/local.conf`, which the unit reads after it, if it exists (`EnvironmentFile=-…`).
+
+**The ISO size limit.** `ISO_MAX_BYTES` in `config/brainsyncos.env` (default 7,800,000,000) is the largest ISO a build may write. Both ISO builds check it:
+- first, an estimate before the base ISO is read: the base ISO plus the repository and the payload (`iso_tree_bytes`: each file in 2 KiB blocks plus its directory records);
+- on the Jetson, again from the staged files before xorriso runs;
+- last, on the finished image, which is deleted when it is too large.
+- Why 7.8e9: an ISO is written raw to the whole stick, so a stick takes an image as large as its capacity. "8 GB" means 8,000,000,000 bytes, and real sticks are often a little smaller, because the controller keeps part of the flash. 7.8e9 leaves 200 MB (2.5 %) for that. `scripts/write-usb.sh` still compares the ISO with the actual stick. For a 16 GB stick, use e.g. 15600000000.
 
 ## Appliance identity (Phase 2.5)
 

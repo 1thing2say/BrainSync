@@ -418,7 +418,10 @@ c_hook() {
     cmp "$W/iso/brainsyncos/release" "$t/opt/brainsyncos/installer/release" || die "payload not installed"
     ! find "$t/opt/brainsyncos" -perm -o+w | grep -q . || die "installed payload is world-writable"
     tail -1 "$t/var/log/brainsyncos/install.log" | grep -qx 'hook.sh: exit 0' || die "target log incomplete: $(tail -1 "$t/var/log/brainsyncos/install.log")"
-    grep -q 'BrainSyncOS layer installed (10 steps)' "$t/var/log/brainsyncos/install.log" || die "log lacks the summary"
+    n="$(ls "$W/iso/brainsyncos/install.d"/[0-9][0-9]-*.sh | wc -l | tr -d ' ')"
+    grep -q "BrainSyncOS layer installed ($n steps)" "$t/var/log/brainsyncos/install.log" || die "log lacks the summary ($n steps)"
+    # The test repositories have no model package (testlib.sh test_repo).
+    grep -q '86-model.sh: orin-nano edition: the repository has no model package' "$t/var/log/brainsyncos/install.log" || die "86-model.sh did not skip"
     check_keyring "$t"
     check_usb_serial "$t"
     check_cuda "$t"

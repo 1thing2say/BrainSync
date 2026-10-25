@@ -37,6 +37,9 @@
 #  6. write the base ISO with its boot setup replayed, build/stage mapped on
 #     top and the repository at /brainsyncos-repo (MBR, GPT, El Torito and
 #     the ESP are NVIDIA's, byte for byte)
+# The size limit ISO_MAX_BYTES (config/brainsyncos.env, an 8 GB USB stick) is
+# checked three times: estimated from the repository before step 1, from the
+# staged files before step 6, and on the finished image.
 # BUILD_ID defaults to the host's git revision (BSOS_GIT_REV, set by builder.sh).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -51,6 +54,8 @@ require_cmd xorriso unsquashfs mksquashfs python3 grub-script-check md5sum sha25
 
 validate_logins
 validate_repo "$REPO_SRC" jetson
+# Size first (ISO_MAX_BYTES): the base ISO plus the repository and the payload.
+iso_size_check "estimated ISO size" $((BASE_ISO_SIZE + $(iso_tree_bytes "$REPO_SRC" "$BRAINSYNCOS_ROOT/payload")))
 
 layer="casper/$AUTOINSTALL_LAYER"
 
@@ -143,6 +148,13 @@ grub-script-check "$STAGE_DIR/boot/grub/grub.cfg" || die "rendered grub.cfg does
 merge_stage_md5sums "$work/vendor/md5sum.txt" "$STAGE_DIR" "$REPO_SRC" "$ISO_REPO_PATH"
 
 # --- 6. the ISO ----------------------------------------------------------------
+# Again from what is staged: the base ISO without the vendor files the stage
+# replaces, plus the stage and the repository. Then write_stage_iso checks the image.
+replaced=0
+for f in grub.cfg md5sum.txt layer.squashfs; do
+    replaced=$((replaced + ($(file_size "$work/vendor/$f") + 2047) / 2048 * 2048))
+done
+iso_size_check "ISO size from the staged files" $((BASE_ISO_SIZE - replaced + $(iso_tree_bytes "$STAGE_DIR" "$REPO_SRC")))
 # Staged files get the vendor's ownership and read-only modes.
 write_stage_iso --map "$REPO_SRC" "$ISO_REPO_PATH" \
     "$iso" "$STAGE_DIR" "$BUILD_NAME" /brainsyncos /boot/grub/grub.cfg /md5sum.txt "/$layer"
