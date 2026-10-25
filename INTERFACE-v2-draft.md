@@ -449,7 +449,7 @@ iPhone app (60 Hz)  ──cycle_markers (server clock)──▶  server  ──s
 ```
 
 **Handshake.** The bridge's `hello` adds `"paradigm": "code"` and
-`"code": {"length": 63, "frames_per_bit": 1, "bits": "1000001..."}` (one period of
+`"code": {"length": 63, "frames_per_bit": 1, "bits": "000001111110..."}` (one period of
 `brainsync.vep.codes.m_sequence(63)`, seed 1, "1" bright), and each slot has `lag_frames`
 instead of `freq_hz` / `phase_deg`: `[{"slot": "s1", "lag_frames": 0}, {"slot": "s2",
 "lag_frames": 31}]`, `waveform` `square`, `refresh_hz` 60. The server checks the paradigm, the
