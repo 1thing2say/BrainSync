@@ -13,6 +13,12 @@ positive weight and stays reachable.
 
 ``MoveSelector`` walks one move through the stages piece -> dest -> (promo) -> (confirm) ->
 done and tells the stimulus what to draw at each step. Pure logic: no IO, no decoder.
+
+With c-VEP (the BrainSync standard, docs/CVEP-STANDARD.md) there is a third target, Back:
+``undo()`` takes back the last pick, so a wrong decode costs one more pick instead of the
+whole move. The two groups stay targets 0 and 1 (``undo=True`` only renames the confirm
+step's second choice, which still starts the move over, from BACK to RESTART); a split
+into three groups would leave no target for Back.
 """
 from __future__ import annotations
 
@@ -169,7 +175,7 @@ class MoveSelector:
     """
 
     def __init__(self, board: chess.Board, weights: Mapping[chess.Move, float], confirm: bool = True,
-                 balance_tol: float = 0.15, min_gap: int = 1) -> None:
+                 balance_tol: float = 0.15, min_gap: int = 1, undo: bool = False) -> None:
         if not (math.isfinite(balance_tol) and balance_tol >= 0):
             raise ValueError(f"balance_tol must be >= 0, got {balance_tol}")
         if min_gap < 0:
@@ -179,7 +185,9 @@ class MoveSelector:
         self.confirm = confirm
         self.balance_tol = balance_tol
         self.min_gap = min_gap
+        self.undo_target = bool(undo)   # c-VEP: a third target, Back, undoes the last pick
         self.picks = 0
+        self.undos = 0
         self._restart()
 
     # -- state -------------------------------------------------------------------------
@@ -192,6 +200,7 @@ class MoveSelector:
         self._promo: tuple[list[chess.Move], list[chess.Move]] | None = None
         self.stage = "piece"
         self.move: chess.Move | None = None
+        self._history: list[tuple] = []   # the state before each pick, for undo()
         self._settle()
 
     def _settle(self) -> None:
@@ -251,6 +260,10 @@ class MoveSelector:
         if self.stage == "done":
             raise ValueError("the move is already chosen; call back() to choose again")
         self.picks += 1
+        if self.stage == "confirm" and target == 1:
+            self._restart()
+            return
+        self._history.append(self._state())
         if self.stage in ("piece", "dest"):
             keep = self._groups[target]
             if self.stage == "piece":
@@ -260,16 +273,42 @@ class MoveSelector:
         elif self.stage == "promo":
             keep_moves = set(self._promo[target])
             self._moves = [m for m in self._moves if m in keep_moves]
-        else:   # confirm
-            if target == 1:
-                self._restart()
-                return
+        else:   # confirm, target 0: play it
             self.stage = "done"
         self._settle()
 
     def back(self) -> None:
         """Start the move over from the piece stage; ``picks`` keeps counting."""
         self._restart()
+
+    def _state(self) -> tuple:
+        return (list(self._moves), self._origin, self._dest, self._groups, self._promo,
+                self.stage)
+
+    @property
+    def can_undo(self) -> bool:
+        """True when there is a pick to take back (not at a move's first pick, nor once
+        the move is chosen)."""
+        return bool(self._history) and self.stage != "done"
+
+    def undo(self) -> bool:
+        """The Back target: take back the last pick, back to the screen before it.
+
+        Counts as a pick. Returns False, changing nothing else, when there is nothing to
+        undo (the move's first pick, or right after RESTART). Undoing a pick that skipped
+        stages (one piece or square left) goes back to the split before them.
+        """
+        if self.stage == "done":
+            raise ValueError("the move is already chosen; there is nothing to undo")
+        self.picks += 1
+        if not self._history:
+            return False
+        moves, self._origin, self._dest, self._groups, self._promo, self.stage = \
+            self._history.pop()
+        self._moves = moves
+        self.move = None
+        self.undos += 1
+        return True
 
     # -- what to draw ------------------------------------------------------------------
 
@@ -293,7 +332,7 @@ class MoveSelector:
 
     def panels(self) -> tuple[str, str] | None:
         if self.stage == "confirm":
-            return ("PLAY", "BACK")
+            return ("PLAY", "RESTART") if self.undo_target else ("PLAY", "BACK")
         if self.stage == "promo":
             return tuple(" / ".join(PROMO_NAMES[m.promotion] for m in grp) for grp in self._promo)
         return None
@@ -311,6 +350,8 @@ class MoveSelector:
             return "Promote to?"
         san = self.board.san(self._moves[0])
         if self.stage == "confirm":
+            if self.undo_target:
+                return f"Play {san}? Look at PLAY"
             return f"Play {san}? Look at PLAY or BACK"
         return f"Playing {san}"
 
