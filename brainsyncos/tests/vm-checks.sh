@@ -432,10 +432,10 @@ c_hook() {
     echo "packages: brainsyncos-archive-keyring, brainsync-runtime and brainsync installed from the ISO's repository; repository unmounted"
     [ "$(stat -c '%u %a' "$t/etc/brainsync/secrets.env")" = "0 640" ] \
         && [ "$(in_target "$t" stat -c %G /etc/brainsync/secrets.env)" = "$BRAINSYNC_USER" ] \
-        && ! grep -qv '^#' "$t/etc/brainsync/secrets.env" || die "secrets.env is not a template root:$BRAINSYNC_USER 640"
+        && ! grep -v '^#' "$t/etc/brainsync/secrets.env" | grep -vqE '^BRAINSYNC_LLAMA_API_KEY=[0-9a-f]{64}$' || die "secrets.env is not a template (plus the llama-server key) root:$BRAINSYNC_USER 640"
     grep -E '70-brainsync.sh: (offline voice: espeak-ng|note: offline voice espeak-ng)' "$log" \
         || die "70-brainsync.sh did not report the offline voice"
-    echo "secrets.env: root:$BRAINSYNC_USER 640, template without keys"
+    echo "secrets.env: root:$BRAINSYNC_USER 640, template plus the llama-server key"
     grep -q '75-usb-serial.sh: vm-arm64 edition: no brainsyncos-ch341-tegra' "$log" || die "75-usb-serial.sh did not skip the module"
     [ -s "$t/usr/lib/udev/rules.d/70-brainsync-cerelog.rules" ] || die "the board's udev rules are missing"
     ! in_target "$t" dpkg -s brainsyncos-ch341-tegra > /dev/null 2>&1 || die "the VM got the Jetson-only ch341 module"

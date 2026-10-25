@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # build-llama.sh - build llama.cpp for aarch64, then check it (builder only).
 #
-# Usage: scripts/builder.sh --cross run scripts/build-llama.sh compile [--force]
+# Usage: scripts/builder.sh --llama run scripts/build-llama.sh compile [--force]
 #        scripts/builder.sh run scripts/build-llama.sh check [--force]
 # scripts/build.sh llama runs both. Pins and flags: llama/llama.env.
 #
-# compile runs in the amd64 cross-builder (docker/Dockerfile.cross-builder):
-# on an x86-64 host that compiles at native speed, where the arm64 builder
-# would run gcc and nvcc under qemu, 6 to 9 times slower (measured). Steps:
+# compile runs in the llama builder for the host (scripts/builder.sh --llama):
+# on an arm64 host (Apple Silicon) the native arm64 llama builder
+# (docker/Dockerfile.llama-builder: g++-14 and NVIDIA's aarch64 nvcc from the
+# Jetson repository, no emulation); on an x86-64 host the amd64 cross-builder
+# (docker/Dockerfile.cross-builder: aarch64-linux-gnu-g++-14, NVIDIA's x86
+# nvcc with the sbsa target files and llama/aarch64-linux-gnu.cmake), which
+# compiles at native speed where the arm64 builder would run gcc and nvcc
+# under qemu, 6 to 9 times slower (measured). Both give the same build steps,
+# flags and checks; the manifest's TOOLCHAIN names the path. Steps:
 #   1. the release tarball (build/downloads/LLAMA_TARBALL, fetched once), its
 #      size and sha256 checked, and the commit in its header
 #   2. the CPU build (CMAKE_FLAGS: every arm64 CPU variant as a loadable
@@ -38,7 +44,7 @@
 #     and, with no GPU and no libcuda here, falls back to the CPU
 #
 # Output in build/llama/, kept while up to date (compile: the inputs, every
-# file in llama/, this script and the cross-builder's Dockerfile, unchanged
+# file in llama/, this script and both llama builder Dockerfiles, unchanged
 # and SHA256SUMS intact; check: the same SHA256SUMS); --force rebuilds:
 #   cpu/        the tree installed at LLAMA_PREFIX (bin/, lib/, lib/ggml/)
 #   cuda/       libggml-cuda.so (for LLAMA_PREFIX/lib/ggml/)
@@ -46,7 +52,8 @@
 #   SHA256SUMS  for sha256sum -c, over the three above
 #   llama.env   compile's manifest, plain KEY=value: LLAMA_*, INPUTS_SHA256,
 #               SUMS_SHA256 (of SHA256SUMS), CMAKE_FLAGS, CUDA_CMAKE_FLAGS,
-#               TOOLCHAIN, NEEDED_CPU, NEEDED_CUDA, GLIBC_MAX, GLIBCXX_MAX,
+#               TOOLCHAIN (native-aarch64 or cross-x86_64, then the gcc, nvcc
+#               and cmake versions), NEEDED_CPU, NEEDED_CUDA, GLIBC_MAX, GLIBCXX_MAX,
 #               CPU_SECONDS, CUDA_SECONDS, BUILD_REV
 #   check.env   check's results: CHECKED_SUMS_SHA256, VERIFIED_VERSION,
 #               VERIFIED_CPU_BACKEND, VERIFIED_TOKENS, VERIFIED_CUDA, CHECK_REV
@@ -97,9 +104,10 @@ elf_files() {
     find "$1" -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' f; do
         [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] && printf '%s\n' "$f"
     done
+    return 0   # not the last file's ELF test
 }
 
-# needed FILE: the NEEDED entries of FILE (objdump, or the cross objdump).
+# needed FILE: the NEEDED entries of FILE ($OBJDUMP: objdump, or the cross objdump).
 needed() { "$OBJDUMP" -p "$1" | awk '$1 == "NEEDED" {print $2}'; }
 
 # check_elf FILE EXTRA_RE: FILE is an aarch64 ELF whose NEEDED entries are the
@@ -122,7 +130,7 @@ inputs_sha256() {
     (
         cd "$BRAINSYNCOS_ROOT" || exit 1
         find llama -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
-        sha256sum scripts/build-llama.sh docker/Dockerfile.cross-builder
+        sha256sum scripts/build-llama.sh docker/Dockerfile.cross-builder docker/Dockerfile.llama-builder
     ) | sha256sum | awk '{print $1}'
 }
 
@@ -135,12 +143,20 @@ sums_ok() {
 cmake_flags() { printf '%s\n' "$1" | tr ',' '\n'; }
 
 c_compile() {
-    local inputs tar src bcpu bcuda inst t0 cpu_s cuda_s f n want base_a base_b map
-    [ "$(uname -m)" = x86_64 ] || die "compile runs in the amd64 cross-builder (scripts/builder.sh --cross run ...)"
-    require_cmd cmake ninja aarch64-linux-gnu-g++-14 aarch64-linux-gnu-strip aarch64-linux-gnu-objdump python3 curl
-    OBJDUMP=aarch64-linux-gnu-objdump
-    [ -x /usr/local/cuda-13.2/bin/nvcc ] && /usr/local/cuda-13.2/bin/nvcc --version | grep -q "V$CUDA_NVCC_VERSION\$" \
-        || die "the cross-builder has no nvcc $CUDA_NVCC_VERSION"
+    local inputs tar src bcpu bcuda inst t0 cpu_s cuda_s f n want base_a base_b map tc path nvcc
+    # The toolchain: the cross one (aarch64-linux-gnu- prefix, toolchain file)
+    # on x86-64, the native one on aarch64. Either way the output is aarch64.
+    nvcc=/usr/local/cuda-13.2/bin/nvcc
+    case "$(uname -m)" in
+        x86_64) path=cross-x86_64; tc=aarch64-linux-gnu- ;;
+        aarch64) path=native-aarch64; tc="" ;;
+        *) die "compile runs in the amd64 cross-builder or the arm64 llama builder (scripts/builder.sh --llama run ...), not on $(uname -m)" ;;
+    esac
+    [ -x "$nvcc" ] && "$nvcc" --version | grep -q "V$CUDA_NVCC_VERSION\$" \
+        || die "compile runs in the amd64 cross-builder (x86-64 hosts) or the arm64 llama builder (scripts/builder.sh --llama run ...): this container has no nvcc $CUDA_NVCC_VERSION"
+    require_cmd cmake ninja "${tc}gcc-14" "${tc}g++-14" "${tc}strip" "${tc}objdump" python3 curl
+    OBJDUMP="${tc}objdump"
+    STRIP="${tc}strip"
     inputs="$(inputs_sha256)"
     if [ "$force" = 0 ] && sums_ok && grep -qx "INPUTS_SHA256=$inputs" "$OUT/llama.env"; then
         log "up to date (${OUT#$BRAINSYNCOS_ROOT/}/llama.env, inputs $inputs)"
@@ -161,10 +177,17 @@ c_compile() {
 
     # Flags of both builds. Build paths become /usr/src/llama.cpp in debug strings.
     map="-ffile-prefix-map=$W=/usr/src/llama.cpp"
-    common=(-G Ninja -S "$src" --toolchain "$RECIPE/aarch64-linux-gnu.cmake"
+    common=(-G Ninja -S "$src"
         "-DCMAKE_INSTALL_PREFIX=$LLAMA_PREFIX" '-DCMAKE_INSTALL_RPATH=$ORIGIN/../lib;$ORIGIN/..' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
         "-DGGML_BACKEND_DIR=$LLAMA_PREFIX/lib/ggml" "-DLLAMA_BUILD_COMMIT=${LLAMA_COMMIT:0:7}"
         "-DLLAMA_BUILD_NUMBER=$LLAMA_BUILD_NUMBER" "-DCMAKE_C_FLAGS=$map" "-DCMAKE_CXX_FLAGS=$map")
+    if [ -n "$tc" ]; then
+        common+=(--toolchain "$RECIPE/aarch64-linux-gnu.cmake")
+    else
+        # Native: name the compilers (noble's default gcc is 13, which fails on
+        # the SME variants) and the CUDA host compiler, as the toolchain file does.
+        common+=(-DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CUDA_HOST_COMPILER=g++-14)
+    fi
     while IFS= read -r f; do common+=("$f"); done < <(cmake_flags "$CMAKE_FLAGS")
 
     # 2. CPU build.
@@ -192,11 +215,11 @@ c_compile() {
     [ "$want" = "$n" ] || die "lib/ggml has $want CPU backends, CPU_VARIANTS lists $n"
     [ -z "$(find "$TREE/cpu/lib/ggml" -type f ! -name 'libggml-cpu-*.so')" ] || die "lib/ggml holds more than the CPU backends"
     [ -x "$TREE/cpu/bin/llama-server" ] || die "the CPU build has no bin/llama-server"
-    elf_files "$TREE/cpu" | while IFS= read -r f; do aarch64-linux-gnu-strip --strip-unneeded "$f"; done
+    elf_files "$TREE/cpu" | while IFS= read -r f; do "$STRIP" --strip-unneeded "$f"; done
 
     # 3. CUDA build: only the backend, against the same base library.
     bcuda="$W/build-cuda"
-    common+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.2/bin/nvcc" "-DCMAKE_CUDA_FLAGS=-Xcompiler=$map")
+    common+=("-DCMAKE_CUDA_COMPILER=$nvcc" "-DCMAKE_CUDA_FLAGS=-Xcompiler=$map")
     while IFS= read -r f; do common+=("$f"); done < <(cmake_flags "$CUDA_CMAKE_FLAGS")
     t0="$(date +%s)"
     cmake -B "$bcuda" "${common[@]}" > "$W/cuda-cmake.log" 2>&1 || { tail -30 "$W/cuda-cmake.log" >&2; die "CUDA configure failed"; }
@@ -207,12 +230,12 @@ c_compile() {
     f="$(find "$bcuda" -name "lib$CUDA_TARGET.so" -type f | head -n 1)"
     [ -n "$f" ] || die "the CUDA build produced no lib$CUDA_TARGET.so"
     install -m 644 "$f" "$TREE/cuda/lib$CUDA_TARGET.so"
-    aarch64-linux-gnu-strip --strip-unneeded "$TREE/cuda/lib$CUDA_TARGET.so"
+    "$STRIP" --strip-unneeded "$TREE/cuda/lib$CUDA_TARGET.so"
     base_a="$(find "$TREE/cpu/lib" -maxdepth 1 -type f -name 'libggml-base.so.*')"
     base_b="$(find "$bcuda" -type f -name "$(basename "$base_a")" | head -n 1)"
     [ -n "$base_b" ] || die "the CUDA build has no $(basename "$base_a")"
     cp "$base_b" "$W/base-b"
-    aarch64-linux-gnu-strip --strip-unneeded "$W/base-b"
+    "$STRIP" --strip-unneeded "$W/base-b"
     cmp -s "$base_a" "$W/base-b" || die "the CUDA build's $(basename "$base_a") differs from the CPU build's"
     log "libggml-base: the same bytes in the CPU and the CUDA build"
 
@@ -238,7 +261,7 @@ c_compile() {
         echo "CMAKE_FLAGS=$CMAKE_FLAGS"
         echo "CUDA_CMAKE_FLAGS=$CUDA_CMAKE_FLAGS"
         echo "CUDA_RUNTIME=$CUDA_RUNTIME"
-        echo "TOOLCHAIN=gcc-$(aarch64-linux-gnu-gcc-14 -dumpfullversion),nvcc-$CUDA_NVCC_VERSION,cmake-$(cmake --version | awk 'NR==1 {print $3}')"
+        echo "TOOLCHAIN=$path,gcc-$("${tc}gcc-14" -dumpfullversion),nvcc-$CUDA_NVCC_VERSION,cmake-$(cmake --version | awk 'NR==1 {print $3}')"
         echo "NEEDED_CPU=$(elf_files "$TREE/cpu" | while IFS= read -r f; do needed "$f"; done | grep -Fvx -f "$W/sonames" | LC_ALL=C sort -u | paste -sd, -)"
         echo "NEEDED_CUDA=$(needed "$TREE/cuda/lib$CUDA_TARGET.so" | grep -Fvx -f "$W/sonames" | LC_ALL=C sort -u | paste -sd, -)"
         echo "GLIBC_MAX=$(find "$TREE" -type f -print0 | xargs -0 "$OBJDUMP" -T 2> /dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)"
@@ -273,7 +296,7 @@ serve() {
     local log="$1"
     shift
     "$LLAMA_PREFIX/bin/llama-server" --host 127.0.0.1 --port "$PORT" -m "$MODEL" --api-key-file "$W/api-key" \
-        -c 512 -np 1 -t 2 --no-webui --offline "$@" > "$log" 2>&1 &
+        -c 512 -np 1 -t 2 --no-webui --offline -v "$@" > "$log" 2>&1 &   # -v: the "loaded CPU backend" line is logged only verbose
     SERVER=$!
     wait_http "http://127.0.0.1:$PORT/health" || { tail -30 "$log" >&2; die "llama-server did not come up ($log)"; }
 }
@@ -342,7 +365,7 @@ c_check() {
     printf '%s' "$out" | python3 -I -c 'import json, sys; d = json.load(sys.stdin); assert d["type"] == "message" and d["content"][0]["text"], d' \
         || die "/v1/messages answered: $out"
     stop_server
-    backend="$(grep -o "loaded CPU backend from $LLAMA_PREFIX/lib/ggml/libggml-cpu-[a-z0-9._]*\.so" "$W/server.log" | head -n 1)"
+    backend="$(grep -o "loaded CPU backend from $LLAMA_PREFIX/lib/ggml/libggml-cpu-[a-z0-9._]*\.so" "$W/server.log" | head -n 1 || true)"
     [ -n "$backend" ] || { tail -30 "$W/server.log" >&2; die "llama-server did not load a CPU backend from lib/ggml"; }
     backend="${backend##*/}"
     log "generation: 8 tokens from /completion ($(cat "$W/content")), /v1/messages answers, 401 without the key; $backend"
@@ -359,12 +382,14 @@ c_check() {
     [ -f "$lib/libcublas.so.13" ] || die "the Jetson runtime debs hold no libcublas.so.13 next to libcudart.so.13"
     f="$OUT/cuda/libggml-cuda.so"
     check_elf "$f" "$CUDA_RE"
+    # ldd where it ships (lib/ggml/): its RUNPATH, $ORIGIN/.., finds libggml-base only there.
+    cp "$f" "$TREE/lib/ggml/"
+    f="$TREE/lib/ggml/libggml-cuda.so"
     miss="$(ldd "$f" 2>&1 | awk '/not found/ {print $1}' | LC_ALL=C sort | paste -sd' ' -)"
     [ "$miss" = "libcublas.so.13 libcudart.so.13" ] || [ "$miss" = "libcublas.so.13 libcublasLt.so.13 libcudart.so.13" ] \
         || die "without the CUDA runtime, libggml-cuda.so should miss only cudart and cublas, misses: $miss"
     out="$(LD_LIBRARY_PATH="$lib" ldd "$f" 2>&1)"
     ! printf '%s\n' "$out" | grep -q 'not found' || die "ldd libggml-cuda.so with NVIDIA's runtime: $(printf '%s\n' "$out" | grep 'not found')"
-    cp "$f" "$TREE/lib/ggml/"
     LD_LIBRARY_PATH="$lib" "$TREE/bin/llama-server" --list-devices > "$W/devices.log" 2>&1 \
         || { cat "$W/devices.log" >&2; die "llama-server --list-devices fails with the CUDA backend in lib/ggml"; }
     grep -q 'ggml_cuda_init: failed to initialize CUDA' "$W/devices.log" \

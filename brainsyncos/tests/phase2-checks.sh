@@ -366,15 +366,16 @@ check_keyring() {
 }
 
 # check_secrets TARGET: 70-brainsync.sh made /etc/brainsync/secrets.env, a
-# template without keys, root:BRAINSYNC_USER 0640, and reported the offline voice.
+# template root:BRAINSYNC_USER 0640 whose only setting is the llama-server key
+# 85-llama.sh adds, and reported the offline voice.
 check_secrets() {
     local t="$1" f="$1/etc/brainsync/secrets.env"
     [ "$(stat -c '%u %a' "$f")" = "0 640" ] && [ "$(in_target "$t" stat -c %G /etc/brainsync/secrets.env)" = "$BRAINSYNC_USER" ] \
         || die "secrets.env is not root:$BRAINSYNC_USER 640"
-    ! grep -qv '^#' "$f" || die "secrets.env holds lines that are not comments"
+    ! grep -v '^#' "$f" | grep -vqE '^BRAINSYNC_LLAMA_API_KEY=[0-9a-f]{64}$' || die "secrets.env holds lines other than comments and the llama-server key"
     grep -E '70-brainsync.sh: (offline voice: espeak-ng|note: offline voice espeak-ng)' "$t/var/log/brainsyncos/install.log" \
         || die "70-brainsync.sh did not report the offline voice"
-    echo "secrets.env: root:$BRAINSYNC_USER 640, template without keys"
+    echo "secrets.env: root:$BRAINSYNC_USER 640, template plus the llama-server key"
 }
 
 # check_usb_serial TARGET: 75-usb-serial.sh installed the udev rules and the

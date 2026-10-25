@@ -76,10 +76,9 @@
 #             the unit's flags (127.0.0.1:9931, key from LoadCredential,
 #             IPAddressDeny=any, sandbox, no tools or router) and the drop-in,
 #             maintainer scripts that skip a chroot, root-owned, md5sums
-#   llama     payload/hook.sh with 00, 60 and 85-llama.sh against NVIDIA's
-#             target base layer, from the jetson test repository plus empty
-#             stand-ins for NVIDIA's cuda-cudart-13-2 and libcublas-13-2 when
-#             it lacks them: both packages installed, the service enabled, a
+#   llama     payload/hook.sh with 00, 60, 70 and 85-llama.sh against NVIDIA's
+#             target base layer, from the jetson test repository (the mirrored
+#             CUDA runtime included): both packages installed, the service enabled, a
 #             64-hex key root-only, the same key in secrets.env (root:brainsync
 #             0640, template kept), systemd-analyze verify and security on the
 #             unit; a re-run keeps key and file; other secrets.env lines kept
@@ -99,7 +98,7 @@
 #             zstd-compressed, exactly its six files, root-owned 644, md5sums OK,
 #             the model and its licence text match config/model.env, the GGUF
 #             header has the pinned file type, model.conf holds BSOS_LLAMA_MODEL
-#             and BSOS_LLAMA_ARGS in systemd EnvironmentFile syntax and is no conffile
+#             BSOS_LLAMA_ALIAS and BSOS_LLAMA_CTX_SIZE in systemd EnvironmentFile syntax and is no conffile
 #   model-step payload/hook.sh with 00, 60 and 86-model.sh against NVIDIA's
 #             target base layer (on disk under TESTDIR, not /scratch): the model
 #             and model.conf installed, its sha256 verified; a re-run works; a
@@ -943,23 +942,6 @@ c_llama_debs() {
     echo "unit: 127.0.0.1:9931, key by LoadCredential, empty environment, IPAddressDeny=any, sandboxed, starts only with a model; -cuda drop-in: GPU devices, no MemoryDenyWriteExecute"
 }
 
-# cuda_stand_ins DIR: empty arm64 packages named and versioned like NVIDIA's
-# CUDA runtime (llama.env CUDA_RUNTIME), for a repository that does not
-# mirror the real ones. They test the install's dependency resolution only.
-cuda_stand_ins() {
-    local d n v s
-    for d in $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' ' '); do
-        n="${d%%=*}"
-        v="${d#*=}"
-        s="$W/stand-in-$n"
-        mkdir -p "$s/DEBIAN" "$s/usr/share/doc/$n"
-        echo "Test stand-in for NVIDIA's $n $v (tests/phase3-checks.sh). Not a CUDA runtime." > "$s/usr/share/doc/$n/README"
-        printf 'Package: %s\nVersion: %s\nArchitecture: arm64\nMaintainer: BrainSyncOS tests <test@localhost>\nDescription: test stand-in for %s\n' \
-            "$n" "$v" "$n" > "$s/DEBIAN/control"
-        build_deb "$s" "$1" > /dev/null
-    done
-}
-
 # expand_exec UNIT CONF: the unit's ExecStart= as systemd would run it, with
 # its Environment= defaults, then CONF's values, and %d (the credentials).
 expand_exec() {
@@ -988,17 +970,7 @@ c_llama() {
     local t="$W/target" p="$W/hp" log="$W/target/var/log/brainsyncos/install.log" repo="$REPO" key sec k1 s1 cmd ok pid
     load_env_file "$BRAINSYNCOS_ROOT/llama/llama.env" "LLAMA_PREFIX CUDA_RUNTIME TEST_MODEL_FILE TEST_MODEL_SHA256"
     target_layer "$t"
-    if ! ls "$REPO/pool/$REPO_COMPONENT"/cuda-cudart-13-2_*.deb > /dev/null 2>&1; then
-        mkdir -p "$W/debs"
-        cp "$T/debs/jetson"/*.deb "$W/debs/"
-        cuda_stand_ins "$W/debs"
-        "$BRAINSYNCOS_ROOT/scripts/build-repo.sh" --edition jetson --debs "$W/debs" --key "$T/key/repo-signing-key.asc" \
-            --out "$W/repo" > "$W/repo.log" 2>&1 || { cat "$W/repo.log"; die "cannot sign the test repository"; }
-        cmp "$W/repo/repo-key.gpg" "$REPO/repo-key.gpg" || die "the test repository has another key"
-        repo="$W/repo"
-        echo "repository: the jetson test packages plus stand-ins for $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' ' ') (not mirrored on this branch)"
-    fi
-    in_t "$t" groupadd "$BRAINSYNC_USER"   # 30-user.sh's group
+    in_t "$t" useradd -m -s /bin/bash "$BRAINSYNC_USER"   # 30-user.sh's account, with its primary group
     hook_payload "$p" 70-brainsync.sh 85-llama.sh
     run_hook "$p" "$t" "$repo" || { tail -30 "$W/live.log"; die "hook failed"; }
     grep -q 'BrainSyncOS layer installed (4 steps)' "$log" || die "log lacks the summary"
@@ -1006,8 +978,8 @@ c_llama() {
     sed -n '/== 85-llama.sh/,$p' "$log" | grep '85-llama.sh'
     grep -q "85-llama.sh: installed brainsyncos-llama $BRAINSYNCOS_VERSION, brainsyncos-llama-cuda $BRAINSYNCOS_VERSION; llama-server version: " "$log" \
         || die "85-llama.sh did not install both packages"
-    grep -q '85-llama.sh: made a new API key' "$log" && grep -q '85-llama.sh: created /etc/brainsync/secrets.env' "$log" \
-        || die "85-llama.sh did not make the key and secrets.env"
+    grep -q '85-llama.sh: made a new API key' "$log" && grep -q '85-llama.sh: added BRAINSYNC_LLAMA_API_KEY to /etc/brainsync/secrets.env' "$log" \
+        || die "85-llama.sh did not make the key and add it to 70-brainsync.sh's secrets.env"
     key="$t/etc/brainsyncos/llama/api-key"
     sec="$t/etc/brainsync/secrets.env"
     [ "$(stat -c '%a %U:%G' "$key")" = "600 root:root" ] && [ "$(stat -c '%a %U:%G' "$(dirname "$key")")" = "700 root:root" ] \
@@ -1017,7 +989,7 @@ c_llama() {
         || die "secrets.env is $(stat -c '%a %U:%G' "$sec")"
     [ "$(grep -c '^BRAINSYNC_LLAMA_API_KEY=' "$sec")" = 1 ] && grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$key")" "$sec" \
         || die "secrets.env does not hold the key once"
-    grep -qx '# ANTHROPIC_API_KEY=' "$sec" || die "secrets.env lacks its template"
+    grep -qx '#ANTHROPIC_API_KEY=' "$sec" || die "secrets.env lacks 70-brainsync.sh's template"
     [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "the service is not enabled"
     # shellcheck disable=SC2046  # one package name per word
     in_t "$t" dpkg-query -W -f '${Package} ${Status}\n' brainsyncos-llama brainsyncos-llama-cuda \
@@ -1068,8 +1040,8 @@ c_llama() {
     cp "$key" "$t/run/credentials/brainsyncos-llama.service/api-key"
     cmd="$(expand_exec "$t/usr/lib/systemd/system/brainsyncos-llama.service" "$t/etc/brainsyncos/llama.d/model.conf")"
     echo "as systemd would run it: $cmd"
-    # shellcheck disable=SC2086  # the command line, split as systemd splits it
-    in_t "$t" $cmd > "$W/service.log" 2>&1 &
+    # shellcheck disable=SC2086  # the command line, split as systemd splits it; -v only here, for the "loaded CPU backend" line
+    in_t "$t" $cmd -v > "$W/service.log" 2>&1 &
     pid=$!
     ok=0
     for _ in $(seq 1 240); do
@@ -1213,12 +1185,12 @@ c_model_deb() {
     conf="$x/etc/brainsyncos/llama.d/model.conf"
     cat "$conf"
     grep -v '^#' "$conf" > "$W/conf"
-    printf 'BSOS_LLAMA_MODEL=%s\nBSOS_LLAMA_ARGS="%s"\n' "/opt/brainsyncos/models/$MODEL_FILE" "$(model_llama_args)" \
+    printf 'BSOS_LLAMA_MODEL=%s\nBSOS_LLAMA_ALIAS=%s\nBSOS_LLAMA_CTX_SIZE=%s\n' "/opt/brainsyncos/models/$MODEL_FILE" "$MODEL_ID" "$MODEL_CTX_SIZE" \
         | diff - "$W/conf" || die "model.conf holds other settings"
     # systemd's EnvironmentFile syntax, kept to what a shell reads the same way.
     ! grep -Ev '^[A-Z_][A-Z0-9_]*=([A-Za-z0-9./_+:=-]*|"[^"$`\\]*")$' "$W/conf" || die "model.conf lines outside the plain KEY=value form"
     # shellcheck disable=SC1090  # the packaged model.conf
-    (set -u; . "$conf"; [ "$BSOS_LLAMA_MODEL" = "/opt/brainsyncos/models/$MODEL_FILE" ] && [ "$BSOS_LLAMA_ARGS" = "$(model_llama_args)" ]) \
+    (set -u; . "$conf"; [ "$BSOS_LLAMA_MODEL" = "/opt/brainsyncos/models/$MODEL_FILE" ] && [ "$BSOS_LLAMA_ALIAS" = "$MODEL_ID" ] && [ "$BSOS_LLAMA_CTX_SIZE" = "$MODEL_CTX_SIZE" ]) \
         || die "model.conf reads differently in a shell"
     force_rm_tree "$x"
     echo "$pkg: zstd, six files, root 644, the pinned model ($MODEL_SIZE bytes) and licence, model.conf for the llama-server unit, no conffiles"
@@ -1258,7 +1230,7 @@ c_model_step() {
     grep -q 'BrainSyncOS layer installed (3 steps)' "$log" || die "log lacks the summary"
     ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
     grep '86-model.sh' "$log"
-    grep -qF "86-model.sh: $pkg $BRAINSYNCOS_VERSION installed: /opt/brainsyncos/models/$MODEL_FILE ($MODEL_SIZE bytes, sha256 verified), BSOS_LLAMA_ARGS=\"$(model_llama_args)\"" "$log" \
+    grep -qF "86-model.sh: $pkg $BRAINSYNCOS_VERSION installed: /opt/brainsyncos/models/$MODEL_FILE ($MODEL_SIZE bytes, sha256 verified), alias $MODEL_ID, context $MODEL_CTX_SIZE" "$log" \
         || die "86-model.sh did not finish"
     "$BRAINSYNCOS_ROOT/tests/shims/curtin" in-target --target="$t" -- dpkg-query -W -f '${Status} ${Provides}\n' "$pkg" \
         | grep -qx 'install ok installed brainsyncos-model' || die "$pkg is not installed"

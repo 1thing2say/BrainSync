@@ -34,7 +34,8 @@ bsos_apt install "$pkgs"
 
 [ -s "$conf" ] || fail "$pkgs did not install $conf"
 BSOS_LLAMA_MODEL=""
-BSOS_LLAMA_ARGS=""
+BSOS_LLAMA_ALIAS=""
+BSOS_LLAMA_CTX_SIZE=""
 # shellcheck disable=SC1090  # installed by the model package
 . "$conf"
 case "$BSOS_LLAMA_MODEL" in
@@ -42,6 +43,8 @@ case "$BSOS_LLAMA_MODEL" in
     *) fail "$conf: BSOS_LLAMA_MODEL is '$BSOS_LLAMA_MODEL', not a .gguf in /opt/brainsyncos/models" ;;
 esac
 [ -s "$BSOS_LLAMA_MODEL" ] || fail "$BSOS_LLAMA_MODEL is missing"
+[ "$BSOS_LLAMA_CTX_SIZE" -ge 512 ] 2> /dev/null || fail "$conf: BSOS_LLAMA_CTX_SIZE is '$BSOS_LLAMA_CTX_SIZE', not a context length"
+[ -n "$BSOS_LLAMA_ALIAS" ] || fail "$conf: BSOS_LLAMA_ALIAS is empty"
 [ "$(head -c 4 "$BSOS_LLAMA_MODEL")" = GGUF ] || fail "$BSOS_LLAMA_MODEL is not a GGUF file"
 if [ "${BSOS_MODEL_VERIFY:-1}" = 1 ]; then
     (cd "$(dirname "$BSOS_LLAMA_MODEL")" && sha256sum --quiet -c "$(basename "$BSOS_LLAMA_MODEL").sha256") \
@@ -50,4 +53,4 @@ if [ "${BSOS_MODEL_VERIFY:-1}" = 1 ]; then
 else
     sum="sha256 not checked (BSOS_MODEL_VERIFY=0)"
 fi
-echo "86-model.sh: $(dpkg-query -W -f '${Package} ${Version}' "$pkgs") installed: $BSOS_LLAMA_MODEL ($(stat -c %s "$BSOS_LLAMA_MODEL") bytes, $sum), BSOS_LLAMA_ARGS=\"$BSOS_LLAMA_ARGS\""
+echo "86-model.sh: $(dpkg-query -W -f '${Package} ${Version}' "$pkgs") installed: $BSOS_LLAMA_MODEL ($(stat -c %s "$BSOS_LLAMA_MODEL") bytes, $sum), alias $BSOS_LLAMA_ALIAS, context $BSOS_LLAMA_CTX_SIZE"

@@ -64,11 +64,10 @@ venv_pip_wheel() {
         if [ ! -f "$f" ] || [ "$(sha256_of "$f")" != "$PIP_WHEEL_SHA256" ]; then
             mkdir -p "$PIP_DIR"
             log "fetching pip $PIP_VERSION"
-            # The builder has no CA store; the pinned sha256 is what is trusted
-            # here. pip itself then verifies TLS with its own certificates.
-            python3 -c 'import ssl, sys, urllib.request
-ctx = ssl._create_unverified_context()
-with urllib.request.urlopen(sys.argv[1], context=ctx, timeout=60) as r, open(sys.argv[2], "wb") as f:
+            # TLS verified with the builder's CA store; the pinned sha256 below is
+            # what is trusted. pip itself then verifies TLS with its own certificates.
+            python3 -c 'import sys, urllib.request
+with urllib.request.urlopen(sys.argv[1], timeout=60) as r, open(sys.argv[2], "wb") as f:
     f.write(r.read())' "$PIP_WHEEL_URL" "$f.part" || die "cannot download $PIP_WHEEL_URL"
             [ "$(sha256_of "$f.part")" = "$PIP_WHEEL_SHA256" ] || { rm -f "$f.part"; die "pip wheel sha256 mismatch ($PIP_WHEEL_URL)"; }
             mv "$f.part" "$f"

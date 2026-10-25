@@ -12,7 +12,6 @@
 #
 #   load_model_config          config/model.env, checked (MODEL_* variables)
 #   model_package              the package name, brainsyncos-model-MODEL_ID
-#   model_llama_args           MODEL_LLAMA_ARGS with its commas as spaces
 #   model_fetch REPO REV FILE SHA256 SIZE
 #                              print the cached file's path (download if needed)
 #   gguf_info FILE             the GGUF header as KEY=value lines: version,
@@ -25,7 +24,7 @@
 BSOS_MODEL_CONFIG="${BSOS_MODEL_CONFIG:-$BRAINSYNCOS_ROOT/config/model.env}"
 BSOS_MODEL_REQUIRED_KEYS="MODEL_ID MODEL_HF_URL MODEL_HF_REPO MODEL_HF_REVISION MODEL_FILE MODEL_SIZE
 MODEL_SHA256 MODEL_FILE_TYPE MODEL_QUANT MODEL_LICENSE MODEL_LICENSE_HF_REPO MODEL_LICENSE_HF_REVISION
-MODEL_LICENSE_FILE MODEL_LICENSE_SIZE MODEL_LICENSE_SHA256 MODEL_LLAMA_ARGS"
+MODEL_LICENSE_FILE MODEL_LICENSE_SIZE MODEL_LICENSE_SHA256 MODEL_CTX_SIZE"
 MODEL_CACHE_DIR="$DOWNLOADS_DIR/models"
 # Where the package installs models, and the file the llama-server unit reads.
 MODEL_INSTALL_DIR=/opt/brainsyncos/models
@@ -50,7 +49,7 @@ load_model_config() {
         eval "val=\$$key"
         printf '%s\n' "$val" | grep -Eq '^[0-9a-f]{64}$' || die "$key must be a sha256 (64 hex characters), got $val"
     done
-    for key in MODEL_SIZE MODEL_LICENSE_SIZE MODEL_FILE_TYPE; do
+    for key in MODEL_SIZE MODEL_LICENSE_SIZE MODEL_FILE_TYPE MODEL_CTX_SIZE; do
         eval "val=\$$key"
         printf '%s\n' "$val" | grep -Eq '^(0|[1-9][0-9]*)$' || die "$key must be a whole number, got $val"
     done
@@ -61,14 +60,10 @@ load_model_config() {
     printf '%s\n' "$MODEL_QUANT" | grep -Eq '^[A-Za-z0-9_]+$' || die "MODEL_QUANT must be a quantization name like Q4_K_M, got $MODEL_QUANT"
     printf '%s\n' "$MODEL_LICENSE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.+-]*$' \
         || die "MODEL_LICENSE must be an SPDX identifier, got $MODEL_LICENSE"
-    # Comma-separated llama-server options: no shell or systemd specials.
-    printf '%s\n' "$MODEL_LLAMA_ARGS" | grep -Eq '^-[A-Za-z0-9.:=+/-]*(,[A-Za-z0-9.:=+/-]+)*$' \
-        || die "MODEL_LLAMA_ARGS must be llama-server options separated by commas (e.g. -c,4096), got $MODEL_LLAMA_ARGS"
+    [ "$MODEL_CTX_SIZE" -ge 512 ] 2> /dev/null || die "MODEL_CTX_SIZE must be a context length of 512 tokens or more, got $MODEL_CTX_SIZE"
 }
 
 model_package() { printf 'brainsyncos-model-%s\n' "$MODEL_ID"; }
-
-model_llama_args() { printf '%s\n' "$MODEL_LLAMA_ARGS" | tr ',' ' '; }
 
 # model_fetch REPO REV FILE SHA256 SIZE: download the file once into
 # MODEL_CACHE_DIR/SHA256/FILE, check it, and print its path.

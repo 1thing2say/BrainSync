@@ -1,6 +1,6 @@
 # BrainSyncOS Phase 3: notes and handoff
 
-Status as of 2026-10-24, branch `custom-operating-brain-seperate`. The work so
+Status as of 2026-10-24, branch `custom-operating-brain-seperate`. Latest status (2026-10-25, branch `bsos/jetson`): [phase3-handoff.md](phase3-handoff.md), last section. The work so
 far ran on an Apple M4 Mac (arm64, Docker Desktop, UTM). It continues on an
 x86-64 laptop. This file lists what is done, what the next parts need, and what
 changes on x86-64.
@@ -68,7 +68,7 @@ Details, versions and evidence are in [phase3-research/findings.md](phase3-resea
 - In NVIDIA's real target layer, the hook's `70-brainsync.sh` installs both and `brainsync-voice` runs there.
 
 **Not done or not verified:**
-- `tests/test_phase2.sh` and `tests/test_vm.sh` were not run with the new step. Their hook checks now expect 8 steps and the two packages.
+- `tests/test_phase2.sh` and `tests/test_vm.sh` were not run with the new step. Their hook checks now expect the two packages (the step count is read from the payload: 12 since the merge of 2026-10-25).
 - No real install on a Jetson or in UTM. Display timing only under Xvfb (no vsync).
 - The app's pytest suite was not run against the installed wheel (pytest is not in the venv).
 - Build time under qemu: about 25 minutes per edition at 2 CPUs, mostly xz on the runtime. zstd was not measured.
@@ -138,13 +138,14 @@ The pins below are the ones the research found; the README section "The package 
 
    **Not done or not verified:**
    - CUDA code on an Orin: whether nvgpu's libcuda loads with this cudart (3e acceptance).
-   - The full `tests/test_phase3.sh`, `test_phase2.sh` and `test_vm.sh`. The last two now expect 10 hook steps, and phase 2 checks the CUDA libraries.
+   - The full `tests/test_phase3.sh`, `test_phase2.sh` and `test_vm.sh`. The last two count the hook steps from the payload (12 since the merge of 2026-10-25), and phase 2 checks the CUDA libraries.
    - An install in UTM or on a Jetson.
    - The licence (EULA Attachment A) assumes the ISO stays on our own devices.
 2. **llama.cpp v0.7.0**: commit `620d2225cc436ab0b001e3200e590e3b286ef9ab`, tarball sha256 `55d67acf3ad2ad747a9bbeb75f9f0e173dbcc0d1753a471038a90c819421c5e1`.
    - CMake flags: `GGML_BACKEND_DL=ON GGML_CPU_ALL_VARIANTS=ON GGML_NATIVE=OFF BUILD_SHARED_LIBS=ON`, with the install prefix `/opt/brainsyncos/llama` and gcc-14 (gcc-13 fails on the SME variants).
    - CUDA: `GGML_CUDA=ON CMAKE_CUDA_ARCHITECTURES=87-real GGML_CUDA_NO_VMM=ON`.
    - Packages: `brainsyncos-llama` (both editions) and `brainsyncos-llama-cuda` (Jetson).
+   - **Compile path per host (2026-10-25):** `scripts/build.sh llama` runs `scripts/builder.sh --llama run scripts/build-llama.sh compile`. `--llama` picks the llama builder for the host: on arm64 (the Mac) the native `brainsyncos-llama-builder` (`docker/Dockerfile.llama-builder`: noble gcc-14/g++-14, cmake, ninja, and NVIDIA's aarch64 `cuda-nvcc-13-2=13.2.86-1`, `cuda-cudart-dev-13-2=13.2.86-1`, `libcublas-dev-13-2=13.4.1.3-1` with their closure from the Jetson repository r39.2, apt `signed-by` the committed `mirror/nvidia-jetson/jetson-ota-public.asc`, which reaches the image build as the named build context `nvidia-jetson`; nothing from it ships); on x86-64 the amd64 cross-builder as before. `build-llama.sh compile` uses `gcc-14`/`strip`/`objdump` and `-DCMAKE_{C,CXX,CUDA_HOST}_COMPILER` on aarch64, the `aarch64-linux-gnu-` tools and `llama/aarch64-linux-gnu.cmake` on x86_64; same steps and checks, `TOOLCHAIN=native-aarch64,...` or `cross-x86_64,...` in `llama.env`, and both Dockerfiles are in `INPUTS_SHA256`. **Run on the Mac (2026-10-25):** native compile 154-166 s CPU + 449-559 s CUDA at 6 jobs; the check passes (8 tokens on `libggml-cpu-armv8.2_2.so`, `/v1/messages` answers, the CUDA backend resolves against NVIDIA's runtime and falls back to the CPU with no GPU). Two check fixes on the way: the test servers run with `-v`, because llama.cpp 0.7.0 logs `load_backend: loaded CPU backend from ...` only at that verbosity (the shipped unit stays without it), and `libggml-cuda.so` is ldd'ed from `lib/ggml/`, where its `$ORIGIN/..` RUNPATH finds `libggml-base`. **Open:** two native compiles of the same inputs gave different `SHA256SUMS` and `libggml-cuda.so` sizes (39727376 and 39661840 bytes), so the CUDA build is not reproducible yet (likely nvcc); the CPU tree was not compared. Compare per file before Phase 6 claims reproducibility.
 3. **`brainsyncos-llama.service`**: `llama-server` on `127.0.0.1:9931`.
    - API key from `LoadCredential`.
    - `IPAddressDeny=any`, with `IPAddressAllow=localhost`.
@@ -161,8 +162,8 @@ The pins below are the ones the research found; the README section "The package 
    - **Memory:** the package is staged on disk under `build/tmp`, with the model hard-linked from the download cache, and dpkg-deb's temporary file goes there too. `build-packages.sh` now builds every package on disk under its output folder, never on the 3 GiB `/scratch` tmpfs.
    - **Install step `86-model.sh`** (its own step, so it does not touch `85-llama.sh`): it installs the one `brainsyncos-model-*` package the repository has, then checks `model.conf` and the sha256 (`BSOS_MODEL_VERIFY=0` skips the hash). Without a model package it prints `86-model.sh: <edition> edition: the repository has no model package; ...` and exits 0.
    - **Contract with 3d-llama** (`brainsyncos-llama.service`, `85-llama.sh`):
-     - `/etc/brainsyncos/llama.d/model.conf` is an `EnvironmentFile` with exactly two settings: `BSOS_LLAMA_MODEL=/opt/brainsyncos/models/<file>.gguf` and `BSOS_LLAMA_ARGS="-c 4096"` (model options only, from `MODEL_LLAMA_ARGS`). Values need no shell or systemd escaping; a shell can source the file too.
-     - The unit: `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf`, `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `EnvironmentFile=-/etc/brainsyncos/llama.d/local.conf` for local options, and `ExecStart=... -m ${BSOS_LLAMA_MODEL} $BSOS_LLAMA_ARGS ...`. Unbraced, `$BSOS_LLAMA_ARGS` splits into separate options. Host, port, key, `-ngl` and limits stay in the unit.
+     - `/etc/brainsyncos/llama.d/model.conf` is an `EnvironmentFile` with exactly three settings: `BSOS_LLAMA_MODEL=/opt/brainsyncos/models/<file>.gguf`, `BSOS_LLAMA_ALIAS=<MODEL_ID>` and `BSOS_LLAMA_CTX_SIZE=<MODEL_CTX_SIZE>` (fixed 2026-10-25: the model track wrote `BSOS_LLAMA_ARGS`, which the unit never read, so it ran at its 8192 default). Values need no shell or systemd escaping; a shell can source the file too.
+     - The unit: `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf`, `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `EnvironmentFile=-/etc/brainsyncos/llama.d/local.conf` for local options, and `ExecStart=... --model ${BSOS_LLAMA_MODEL} --alias ${BSOS_LLAMA_ALIAS} --ctx-size ${BSOS_LLAMA_CTX_SIZE} ...`, every variable braced. Host, port, key, `-ngl` and limits stay in the unit.
      - `model.conf` is not a conffile: an upgrade replaces it, and removing the package removes it, so the unit stops starting. Nothing in this track writes `local.conf`; that part is a proposal for 3d-llama.
      - The model file is world-readable (644, root), so the unit's own user can read it under `ProtectSystem=strict`.
    - **Verified** (x86-64 WSL2, arm64 builder under qemu, 1-CPU cap): `test_phase3.sh` checks `model-pin`, `model-deb`, `model-step` and `iso-size`, run with `BSOS_TEST_ONLY` on a test tree holding only the keyring and the model (the full suite was not run, see below):
@@ -268,6 +269,29 @@ second key: a device only trusts the key its ISO came with.
   - The earlier run's only failure, apt's `/dev/pts` log line, is gone. The Phase 3 hook check now fails on any `E:`/`W:` line.
 - shellcheck v0.10.0 (`-x -S warning`) is clean over all BrainSyncOS scripts.
 
+## Install bundle for a running Orin (2026-10-25, Phase 3 of the handoff)
+
+Built, not yet run: `scripts/make-bundle.sh`, `payload/bundle/install.sh`,
+`tests/test_bundle.sh` and `tests/bundle-checks.sh` (README: "Install bundle
+for a running Orin (Phase 3)").
+- The bundle is the signed jetson repository plus `lib/`, steps 60 to 86,
+  `account/30-user.sh`, the key, `release`, `bundle.env` and `install.sh`, as
+  one reproducible GNU tar (`build/out/brainsyncos-jetson-VERSION.tar`).
+- `install.sh` refuses any Jetson Linux but R39.2.1 and any `nvidia-l4t-kernel`
+  but the one the CH340 module is built for, runs the ISO's steps unchanged on
+  the live system through `lib/apt-repo.sh` with the bundle's `repo/` as a
+  plain directory (no mount, no curtin), and settles the apps' account:
+  an existing one (JetPack's first-boot user, hardware groups added) or a new
+  one made by the bundle's unchanged `30-user.sh` from a password hash or SSH keys.
+- Status: `bash -n` passes on all four scripts and the `--help` texts print.
+  `test_bundle.sh` has not run: when it was written `build/repo/jetson` did not
+  exist yet (the packages were being built), the base ISO was not in
+  `~/Downloads`, and the disk was full. Run `BASE_ISO=... tests/test_bundle.sh`
+  once the jetson repository (with the mirrored CUDA runtime) is built; then
+  on an Orin.
+- Not integrated into `scripts/build.sh` or the Makefile (those files were
+  being edited elsewhere): run it as `scripts/builder.sh run scripts/make-bundle.sh`.
+
 ## Open items
 
 - **Confirmed on x86-64 (2026-10-24):** `tests/test_phase3.sh` passes all 10 checks on a WSL2 laptop with Docker Desktop, under arm64 emulation, from a clone under `~`. It needed two fixes: `builder.sh` hands root-owned output back to the user, and the key-mode check reads GNU `stat` first. From `/mnt/c` the key check fails by design (Windows drives ignore `chmod`).
@@ -275,3 +299,10 @@ second key: a device only trusts the key its ISO came with.
 - **Not exercised yet:** a real UTM install of a 3a ISO, i.e. the repository bind mount under real subiquity/curtin. The tests use a chroot shim for curtin.
 - **Clock risk:** the apt helper accepts a clock in the past (tested at 2001), and a clock past the key's expiry fails. That is correct, but a Jetson whose RTC jumps far ahead would fail the install.
 - **Also on this branch:** a separate commit with another session's uncommitted app changes, which moved spoken prompts to Cartesia TTS (`brainsync/voice.py`, `tests/test_voice.py` and edits in `brainsync/` and `tests/`). They were pushed as found; they are not part of BrainSyncOS and were not reviewed or tested here.
+
+## Phase 4 checks: nothing compiles on the device (2026-10-25, on the Mac)
+
+- Built: `scripts/check-no-compile.sh` (repo, steps and llama checks; README section "Nothing compiles on the device") and `tests/test_nocompile.sh` (negative test with a fake `.deb` and step, the real install steps, the repository when built, shellcheck).
+- Run: `tests/test_nocompile.sh` passes its 3 host-side checks (`refuses`, `accepts`, `steps`). The 7 debs in `build/debs/jetson` (brainsync, brainsync-runtime, brainsync-udev, the keyring, ch341-tegra, the model, espeak-ng) and the 5 mirrored NVIDIA debs in `build/downloads/mirror/nvidia-jetson` were also scanned by hand as flat directories: all clean, no maintainer script runs a build tool, cudart and cublas depend only on `cuda-toolkit-*-config-common`.
+- Not run yet: the scan of `build/repo/jetson` (no repository built at the time), the llama check (`build/llama/cpu` and the test model did not exist), and shellcheck (the host has none; Docker Desktop was down while the disk was full). Run `tests/test_nocompile.sh` again after `scripts/build.sh llama` and `scripts/build.sh repo`.
+- The qemu Cortex-A76 question: on this Mac the arm64 builder is native, so `QEMU_CPU` has no effect and `docker/Dockerfile.builder` has no `qemu-user`; the script falls back to classing each CPU variant's instructions and to a native run (details in the README section). Verified in a throwaway arm64 container: Ubuntu's `qemu-user` does run `qemu-aarch64 -cpu cortex-a76` on the M4 (TCG), and the program then sees exactly dotprod and fp16 (AT_HWCAP `0x119ffb`), the A78AE's set. Adding `qemu-user` to the builder image is the one change that would give the emulated check; the instruction classer was checked against the builder's GNU objdump 2.42 (glibc's libc.so.6 shows its SVE and SME code) and the host's LLVM objdump.

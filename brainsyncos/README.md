@@ -101,14 +101,15 @@ scripts/build.sh doctor                # what is missing, and how to fix it
 scripts/build.sh key                   # once: the package repository signing key (config/, gitignored)
 scripts/build.sh all                   # packages -> signed repository -> build/out/brainsyncos-0.1.0-orin-nano.iso
 scripts/build.sh all --edition vm      # the UTM edition (downloads Ubuntu's ISO first)
-scripts/build.sh test phase3           # tests: phase1 phase2 phase3 vm
+scripts/build.sh test phase3           # tests: phase1 phase2 phase3 vm bundle nocompile
 ```
 
 `make`, `make EDITION=vm`, `make doctor`, `make test TESTS="phase2 vm"` and so on do the same (see `Makefile`).
 
 The steps of `all` also run one at a time:
-- `packages` builds the edition's packages into `build/debs/EDITION/`.
-- `wheels` (not part of `all` yet) builds the Python wheels into `build/wheels/`. It is the same for both editions and skips a wheel that is up to date.
+- `wheels` builds the Python wheels (the BrainFlow Cerelog fork) into `build/wheels/`. It is the same for both editions and skips a wheel that is up to date.
+- `llama` compiles llama.cpp for aarch64 in the llama builder for this host (native arm64 on Apple Silicon, the amd64 cross-builder on x86-64) and checks it in the arm64 builder, into `build/llama/`; the same for both editions, skipped while up to date.
+- `packages` builds the edition's packages into `build/debs/EDITION/` (the venv needs the wheels, `brainsyncos-llama` the checked llama.cpp).
 - `mirror` fetches the third-party debs the edition's repository carries (NVIDIA's CUDA runtime, Jetson only, about 0.5 GB) into `build/downloads/mirror/`. It is offline once they are there.
 - `repo` signs them into `build/repo/EDITION/`, with the mirrored debs checked against their pins.
 - `iso` writes the installer ISO. Its options go to `build-iso.sh` / `build-vm-iso.sh`, e.g. `scripts/build.sh iso --name test`.
@@ -772,11 +773,12 @@ packages.
 
   ```
   BSOS_LLAMA_MODEL=/opt/brainsyncos/models/Qwen3.5-2B-Q4_K_M.gguf
-  BSOS_LLAMA_ARGS="-c 4096"
+  BSOS_LLAMA_ALIAS=qwen3.5-2b-q4km
+  BSOS_LLAMA_CTX_SIZE=4096
   ```
 
-  - The unit uses `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf` and `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `-m ${BSOS_LLAMA_MODEL} $BSOS_LLAMA_ARGS` in `ExecStart`. Unbraced, `$BSOS_LLAMA_ARGS` splits into separate options.
-  - `BSOS_LLAMA_ARGS` holds model options only (`MODEL_LLAMA_ARGS` in `config/model.env`). Host, port, key, GPU layers and limits belong to the unit.
+  - The unit uses `ConditionPathExists=/etc/brainsyncos/llama.d/model.conf` and `EnvironmentFile=/etc/brainsyncos/llama.d/model.conf`, then `--model ${BSOS_LLAMA_MODEL} --alias ${BSOS_LLAMA_ALIAS} --ctx-size ${BSOS_LLAMA_CTX_SIZE}` in `ExecStart`. Every variable is braced, so `model.conf` can set values but never add options.
+  - `BSOS_LLAMA_ALIAS` is `MODEL_ID` and `BSOS_LLAMA_CTX_SIZE` is `MODEL_CTX_SIZE` from `config/model.env` (the unit's own defaults are `local` and 8192). Host, port, key, GPU layers and limits belong to the unit.
   - `model.conf` is not a conffile: an upgrade replaces it, and removing the package removes it, so the unit no longer starts. Local options go in `/etc/brainsyncos/llama.d/local.conf`, which the unit reads after it, if it exists (`EnvironmentFile=-…`).
 
 **The ISO size limit.** `ISO_MAX_BYTES` in `config/brainsyncos.env` (default 7,800,000,000) is the largest ISO a build may write. Both ISO builds check it:
@@ -784,6 +786,93 @@ packages.
 - on the Jetson, again from the staged files before xorriso runs;
 - last, on the finished image, which is deleted when it is too large.
 - Why 7.8e9: an ISO is written raw to the whole stick, so a stick takes an image as large as its capacity. "8 GB" means 8,000,000,000 bytes, and real sticks are often a little smaller, because the controller keeps part of the flash. 7.8e9 leaves 200 MB (2.5 %) for that. `scripts/write-usb.sh` still compares the ISO with the actual stick. For a 16 GB stick, use e.g. 15600000000.
+
+## Install bundle for a running Orin (Phase 3)
+
+An Orin that already runs stock JetPack 7.2.1 (Jetson Linux R39.2.1) gets the
+BrainSyncOS layer without a reflash: the same signed repository and the same
+`install.d` steps as the ISO, run on the live system.
+
+**Building it.** `scripts/builder.sh run scripts/make-bundle.sh` (builder only;
+`--repo DIR`, `--out DIR`, `--build-id ID`) writes
+`build/out/brainsyncos-jetson-VERSION.tar` and its `.sha256`. It refuses a
+missing repository, one built for the VM, or one whose `InRelease` does not
+verify against its own `repo-key.gpg` (`validate_repo`, as the ISO build
+checks it). The tar holds one directory, `brainsyncos-jetson-VERSION/`:
+
+| Member | What |
+|---|---|
+| `install.sh` | `payload/bundle/install.sh`, run as root on the Orin |
+| `bundle.env` | what `install.sh` checks and the steps need: version, `L4T_RELEASE`, `TEGRA_KERNEL`, `KERNEL_RELEASE`, suite, component, the default account, the key's fingerprint, the packages and their summed `Installed-Size` |
+| `release` | the release file, as the ISO's payload carries it (plus `BUNDLE=jetson`) |
+| `repo-key.gpg` | the repository's public key: the install's trust anchor |
+| `lib/apt-repo.sh` | the apt helper the steps install through |
+| `install.d/` | the BrainSync layer only: 60 repository key, 70 apps, 75 USB serial, 80 CUDA, 85 llama, 86 model. 00 to 50 (release, issue, hostname, account, SSH, OOBE) shape a fresh install; a running Orin keeps its own |
+| `account/30-user.sh` | unchanged, for `install.sh` to create the appliance account on request |
+| `repo/` | `build/repo/jetson` as it is, about 2.6 GB with the CUDA runtime and the model |
+
+The tar is reproducible: GNU format, members sorted, owner 0:0, modes
+normalized, every mtime `BSOS_SOURCE_DATE_EPOCH` (the commit time, as for the
+`.debs`). It is not compressed; the `.debs` already are.
+
+**Installing it.** On the Orin, as root:
+
+```sh
+tar -xf brainsyncos-jetson-0.1.0.tar && cd brainsyncos-jetson-0.1.0
+sudo ./install.sh                       # asks which account runs the apps
+sudo ./install.sh --user nvidia --yes   # unattended, JetPack's first-boot user
+sudo ./install.sh --user brainsync --password-hash pw.hash --yes   # a new account
+```
+
+`install.sh`:
+1. Checks the system: aarch64; `/etc/nv_tegra_release` names R39.2.1 (the CH340 module and NVIDIA's CUDA 13.2 runtime are built for exactly that kernel and release; anything else is refused before anything is touched); `nvidia-l4t-kernel` is the version the module depends on; free space for the packages' `Installed-Size` plus a fifth and 1 GiB (`--skip-space-check`).
+2. Settles the account the apps run as (`BRAINSYNC_USER` for the steps: `70-brainsync.sh` gives it `/etc/brainsync/secrets.env`, `85-llama.sh` needs its group). An existing account gets the hardware groups `30-user.sh` gives (`dialout` for the EEG board, audio, video, render, input, plugdev, i2c, gpio, ...), never sudo or adm. A name that does not exist is created by the bundle's copy of `30-user.sh`, unchanged, from `--authorized-keys` and/or `--password-hash` (`openssl passwd -6`), so it gets the same groups, sudo rule and SSH setup as on the ISO. Without `--user`, a re-run takes the last run's account; otherwise it asks, or with `--yes` takes the one login account. `30-user.sh` also removes NVIDIA's fallback accounts `nvidia` and `ubuntu`, so when one exists creating an account is refused: use `--user` with that account.
+3. Copies `lib/`, `install.d/`, `account/` and the key to `/opt/brainsyncos/installer` (where the ISO install keeps them), writes `settings.env` and `device.env` the way `hook.sh` does, and runs the steps there in order, directly on the system (no curtin, no chroot), with a fixed environment like the installer's and `BSOS_REPO_DIR` pointing at the bundle's `repo/`: apt reads it in place through `lib/apt-repo.sh`, that repository alone, offline, signature checked. No apt source is left behind. A failing step stops the install; every step is idempotent, so a re-run carries on.
+4. Records the install in `/etc/brainsyncos-release` (as `00-release.sh` does, plus `INSTALL_METHOD=bundle` and `BRAINSYNC_USER`), reloads udev and systemd, and starts `brainsyncos-llama.service` when a model is installed (`--no-start` leaves it to the next boot).
+
+Log: `/var/log/brainsyncos/install.log`, appended, like the ISO install.
+`BSOS_MODEL_VERIFY=0` skips the model's sha256.
+
+**What differs from the ISO install.** The steps were written for `curtin
+in-target`; on a live system these points matter, and `install.sh` handles each:
+- `BSOS_INSTALL_DIR`, `BSOS_REPO_DIR`, `settings.env` and `device.env` come from the hook. `install.sh` writes them itself; `device.env` gets `BSOS_EDITION=orin-nano` from `bundle.env`, so 75, 80, 85 and 86 take the Jetson path.
+- The hook bind-mounts the repository read-only in the target. apt reads a `file:` URI, so the bundle's `repo/` directory serves as it is; `install.sh` refuses a path with spaces or colons.
+- `75-usb-serial.sh`: `brainsyncos-ch341-tegra` depends on exactly `nvidia-l4t-kernel` `TEGRA_KERNEL`. On a fresh install NVIDIA's late-commands put that version in place; a running Orin may have updated its kernel, so `install.sh` checks the installed version first and refuses a mismatch, and notes when the running kernel is another one (the module loads once that kernel runs).
+- `85-llama.sh` enables the service; in the installer the first boot starts it. `install.sh` starts it (or reloads udev) when systemd is running, which it is not in the test chroot.
+- `80-cuda.sh` keeps a newer CUDA runtime that is already installed (apt never downgrades); its `/usr/local/cuda` check then still expects 13.2.
+- The steps run with `env -i` and the installer's `PATH`, `HOME`, `LANG` and `DEBIAN_FRONTEND`, not the operator's `sudo` environment.
+- `70-brainsync.sh` installs `espeak-ng` from the repository when its libraries are there; on a desktop JetPack they are.
+
+**Checked by `tests/test_bundle.sh`** (`BASE_ISO=... tests/test_bundle.sh [--keep]`,
+same style as `test_phase3.sh`; it uses `build/repo/jetson` when it exists,
+else a throwaway repository, which is slow): `bash -n` and both `--help`
+texts; the tar built twice to the same bytes; its member list, `.sha256`, key
+and env files from the host; in the builder, GNU format, 0:0 owners, one
+mtime, the steps byte-identical to `payload/`, the unpacked repository
+validating; `make-bundle.sh` refusing a missing repository, a tampered
+`InRelease` and a VM repository; then `install.sh` in NVIDIA's real target
+base layer (on disk, with `nvidia-l4t-kernel` from the pool, a fake
+`/etc/nv_tegra_release` and an Orin Nano device tree, through the curtin
+shim with the bundle bind-mounted read-only): a new account from a password
+hash through `30-user.sh`, the six steps with their own log lines and no apt
+error or warning, `/etc/brainsyncos-release`, no apt state left; a re-run that
+keeps the account, `secrets.env` and the llama key; `--user` with an existing
+account adding `dialout` and not `sudo`; and refusals of R36.4.3, of a new
+account while `nvidia` exists or without logins, and of a repository with
+another key. Last, shellcheck on the four scripts.
+
+**Not tested here:** an install on an Orin itself (a live systemd, the real
+device tree, the kernel the module is built for).
+
+**On a live system (2026-10-25 review).** The steps get an `APT_CONFIG` that waits up to 10 minutes for the dpkg lock (apt-daily, unattended-upgrades and packagekit hold it after boot) and sets `APT::Get::Remove "false"`, so no dependency resolution removes an installed package. `--authorized-keys` and `--password-hash` apply only to an account `install.sh` creates; with an existing account they are refused, as is a system account (uid below 1000). `--no-start` leaves only the llama service to the next boot; systemd and udev are still reloaded. A repository under `/opt/brainsyncos/installer` is refused, since that directory is replaced. An NVIDIA kernel update later removes `brainsyncos-ch341-tegra` (its Depends pin the exact kernel): hold `nvidia-l4t-kernel` or reinstall the bundle built for the new kernel.
+
+## Nothing compiles on the device (Phase 4 checks)
+
+Everything on the ISO is precompiled for the Orin Nano (Cortex-A78AE: ARMv8.2 with dotprod and fp16; GPU sm_87): no compiler in any Depends, no DKMS, no pip builds. `scripts/check-no-compile.sh [REPO_DIR]` checks that this stays true, one line per finding (`ok`, `FAIL`, `SKIP`, `NOTE`, `WARN`), exit 0 only when nothing failed. `tests/test_nocompile.sh` runs it against `build/repo/jetson` when that exists, plus a negative test: a fake `.deb` with `Depends: gcc | clang, python3-dev` and a postinst running `pip install` and `make`, and a fake step running `apt-get install build-essential`, all of which it must refuse, and a clean pair it must accept.
+- **repo.** Every `.deb` in the pool, ours and the mirrored NVIDIA ones: Depends, Pre-Depends and Recommends hold no compiler or build tool (gcc, g++, cc, clang, cpp, make, cmake, ninja-build, dkms, build-essential, python3-dev, python3-pip, nvidia-l4t-kernel-headers, cuda-nvcc-*, cuda-toolkit-* other than *-config-common, and any *-dev, *-dev-N-M or *-headers name; `--allow PKG` for a runtime exception), and no maintainer script runs gcc, cc, g++, make, cmake, dkms, `pip install`, `python -m pip`, cargo, `go build` or `npm install`. Each package's Depends lists are printed. The `.debs` are read with python3 (ar plus tarfile), so this runs on the Mac without dpkg-deb or Docker.
+- **steps.** `payload/install.d/*.sh` and `payload/lib/*.sh`: the same commands, and no `apt-get install`, `bsos_apt install` or `apt_install` of a forbidden package (`pkgs=(...)` arrays are resolved; `86-model.sh`'s run-time package name is reported as a NOTE).
+- **llama.** `build/llama/cpu` as the A78AE will run it. Each `lib/ggml/libggml-cpu-*.so` is disassembled (`objdump -d`) and classed by the instructions it uses (dotprod, fp16 arithmetic, i8mm, SVE, SME); scored as ggml does (`ggml_backend_score`), the A78AE's hwcaps (dotprod and fp16, nothing newer) must select an `armv8.2` variant that uses only those two. Then `llama-server` serves the pinned test model (`TEST_MODEL_*` in `llama/llama.env`) and `/completion` must return tokens; from the Mac this part runs in the arm64 builder through `scripts/builder.sh`. SKIP when `build/llama/cpu` or the test model is missing.
+  - **About `qemu -cpu cortex-a76`.** Cortex-A76 is the qemu model closest to the A78AE (dotprod and fp16, no i8mm, SVE or SME, so the same ggml variant). On this Mac the arm64 builder runs natively under Docker Desktop: there is no qemu between the container and the M4, `QEMU_CPU` does nothing, and `docker/Dockerfile.builder` ships no `qemu-user`. So the live run uses the M4's own hwcaps (i8mm and newer), the script says so (`live  llama-server runs on: this host's own CPU ...`), checks that the loaded variant is the one the disassembly predicts for those hwcaps (`WARN` on a mismatch), and the `armv8.2` claim for the A78AE rests on the disassembly. The script uses `qemu-aarch64 -cpu cortex-a76` as soon as that binary is in the builder's PATH, and `QEMU_CPU=cortex-a76` when the builder itself runs under qemu binfmt on an x86-64 host. In both emulated cases the loaded backend must be `armv8.2_*`. Verified on 2026-10-25 in a throwaway `ubuntu:24.04` arm64 container on the M4: Ubuntu's `qemu-user` package ships `qemu-aarch64`, it runs aarch64 code on an aarch64 host under TCG, and with `-cpu cortex-a76` the program sees `Features: fp asimd aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp` (AT_HWCAP `0x119ffb`, HWCAP2 `0`): dotprod and fp16 and nothing newer, the A78AE's set, whereas natively the M4 shows `i8mm` and `bf16` too. So adding `qemu-user` to `docker/Dockerfile.builder` is the one change that turns the live check into the emulated one.
 
 ## Appliance identity (Phase 2.5)
 

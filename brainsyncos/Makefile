@@ -1,7 +1,7 @@
 # BrainSyncOS: thin wrapper around scripts/build.sh (which does the work and
 # also runs without make). EDITION is jetson (default) or vm.
 #
-#   make                  doctor, packages, mirror, repo and the installer ISO
+#   make                  doctor, wheels, llama, packages, mirror, repo and the installer ISO
 #   make doctor           check what the build needs
 #   make key              create the package repository signing key (once)
 #   make wheels           the BrainFlow Cerelog wheel (build/wheels/)

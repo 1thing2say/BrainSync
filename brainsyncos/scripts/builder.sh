@@ -9,6 +9,10 @@
 #   scripts/builder.sh clean [--all]    delete build/out (--all: all of build/)
 #   scripts/builder.sh --cross build|run|shell|image
 #                                       the same with the amd64 cross-builder
+#   scripts/builder.sh --llama build|run|shell|image
+#                                       the same with the llama builder for this
+#                                       host: native arm64 on an arm64 host,
+#                                       the cross-builder on x86-64
 #
 # Mounts: brainsyncos/ -> /work (rw), the base ISO's directory -> /in (ro,
 # only when the ISO is found; commands that do not need it run without),
@@ -33,6 +37,13 @@
 # aarch64 code at native speed on an x86-64 host (scripts/build-llama.sh
 # compile). Same mounts, caps and variables; on Apple Silicon it runs under
 # emulation instead. The arm64 builder is unchanged by it.
+# --llama selects the image that compiles llama.cpp fastest on this host: on
+# an arm64 host (Apple Silicon) brainsyncos-llama-builder
+# (docker/Dockerfile.llama-builder, --platform linux/arm64, NVIDIA's aarch64
+# nvcc from the Jetson repository, no emulation); on an x86-64 host the
+# cross-builder above. Same mounts, caps and variables. Its image build gets
+# mirror/nvidia-jetson as the named build context nvidia-jetson, so the
+# Dockerfile can COPY the committed repository key from there.
 # `clean` truncates large files before deleting them: Docker Desktop keeps
 # deleted bind-mounted files open, so a plain rm would not free their space.
 
@@ -41,13 +52,36 @@ load_config
 load_build_config
 
 DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.builder"
-if [ "${1:-}" = --cross ]; then
-    shift
+BUILD_CONTEXT_FLAGS=""
+# use_cross: the amd64 cross-builder (aarch64 code compiled on x86-64).
+use_cross() {
     DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.cross-builder"
     BUILDER_IMAGE_NAME=brainsyncos-cross-builder
     BUILDER_PLATFORM=linux/amd64
-    case "${1:-}" in build|run|shell|image) ;; *) die "--cross takes build, run, shell or image" ;; esac
-fi
+}
+# use_llama_native: the arm64 llama builder (native nvcc, no emulation).
+use_llama_native() {
+    DOCKERFILE="$BRAINSYNCOS_ROOT/docker/Dockerfile.llama-builder"
+    BUILDER_IMAGE_NAME=brainsyncos-llama-builder
+    BUILDER_PLATFORM=linux/arm64
+    BUILD_CONTEXT_FLAGS="--build-context nvidia-jetson=$BRAINSYNCOS_ROOT/mirror/nvidia-jetson"
+}
+case "${1:-}" in
+    --cross)
+        shift
+        use_cross
+        case "${1:-}" in build|run|shell|image) ;; *) die "--cross takes build, run, shell or image" ;; esac
+        ;;
+    --llama)
+        shift
+        case "$(uname -m)" in
+            arm64|aarch64) use_llama_native ;;
+            x86_64|amd64) use_cross ;;
+            *) die "--llama: no llama builder for a $(uname -m) host (arm64 or x86-64)" ;;
+        esac
+        case "${1:-}" in build|run|shell|image) ;; *) die "--llama takes build, run, shell or image" ;; esac
+        ;;
+esac
 # tini as PID 1 passes Ctrl-C/SIGTERM to the whole process group. Without it the
 # script itself is PID 1, ignores SIGINT, and xorriso/dd keep running.
 INIT_FLAGS="--init -e TINI_KILL_PROCESS_GROUP=1"
@@ -61,7 +95,8 @@ cmd_build() {
     local ref
     ref="$(image_ref)"
     log "building $ref ($BUILDER_PLATFORM)"
-    docker build --platform "$BUILDER_PLATFORM" \
+    # shellcheck disable=SC2086  # BUILD_CONTEXT_FLAGS: zero or more flags, split as given
+    docker build --platform "$BUILDER_PLATFORM" $BUILD_CONTEXT_FLAGS \
         -t "$ref" -t "$BUILDER_IMAGE_NAME:latest" \
         -f "$DOCKERFILE" "$BRAINSYNCOS_ROOT/docker"
     log "built $ref"

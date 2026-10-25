@@ -360,6 +360,7 @@ mirror_names() {
     for env in "$MIRROR_DIR"/*/mirror.env; do
         [ -e "$env" ] || continue
         name="$(basename "$(dirname "$env")")"
+        (load_mirror "$name")   # a malformed mirror.env dies here instead of dropping the mirror
         if [ "$1" = all ] || (load_mirror "$name"; case ",$MIRROR_EDITIONS," in *,all,*|*,"$1",*) exit 0 ;; *) exit 1 ;; esac); then
             names="$names $name"
         fi

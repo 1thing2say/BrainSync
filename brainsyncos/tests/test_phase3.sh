@@ -286,10 +286,10 @@ t_model_pin() {
     local bad="$TMP_DIR/bad.env" kv out api
     mkdir -p "$TMP_DIR"
     /bin/bash -c 'source "$1/scripts/lib.sh"; source "$1/scripts/model.sh"; load_model_config
-        echo "model: $(model_package): $MODEL_HF_REPO@$MODEL_HF_REVISION/$MODEL_FILE, $MODEL_SIZE bytes, sha256 $MODEL_SHA256, args \"$(model_llama_args)\""' \
+        echo "model: $(model_package): $MODEL_HF_REPO@$MODEL_HF_REVISION/$MODEL_FILE, $MODEL_SIZE bytes, sha256 $MODEL_SHA256, context $MODEL_CTX_SIZE"' \
         _ "$BRAINSYNCOS_ROOT"
     for kv in MODEL_ID=Qwen3.5 MODEL_HF_URL=http://huggingface.co MODEL_HF_REPO=unsloth MODEL_HF_REVISION=main \
-        MODEL_FILE=model.bin MODEL_SIZE=1.3G MODEL_SHA256=aaf42c8b MODEL_FILE_TYPE=Q4_K_M MODEL_QUANT=Q4-K-M MODEL_LLAMA_ARGS=c,4096; do
+        MODEL_FILE=model.bin MODEL_SIZE=1.3G MODEL_SHA256=aaf42c8b MODEL_FILE_TYPE=Q4_K_M MODEL_QUANT=Q4-K-M MODEL_CTX_SIZE=4k; do
         sed "s|^${kv%%=*}=.*|$kv|" "$BSOS_MODEL_CONFIG" > "$bad"
         if out="$(BSOS_MODEL_CONFIG="$bad" /bin/bash -c 'source "$1/scripts/lib.sh"; source "$1/scripts/model.sh"; load_model_config' \
             _ "$BRAINSYNCOS_ROOT" 2>&1)"; then

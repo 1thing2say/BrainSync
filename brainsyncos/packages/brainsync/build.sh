@@ -126,7 +126,7 @@ chmod 644 "$s/usr/share/doc/brainsync/README"
 # Never a secret.
 found="$(find "$s" \( -name '*.env' -o -name '.env*' \) -print)"
 [ -z "$found" ] || die "refusing to package environment files: $found"
-! grep -rIlE 'sk-ant-[A-Za-z0-9_-]{20,}' "$s" || die "something that looks like an Anthropic API key is staged"
+! grep -rIlE 'sk-ant-[A-Za-z0-9_-]{20,}|sk_car_[A-Za-z0-9_-]{20,}' "$s" || die "something that looks like an Anthropic or Cartesia API key is staged"
 
 installed_kb="$(installed_size "$s")"
 cat > "$s/DEBIAN/control" <<EOF

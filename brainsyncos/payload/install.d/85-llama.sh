@@ -11,8 +11,8 @@
 #   - a random API key in /etc/brainsyncos/llama/api-key (root:root 0600),
 #     which the service gets through systemd's LoadCredential
 #   - the same key as BRAINSYNC_LLAMA_API_KEY in /etc/brainsync/secrets.env,
-#     where BCI Voice reads it. The file is created as root:brainsync 0640
-#     with a commented template if it is missing; other lines are never
+#     where BCI Voice reads it. 70-brainsync.sh creates that file (a commented
+#     template, root:brainsync 0640) before this step; other lines are never
 #     touched, and a stale BRAINSYNC_LLAMA_API_KEY line is replaced in place.
 # Never at build time: the key must differ on every device.
 # It enables brainsyncos-llama.service. The service starts on boot only when
@@ -67,20 +67,7 @@ value="$(head -n 1 "$key")"
 
 # BCI Voice's copy of it.
 secrets=/etc/brainsync/secrets.env
-if [ ! -e "$secrets" ]; then
-    install -d -m 755 "$(dirname "$secrets")"
-    tmp="$(mktemp "$secrets.XXXXXX")"
-    cat > "$tmp" <<'EOF'
-# /etc/brainsync/secrets.env - API keys for the BrainSync apps (KEY=value).
-# Readable by root and the brainsync group only. Fill in the ones you use:
-# ANTHROPIC_API_KEY=
-# CARTESIA_API_KEY=
-EOF
-    chown "root:$group" "$tmp"
-    chmod 640 "$tmp"
-    mv "$tmp" "$secrets"
-    echo "85-llama.sh: created $secrets"
-fi
+[ -e "$secrets" ] || fail "no $secrets (70-brainsync.sh creates it, before this step)"
 line="BRAINSYNC_LLAMA_API_KEY=$value"
 if grep -qx "$line" "$secrets"; then
     echo "85-llama.sh: $secrets already has the key"

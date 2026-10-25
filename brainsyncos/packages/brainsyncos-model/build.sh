@@ -12,7 +12,8 @@
 #   /opt/brainsyncos/models/FILE.sha256    its sha256, for sha256sum -c
 #   /etc/brainsyncos/llama.d/model.conf    what brainsyncos-llama.service reads:
 #       BSOS_LLAMA_MODEL=/opt/brainsyncos/models/FILE
-#       BSOS_LLAMA_ARGS="..."              (MODEL_LLAMA_ARGS, e.g. -c 4096)
+#       BSOS_LLAMA_ALIAS=MODEL_ID          (the name the server answers with)
+#       BSOS_LLAMA_CTX_SIZE=N              (MODEL_CTX_SIZE, --ctx-size)
 #   /usr/share/doc/PACKAGE/                LICENSE (pinned, from the model's
 #                                          upstream), copyright and README
 # model.conf is not a conffile: removing the package removes it, so the
@@ -47,7 +48,6 @@ gguf() { printf '%s\n' "$info" | sed -n "s/^$1=//p"; }
 [ "$(gguf GGUF_FILE_TYPE)" = "$MODEL_FILE_TYPE" ] \
     || die "$MODEL_FILE has general.file_type $(gguf GGUF_FILE_TYPE), config/model.env pins $MODEL_FILE_TYPE"
 [ -n "$(gguf GGUF_ARCHITECTURE)" ] || die "$MODEL_FILE names no general.architecture"
-args="$(model_llama_args)"
 
 # On disk, beside the download cache (same filesystem: the hard link works).
 s="$TMP_DIR/stage-$pkg"
@@ -69,7 +69,8 @@ cat > "$s$MODEL_CONF" <<EOF
 # every upgrade and removed with the package: put local llama-server options
 # in local.conf next to it.
 BSOS_LLAMA_MODEL=$MODEL_INSTALL_DIR/$MODEL_FILE
-BSOS_LLAMA_ARGS="$args"
+BSOS_LLAMA_ALIAS=$MODEL_ID
+BSOS_LLAMA_CTX_SIZE=$MODEL_CTX_SIZE
 EOF
 install -m 644 "$licence" "$doc/LICENSE"
 cat > "$doc/copyright" <<EOF
@@ -90,7 +91,8 @@ GGUF       version $(gguf GGUF_VERSION), $(gguf GGUF_TENSORS) tensors, architect
 licence    $MODEL_LICENSE (LICENSE here)
 
 $MODEL_CONF tells the llama-server unit which file to load
-(BSOS_LLAMA_MODEL) and with which options (BSOS_LLAMA_ARGS="$args").
+(BSOS_LLAMA_MODEL), under which name (BSOS_LLAMA_ALIAS=$MODEL_ID) and with
+which context length (BSOS_LLAMA_CTX_SIZE=$MODEL_CTX_SIZE).
 Check the file with:
   cd $MODEL_INSTALL_DIR && sha256sum -c $MODEL_FILE.sha256
 EOF
