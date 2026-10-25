@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body class="session">
   <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
@@ -68,7 +68,7 @@
       <div id="targets" class="targets diamond">
         <div id="centre" class="target-centre">
           <span id="centre-text" class="centre-text"></span>
-          <span id="state" class="state" role="status" aria-live="polite">Connecting…</span>
+          <span id="state" class="state" role="status" aria-live="polite"></span>
         </div>
       </div>
     </section>
@@ -106,10 +106,11 @@
     </aside>
   </main>
 
-  <script src="listen_core.js"></script>
-  <script src="voice_core.js"></script>
-  <script src="view_core.js"></script>
-  <script src="speech.js"></script>
-  <script src="app.js"></script>
+  <!-- ?v= makes browsers that cached these before the server sent no-cache fetch them again. -->
+  <script src="listen_core.js?v=2"></script>
+  <script src="voice_core.js?v=2"></script>
+  <script src="view_core.js?v=2"></script>
+  <script src="speech.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

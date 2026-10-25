@@ -862,6 +862,44 @@ def test_partner_line_asks_the_llm_and_waits_for_its_page():
     assert r.last(r.ui, UIStatus).llm_ok
 
 
+def test_start_from_a_new_page_begins_at_home_with_an_empty_conversation():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()  # the room's talk made a page of its own
+    r.answer(req=req)
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.conversation.turns == []
+    while r.o.state is not St.MENU_CUE:
+        r.finish_baseline() if r.o.state is St.BASELINE else r.run_out()
+    assert r.page_utterances() == [o.utterance for o in HOME]
+
+
+def test_start_from_a_reloaded_page_while_running_goes_home_at_once():
+    r = LLMRig()
+    r.to_trial()
+    req = r.partner()
+    assert r.o.state is St.PREPARING  # waiting for Claude's page
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.MENU_CUE
+    assert r.page_utterances() == [o.utterance for o in HOME]
+    r.answer(req=req)  # the old conversation's page arrives late: dropped
+    assert r.page_utterances() == [o.utterance for o in HOME]
+    r.to_trial()
+    r.o.on_ui_message(Resume(start=True))  # mid-trial: the trial ends, home again
+    assert r.last(r.decoder, StimStop).reason == "context_changed"
+    assert r.page_utterances() == [o.utterance for o in HOME]
+
+
+def test_plain_resume_keeps_the_conversation():
+    r = LLMRig()
+    r.to_trial()
+    r.answer(req=r.partner())
+    r.o.on_ui_message(Stop())
+    r.o.on_ui_message(Resume())
+    assert r.o.conversation.partner_last == QUESTION
+
+
 def test_llm_timeout_shows_the_fallback_and_ignores_the_late_page():
     r = LLMRig()
     r.to_trial()

@@ -173,7 +173,11 @@ pull requests.
   (health line and its details, Correct / Wrong, keyboard hint), the banner with its pills (FAKE
   DECODER / KEYBOARD, the trial phase) and the "Page N · …" heading. The state line now sits in the
   diamond's still centre and says something only when the user is not picking (Waiting to start,
-  Paused — why, Didn't catch that); `ViewCore.status`. The C / W keys still mark the last reply; a fake decoder
+  Paused — why, Didn't catch that); `ViewCore.status`. The page's start button
+  (the flicker warning, so every newly opened page) sends `resume` with `start: true`: a fresh
+  session, an empty conversation and the fixed home page, also when a running session is
+  reloaded; the Resume button keeps the conversation. Before this, lines the always-on mic had
+  heard in the room (nonsense to Claude) left "could you say that again"-style pages on screen. The C / W keys still mark the last reply; a fake decoder
   or keyboard mode shows in the terminal, `/api/health`, `tools/preflight.py` and the log; the iPhone app link shows only with `--tunnel` or on the LAN, and the
   iPhone app keeps its own text box. Laid out for SSVEP: each target sits against its own edge of
   the mirror (top, bottom, left, right; at most 28 % of its width) and the empty middle takes the

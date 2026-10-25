@@ -28,7 +28,10 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws/ui`);
   // No resume on (re)connect: the server re-sends its state, and a reconnect after STOP must
   // never restart the flicker. Only the warning's start button and Resume send "resume".
-  ws.onopen = () => setConnected(true);
+  ws.onopen = () => {
+    setConnected(true);
+    $("state").textContent = "";  // the server sends its state now
+  };
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = (ev) => {
     setConnected(false);
@@ -282,7 +285,9 @@ $("accept").addEventListener("click", () => {
   $("warning").hidden = true;
   Speech.unlock();  // this tap lets iOS play the replies later
   keepAwake();
-  send({ type: "resume" });
+  // A newly opened page starts a fresh session: the home page and an empty conversation.
+  $("conversation").replaceChildren();
+  send({ type: "resume", start: true });
 });
 $("stop").addEventListener("click", () => {
   if (!send({ type: "stop" })) $("state").textContent = "Not connected: press Esc on the display";

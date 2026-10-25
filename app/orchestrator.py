@@ -372,7 +372,18 @@ class Orchestrator:
                 if problem:
                     self._send_state(problem)  # stay put; the page shows why
                 else:
+                    if msg.start:
+                        self._fresh_start()
                     self._enter_baseline()
+            elif msg.start:
+                # A newly opened page while the session runs (a reload): start over from the
+                # home page; a trial in progress ends first, so the screen may change.
+                in_trial = self.state in TRIAL_STATES
+                if in_trial:
+                    self._stop_trial("context_changed")
+                self._fresh_start()
+                if in_trial or self.state in (St.MENU_CUE, St.PREPARING):
+                    self._enter_menu_cue()
         elif isinstance(msg, Stop):
             if self.state not in (St.IDLE, St.PAUSED):
                 self._pause("Stopped")
@@ -759,6 +770,17 @@ class Orchestrator:
     def _fallback(self, name: str) -> OptionList:
         options = [Option(**o.model_dump()) for o in self.intents.fallback_lists[name]]
         return OptionList(list_id=f"m{next(self._list_ids)}", name=name, options=options)
+
+    def _fresh_start(self) -> None:
+        """The start button of a newly opened page: a new conversation, from the home page. Lines
+        heard before (the room, the last session) no longer shape Claude's pages."""
+        self.conversation = Conversation(self.cfg.context.history_turns)
+        self.awaiting = None  # a page still on its way for the old conversation is dropped
+        self.pending_list = None
+        self.picked = None
+        self.more_in_a_row = 0
+        self._set_list(self._fallback(HOME_LIST))
+        self._record("fresh_start")
 
     def _set_list(self, options: OptionList) -> None:
         self.options, self.index = options, 0
