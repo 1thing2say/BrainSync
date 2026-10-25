@@ -9,6 +9,12 @@ when a window is opened.
 The card and the flash never touch a square's fill: the card is its own image stimulus
 and the flash is a thicker, coloured outline box, so the flicker frequencies stay exact.
 Text (a status line under the targets, a prompt above them) is only ever on still frames.
+
+A bridge driving the free run with JSON lines (brainsync.stimulus.feedback) sets a
+sentence beside each square and a line at the centre (placed by ``text_boxes``, so no
+text covers a square), and turns the flicker on and off for chosen targets only; the
+first flickering frame is marked "flicker_on" and the first still frame after it
+"flicker_off". A fixation mark ([stimulus] fixation) sits on each square's centre.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ from typing import Protocol, TextIO
 import numpy as np
 
 from .config import StimulusConfig, Trial, card_overlap
+from .feedback import Control
 from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
 
 # The flash box's line is this many times the cue box's, so a swipe reads at a glance.
@@ -32,6 +39,22 @@ LABEL_HEIGHT = 0.045   # screen heights
 LABEL_GAP = 0.03       # between a target's cue box and its label
 TEXT_HEIGHT = 0.028    # status and prompt lines, screen heights
 TEXT_GAP = 0.04        # between the targets' cue boxes and the status or prompt text
+STATUS_WRAP = 1.5      # widest status or prompt line, screen heights
+START_PROMPT = "press space to start"
+START_PROMPT_POS = (0.0, -0.45)   # where the start prompt goes unless it would cover a target
+START_PROMPT_HEIGHT = 0.03
+START_PROMPT_WIDTH = 0.4          # room kept for it (about 20 characters at that height)
+# Decoder-sent text: one sentence beside each square, one line at the centre.
+SLOT_TEXT_HEIGHT = 0.03   # letter height, screen heights
+SLOT_TEXT_WRAP = 0.44     # widest line, screen heights (about 26 characters)
+SLOT_TEXT_LINES = 4       # lines kept free for each sentence (14 words fit in 3)
+CENTRE_TEXT_HEIGHT = 0.035
+CENTRE_TEXT_WRAP = 0.6
+CENTRE_TEXT_LINES = 3
+CENTRE_TEXT_MIN_WRAP = 0.2   # narrower than this between the squares: put it at the bottom
+LINE_SPACING = 1.25       # a text line's height over its letter height, with room to spare
+TEXT_MARGIN = 0.02        # kept clear at the screen edges
+FLICKER_ON, FLICKER_OFF = "flicker_on", "flicker_off"
 RATE_KEYS = ("1", "2", "3", "4", "5")
 RATE_PROMPT = ("How comfortable was that flicker?\n"
                "1 unpleasant  2  3 fine  4  5 comfortable")
@@ -55,7 +78,9 @@ class Frame:
 
     ``card`` is the profile card shown (-1: none) and ``flash`` the target whose box is
     flashing (-1: none); neither affects ``lum``. ``text`` is drawn under the targets and
-    ``prompt`` above them ("": nothing).
+    ``prompt`` above them ("": nothing). ``labels`` holds one sentence per target, drawn
+    beside its square, and ``centre`` a line at the centre of the screen (both sent by a
+    decoder; empty: nothing).
     """
 
     lum: np.ndarray
@@ -66,6 +91,8 @@ class Frame:
     flash: int = -1
     text: str = ""
     prompt: str = ""
+    labels: tuple[str, ...] = ()
+    centre: str = ""
 
 
 def format_marker(stamp: float, event: str) -> str:
@@ -171,7 +198,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 stop: Callable[[], bool] | None = None,
                 hold: Callable[[], bool] | None = None,
                 card: Callable[[], int] | None = None,
-                flash: Callable[[], tuple[int, int]] | None = None) -> Iterator[Frame]:
+                flash: Callable[[], tuple[int, int]] | None = None,
+                control: Callable[[], Control] | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
@@ -182,6 +210,16 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
     still frames included. A serial different from the last one seen (initially 0, as
     FeedbackReader starts) lights that target's box for [card] flash_s, restarting any
     flash in progress. Neither changes the luminances.
+
+    ``control`` (a feedback Control) is polled once per frame too. Once its ``used`` is
+    true, ``hold`` no longer matters: the targets stand still until a flicker-on (a new
+    ``serial`` with ``flicker`` true), then only its ``flickering`` targets flicker, from
+    frame 0, while the rest show their still luminance; ``flicker`` false holds them all
+    still again. The first flickering frame carries "flicker_on" and the first still frame
+    after it "flicker_off"; the frames of each flicker run share a ``trial`` number (0, 1,
+    ...), so play() times every run and counts its dropped frames. The cue box follows
+    ``cue`` on every frame, and the labels and centre text show on every frame (hidden
+    while flickering with [stimulus] labels_during_flicker = false).
     """
     r = cfg.refresh
     still = frame_luminances(cfg.freqs, cfg.phases, 0, r, cfg.waveform, cfg.depth)
@@ -189,25 +227,60 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
     flash_len = n_frames(cfg.card_spec.flash_s, r)
     holding = hold is not None
     seen, flashing, left = 0, -1, 0
-    i = 0
-    while total is None or i < total:
+    i = 0            # frames since this flicker run began: the flicker's phase
+    shown = 0        # flicker frames so far, what ``seconds`` counts
+    flickering = False
+    run, run_serial = -1, 0
+    mask = np.ones(cfg.n_targets, dtype=bool)
+    while total is None or shown < total:
         if stop is not None and stop():
             return
-        shown = card() if card is not None else -1
+        image = card() if card is not None else -1
         if flash is not None:
             target, serial = flash()
             if serial != seen:
                 seen, flashing, left = serial, target, flash_len
         lit = flashing if left > 0 else -1
         left = max(0, left - 1)
-        if holding and hold():
-            yield Frame(still, card=shown, flash=lit)
+        # hold() before control(): the reader applies each line in order, so when an integer
+        # line that came after a JSON line has ended the hold, control() already shows
+        # ``used`` and this frame takes the JSON branch, never the legacy flicker below.
+        held = holding and hold()
+        ctl = control() if control is not None else None
+        if ctl is not None and ctl.used:
+            events: tuple[str, ...] = ()
+            if ctl.flicker and ctl.serial != run_serial:
+                # a new flicker-on: phase back to 0, only the targets active right now
+                run_serial, run, i, flickering = ctl.serial, run + 1, 0, True
+                mask = np.zeros(cfg.n_targets, dtype=bool)
+                mask[list(ctl.flickering)] = True
+                events = (FLICKER_ON,)
+            elif not ctl.flicker and flickering:
+                flickering = False
+                events = (FLICKER_OFF,)
+            k = cue() if cue is not None else -1
+            words = not flickering or cfg.labels_during_flicker
+            labels, centre = (ctl.labels, ctl.text) if words else ((), "")
+            if not flickering:
+                yield Frame(still, cue=k, events=events, card=image, flash=lit,
+                            labels=labels, centre=centre)
+                continue
+            lum = np.where(mask, frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform,
+                                                  cfg.depth), still)
+            yield Frame(lum, cue=k, events=events, trial=run, card=image, flash=lit,
+                        labels=labels, centre=centre)
+            i += 1
+            shown += 1
             continue
-        holding = False
+        if held:
+            yield Frame(still, card=image, flash=lit)
+            continue
+        holding, flickering = False, True
         k = cue() if cue is not None else -1
         yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
-                    cue=k, card=shown, flash=lit)
+                    cue=k, card=image, flash=lit)
         i += 1
+        shown += 1
 
 
 @dataclass
@@ -254,11 +327,13 @@ class SessionTiming:
 
 
 class Renderer(Protocol):
-    """``play`` passes ``card`` and ``flash``, or ``text`` and ``prompt``, only on frames
-    that set them, so a renderer for plain sessions may take just ``(lum, cue)``."""
+    """``play`` passes ``card`` and ``flash``, ``text`` and ``prompt``, or ``labels`` and
+    ``centre`` only on frames that set them, so a renderer for plain sessions may take
+    just ``(lum, cue)``."""
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
-             text: str = "", prompt: str = "") -> None: ...
+             text: str = "", prompt: str = "", labels: Sequence[str] = (),
+             centre: str = "") -> None: ...
     def flip(self) -> float: ...
     def escape_pressed(self) -> bool: ...
 
@@ -278,11 +353,13 @@ def play(frames: Iterable[Frame], renderer: Renderer, markers: MarkerWriter,
         for fr in frames:
             if renderer.escape_pressed():
                 raise Aborted
-            extra: dict[str, int | str] = {}
+            extra: dict[str, int | str | tuple[str, ...]] = {}
             if fr.card >= 0 or fr.flash >= 0:
                 extra.update(card=fr.card, flash=fr.flash)
             if fr.text or fr.prompt:
                 extra.update(text=fr.text, prompt=fr.prompt)
+            if any(fr.labels) or fr.centre:
+                extra.update(labels=fr.labels, centre=fr.centre)
             renderer.draw(fr.lum, fr.cue, **extra)
             t = renderer.flip()
             markers.emit(fr.events)
@@ -339,6 +416,193 @@ def label_pos(cfg: StimulusConfig, k: int) -> tuple[float, float]:
     return (x, y - cfg.reach - LABEL_GAP - LABEL_HEIGHT / 2.0)
 
 
+@dataclass(frozen=True)
+class TextBox:
+    """Where one block of text goes. ``pos`` is the TextStim anchor point, ``anchor`` its
+    (horizontal, vertical) anchor and ``align`` the line alignment, as PsychoPy names them;
+    ``width`` is the wrap width and ``height`` the room kept free for the text's lines, so
+    ``rect`` (left, bottom, right, top) is the most the text should cover."""
+
+    pos: tuple[float, float]
+    width: float
+    height: float
+    anchor: tuple[str, str]
+    align: str
+    side: str = "centre"
+
+    @property
+    def rect(self) -> tuple[float, float, float, float]:
+        x, y = self.pos
+        h, v = self.anchor
+        left = {"left": x, "center": x - self.width / 2.0, "right": x - self.width}[h]
+        bottom = {"bottom": y, "center": y - self.height / 2.0, "top": y - self.height}[v]
+        return (left, bottom, left + self.width, bottom + self.height)
+
+
+def _label_side(cfg: StimulusConfig, k: int) -> str:
+    """Which side of target ``k`` its sentence goes on.
+
+    In a single row every sentence goes below its square. Otherwise each one goes on the
+    side a clockwise turn around the layout's centre points to (top square: right, right
+    square: below, bottom: left, left: above), so in the diamond each sentence gets a
+    corner of the screen to itself and none crosses another square.
+    """
+    xs = [t.pos[0] for t in cfg.targets]
+    ys = [t.pos[1] for t in cfg.targets]
+    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+    if max(ys) - min(ys) < 1e-9:
+        return "below"
+    x, y = cfg.targets[k].pos
+    dx, dy = x - cx, y - cy
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return "below"
+    tx, ty = dy, -dx   # clockwise tangent
+    if abs(tx) >= abs(ty):
+        return "right" if tx > 0 else "left"
+    return "below" if ty < 0 else "above"
+
+
+def text_boxes(cfg: StimulusConfig, aspect: float | None = None
+               ) -> tuple[tuple[TextBox, ...], TextBox]:
+    """Where each target's sentence and the centre line go on a ``aspect``:1 screen
+    (default [display] aspect, the narrowest the layout must fit).
+
+    A sentence sits just outside its square's cue box on the side _label_side picks,
+    SLOT_TEXT_WRAP wide at most and kept TEXT_MARGIN inside the screen; the centre line
+    goes between the squares, or at the bottom of the screen when they leave too little
+    room. text_overlaps() checks the result.
+    """
+    half_w = (cfg.display.aspect if aspect is None else aspect) / 2.0 - TEXT_MARGIN
+    half_h = 0.5 - TEXT_MARGIN
+    reach, gap = cfg.reach, LABEL_GAP
+    h = SLOT_TEXT_LINES * SLOT_TEXT_HEIGHT * LINE_SPACING
+    out = []
+    for t in cfg.targets:
+        x, y = t.pos
+        side = _label_side(cfg, t.index)
+        if side == "right":
+            x0 = x + reach + gap
+            out.append(TextBox((x0, y), max(0.0, min(SLOT_TEXT_WRAP, half_w - x0)), h,
+                               ("left", "center"), "left", side))
+        elif side == "left":
+            x1 = x - reach - gap
+            out.append(TextBox((x1, y), max(0.0, min(SLOT_TEXT_WRAP, x1 + half_w)), h,
+                               ("right", "center"), "right", side))
+        else:
+            w = min(SLOT_TEXT_WRAP, 2.0 * half_w)
+            cx = min(max(x, -half_w + w / 2.0), half_w - w / 2.0)
+            if side == "below":
+                out.append(TextBox((cx, y - reach - gap), w, h, ("center", "top"),
+                                   "center", side))
+            else:
+                out.append(TextBox((cx, y + reach + gap), w, h, ("center", "bottom"),
+                                   "center", side))
+    xs = [t.pos[0] for t in cfg.targets]
+    ys = [t.pos[1] for t in cfg.targets]
+    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+    hc = CENTRE_TEXT_LINES * CENTRE_TEXT_HEIGHT * LINE_SPACING
+    # the room left and right of the centre among the squares level with the centre line
+    level = [abs(t.pos[0] - cx) - reach for t in cfg.targets
+             if abs(t.pos[1] - cy) < reach + hc / 2.0]
+    room = 2.0 * (min(level) - gap) if level else 2.0 * half_w
+    width = min(CENTRE_TEXT_WRAP, room, 2.0 * half_w)
+    above = [t.pos[1] - reach for t in cfg.targets
+             if t.pos[1] > cy and abs(t.pos[0] - cx) < reach + width / 2.0]
+    below = [t.pos[1] + reach for t in cfg.targets
+             if t.pos[1] < cy and abs(t.pos[0] - cx) < reach + width / 2.0]
+    tall = min(above, default=half_h) - max(below, default=-half_h) - 2.0 * gap
+    if width >= CENTRE_TEXT_MIN_WRAP and tall >= hc:
+        x = min(max(cx, -half_w + width / 2.0), half_w - width / 2.0)   # stay on screen
+        centre = TextBox((x, cy), width, hc, ("center", "center"), "center")
+    else:
+        # a square on the centre: the line goes along the bottom of the screen instead
+        centre = TextBox((0.0, -half_h), min(CENTRE_TEXT_WRAP * 2.0, 2.0 * half_w), hc,
+                         ("center", "bottom"), "center", "bottom")
+    return tuple(out), centre
+
+
+def status_prompt_boxes(cfg: StimulusConfig, aspect: float | None = None
+                        ) -> tuple[TextBox, TextBox]:
+    """Where the status lines (under the targets) and the prompt (above them) go on a
+    ``aspect``:1 screen (default [display] aspect).
+
+    When the targets reach so close to the bottom (top) edge that not even one line fits
+    there, as in four_diamond, the status (prompt) moves to the centre between the squares:
+    the prompt ends just above the middle, the status starts just below it, both as wide as
+    the centre line's box. With a square on the centre itself they go along the screen's
+    bottom and top edges instead, over whatever is there, so they are always on screen.
+    """
+    ratio = cfg.display.aspect if aspect is None else aspect
+    half_h = 0.5 - TEXT_MARGIN
+    wrap = min(STATUS_WRAP, ratio - 2.0 * TEXT_MARGIN)
+    bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
+    top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
+    _, centre = text_boxes(cfg, ratio)
+    middle = centre.side != "bottom"   # room between the squares
+    cx, cy = centre.pos
+    if bottom - TEXT_HEIGHT * LINE_SPACING >= -half_h:
+        status = TextBox((0.0, bottom), wrap, bottom + half_h, ("center", "top"), "left", "below")
+    elif middle:
+        status = TextBox((cx, cy - LABEL_GAP / 2.0), centre.width, centre.height / 2.0,
+                         ("center", "top"), "left", "centre")
+    else:
+        status = TextBox((0.0, -half_h), wrap, TEXT_HEIGHT * LINE_SPACING,
+                         ("center", "bottom"), "left", "bottom")
+    if top + TEXT_HEIGHT * LINE_SPACING <= half_h:
+        prompt = TextBox((0.0, top), wrap, half_h - top, ("center", "bottom"), "center", "above")
+    elif middle:
+        prompt = TextBox((cx, cy + LABEL_GAP / 2.0), centre.width, centre.height / 2.0,
+                         ("center", "bottom"), "center", "centre")
+    else:
+        prompt = TextBox((0.0, half_h), wrap, TEXT_HEIGHT * LINE_SPACING,
+                         ("center", "top"), "center", "top")
+    return status, prompt
+
+
+def start_prompt_box(cfg: StimulusConfig, aspect: float | None = None) -> TextBox:
+    """Where "press space to start" goes: low on the screen (START_PROMPT_POS), or where
+    status_prompt_boxes puts the prompt when that spot would cover a target's cue box."""
+    box = TextBox(START_PROMPT_POS, START_PROMPT_WIDTH, START_PROMPT_HEIGHT * LINE_SPACING,
+                  ("center", "center"), "center", "below")
+    feet = [(t.pos[0] - cfg.reach, t.pos[1] - cfg.reach, t.pos[0] + cfg.reach,
+             t.pos[1] + cfg.reach) for t in cfg.targets]
+    if not any(_rects_overlap(box.rect, foot) for foot in feet):
+        return box
+    return status_prompt_boxes(cfg, aspect)[1]
+
+
+def _rects_overlap(a: tuple[float, float, float, float],
+                   b: tuple[float, float, float, float]) -> bool:
+    return a[0] < b[2] - 1e-9 and b[0] < a[2] - 1e-9 and a[1] < b[3] - 1e-9 \
+        and b[1] < a[3] - 1e-9
+
+
+def text_overlaps(cfg: StimulusConfig, aspect: float | None = None) -> list[str]:
+    """Problems with text_boxes(cfg, aspect): a text box over any target's cue box, over
+    another text box, or past the screen edge. Empty when the layout is clean."""
+    ratio = cfg.display.aspect if aspect is None else aspect
+    slots, centre = text_boxes(cfg, ratio)
+    named = [(f"target {k}'s sentence", b) for k, b in enumerate(slots)]
+    named.append(("the centre line", centre))
+    feet = [(t.index, (t.pos[0] - cfg.reach, t.pos[1] - cfg.reach, t.pos[0] + cfg.reach,
+                       t.pos[1] + cfg.reach)) for t in cfg.targets]
+    problems = []
+    for i, (name, box) in enumerate(named):
+        r = box.rect
+        if box.width <= 0:
+            problems.append(f"{name} has no room beside its square")
+        for k, foot in feet:
+            if _rects_overlap(r, foot):
+                problems.append(f"{name} covers target {k}")
+        for other, obox in named[i + 1:]:
+            if _rects_overlap(r, obox.rect):
+                problems.append(f"{name} overlaps {other}")
+        if r[0] < -ratio / 2 - 1e-9 or r[2] > ratio / 2 + 1e-9 or r[1] < -0.5 - 1e-9 \
+                or r[3] > 0.5 + 1e-9:
+            problems.append(f"{name} runs past the screen edge")
+    return problems
+
+
 def card_paths(directory: str | Path) -> list[Path]:
     """The card images in ``directory``: its *.png files sorted by name (card k is [k])."""
     d = Path(directory).expanduser()
@@ -372,6 +636,11 @@ class PsychoPyRenderer:
     squares, so they never touch the flicker. Status text goes under the targets and
     prompts above them, in a monospaced font so a status table lines up; a text stimulus
     is re-rendered only when its text changes.
+
+    The decoder's sentences (one TextStim per target, placed by text_boxes for this
+    window's aspect) and its centre line are created once, empty, and drawn only while
+    they hold text. With [stimulus] fixation each square gets a small plus in the cue
+    colour at its centre, drawn over the square on every frame.
     """
 
     def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = ()) -> None:
@@ -410,14 +679,44 @@ class PsychoPyRenderer:
                                                    pos=label_pos(cfg, t.index),
                                                    height=LABEL_HEIGHT,
                                                    color=cfg.flash_color(t.index)))
-        bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
-        top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
-        self.status = visual.TextStim(self.win, text="", pos=(0.0, bottom), height=TEXT_HEIGHT,
+        aspect = self.win.size[0] / self.win.size[1]
+        # under and above the targets, or between them when they reach the screen's edge
+        status, prompt = status_prompt_boxes(cfg, aspect)
+        self.status = visual.TextStim(self.win, text="", pos=status.pos, height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.75), font="Menlo",
-                                      wrapWidth=1.5, anchorVert="top", alignText="left")
-        self.prompt = visual.TextStim(self.win, text="", pos=(0.0, top), height=TEXT_HEIGHT,
+                                      wrapWidth=status.width, anchorHoriz=status.anchor[0],
+                                      anchorVert=status.anchor[1], alignText=status.align)
+        self.prompt = visual.TextStim(self.win, text="", pos=prompt.pos, height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.9), font="Menlo",
-                                      wrapWidth=1.5, anchorVert="bottom")
+                                      wrapWidth=prompt.width, anchorHoriz=prompt.anchor[0],
+                                      anchorVert=prompt.anchor[1], alignText=prompt.align)
+        self._start_box = start_prompt_box(cfg, aspect)
+        slots, centre = text_boxes(cfg, aspect)
+        # reported on the first frame that shows decoder text, so a session that never
+        # gets any (a cued recording, BrainSwipe) prints nothing
+        self._text_problems = text_overlaps(cfg, aspect)
+        self.slot_texts = [
+            visual.TextStim(self.win, text="", pos=b.pos, height=SLOT_TEXT_HEIGHT,
+                            wrapWidth=max(b.width, SLOT_TEXT_HEIGHT),
+                            color=to_psychopy_rgb(0.9),
+                            anchorHoriz=b.anchor[0], anchorVert=b.anchor[1],
+                            alignText=b.align)
+            for b in slots]
+        self.centre = visual.TextStim(self.win, text="", pos=centre.pos,
+                                      height=CENTRE_TEXT_HEIGHT, wrapWidth=centre.width,
+                                      color=to_psychopy_rgb(0.95),
+                                      anchorHoriz=centre.anchor[0],
+                                      anchorVert=centre.anchor[1], alignText=centre.align)
+        # a plus at each square's centre: two thin bars, in the cue colour so it shows on
+        # both the dark and the light phase of the flicker
+        self.fixations = []
+        if cfg.fixation:
+            arm, bar = cfg.fixation_size, cfg.fixation_size / 5.0
+            for t in cfg.targets:
+                for size in ((arm, bar), (bar, arm)):
+                    self.fixations.append(visual.Rect(self.win, size=size, pos=t.pos,
+                                                      lineColor=None,
+                                                      fillColor=cfg.cue_color))
         self._texts: dict[int, str] = {}
         self._escaped = False
         self.cards = []
@@ -444,15 +743,25 @@ class PsychoPyRenderer:
         stim.draw()
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
-             text: str = "", prompt: str = "") -> None:
+             text: str = "", prompt: str = "", labels: Sequence[str] = (),
+             centre: str = "") -> None:
         # the card goes first so a square drawn over an oversized card keeps its luminance
         if 0 <= card < len(self.cards):
             self.cards[card].draw()
         for k, square in enumerate(self.squares):
             square.fillColor = to_psychopy_rgb(lum[k])
             square.draw()
+        for mark in self.fixations:
+            mark.draw()
         for label in self.labels:
             label.draw()
+        if self._text_problems and (any(labels) or centre):
+            for problem in self._text_problems:
+                print(f"warning: decoder text: {problem}", file=sys.stderr, flush=True)
+            self._text_problems = []
+        for stim, words in zip(self.slot_texts, labels):
+            self._draw_text(stim, words)
+        self._draw_text(self.centre, centre)
         if 0 <= cue < len(self.boxes):
             self.boxes[cue].draw()
         if 0 <= flash < len(self.flashes):
@@ -485,13 +794,20 @@ class PsychoPyRenderer:
         """Space or Escape on the end screen: closes it normally (not an abort)."""
         return bool(self._keys(keyList=["space", "escape"]))
 
-    def wait_for_start(self, still: np.ndarray, text: str = "press space to start") -> None:
-        """Show the still targets and a prompt until space (Escape raises Aborted)."""
-        prompt = self._visual.TextStim(self.win, text=text, pos=(0.0, -0.45), height=0.03,
+    def wait_for_start(self, still: np.ndarray, text: str = START_PROMPT,
+                       stop: Callable[[], bool] | None = None) -> None:
+        """Show the still targets and a prompt until space (Escape raises Aborted), or until
+        ``stop()`` is true (polled every frame; the caller checks why it returned)."""
+        box = self._start_box
+        prompt = self._visual.TextStim(self.win, text=text, pos=box.pos,
+                                       height=START_PROMPT_HEIGHT, wrapWidth=box.width,
+                                       anchorHoriz=box.anchor[0], anchorVert=box.anchor[1],
                                        color=to_psychopy_rgb(0.7))
         self._clear_keys()
         pressed: list[str] = []
         while "space" not in pressed:
+            if stop is not None and stop():
+                return
             self.draw(still, -1, card=0 if self.cards else -1)
             prompt.draw()
             self.win.flip()
