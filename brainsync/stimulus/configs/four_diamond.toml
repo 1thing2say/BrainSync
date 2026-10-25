@@ -1,0 +1,37 @@
+# Page mode's four targets (PLAN.md sections 13-14, the 4-target gate): a diamond with 13 Hz
+# on top, 15 Hz left, 17 Hz right and 11 Hz at the bottom, so only one pair of neighbouring
+# squares is 2 Hz apart. 15 and 17 Hz keep the two_targets places; 11 Hz, nearest the user's
+# alpha, is NEXT in the app, so its errors turn a page rather than pick an option. All four
+# sit clear of a 9.25 Hz alpha and of the 18-21 Hz venue interference; with sine flicker they
+# share no harmonics below 45 Hz. Same cue/stim/rest timing as two_targets. Record it with
+# `python -m brainsync.calibrate -c four_diamond` (the gate decision and the calibration data
+# are the same session).
+name = "four_diamond"
+
+[targets]
+freqs = [13.0, 15.0, 17.0, 11.0]   # Hz: top, left, right, bottom
+phases_pi = [0.0, 0.0, 0.0, 0.0]
+labels = ["13", "15", "17", "11"]
+
+[layout]
+size = 0.3                          # side, screen heights (smaller than the pair's 0.4: four fit)
+spacing = 0.6                       # nominal centre-to-centre, for the overlap check
+positions = [[0.0, 0.3], [-0.55, 0.0], [0.55, 0.0], [0.0, -0.3]]   # screen heights, y up
+
+[stimulus]
+waveform = "sine"
+hold_cue = true                     # gaze drifts after about 2 s without the box
+
+[display]
+refresh_hz = 60.0                   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5                        # narrowest width/height the layout must fit
+
+[session]
+blocks = 8                          # 8 x 4 = 32 cued trials, about 4.5 minutes
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true

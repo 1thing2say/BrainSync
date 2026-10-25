@@ -102,8 +102,8 @@ def test_single_trial_input_gives_one_row(task) -> None:
 
 def test_baseline_removes_constant_bias(task, rest) -> None:
     class Biased(CCA):
-        def raw_scores(self, X):
-            return super().raw_scores(X) + np.array([0.5, 0.0, 0.0])
+        def raw_scores(self, X, offset=0.0):
+            return super().raw_scores(X, offset) + np.array([0.5, 0.0, 0.0])
 
     X, y = task
     R, _ = rest
@@ -197,8 +197,8 @@ def test_margin_is_in_baseline_spread_units(rest) -> None:
 
 def test_abstain_decisions_invariant_to_score_scale(task, rest) -> None:
     class Scaled(CCA):
-        def raw_scores(self, X):
-            return 10.0 * super().raw_scores(X)
+        def raw_scores(self, X, offset=0.0):
+            return 10.0 * super().raw_scores(X, offset)
 
     X, _ = task
     held = np.concatenate([X, rest[1]])
@@ -232,8 +232,9 @@ def test_fbcca_score_is_weighted_sum_of_squares(task) -> None:
 def test_make_and_validation() -> None:
     assert isinstance(make("FBCCA", freqs=FREQS, fs=FS), FBCCA)
     assert type(make("cca", freqs=FREQS, fs=FS)) is CCA
-    with pytest.raises(ValueError, match="trca"):
-        make("trca", freqs=FREQS, fs=FS)
+    with pytest.raises(ValueError, match="tdca"):
+        make("tdca", freqs=FREQS, fs=FS)
+    assert make("trca", freqs=FREQS, fs=FS).needs_fit and not make("cca", freqs=FREQS, fs=FS).needs_fit
     with pytest.raises(ValueError, match="-1"):
         CCA(FREQS, FS, margin=-1.0)
     with pytest.raises(ValueError, match="200"):

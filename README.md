@@ -212,6 +212,50 @@ Per subject (CCA, FBCCA at 1/2/4 s) the results go to stderr. Subject 1 is the h
 (CCA 24/44/64%), subject 8 the easiest (CCA 91/100/100%). Starting the window at sample 0
 instead drops subject 8's 1 s CCA accuracy from 90.6% to 48.9%.
 
+## Phase 1b: trained classifiers
+
+`brainsync/templates.py` adds the classifiers that learn from the user's own cued trials,
+behind the same API as CCA and FBCCA (baseline, margin, threshold, `make()`): `itcca` and
+`ecca` (Nakanishi 2015), `trca` / `etrca` (Nakanishi 2018), `etrcar` (TRCA with a sine/cosine
+projection, Wong 2020) and `sfcca` (a learned spatial filter scored like CCA, so it ignores
+the phase). Each target's template is its trial average projected onto its own harmonics,
+which makes it defined at any time after the stimulus onset: the online decoder scores every
+sliding window at its offset from `Decoder.set_onset(t)` (the display's first flickering
+frame). `--template raw` uses the plain averages instead, for windows inside the calibration
+epochs. Trained methods are always scored leave-one-block-out (`*` in the tables).
+
+```bash
+.venv/bin/python -m brainsync.nakanishi --methods cca itcca ecca etrca etrcar --windows 0.5 1
+.venv/bin/python -m brainsync.nakanishi --methods itcca ecca etrca --windows 1 --template raw
+.venv/bin/python -m brainsync.score_cued --methods fbcca ecca etrcar sfcca --windows 1 1.5 2
+.venv/bin/python -m brainsync.online <file>_cued.npz --classifier etrcar --train-blocks 4
+.venv/bin/python -m brainsync.calibrate -c four_diamond        # record, score, gate, save model
+```
+
+Nakanishi 2015 (12 targets, 10 subjects, 14 training blocks, mean accuracy):
+
+| Method | 0.5 s | 1 s | Paper, 1 s |
+|---|---|---|---|
+| CCA | 23 % | 57 % | 55 % |
+| ITCCA, raw templates | 60 % | 81 % | 81 % |
+| eCCA, raw templates | 81 % | 94 % | 93 % |
+| eTRCA, raw templates | 91 % | 98 % | - |
+| eCCA, harmonic templates | 64 % | 83 % | - |
+| eTRCA-R, harmonic templates | 79 % | 92 % | - |
+| eTRCA-R, harmonic, 2 training blocks | - | 86 % | - |
+
+On the three dry-electrode 15/17 Hz recordings (4 posterior channels, 10 trials per target),
+no trained method beats FBCCA: pooled at 1.5 s, FBCCA 80 %, eCCA 70 %, eTRCA 66 %, eTRCA-R
+54 %, SFCCA 58 %; replayed through the online decoder after a fit on the first 4 blocks, FBCCA
+commits 19 of 36 held-out trials with 0 wrong, the trained ones 5-9 with 1-6 wrong. The
+SSVEP phase relative to the `stim_on` marker is only weakly consistent across trials there
+(phase-locking value 0.4-0.6 on 162029 and 172130, 0.1-0.5 on 161131, chance about 0.3), so
+either the display-to-board onset timing jitters or the response is too weak for templates.
+Both have the same cure: measure the onset with the stimulus's photodiode patch, add posterior
+electrodes, then record the four-target gate session with `brainsync.calibrate`. FBCCA stays
+the live default; `demo --model` and the server's `DecoderBank(model=...)` take a saved model
+once one earns it. A filter bank to 88 Hz or 5 harmonics did not help FBCCA on these files.
+
 ## Phase 2: two-target cued trials
 
 Each cued session has 20 trials: a 1 s cue, 4 s of 15 and 17 Hz flicker with the cue box

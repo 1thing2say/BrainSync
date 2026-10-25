@@ -463,3 +463,46 @@ def test_demo_calibration_length_pins_the_rest_offset():
     rms = {s: float(np.sqrt(np.mean(np.square(e)))) / spread for s, e in errs.items()}
     assert rms[CALIBRATE_S] < 0.8 * rms[10.0], rms   # about 0.3 vs 0.45 spreads
     assert rms[CALIBRATE_S] < TUNED.margin, rms
+
+
+# -- onsets and trained classifiers ---------------------------------------------------------
+
+def test_set_onset_gives_each_window_its_offset():
+    dec = make_decoder(window_s=2.0, step_s=0.5, pad_s=1.0)
+    X, t = board_data(5.0, seed=3)
+    assert dec.onset is None and not dec.needs_onset
+    dec.set_onset(float(t[0]) + 1.0)
+    out = dec.feed(X, t)
+    assert out, "no decisions"
+    for d in out:
+        first = t[d.end - dec.n_window]
+        assert d.offset_s == pytest.approx(first - (t[0] + 1.0), abs=1e-9)
+    dec.clear_onset()
+    assert np.isnan(dec.feed(*board_data(1.0, seed=4))[-1].offset_s)
+    with pytest.raises(ValueError, match="onset"):
+        dec.set_onset(float("inf"))
+    dec.set_onset(5.0)
+    dec.reset()
+    assert dec.onset == 5.0           # kept across a reset, like the baseline
+
+
+def test_trained_replay_fits_on_first_blocks_and_scores_the_rest(synthetic_recording):
+    res = replay(synthetic_recording, classifier="etrcar", train_blocks=3, window_s=2.0,
+                 step_s=0.25, votes=3, margin=0.5)
+    assert res.n_train == 6 and res.n_trials == 6          # 12 trials, 2 per block
+    assert res.decoder.needs_onset and res.decoder.train_trials == 6
+    assert res.correct >= 5 and res.wrong == 0
+    assert "fitted on the first 6 trials" in res.summary()
+    offsets = [d.offset_s for d in res.decisions if not np.isnan(d.offset_s)]
+    assert offsets and min(offsets) > -5.0 and max(offsets) < 10.0
+    # the same held-out trials for a training-free classifier
+    base = replay(synthetic_recording, classifier="fbcca", train_blocks=3, window_s=2.0,
+                  step_s=0.25, votes=3, margin=0.5)
+    assert base.n_train == 6 and base.n_trials == 6 and base.decoder.train_trials == 6
+
+
+def test_trained_replay_needs_train_blocks(synthetic_recording):
+    with pytest.raises(ValueError, match="train_blocks"):
+        replay(synthetic_recording, classifier="etrca")
+    with pytest.raises(ValueError, match="nothing would be left"):
+        replay(synthetic_recording, classifier="etrca", train_blocks=6)
