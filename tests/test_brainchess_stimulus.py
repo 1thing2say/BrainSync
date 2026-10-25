@@ -877,3 +877,27 @@ def test_board_renderer_code_mode_against_fake_psychopy(monkeypatch):
     assert r.cue_box.pos == cfg.targets[0].pos
     assert r.confidence[0].drawn == 2 and r.confidence[1].drawn == 1   # cleared lines skipped
     assert r.panels[2].fillColor == bs.to_psychopy_rgb(frame_bit(2, 5))
+
+
+@pytest.mark.parametrize("line, verb, value", [
+    ('{"flicker": true}', "go", None),
+    ('{"flicker": false}', "hold", None),
+    ('{"text": "Look  at\\nA"}', "text", "Look at A"),
+    ('{"labels": ["A ███ +0.42 <", "B", "BACK"]}', "confidence", ("A ███ +0.42 <", "B", "BACK")),
+    ("2", "cue", 2),
+    ("-1", "cue", None),
+])
+def test_standard_display_lines_drive_the_board(line, verb, value):
+    assert parse_command(line) == Command(verb, value)
+
+
+@pytest.mark.parametrize("line, match", [
+    ('{"active": [0, 2]}', "unsupported JSON"),
+    ('{"flicker": 1}', "unsupported JSON"),
+    ('{"text": "a", "flicker": true}', "exactly one key"),
+    ("{nope", "bad JSON"),
+    ("3", "target index"),
+])
+def test_standard_display_lines_bad(line, match):
+    with pytest.raises(ValueError, match=match):
+        parse_command(line)

@@ -35,6 +35,10 @@ frame draws the latest state, so a slow or chatty game never stalls the flicker)
     hold                   every flicker stands still at its frame-0 luminance
     go                     flicker runs
 
+The standard display lines (docs/CVEP-STANDARD.md 4.1) work too: a target index moves the
+cue box (-1 clears it), {"flicker": true} / {"flicker": false} are go / hold, {"text": ...}
+sets the prompt and {"labels": [...]} the confidence block.
+
 Bad lines are ignored with a note on stderr; EOF ends the run (exit 0), Escape aborts it
 (exit 1). The window starts in hold. Once it is up and its measured refresh passed the
 check against [display] refresh_hz, "measured refresh: <x> Hz" goes to stderr (a refused
@@ -65,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import math
 import os
 import sys
@@ -177,11 +182,45 @@ def _count(text: str, what: str) -> int:
     return n
 
 
+def _standard_line(text: str) -> Command:
+    """A line of the standard display protocol (docs/CVEP-STANDARD.md 4.1,
+    brainsync.stimulus.feedback) as a board command: a target index moves the cue box
+    (-1 clears it), {"flicker": true / false} is go / hold, {"text": ...} the prompt and
+    {"labels": [...]} the confidence block. {"active": [...]} has no board equivalent
+    (the groups and panels decide what flickers) and is refused like any bad line."""
+    if text.lstrip("-").isdigit():
+        k = int(text)
+        if k == ABSTAIN:
+            return Command("cue", None)
+        if 0 <= k < MAX_TARGETS:
+            return Command("cue", k)
+        raise ValueError(f"target index must be -1..{MAX_TARGETS - 1}, got {k}")
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"bad JSON line: {exc}") from None
+    if not isinstance(obj, dict) or len(obj) != 1:
+        raise ValueError(f"a JSON line needs exactly one key, got {text!r}")
+    (key, value), = obj.items()
+    if key == "flicker" and isinstance(value, bool):
+        return Command("go" if value else "hold")
+    if key == "text" and isinstance(value, str):
+        return Command("text", " ".join(value.split()))
+    if key == "labels" and isinstance(value, list) and all(isinstance(v, str) for v in value):
+        if len(value) > MAX_CONFIDENCE:
+            raise ValueError(f"labels takes at most {MAX_CONFIDENCE} lines, got {len(value)}")
+        return Command("confidence", tuple(" ".join(v.splitlines()).strip() for v in value))
+    raise ValueError(f"unsupported JSON line {text!r}; the board takes flicker, text and "
+                     "labels")
+
+
 def parse_command(line: str) -> Command:
     """The Command on one protocol line; ValueError for anything malformed."""
     text = line.strip()
     if not text:
         raise ValueError("blank line")
+    if text[0] in "{-0123456789":
+        return _standard_line(text)
     verb, _, rest = text.partition(" ")
     rest = rest.strip()
     if verb == "groups":
