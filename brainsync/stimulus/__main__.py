@@ -10,8 +10,9 @@
                                                                 # labelled squares, live status
     python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
-Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
-flushed right after the flip that shows the event. Once the window is up and its measured
+Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>" (a [code] or
+[time] config adds cycle:<n> on each m-sequence cycle's first frame and flash:<k> on each
+flash onset), printed and flushed right after the flip that shows the event. Once the window is up and its measured
 refresh has passed the check against [display] refresh_hz (or --refresh auto adopted it),
 "measured refresh: <x> Hz" goes to stderr; a refused rate exits with code 2 before that
 line. Space starts, Escape quits.

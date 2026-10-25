@@ -56,9 +56,10 @@ def test_snr_classifier_matches_the_cca_interface_and_decodes():
     assert accuracy(y, pred) >= 0.9
     assert accuracy(y, SNR(freqs, FS, harmonics=2).predict(X)) >= 0.9
     rest = preprocess(rest_trials(20, FS, 4, 4.0, seed=2), FS)
-    clf.fit_baseline(rest)
+    clf.fit_baseline(rest[:10])
     assert clf.has_baseline and accuracy(y, clf.predict(X)) >= 0.9
-    assert abs(float(clf.scores(rest).mean())) < 1.0          # rest sits near 0 dB after it
+    assert abs(float(clf.scores(rest[10:]).mean())) < 1.0     # unseen rest sits near 0 dB
+    assert clf.scores(X)[np.arange(y.size), y].mean() > clf.scores(rest[10:]).max(axis=1).mean()
     assert "SNR(" in repr(clf) and clf.name == "snr"
     dec = Decoder(SNR(freqs, FS), FS, window_s=4.0, step_s=0.5, votes=1)   # plugs in
     assert dec.classifier is not None
@@ -111,9 +112,10 @@ def test_template_fit_cross_validate_decide_and_save(cvep_data, tmp_path: Path):
     assert hits / total >= 0.9
     # a single cycle is weaker than the mean of two
     k0 = test[2]
-    p1, _ = tpl.decide(k0)
-    p2, _ = tpl.decide(np.stack([k0[i:i + 2].mean(axis=0) for i in range(0, 14, 2)]))
-    assert np.mean(p2 == 2) >= np.mean(p1 == 2) - 0.1
+    _, s1 = tpl.decide(k0)
+    _, s2 = tpl.decide(np.stack([k0[i:i + 2].mean(axis=0) for i in range(0, 14, 2)]))
+    lead = lambda s: float((np.sort(s, axis=1)[:, -1] - np.sort(s, axis=1)[:, -2]).mean())  # noqa: E731
+    assert lead(s2) > lead(s1)
     # a margin makes it abstain rather than guess on noise
     noise = np.random.default_rng(0).standard_normal((5, 4, n))
     p, _ = tpl.decide(noise, margin=0.3)
@@ -234,9 +236,9 @@ def _stream(board: SequenceFakeBoard, dec: SyncDecoder, seconds: float, step: fl
 
 def test_sync_decoder_commits_the_fixated_code_target(cvep_data):
     cfg, X, t, events, spans = cvep_data
-    n = 262
-    lag = lag_samples(16, FS, 60.0)
-    tpl = fit_template(_cycles_by_target(cfg, X, t, events, spans, n), 4, lag, FS)
+    n = int(round(cfg.code.cycle_frames / 60 * FS))
+    lag = lag_samples(cfg.code.lag_frames, FS, 60.0)
+    tpl = fit_template(_cycles_by_target(cfg, X, t, events, spans, n), cfg.n_targets, lag, FS)
     board = SequenceFakeBoard(CodeSequence(cfg), amp=3.0, noise=8.0, seed=11, t0=5000.0)
     dec = SyncDecoder(FS, template=tpl, votes=2, cycles=2, pad_s=0.5)
     assert dec.paradigm == "code" and dec.kind == "cycle" and dec.n_targets == 4
@@ -317,3 +319,23 @@ def test_sync_decoder_commits_the_fixated_flash_target():
         results.append((k, first.committed, first.time - t_on))
     assert all(k == got for k, got, _ in results)
     assert all(3.0 <= delay <= 9.0 for _, _, delay in results)   # 3 flashes per target first
+
+
+def test_snr_grows_with_the_response_and_its_ring_clears_the_hann_lobe():
+    """With a Hann window the bins within 2 / T of a line are its own leakage; the ring
+    must start beyond them or the ratio saturates and a strong response scores like a weak
+    one (the live confidence bars and the margin then say nothing)."""
+    freqs = [10.0, 15.0]
+    clf = SNR(freqs, FS)
+    inner, outer = clf.ring(int(2.0 * FS))        # a 2 s window: bins 0.5 Hz, lobe 1 Hz
+    assert inner == pytest.approx(1.0) and outer == pytest.approx(3.0)
+    inner4, outer4 = clf.ring(int(4.0 * FS))
+    assert inner4 == pytest.approx(0.5) and outer4 == pytest.approx(1.5)
+    scores = []
+    for snr_db in (-12.0, -6.0, 0.0):
+        X, y = ssvep_trials(freqs, FS, n_per_target=6, seconds=2.0, snr_db=snr_db, seed=4)
+        s = clf.raw_scores(preprocess(X, FS))
+        scores.append(float(np.mean(s[np.arange(y.size), y])))
+    assert scores[0] < scores[1] - 3.0 < scores[2] - 6.0, scores   # dB keep rising
+    with pytest.raises(ValueError, match="no bin within"):
+        SNR(freqs, FS, exclude_hz=0.01, resolution_hz=0.5).raw_scores(np.ones((4, 500)) + np.arange(500) % 2)

@@ -9,7 +9,9 @@ only by that time shift, which is why one template is enough.
 ``fit_template`` accepts cycles from any cued target (each is shifted back to the base
 target's alignment before averaging), so a cued recording of every target trains it, and
 ``cross_validate`` is the paper's training accuracy with each cycle held out in turn.
-Correlation is Pearson's r per channel, averaged over the channels given.
+Correlation is Pearson's r per channel, averaged over the channels given. The paper's r_k is
+the uncentred normalised inner product T_k x^T / sqrt((T_k T_k^T)(x x^T)); after the 1-30 Hz
+band-pass a cycle is zero-mean, so Pearson's r is the same quantity.
 """
 from __future__ import annotations
 

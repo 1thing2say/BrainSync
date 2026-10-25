@@ -5,7 +5,10 @@ the power at its frequency over the mean power of the neighbouring frequency poi
 pick the largest. ``SNR`` does that in the ``classify.CCA`` interface (``decide``,
 ``gaps``, ``levels``, ``fit_baseline``), so it drops into ``online.Decoder`` and the
 scoring tools beside CCA and FBCCA. Scores are in dB, averaged over the channels and, with
-``harmonics`` above 1, over the harmonics of each frequency.
+``harmonics`` above 1, over the harmonics of each frequency. Two departures from the paper's
+P(f_k) over its neighbours: the peak is the largest bin within ``exclude_hz`` of the frequency
+(a frequency between two bins still gets its peak), and the neighbour ring starts beyond the
+Hann window's main lobe (``ring``), or the ratio would saturate.
 """
 from __future__ import annotations
 
@@ -53,9 +56,27 @@ class SNR(CCA):
         power = np.abs(np.fft.rfft(centred, n=n_fft, axis=-1)) ** 2
         return power.mean(axis=1), np.fft.rfftfreq(n_fft, 1.0 / self.fs)
 
+    def ring(self, n_samples: int) -> tuple[float, float]:
+        """(inner, outer) distance in Hz of the neighbour ring for a window of ``n_samples``.
+
+        The Hann window spreads a line over a main lobe 2 / T wide on each side (1 Hz for a
+        2 s window), so bins closer than that are the peak's own leakage, not the noise
+        floor: the ring starts at ``exclude_hz`` or the main lobe's edge, whichever is
+        farther, and spans at least four bins of 1 / T beyond it, or ``neighbour_hz``.
+        Without this the ratio saturates at a window-determined constant and a strong
+        response scores the same as a weak one.
+        """
+        bin_hz = self.fs / float(n_samples)
+        inner = max(self.exclude_hz, 2.0 * bin_hz)
+        outer = max(self.neighbour_hz, inner + 4.0 * bin_hz)
+        return inner, outer
+
     def raw_scores(self, X: np.ndarray) -> np.ndarray:
-        """SNR in dB (n_trials, n_targets): peak power within exclude_hz of the frequency
-        over the mean power of the bins between exclude_hz and neighbour_hz away."""
+        """SNR in dB (n_trials, n_targets): the largest bin within exclude_hz of the frequency
+        (a variant of the paper's P(f_k) that tolerates a frequency between two bins) over
+        the mean power of the bins in ``ring``."""
+        X = self._windows(X)
+        inner, outer = self.ring(X.shape[-1])
         power, bins = self.spectrum(X)
         out = np.zeros((power.shape[0], self.n_targets))
         for k, f in enumerate(self.freqs):
@@ -65,10 +86,15 @@ class SNR(CCA):
                 if fh >= self.fs / 2.0:
                     continue
                 dist = np.abs(bins - fh)
-                peak = power[:, dist <= self.exclude_hz].max(axis=1)
-                ring = power[:, (dist > self.exclude_hz) & (dist <= self.neighbour_hz)]
+                near = dist <= self.exclude_hz
+                if not near.any():
+                    raise ValueError(f"no bin within {self.exclude_hz:g} Hz of {fh:g} Hz; lower "
+                                     "resolution_hz")
+                peak = power[:, near].max(axis=1)
+                ring = power[:, (dist > inner) & (dist <= outer)]
                 if ring.shape[1] == 0:
-                    raise ValueError(f"no neighbour bins around {fh:g} Hz; lower resolution_hz")
+                    raise ValueError(f"no neighbour bins {inner:g}-{outer:g} Hz from {fh:g} Hz; "
+                                     "a longer window or a higher neighbour_hz")
                 floor = ring.mean(axis=1)
                 terms.append(10.0 * np.log10(np.maximum(peak, 1e-300) / np.maximum(floor, 1e-300)))
             out[:, k] = np.mean(terms, axis=0)   # the fundamental is always below Nyquist

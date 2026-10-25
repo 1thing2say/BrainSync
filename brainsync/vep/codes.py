@@ -10,8 +10,10 @@ as ``brainsync.stimulus.flicker``).
   delayed by ``k * lag_frames`` frames (the paper: 63 bits, 16 targets, 4-frame lags).
 - **t-VEP**: brief flashes that never overlap. Targets flash in rounds, one slot of
   ``flash_frames + gap_frames`` frames each, in a fixed or a per-round shuffled order, so
-  every target's flash rate stays under the paper's 4 Hz and any two flash onsets are at
-  least a slot apart.
+  each target flashes well under the paper's 4 Hz and any two flash onsets are at least a
+  slot apart. (The paper's bound keeps one target's consecutive responses from overlapping;
+  the screen as a whole flashes once a slot, 4 Hz in tvep_4, so an epoch also holds the start
+  of another target's response, which the per-target average cancels.)
 - **f-VEP** needs no sequence: ``brainsync.stimulus.flicker`` already does it.
 """
 from __future__ import annotations

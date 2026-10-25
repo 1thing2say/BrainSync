@@ -1,8 +1,10 @@
 # t-VEP (Bin et al. 2009) with four targets: brief flashes (2 frames = 33 ms) that never
 # overlap. Targets flash in rounds of four 15-frame slots in a shuffled order, so each
-# target flashes once a second (under the paper's 4 Hz) and consecutive onsets are 250 ms
-# apart. The decoder averages the 0-500 ms after each target's own flashes and picks the
-# largest peak-to-valley response, so it needs many flashes: stim_s is 6 rounds.
+# target flashes once a second, well under the paper's 4 Hz (which keeps one target's
+# consecutive responses apart). The screen as a whole flashes every 250 ms, so a 0.5 s epoch
+# also holds the start of another target's response, which the per-target average cancels.
+# The decoder averages the 0-500 ms after each target's own flashes and picks the largest
+# peak-to-valley response, so it needs many flashes: stim_s is 6 rounds.
 name = "tvep_4"
 
 [targets]

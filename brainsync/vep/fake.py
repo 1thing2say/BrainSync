@@ -9,7 +9,9 @@ like a real flip), ``read_events`` hands out the markers of every frame shown so
 (``stim_on:<k>`` with the fixated target, then the sequence's ``cycle:<n>`` or
 ``flash:<k>``), and ``read`` returns the EEG: Gaussian noise on all 8 channels plus
 ``amp`` times the kernel-filtered stimulus of the fixated target on P7, P8, O1, O2. It is a
-check of the pipeline, not of anyone's visual cortex. Time moves like FakeBoard's: through
+check of the pipeline, not of anyone's visual cortex, and an easy one: only the fixated
+target evokes anything, while the paper's peripheral, non-fixated targets evoke smaller
+responses too, which the real decoders have to reject. Time moves like FakeBoard's: through
 ``advance`` (virtual) or a ``clock``.
 """
 from __future__ import annotations
