@@ -14,7 +14,7 @@ from brainsync.board import FakeBoard
 from brainsync.classify import ABSTAIN
 from brainsync.online import Decision, Decoder
 
-HEADLESS = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
+HEADLESS = ["--paradigm", "freq", "--fake", "--fast", "--no-stimulus", "--no-voice"]
 
 # Stand-in for brainsync.stimulus --feedback stdin: reports its window, then copies each
 # feedback line to a file until EOF.
@@ -64,7 +64,12 @@ def test_live_arguments_take_other_defaults():
     demo.add_live_arguments(p, config="swipe", seconds=600.0)
     p.add_argument("--cards", default=None)     # another app can add its own flags
     args = p.parse_args(["--cards", "d"])
-    assert args.config == "swipe" and args.seconds == 600.0 and args.cards == "d"
+    assert args.config is None and args.seconds == 600.0 and args.cards == "d"
+    assert demo.config_name(args) == "cvep_3"            # c-VEP unless asked otherwise
+    freq = p.parse_args(["--paradigm", "freq"])
+    assert demo.config_name(freq) == "swipe"
+    demo.resolve(freq)
+    assert freq.config == "swipe" and freq.votes == demo.TUNED.votes
     assert "default 600" in p.format_help()
 
 
@@ -161,7 +166,7 @@ def test_session_hands_each_decision_and_its_time_to_the_caller(capsys):
 
 def test_session_sends_the_callers_lines_after_the_start(fake_stimulus):
     calls, feedback = fake_stimulus
-    args = parse(["--fake", "--fast", "--no-voice", "--seconds", "8", "--calibrate", "8"])
+    args = parse(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "8", "--calibrate", "8"])
     cfg, board, decoder = demo.build(args)
     flashes: list[int] = []
 
@@ -189,7 +194,7 @@ def test_session_sends_the_callers_lines_after_the_start(fake_stimulus):
 
 
 def test_failed_feedback_ends_the_session(fake_stimulus):
-    (ended, code), _, _ = _run(["--fake", "--fast", "--no-voice", "--seconds", "300"],
+    (ended, code), _, _ = _run(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "300"],
                                on_decision=lambda d, t: False)
     assert (ended, code) == ("stimulus pipe closed", 0)
 
