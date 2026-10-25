@@ -68,3 +68,34 @@ test("the selection timer fills to the trial limit and never past it", () => {
   assert.deepEqual(VC.progress(-1, 10), { fraction: 0, label: "0 s" });
   assert.equal(VC.progress(3, 0).fraction, 0);
 });
+
+// --- c-VEP (code mode): the training card and the confidence bars ------------------------------
+
+test("training shows the square to look at, the cycles, then the accuracy", () => {
+  assert.deepEqual(VC.training({ slot: "s1", label: "left", cycle: 12, of: 30 }),
+    { title: "Training: look at the left square", detail: "cycle 12 of 30", fraction: 0.4, tone: "look", done: false });
+  const done = VC.training({ slot: "s1", label: "left", cycle: 30, of: 30, accuracy: 0.83, chance: 1 / 3 });
+  assert.deepEqual(done, { title: "Template ready", detail: "83 % on held-out cycles (chance 33 %)",
+    fraction: 1, tone: "ok", done: true });
+  const failed = VC.training({ slot: "s1", label: "left", cycle: 4, of: 30, accuracy: null, message: "interrupted" });
+  assert.equal(failed.title, "Training failed");
+  assert.equal(failed.detail, "interrupted");
+  assert.equal(failed.tone, "bad");
+  assert.equal(VC.training({ slot: "s1", cycle: 0, of: 30 }).title, "Training: look at the first square");
+});
+
+test("the confidence bar clips the correlation to 0..1 and marks the best and committed", () => {
+  const bars = VC.confidence({ scores: { s1: 0.42, s2: 1.4, s3: -0.03 }, raw: "s1", committed: "s2" });
+  assert.deepEqual(bars.s1, { fraction: 0.42, text: "+0.42", best: true, committed: false });
+  assert.deepEqual(bars.s2, { fraction: 1, text: "+1.40", best: false, committed: true });
+  assert.deepEqual(bars.s3, { fraction: 0, text: "-0.03", best: false, committed: false });
+  assert.deepEqual(VC.confidence({ scores: {} }), {});
+  assert.deepEqual(VC.confidence(null), {});
+});
+
+test("the banner shows the training detail in place of the baseline", () => {
+  assert.deepEqual(VC.banner("BASELINE", "Training: look at the left square, cycle 12/30", "page"),
+    { text: "Training: look at the left square, cycle 12/30", tone: "look" });
+  assert.equal(VC.banner("BASELINE", "Keep still and look at the screen", "page").text,
+    "Baseline: keep still — Keep still and look at the screen");
+});

@@ -25,6 +25,9 @@ struct MirrorView: View {
                 if let started = model.trialStarted {
                     SelectionTimer(started: started, max: model.maxTrialS)
                 }
+                if let card = model.training {
+                    TrainingCardView(card: card)
+                }
                 if let page = model.page {
                     pageView(page)
                 } else {
@@ -42,8 +45,29 @@ struct MirrorView: View {
 
     @ViewBuilder
     private func pageView(_ page: ShowPage) -> some View {
-        let flickering = model.phase == "flicker"
+        let flickering = model.phase == "flicker" || model.phase == "train"
         MonoLabel(heading(page))
+        if model.layout == "cvep" && page.mode != .list {
+            // c-VEP: the user's three squares in a row, each with its sentence and confidence bar.
+            if page.mode == .confirm && !page.text.isEmpty {
+                Text("“\(page.text)”")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .card(padding: 14)
+            }
+            SquareRow(order: model.screenSlots, slots: page.slots, picked: model.pickedSlot,
+                      cue: model.training?.done == false ? model.trainingSlot : nil,
+                      active: flickering, bars: model.confidence, keyboard: model.keyboardMode,
+                      place: model.place) { slot in model.tapSlot(slot) }
+        } else {
+            classicView(page, flickering: flickering)
+        }
+    }
+
+    @ViewBuilder
+    private func classicView(_ page: ShowPage, flickering: Bool) -> some View {
         switch page.mode {
         case .page:
             PhraseStack(slots: page.slots, picked: model.pickedSlot, active: flickering,
@@ -94,6 +118,125 @@ struct MirrorView: View {
         case .confirm:
             return "Page \(page.page) · Say this?"
         }
+    }
+}
+
+/// c-VEP (docs/CVEP-STANDARD.md): the user's squares in a row, in slot order. A slot that does
+/// not flicker this trial (the middle one on the confirm screen) stays as an empty square. Each
+/// square is a steady card (a lighter fill while its target flickers, never a flash), with its
+/// sentence or label and the decoder's confidence bar under it.
+struct SquareRow: View {
+    let order: [String]
+    let slots: [UISlot]
+    let picked: String?
+    /// The training square (the cue), while the template is recorded.
+    let cue: String?
+    let active: Bool
+    let bars: [String: ConfidenceBar]
+    var keyboard = false
+    var place: (String) -> String = { _ in "" }
+    var onTap: (String) -> Void = { _ in }
+
+    var body: some View {
+        let bySlot = Dictionary(slots.map { ($0.slot, $0) }, uniquingKeysWith: { a, _ in a })
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(order, id: \.self) { slot in
+                column(slot: slot, ui: bySlot[slot])
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func column(slot: String, ui: UISlot?) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Palette.radius)
+        let isPicked = picked == slot
+        let isCue = cue == slot
+        let flickers = active && (ui != nil || cue != nil)
+        let content = VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                PositionChip(text: place(slot))
+                Spacer(minLength: 0)
+                if isPicked { MonoLabel("Picked", color: Palette.pick) }
+                else if keyboard && ui != nil { MonoLabel("key " + String(slot.dropFirst())) }
+            }
+            // The square itself: a steady fill, lighter while it flickers on the user's screen.
+            shape.fill(flickers ? Palette.surfaceHi : Palette.surface)
+                .overlay(shape.strokeBorder(isPicked ? Palette.pick : isCue ? Palette.look : Palette.lineStrong,
+                                            style: StrokeStyle(lineWidth: isPicked || isCue ? 3 : 1,
+                                                               dash: ui == nil && cue == nil ? [4, 3] : [])))
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 72)
+            if let ui {
+                let sentence = ui.utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+                Text(sentence.isEmpty ? ui.label : sentence)
+                    .font(sentence.isEmpty ? .headline : .callout.weight(.semibold))
+                    .foregroundStyle(ui.role == .next || ui.role == .back ? Palette.next
+                                     : ui.role == .say ? Palette.say : Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let bar = bars[slot] {
+                ConfidenceBarView(bar: bar)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Palette.cardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Palette.cardRadius)
+            .strokeBorder(isPicked ? Palette.pick : Palette.line, lineWidth: isPicked ? 2 : 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isPicked ? .isSelected : [])
+
+        if keyboard, ui != nil {
+            Button { onTap(slot) } label: { content }
+                .buttonStyle(.plain)
+                .disabled(!active)
+        } else {
+            content
+        }
+    }
+}
+
+/// The decoder's confidence under a square: a steady bar of the correlation (0...1) and its
+/// signed score; blue on this decision's best, yellow once committed. Not a percentage.
+struct ConfidenceBarView: View {
+    let bar: ConfidenceBar
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView(value: bar.fraction)
+                .tint(bar.committed ? Palette.pick : bar.best ? Palette.look : Palette.muted)
+            Text(bar.text)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Palette.muted)
+        }
+        .accessibilityLabel("confidence \(bar.text)")
+    }
+}
+
+/// c-VEP's training step: where to look, the cycles so far, then the template's accuracy.
+struct TrainingCardView: View {
+    let card: TrainingCard
+
+    var body: some View {
+        let color: Color = card.tone == "ok" ? Palette.say : card.tone == "bad" ? Palette.danger : Palette.look
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(card.title)
+                    .font(.headline)
+                    .foregroundStyle(Palette.text)
+                Spacer(minLength: 8)
+                MonoLabel(card.detail)
+            }
+            ProgressView(value: card.fraction)
+                .tint(color)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Palette.cardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Palette.cardRadius).strokeBorder(color.opacity(0.6), lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -297,14 +440,14 @@ struct PhasePill: View {
     var body: some View {
         let color: Color = {
             switch phase {
-            case "flicker": return Palette.look
+            case "flicker", "train": return Palette.look
             case "cue": return Palette.text
             case "baseline": return Palette.warn
             case "paused": return Palette.danger
             default: return Palette.muted
             }
         }()
-        MonoLabel(phase == "flicker" ? "flickering" : phase, color: color)
+        MonoLabel(phase == "flicker" ? "flickering" : phase == "train" ? "training" : phase, color: color)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .overlay(Capsule().strokeBorder(color.opacity(0.6), lineWidth: 1))

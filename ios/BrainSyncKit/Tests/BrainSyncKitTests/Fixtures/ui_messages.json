@@ -98,6 +98,58 @@
       "highlight_index": 1
     },
     {
+      "type": "show_page",
+      "list_id": "m2",
+      "page": 3,
+      "mode": "page",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "option",
+          "label": "Go outside",
+          "utterance": "Yes, let's go outside."
+        },
+        {
+          "slot": "s2",
+          "role": "option",
+          "label": "Not now",
+          "utterance": "Not right now."
+        },
+        {
+          "slot": "s3",
+          "role": "next",
+          "label": "More options",
+          "utterance": ""
+        }
+      ],
+      "text": "",
+      "options": [],
+      "highlight_index": null
+    },
+    {
+      "type": "show_page",
+      "list_id": "m2",
+      "page": 3,
+      "mode": "confirm",
+      "slots": [
+        {
+          "slot": "s1",
+          "role": "say",
+          "label": "Say it",
+          "utterance": ""
+        },
+        {
+          "slot": "s3",
+          "role": "back",
+          "label": "Back",
+          "utterance": ""
+        }
+      ],
+      "text": "Not right now.",
+      "options": [],
+      "highlight_index": null
+    },
+    {
       "type": "trial",
       "trial_id": 7,
       "phase": "cue"
@@ -121,6 +173,86 @@
       "type": "trial",
       "trial_id": 7,
       "phase": "paused"
+    },
+    {
+      "type": "trial",
+      "trial_id": 7,
+      "phase": "train"
+    },
+    {
+      "type": "training",
+      "slot": "s1",
+      "label": "left",
+      "cycle": 0,
+      "of": 30,
+      "accuracy": null,
+      "chance": null,
+      "message": ""
+    },
+    {
+      "type": "training",
+      "slot": "s1",
+      "label": "left",
+      "cycle": 12,
+      "of": 30,
+      "accuracy": null,
+      "chance": null,
+      "message": ""
+    },
+    {
+      "type": "training",
+      "slot": "s1",
+      "label": "left",
+      "cycle": 30,
+      "of": 30,
+      "accuracy": 0.83,
+      "chance": 0.3333,
+      "message": ""
+    },
+    {
+      "type": "training",
+      "slot": "s1",
+      "label": "left",
+      "cycle": 4,
+      "of": 30,
+      "accuracy": null,
+      "chance": null,
+      "message": "interrupted"
+    },
+    {
+      "type": "confidence",
+      "trial_id": 8,
+      "scores": {
+        "s1": 0.42,
+        "s2": 0.11,
+        "s3": -0.03
+      },
+      "raw": "s1",
+      "committed": null,
+      "lead": 0.31
+    },
+    {
+      "type": "confidence",
+      "trial_id": 8,
+      "scores": {
+        "s1": 0.47,
+        "s2": 0.1,
+        "s3": 0.02
+      },
+      "raw": "s1",
+      "committed": "s1",
+      "lead": 0.37
+    },
+    {
+      "type": "confidence",
+      "trial_id": 9,
+      "scores": {
+        "s1": 0.05,
+        "s3": 0.06
+      },
+      "raw": null,
+      "committed": null,
+      "lead": null
     },
     {
       "type": "highlight",

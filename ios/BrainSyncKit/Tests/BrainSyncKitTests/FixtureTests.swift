@@ -38,6 +38,8 @@ final class FixtureTests: XCTestCase {
             case .state(let m): encoded = try JSONEncoder().encode(m)
             case .transcript(let m): encoded = try JSONEncoder().encode(m)
             case .status(let m): encoded = try JSONEncoder().encode(m)
+            case .training(let m): encoded = try JSONEncoder().encode(m)
+            case .confidence(let m): encoded = try JSONEncoder().encode(m)
             case .unknown(let t):
                 XCTFail("\(t) decoded as unknown")
                 continue
@@ -50,7 +52,8 @@ final class FixtureTests: XCTestCase {
             XCTAssertTrue(jsonEqual(stripNulls(expected), stripNulls(actual)),
                           "\(type): \(expected) != \(actual)")
         }
-        XCTAssertEqual(seen, ["show_page", "trial", "highlight", "speak", "listen", "state", "transcript", "status"])
+        XCTAssertEqual(seen, ["show_page", "trial", "highlight", "speak", "listen", "state", "transcript", "status",
+                              "training", "confidence"])
     }
 
     func testServerMessageValues() throws {
@@ -88,6 +91,15 @@ final class FixtureTests: XCTestCase {
             }
         }
         XCTAssertEqual(modes, ["page", "confirm", "list"])
+        // c-VEP: a three-square page, every training state, and the trial phase "train".
+        XCTAssertTrue(decoded.contains { if case .showPage(let p) = $0 { return p.slots.count == 3 && p.mode == .page }; return false })
+        XCTAssertTrue(decoded.contains { if case .trial(let t) = $0 { return t.phase == .train }; return false })
+        let cards = decoded.compactMap { m -> TrainingCard? in
+            if case .training(let t) = m { return TrainingCard.make(t) }
+            return nil
+        }
+        XCTAssertEqual(Set(cards.map(\.tone)), ["look", "ok", "bad"])
+        XCTAssertTrue(decoded.contains { if case .confidence(let c) = $0 { return c.committed != nil }; return false })
         XCTAssertTrue(speakWithAudio && speakWithout)
         XCTAssertTrue(listenUntil && listenWindow && listenOff)
     }

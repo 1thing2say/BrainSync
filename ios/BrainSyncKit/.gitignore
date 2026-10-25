@@ -1,0 +1,3 @@
+# SwiftPM build products and Xcode package state (swift build / swift test)
+.build/
+.swiftpm/

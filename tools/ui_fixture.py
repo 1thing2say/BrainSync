@@ -2,8 +2,10 @@
 
 Builds every server -> partner page and partner page -> server message (PLAN.md section 6) from the
 pydantic models in app/schemas.py, each exactly as the server sends or accepts it
-(``model_dump(mode="json")``), with every variant the app has to handle: each show_page mode, speak
-with and without audio, each listen form and reason, each trial phase, each mic_report state.
+(``model_dump(mode="json")``), with every variant the app has to handle: each show_page mode (in
+f-VEP's four-target diamond and c-VEP's three-square row), speak with and without audio, each
+listen form and reason, each trial phase, each mic_report state, and c-VEP's training (running,
+done, failed) and confidence messages.
 
     python tools/ui_fixture.py           # write the fixture
     python tools/ui_fixture.py --check   # exit 1 if the committed fixture is stale
@@ -21,6 +23,7 @@ if __package__ in (None, ""):  # python tools/ui_fixture.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.schemas import (  # noqa: E402
+    Confidence,
     Highlight,
     Judgment,
     Key,
@@ -36,6 +39,7 @@ from app.schemas import (  # noqa: E402
     State,
     Stop,
     Transcript,
+    Training,
     Trial,
     TTSDone,
     UISlot,
@@ -103,7 +107,29 @@ def server_to_ui() -> list:
     ]
     assert {m.llm for m in statuses} == set(literal_values(UIStatus, "llm"))
     trials = [Trial(trial_id=7, phase=p) for p in literal_values(Trial, "phase")]
-    return [page, confirm, listing, *trials, Highlight(slot="s1"),
+    # c-VEP (the default config): option 1 on s1, option 2 on s2, NEXT on s3; confirm on s1 / s3.
+    code_page = ShowPage(list_id="m2", page=3, mode="page", slots=[
+        UISlot(slot="s1", role="option", label="Go outside", utterance="Yes, let's go outside."),
+        UISlot(slot="s2", role="option", label="Not now", utterance="Not right now."),
+        UISlot(slot="s3", role="next", label="More options"),
+    ])
+    code_confirm = ShowPage(list_id="m2", page=3, mode="confirm", text="Not right now.",
+                            slots=[UISlot(slot="s1", role="say", label="Say it"),
+                                   UISlot(slot="s3", role="back", label="Back")])
+    training = [
+        Training(slot="s1", label="left", cycle=0, of=30),
+        Training(slot="s1", label="left", cycle=12, of=30),
+        Training(slot="s1", label="left", cycle=30, of=30, accuracy=0.83, chance=0.3333),
+        Training(slot="s1", label="left", cycle=4, of=30, message="interrupted"),
+    ]
+    confidence = [
+        Confidence(trial_id=8, scores={"s1": 0.42, "s2": 0.11, "s3": -0.03}, raw="s1", lead=0.31),
+        Confidence(trial_id=8, scores={"s1": 0.47, "s2": 0.1, "s3": 0.02}, raw="s1",
+                   committed="s1", lead=0.37),
+        Confidence(trial_id=9, scores={"s1": 0.05, "s3": 0.06}),  # the confirm screen, no best yet
+    ]
+    return [page, confirm, listing, code_page, code_confirm, *trials, *training, *confidence,
+            Highlight(slot="s1"),
             Speak(text="Yes, let's go outside.", utterance_id="u-7", audio_url="/audio/3f2a9c"),
             Speak(text="Not right now.", utterance_id="u-8"),
             *listens,

@@ -21,6 +21,8 @@ const ViewCore = (() => {
 
   // ``mode`` is the shown page's mode: list mode has SAY / NEXT instead of a reply per target.
   function banner(name, detail, mode) {
+    // c-VEP: the BASELINE step trains ("Training: look at the left square, cycle 12/30").
+    if (name === "BASELINE" && /^Training/.test(detail || "")) return { text: detail, tone: "look" };
     let [text, tone] = BANNER[name] || [name, "idle"];
     if (name === "STIMULATING" && mode === "list") text = "Look at SAY or NEXT";
     // The spoken sentence has its own place on the page; other details follow the state.
@@ -95,7 +97,40 @@ const ViewCore = (() => {
     return { fraction, label: `${Math.floor(t)} s` };
   }
 
-  return { banner, micCard, health, progress, MIC_PROBLEMS };
+  // c-VEP: the bar under each square from a ``confidence`` message: the correlation clipped to
+  // 0..1 (a steady fill; scores are not probabilities, so no percent), the signed score, and
+  // whether the slot is this decision's best and the committed one.
+  function confidence(msg) {
+    const out = {};
+    for (const [slot, raw] of Object.entries((msg && msg.scores) || {})) {
+      const v = Number.isFinite(raw) ? raw : 0;
+      out[slot] = {
+        fraction: Math.min(1, Math.max(0, v)),
+        text: `${v < 0 ? "-" : "+"}${Math.abs(v).toFixed(2)}`,
+        best: slot === msg.raw,
+        committed: slot === msg.committed,
+      };
+    }
+    return out;
+  }
+
+  // c-VEP: the training card from a ``training`` message.
+  function training(msg) {
+    const of = msg.of > 0 ? msg.of : 1;
+    const fraction = Math.min(1, Math.max(0, (msg.cycle || 0) / of));
+    if (msg.accuracy !== null && msg.accuracy !== undefined) {
+      const chance = msg.chance !== null && msg.chance !== undefined
+        ? ` (chance ${Math.round(msg.chance * 100)} %)` : "";
+      return { title: "Template ready", detail: `${Math.round(msg.accuracy * 100)} % on held-out cycles${chance}`,
+               fraction: 1, tone: "ok", done: true };
+    }
+    if (msg.message) return { title: "Training failed", detail: msg.message, fraction, tone: "bad", done: true };
+    const where = msg.label ? `the ${msg.label} square` : "the first square";
+    return { title: `Training: look at ${where}`, detail: `cycle ${msg.cycle || 0} of ${of}`, fraction,
+             tone: "look", done: false };
+  }
+
+  return { banner, micCard, health, progress, confidence, training, MIC_PROBLEMS };
 })();
 
 if (typeof module !== "undefined") module.exports = ViewCore;

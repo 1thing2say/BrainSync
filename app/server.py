@@ -74,11 +74,12 @@ log = logging.getLogger("app.server")
 
 
 def screen_layout(cfg: AppConfig) -> str:
-    """The user's screen as the mirror draws it: "row" (c-VEP's three squares, or list mode's
-    two) or "diamond" (f-VEP page mode's four)."""
-    if cfg.stim.paradigm == "code" or cfg.menus.mode == "list":
+    """The user's screen as the mirror draws it: "cvep" (c-VEP's squares in a row, in slot
+    order, each kept in its place), "row" (list mode's SAY / NEXT) or "diamond" (f-VEP page
+    mode's four)."""
+    if cfg.menus.mode == "list":
         return "row"
-    return "diamond"
+    return "cvep" if cfg.stim.paradigm == "code" else "diamond"
 
 
 def ui_client(raw: str | None) -> str:

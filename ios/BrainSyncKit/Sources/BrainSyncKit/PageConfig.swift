@@ -15,6 +15,13 @@ public struct PageConfig: Decodable, Equatable {
     public var userName: String
     public var phoneUrl: String
     public var appLink: String
+    /// "code" (c-VEP) or "freq" (f-VEP).
+    public var paradigm: String
+    /// How the user's screen is laid out: "cvep" (squares in a row, in slot order), "diamond"
+    /// (f-VEP page mode) or "row" (list mode).
+    public var layout: String
+    /// Every slot of the user's screen, in order.
+    public var slots: [String]
 
     enum CodingKeys: String, CodingKey {
         case ttsRate = "tts_rate"
@@ -29,12 +36,15 @@ public struct PageConfig: Decodable, Equatable {
         case userName = "user_name"
         case phoneUrl = "phone_url"
         case appLink = "app_link"
+        case paradigm, layout, slots
     }
 
     public init(ttsRate: Double = 1.0, keyboardMode: Bool = false, sttMode: String = "always",
                 listenWindowS: Double = 10.0, sttGapS: Double = 1.2, sttMaxLineS: Double = 15.0,
                 sttEchoS: Double = 4.0, cueS: Double = 1.0, maxTrialS: Double = 10.0,
-                userName: String = "", phoneUrl: String = "", appLink: String = "") {
+                userName: String = "", phoneUrl: String = "", appLink: String = "",
+                paradigm: String = "freq", layout: String = "diamond",
+                slots: [String] = ["s1", "s2", "s3", "s4"]) {
         self.ttsRate = ttsRate
         self.keyboardMode = keyboardMode
         self.sttMode = sttMode
@@ -47,6 +57,9 @@ public struct PageConfig: Decodable, Equatable {
         self.userName = userName
         self.phoneUrl = phoneUrl
         self.appLink = appLink
+        self.paradigm = paradigm
+        self.layout = layout
+        self.slots = slots
     }
 
     public static let defaults = PageConfig()
@@ -66,6 +79,9 @@ public struct PageConfig: Decodable, Equatable {
         userName = (try? c.decodeIfPresent(String.self, forKey: .userName)) ?? d.userName
         phoneUrl = (try? c.decodeIfPresent(String.self, forKey: .phoneUrl)) ?? d.phoneUrl
         appLink = (try? c.decodeIfPresent(String.self, forKey: .appLink)) ?? d.appLink
+        paradigm = (try? c.decodeIfPresent(String.self, forKey: .paradigm)) ?? d.paradigm
+        layout = (try? c.decodeIfPresent(String.self, forKey: .layout)) ?? d.layout
+        slots = (try? c.decodeIfPresent([String].self, forKey: .slots)) ?? d.slots
     }
 
     public static func decode(_ data: Data) throws -> PageConfig {

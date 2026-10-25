@@ -47,6 +47,11 @@ final class AppModel {
     private(set) var trialStarted: Date?
     /// The partner's Mute, held by the server (the last listen message).
     private(set) var micMuted = false
+    /// c-VEP: the decoder's latest decision in this trial, as a bar per slot (cleared at each cue).
+    private(set) var confidence: [String: ConfidenceBar] = [:]
+    /// c-VEP: the training card, and the slot to look at while it runs; nil once a trial starts.
+    private(set) var training: TrainingCard?
+    private(set) var trainingSlot: String?
 
     // MARK: Local
 
@@ -250,6 +255,11 @@ final class AppModel {
             addLine(fromPartner: String(describing: msg.who) == "partner", text: msg.text)
         case .status(let msg):
             status = msg
+        case .training(let msg):
+            training = TrainingCard.make(msg)
+            trainingSlot = msg.slot
+        case .confidence(let msg):
+            confidence = ConfidenceBar.make(msg)
         case .unknown:
             break
         }
@@ -258,7 +268,11 @@ final class AppModel {
     private func setPhase(_ next: String) {
         if next == "flicker" && phase != "flicker" { trialStarted = Date() }
         if next != "flicker" { trialStarted = nil }
-        if next == "cue" { pickedSlot = nil }
+        if next == "cue" {
+            pickedSlot = nil
+            confidence = [:]
+        }
+        if next == "cue" || next == "flicker" { training = nil }
         phase = next
     }
 
@@ -399,6 +413,14 @@ final class AppModel {
 
     var keyboardMode: Bool { status?.keyboardMode ?? false }
 
+    /// How the user's screen is laid out (/api/config): "cvep" (c-VEP's squares in a row),
+    /// "diamond" (f-VEP page mode) or "row" (list mode).
+    var layout: String { config?.layout ?? PageConfig.defaults.layout }
+    /// Every slot of the user's screen, in order.
+    var screenSlots: [String] { config?.slots ?? PageConfig.defaults.slots }
+    /// Where a slot sits on the user's screen ("Left", "Top", ...).
+    func place(_ slot: String) -> String { ScreenPlace.name(slot, layout: layout, slots: screenSlots) }
+
     /// Settings' "Test the speaker": the phone's own voice says a fixed sentence. Not a reply
     /// (rule 2 is about replies), and only while no reply plays and the mic is off, so it never
     /// cuts a reply short and the mic never hears it as the partner.
@@ -538,6 +560,8 @@ struct Banner: Equatable {
 
     static func make(name: String, detail: String, mode: String?) -> Banner {
         if name.isEmpty { return Banner(text: "Connecting…", tone: .idle) }
+        // c-VEP: the BASELINE step trains ("Training: look at the left square, cycle 12/30").
+        if name == "BASELINE" && detail.hasPrefix("Training") { return Banner(text: detail, tone: .look) }
         let entry: (String, Tone) = table[name] ?? (name, .idle)
         var text = entry.0
         let tone = entry.1
