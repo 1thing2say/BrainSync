@@ -1,26 +1,28 @@
-// BrainSwipe browser mock: DOM, network and speech. The decisions (gaze, progress,
-// layout, rates) live in logic.js as pure functions; this file only wires them to the
-// page and to the server's API (/api/state, /api/events, /api/gaze, /api/swipe).
+// BrainSwipe browser mock: DOM, network and speech. The decisions (gaze, confidence,
+// layout, rates, training text) live in logic.js as pure functions; this file only wires
+// them to the page and to the server's API (/api/state, /api/events, /api/gaze,
+// /api/swipe).
 //
-// Nothing here makes anything flicker: the squares are static and only their streak
-// meters and outlines change, a few times a second at most.
+// Nothing here makes anything flicker: the three squares are static white and only
+// their outlines, badges and the confidence bars under them change, about once a code
+// cycle (1.05 s) at most.
 
 import * as L from "./logic.js";
 
 const $ = (id) => document.getElementById(id);
 const body = document.body;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-const FLASH_MS = 350;      // swipe.toml [card] flash_s
+const FLASH_MS = 350;      // swipe_cvep.toml [card] flash_s
 const MATCH_MS = 2200;
 const MUTE_KEY = "brainswipe.muted";
-const NOTE_EEG = "Browser mock: simulated EEG board, no flicker. The live demo uses the full-screen stimulus.";
+const NOTE_EEG = "Browser mock: c-VEP decoder on a simulated EEG board, no flicker. The live demo uses the full-screen stimulus.";
 const NOTE_KEYS = "Browser mock in keyboard mode: no EEG, no flicker. The live demo uses the full-screen stimulus.";
 
 const ui = {
   state: L.normalizeState(null),
   conn: "connecting",
   auto: false,
-  hover: null,          // "pass" | "like" | null (pointer)
+  hover: null,          // "pass" | "super" | "like" | null (pointer)
   keys: [],             // arrow keys held, in press order
   sentGaze: null,       // last gaze the server acknowledged (or we asked for)
   gazeChain: Promise.resolve(),
@@ -29,14 +31,16 @@ const ui = {
   lastSwipes: 0,
   firstSwipeT: null,    // performance clock (s) of the first swipe this page saw
   firstCount: 1,
-  lastWindow: null,
+  lastDecision: null,
+  settling: false,      // a new card is settling: its first cycles are ignored
+  cue: L.ABSTAIN,       // the swiped square keeps its cue box until the next decision
   shownCard: null,
   preloaded: new Set(),
-  flashTimers: [null, null],
+  flashTimers: [null, null, null],
   matchTimer: null,
 };
 
-const squares = [$("square-0"), $("square-1")];
+const squares = L.TARGETS.map((t) => $(`square-${t}`));
 
 // ---------------------------------------------------------------- persistence
 
@@ -61,6 +65,7 @@ function applyLayout() {
   r.setProperty("--pitch", `${lay.pitch}px`);
   r.setProperty("--card-w", `${lay.cardW}px`);
   r.setProperty("--card-h", `${lay.cardH}px`);
+  r.setProperty("--super-h", `${lay.superH}px`);
   r.setProperty("--stage-h", `${lay.stageH}px`);
 }
 
@@ -70,46 +75,39 @@ function setConn(conn) {
   ui.conn = conn;
   body.dataset.conn = conn;
   const text = conn === "live"
-    ? (ui.state.decoder ? "live · simulated EEG" : "live · keyboard mode (no decoder)")
+    ? (ui.state.decoder ? "live · c-VEP on simulated EEG" : "live · keyboard mode (no decoder)")
     : conn === "offline" ? "server not reachable, retrying…" : "connecting…";
   $("conn-text").textContent = text;
-}
-
-function renderPips() {
-  const v = ui.state.votes;
-  for (const sq of squares) {
-    const box = sq.querySelector(".square__pips");
-    if (box.childElementCount === v) continue;
-    box.replaceChildren(...Array.from({ length: v }, () => {
-      const pip = document.createElement("span");
-      pip.className = "pip";
-      return pip;
-    }));
-  }
 }
 
 function renderStatic() {
   const s = ui.state;
   const root = document.documentElement.style;
   root.setProperty("--pass", s.colors[L.PASS]);
+  root.setProperty("--super", s.colors[L.SUPER]);
   root.setProperty("--like", s.colors[L.LIKE]);
   body.dataset.decoder = String(s.decoder);
   // --no-decoder runs no simulated board, so the note must not claim one
   $("note").textContent = s.decoder ? NOTE_EEG : NOTE_KEYS;
-  for (const t of [L.PASS, L.LIKE]) {
+  for (const t of L.TARGETS) {
     $(`label-text-${t}`).textContent = s.labels[t];
     $(`label-${t}`).setAttribute("aria-label", `Swipe ${s.labels[t]} now`);
-    $(`freq-${t}`).textContent = `${formatHz(s.freqs[t])} Hz`;
-    $(`bar-name-${t}`).textContent = s.labels[t];
+    $(`lag-${t}`).textContent = `lag ${s.lags[t]} frames`;
     squares[t].setAttribute("aria-label",
-      `${s.labels[t]} square, ${formatHz(s.freqs[t])} Hz (static, no flicker)`);
+      `${s.labels[t]} square, code lag ${s.lags[t]} frames (static, no flicker)`);
   }
   $("btn-auto").disabled = !s.decoder;
-  renderPips();
 }
 
-function formatHz(f) {
-  return Number.isInteger(f) ? String(f) : f.toFixed(1);
+function renderTraining() {
+  const s = ui.state;
+  const t = s.training;
+  const active = s.decoder && t.active;
+  body.dataset.training = String(active);
+  $("training").setAttribute("aria-hidden", String(!active));
+  $("training-line").textContent = `Look at the ${s.labels[t.target]} square · cycle ${t.cycle}/${t.of}`;
+  $("training-fill").style.setProperty("--w", String(L.trainingProgress(t)));
+  $("train-line").textContent = s.decoder ? L.trainingText(t, s.labels) : "";
 }
 
 function renderCounts(counts, bumped = []) {
@@ -118,7 +116,7 @@ function renderCounts(counts, bumped = []) {
   for (const item of L.formatCounts(counts, rate)) {
     const el = $(`stat-${item.key}`);
     if (el && el.textContent !== item.value) el.textContent = item.value;
-    if (bumped.includes(item.key)) bump(el.parentElement);
+    if (el && bumped.includes(item.key)) bump(el.parentElement);
   }
 }
 
@@ -129,39 +127,44 @@ function bump(el) {
   el.classList.add("is-bumped");
 }
 
+/** The square the simulated eyes are on (the server's `true`), or -1. */
+function eyesOn() {
+  if (ui.state.training.active) return ui.state.training.target;
+  return ui.lastDecision ? Number(ui.lastDecision.true) : L.ABSTAIN;
+}
+
 function renderGaze() {
   const g = ui.state.gaze;
   $("your-gaze").textContent = L.gazeLabel(g, ui.state.labels);
-  const truth = ui.lastWindow ? Number(ui.lastWindow.true) : L.ABSTAIN;
-  for (const t of [L.PASS, L.LIKE]) {
-    const looking = g === L.SIDES[t] || (g === "auto" && truth === t);
+  const truth = eyesOn();
+  for (const t of L.TARGETS) {
+    const looking = ui.state.training.active ? truth === t
+      : g === L.SIDES[t] || (g === "auto" && truth === t);
     squares[t].classList.toggle("is-gazed", ui.state.decoder && looking);
   }
+  $("true-gaze").textContent = L.targetLabel(truth, ui.state.labels, "card (no response)");
   $("btn-auto").setAttribute("aria-pressed", String(ui.auto));
 }
 
-function renderWindow(win) {
-  const states = L.squareStates(win, ui.state.votes);
-  for (const t of [L.PASS, L.LIKE]) {
-    const sq = squares[t];
-    const st = states[t];
-    sq.style.setProperty("--fill", String(st.fill));
+function renderSquares() {
+  const t = ui.state.training;
+  const states = L.squareStates(ui.lastDecision, {
+    training: ui.state.decoder && t.active, target: t.target,
+    settling: ui.settling, cue: ui.cue,
+  });
+  for (const k of L.TARGETS) {
+    const sq = squares[k];
+    const st = states[k];
     sq.classList.toggle("is-settling", st.settling);
     sq.classList.toggle("is-cue", st.cue);
-    sq.querySelectorAll(".pip").forEach((pip, i) => pip.classList.toggle("is-on", i < st.steps));
+    sq.classList.toggle("is-best", st.best);
+    sq.classList.toggle("is-committed", st.committed);
+    $(`meter-fill-${k}`).style.setProperty("--w", String(st.level));
+    $(`meter-val-${k}`).textContent = L.scoreText(st.score) + (st.best ? " <" : "");
+    $(`meter-${k}`).classList.toggle("is-best", st.best);
   }
-  if (!win) return;
-  const bars = L.scoreBars(win.scores);
-  for (const t of [L.PASS, L.LIKE]) {
-    $(`bar-${t}`).style.setProperty("--w", String(bars[t]));
-    const v = Array.isArray(win.scores) ? Number(win.scores[t]) : NaN;
-    $(`bar-val-${t}`).textContent = Number.isFinite(v) ? v.toFixed(2) : "–";
-  }
-  $("true-gaze").textContent = L.targetLabel(win.true, ui.state.labels, "card (no tone)");
-  const p = Number(win.pending);
-  $("swiper-state").textContent = win.stale ? "settling (cooldown)"
-    : p === L.PASS || p === L.LIKE ? `${ui.state.labels[p]} ${win.streak}/${win.votes}`
-    : "no streak";
+  $("status-line").textContent = t.active ? "decoding starts after training"
+    : ui.settling ? "new card: settling" : L.statusText(ui.lastDecision, ui.state.labels);
 }
 
 // ---------------------------------------------------------------- cards
@@ -179,7 +182,7 @@ function makeCard(k) {
   img.decoding = "async";
   img.draggable = false;
   card.append(img);
-  for (const t of [L.PASS, L.LIKE]) {
+  for (const t of L.TARGETS) {
     const stamp = document.createElement("span");
     stamp.className = `card__stamp card__stamp--${L.SIDES[t]}`;
     stamp.setAttribute("aria-hidden", "true");
@@ -245,9 +248,10 @@ function flashSquare(target) {
   ui.flashTimers[target] = window.setTimeout(() => sq.classList.remove("is-flash"), FLASH_MS);
 }
 
-function showMatch(name) {
+function showMatch(banner) {
   const m = $("match");
-  $("match-name").textContent = `${name} liked you back`;
+  $("match-title").textContent = banner.title;
+  $("match-name").textContent = banner.line;
   m.classList.add("is-shown");
   window.clearTimeout(ui.matchTimer);
   ui.matchTimer = window.setTimeout(() => m.classList.remove("is-shown"), MATCH_MS);
@@ -304,23 +308,46 @@ function applyState(raw, fresh = false) {
   if (s.n_cards > 0 && (prevCard !== s.card || !$("cards").querySelector(".card"))) showCard(s.card);
   preloadCards();
   renderCounts(s.counts);
+  ui.lastDecision = null;
+  renderTraining();
+  renderSquares();
   renderGaze();
-  renderWindow(null);
   applyLayout();
   syncGaze();   // a restarted server forgets our gaze
 }
 
-function onWindow(win) {
-  ui.lastWindow = win;
-  if (L.GAZES.includes(win.gaze) && win.gaze !== ui.state.gaze) ui.state.gaze = win.gaze;
-  renderWindow(win);
+function onTrain(p) {
+  const t = ui.state.training;
+  ui.state.training = L.normalizeTraining({ ...t, active: true, cycle: p.cycle, of: p.of });
+  renderTraining();
+  renderSquares();
   renderGaze();
-  if (win.stale === true) {
-    // counts.stale only arrives with state and swipes; count along in between (the next
-    // swipe's counts replace this estimate)
-    ui.state.counts.stale += 1;
+}
+
+function onTrained(p) {
+  ui.state.training = L.normalizeTraining({
+    ...ui.state.training, active: false, cycle: p.cycles, of: p.cycles,
+    accuracy: p.accuracy, chance: p.chance,
+  });
+  ui.settling = true;   // the eyes leave the training square for the card
+  renderTraining();
+  renderSquares();
+  renderGaze();
+  $("live").textContent = L.trainingText(ui.state.training, ui.state.labels);
+}
+
+function onDecision(d) {
+  ui.lastDecision = d;
+  ui.settling = false;
+  ui.cue = L.ABSTAIN;
+  if (L.GAZES.includes(d.gaze) && d.gaze !== ui.state.gaze) ui.state.gaze = d.gaze;
+  const stale = Number(d.stale);
+  if (Number.isFinite(stale) && stale !== ui.state.counts.stale) {
+    ui.state.counts.stale = stale;
     renderCounts(ui.state.counts);
   }
+  renderSquares();
+  renderGaze();
 }
 
 function onSwipe(p) {
@@ -336,17 +363,18 @@ function onSwipe(p) {
   ui.lastSwipes = counts.swipes;
   ui.state.counts = counts;
   ui.state.card = Number(p.card);
-  const target = Number(p.target) === L.LIKE ? L.LIKE : L.PASS;
+  const target = L.TARGETS.includes(Number(p.target)) ? Number(p.target) : L.PASS;
   flashSquare(target);
   swipeCard(target, ui.state.card);
-  renderWindow(null);   // the Swiper restarts its streak on every card change
+  // the decoder starts over on every card: its first cycles are settling
+  ui.settling = ui.state.decoder && !ui.state.training.active;
+  ui.cue = target;
+  renderSquares();
   renderCounts(counts, bumped);
   say(p.voice);
   $("live").textContent = L.swipeAnnouncement(p, ui.state.deck);
-  if (p.match) {
-    const who = ui.state.deck[p.swiped];
-    showMatch(who ? who.name : "Someone");
-  }
+  const banner = L.matchBanner(p, ui.state.deck);
+  if (banner) showMatch(banner);
 }
 
 function onGaze(p) {
@@ -395,7 +423,9 @@ function connect() {
   source = es;
   es.addEventListener("open", () => { attempt = 0; setConn("live"); });
   es.addEventListener("state", handler((d) => { applyState(d, true); setConn("live"); }));
-  es.addEventListener("window", handler(onWindow));
+  es.addEventListener("train", handler(onTrain));
+  es.addEventListener("trained", handler(onTrained));
+  es.addEventListener("decision", handler(onDecision));
   es.addEventListener("swipe", handler(onSwipe));
   es.addEventListener("gaze", handler(onGaze));
   es.addEventListener("error", () => {
@@ -466,7 +496,7 @@ function onKeyDown(e) {
     if (!e.repeat) swipeNow(t);
     return;
   }
-  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+  if (L.isGazeKey(e.key)) {
     e.preventDefault();
     if (e.repeat) return;
     ui.keys = ui.keys.filter((k) => k !== e.key).concat(e.key);
@@ -480,7 +510,7 @@ function onKeyDown(e) {
 }
 
 function onKeyUp(e) {
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") {
+  if (!L.isGazeKey(e.key)) {
     updateVoiceHint();
     return;
   }
@@ -548,7 +578,7 @@ function bindInputs() {
     }
     sq.addEventListener("contextmenu", (e) => e.preventDefault());
   }
-  for (const t of [L.PASS, L.LIKE]) $(`label-${t}`).addEventListener("click", () => swipeNow(t));
+  for (const t of L.TARGETS) $(`label-${t}`).addEventListener("click", () => swipeNow(t));
   $("btn-auto").addEventListener("click", toggleAuto);
   $("btn-mute").addEventListener("click", toggleMute);
   let pending = 0;
@@ -571,8 +601,9 @@ function start() {
   renderStatic();
   renderMute();
   renderCounts(ui.state.counts);
+  renderTraining();
+  renderSquares();
   renderGaze();
-  renderWindow(null);
   setConn("connecting");
   applyLayout();
   bindInputs();
