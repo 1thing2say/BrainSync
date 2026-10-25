@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # build-llama.sh - build llama.cpp for aarch64, then check it (builder only).
 #
-# Usage: scripts/builder.sh --cross run scripts/build-llama.sh compile [--force]
+# Usage: scripts/builder.sh --cross run scripts/build-llama.sh compile [--cpu-only] [--force]
 #        scripts/builder.sh run scripts/build-llama.sh check [--force]
 # scripts/build.sh llama runs both. Pins and flags: llama/llama.env.
+# --cpu-only skips step 3: build/llama then holds cpu/ alone, its llama.env
+# says PARTS=cpu, check skips the CUDA backend, and brainsyncos-llama-cuda
+# cannot be packaged from it. That is how the x86-64 laptop hands the CPU
+# tree to the Mac (docs/phase3-handoff.md).
 #
 # compile runs in the amd64 cross-builder (docker/Dockerfile.cross-builder):
 # on an x86-64 host that compiles at native speed, where the arm64 builder
@@ -61,9 +65,11 @@ case "$mode" in
     *) die "usage: build-llama.sh compile|check [--force] (see --help)" ;;
 esac
 force=0
+cpu_only=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --force) force=1; shift ;;
+        --cpu-only) cpu_only=1; shift ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -139,10 +145,14 @@ c_compile() {
     [ "$(uname -m)" = x86_64 ] || die "compile runs in the amd64 cross-builder (scripts/builder.sh --cross run ...)"
     require_cmd cmake ninja aarch64-linux-gnu-g++-14 aarch64-linux-gnu-strip aarch64-linux-gnu-objdump python3 curl
     OBJDUMP=aarch64-linux-gnu-objdump
-    [ -x /usr/local/cuda-13.2/bin/nvcc ] && /usr/local/cuda-13.2/bin/nvcc --version | grep -q "V$CUDA_NVCC_VERSION\$" \
-        || die "the cross-builder has no nvcc $CUDA_NVCC_VERSION"
+    parts=cpu,cuda
+    [ "$cpu_only" = 0 ] || parts=cpu
+    if [ "$cpu_only" = 0 ]; then
+        [ -x /usr/local/cuda-13.2/bin/nvcc ] && /usr/local/cuda-13.2/bin/nvcc --version | grep -q "V$CUDA_NVCC_VERSION\$" \
+            || die "the cross-builder has no nvcc $CUDA_NVCC_VERSION"
+    fi
     inputs="$(inputs_sha256)"
-    if [ "$force" = 0 ] && sums_ok && grep -qx "INPUTS_SHA256=$inputs" "$OUT/llama.env"; then
+    if [ "$force" = 0 ] && sums_ok && grep -qx "INPUTS_SHA256=$inputs" "$OUT/llama.env" && grep -qx "PARTS=$parts" "$OUT/llama.env"; then
         log "up to date (${OUT#$BRAINSYNCOS_ROOT/}/llama.env, inputs $inputs)"
         return 0
     fi
@@ -178,7 +188,7 @@ c_compile() {
     log "CPU build: $(grep -c '^\[' "$W/cpu-build.log" || true) steps with ${BSOS_JOBS:-1} jobs in $cpu_s s ($(grep -ci 'warning:' "$W/cpu-build.log" || true) compiler warnings)"
 
     TREE="$W/out"
-    mkdir -p "$TREE/cpu" "$TREE/cuda"
+    mkdir -p "$TREE/cpu"
     cp -a "$inst$LLAMA_PREFIX/." "$TREE/cpu/"
     rm -rf "$TREE/cpu/include" "$TREE/cpu/lib/cmake" "$TREE/cpu/lib/pkgconfig"
     # Unversioned lib*.so links are for linking against the libraries; nothing loads them.
@@ -195,32 +205,36 @@ c_compile() {
     elf_files "$TREE/cpu" | while IFS= read -r f; do aarch64-linux-gnu-strip --strip-unneeded "$f"; done
 
     # 3. CUDA build: only the backend, against the same base library.
-    bcuda="$W/build-cuda"
-    common+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.2/bin/nvcc" "-DCMAKE_CUDA_FLAGS=-Xcompiler=$map")
-    while IFS= read -r f; do common+=("$f"); done < <(cmake_flags "$CUDA_CMAKE_FLAGS")
-    t0="$(date +%s)"
-    cmake -B "$bcuda" "${common[@]}" > "$W/cuda-cmake.log" 2>&1 || { tail -30 "$W/cuda-cmake.log" >&2; die "CUDA configure failed"; }
-    cmake --build "$bcuda" --parallel "${BSOS_JOBS:-1}" --target "$CUDA_TARGET" > "$W/cuda-build.log" 2>&1 \
-        || { tail -40 "$W/cuda-build.log" >&2; die "CUDA build failed"; }
-    cuda_s=$(( $(date +%s) - t0 ))
-    log "CUDA build: $(grep -c '\.cu\.o$' "$W/cuda-build.log" || true) CUDA objects with ${BSOS_JOBS:-1} jobs in $cuda_s s ($(grep -ci 'warning' "$W/cuda-build.log" || true) warning lines)"
-    f="$(find "$bcuda" -name "lib$CUDA_TARGET.so" -type f | head -n 1)"
-    [ -n "$f" ] || die "the CUDA build produced no lib$CUDA_TARGET.so"
-    install -m 644 "$f" "$TREE/cuda/lib$CUDA_TARGET.so"
-    aarch64-linux-gnu-strip --strip-unneeded "$TREE/cuda/lib$CUDA_TARGET.so"
-    base_a="$(find "$TREE/cpu/lib" -maxdepth 1 -type f -name 'libggml-base.so.*')"
-    base_b="$(find "$bcuda" -type f -name "$(basename "$base_a")" | head -n 1)"
-    [ -n "$base_b" ] || die "the CUDA build has no $(basename "$base_a")"
-    cp "$base_b" "$W/base-b"
-    aarch64-linux-gnu-strip --strip-unneeded "$W/base-b"
-    cmp -s "$base_a" "$W/base-b" || die "the CUDA build's $(basename "$base_a") differs from the CPU build's"
-    log "libggml-base: the same bytes in the CPU and the CUDA build"
+    cuda_s=
+    if [ "$cpu_only" = 0 ]; then
+        bcuda="$W/build-cuda"
+        mkdir -p "$TREE/cuda"
+        common+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.2/bin/nvcc" "-DCMAKE_CUDA_FLAGS=-Xcompiler=$map")
+        while IFS= read -r f; do common+=("$f"); done < <(cmake_flags "$CUDA_CMAKE_FLAGS")
+        t0="$(date +%s)"
+        cmake -B "$bcuda" "${common[@]}" > "$W/cuda-cmake.log" 2>&1 || { tail -30 "$W/cuda-cmake.log" >&2; die "CUDA configure failed"; }
+        cmake --build "$bcuda" --parallel "${BSOS_JOBS:-1}" --target "$CUDA_TARGET" > "$W/cuda-build.log" 2>&1 \
+            || { tail -40 "$W/cuda-build.log" >&2; die "CUDA build failed"; }
+        cuda_s=$(( $(date +%s) - t0 ))
+        log "CUDA build: $(grep -c '\.cu\.o$' "$W/cuda-build.log" || true) CUDA objects with ${BSOS_JOBS:-1} jobs in $cuda_s s ($(grep -ci 'warning' "$W/cuda-build.log" || true) warning lines)"
+        f="$(find "$bcuda" -name "lib$CUDA_TARGET.so" -type f | head -n 1)"
+        [ -n "$f" ] || die "the CUDA build produced no lib$CUDA_TARGET.so"
+        install -m 644 "$f" "$TREE/cuda/lib$CUDA_TARGET.so"
+        aarch64-linux-gnu-strip --strip-unneeded "$TREE/cuda/lib$CUDA_TARGET.so"
+        base_a="$(find "$TREE/cpu/lib" -maxdepth 1 -type f -name 'libggml-base.so.*')"
+        base_b="$(find "$bcuda" -type f -name "$(basename "$base_a")" | head -n 1)"
+        [ -n "$base_b" ] || die "the CUDA build has no $(basename "$base_a")"
+        cp "$base_b" "$W/base-b"
+        aarch64-linux-gnu-strip --strip-unneeded "$W/base-b"
+        cmp -s "$base_a" "$W/base-b" || die "the CUDA build's $(basename "$base_a") differs from the CPU build's"
+        log "libggml-base: the same bytes in the CPU and the CUDA build"
+    fi
 
     # 4. Check every ELF file.
     find "$TREE/cpu" -type f -print0 | while IFS= read -r -d '' f; do "$OBJDUMP" -p "$f" 2> /dev/null | awk '$1 == "SONAME" {print $2}'; done \
         | LC_ALL=C sort -u > "$W/sonames"
     elf_files "$TREE/cpu" | while IFS= read -r f; do check_elf "$f" ""; done
-    check_elf "$TREE/cuda/lib$CUDA_TARGET.so" "$CUDA_RE"
+    [ "$cpu_only" = 1 ] || check_elf "$TREE/cuda/lib$CUDA_TARGET.so" "$CUDA_RE"
     ! grep -rlq -e "$W" -e /usr/local/cuda "$TREE" || die "a file holds a build path: $(grep -rl -e "$W" -e /usr/local/cuda "$TREE" | head -n 3)"
     install -m 644 "$src/LICENSE" "$TREE/LICENSE"
 
@@ -240,7 +254,12 @@ c_compile() {
         echo "CUDA_RUNTIME=$CUDA_RUNTIME"
         echo "TOOLCHAIN=gcc-$(aarch64-linux-gnu-gcc-14 -dumpfullversion),nvcc-$CUDA_NVCC_VERSION,cmake-$(cmake --version | awk 'NR==1 {print $3}')"
         echo "NEEDED_CPU=$(elf_files "$TREE/cpu" | while IFS= read -r f; do needed "$f"; done | grep -Fvx -f "$W/sonames" | LC_ALL=C sort -u | paste -sd, -)"
-        echo "NEEDED_CUDA=$(needed "$TREE/cuda/lib$CUDA_TARGET.so" | grep -Fvx -f "$W/sonames" | LC_ALL=C sort -u | paste -sd, -)"
+        echo "PARTS=$parts"
+        if [ "$cpu_only" = 0 ]; then
+            echo "NEEDED_CUDA=$(needed "$TREE/cuda/lib$CUDA_TARGET.so" | grep -Fvx -f "$W/sonames" | LC_ALL=C sort -u | paste -sd, -)"
+        else
+            echo "NEEDED_CUDA="
+        fi
         echo "GLIBC_MAX=$(find "$TREE" -type f -print0 | xargs -0 "$OBJDUMP" -T 2> /dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)"
         echo "GLIBCXX_MAX=$(find "$TREE" -type f -print0 | xargs -0 "$OBJDUMP" -T 2> /dev/null | grep -o 'GLIBCXX_[0-9.]*' | sed 's/GLIBCXX_//' | sort -uV | tail -n 1)"
         echo "CPU_SECONDS=$cpu_s"
@@ -252,7 +271,11 @@ c_compile() {
     cp -a "$TREE" "$OUT.new"
     force_rm_tree "$OUT"
     mv "$OUT.new" "$OUT"
-    log "${OUT#$BRAINSYNCOS_ROOT/}: $(du -sh "$OUT/cpu" | cut -f1) CPU tree, $(file_size "$OUT/cuda/lib$CUDA_TARGET.so") bytes libggml-cuda.so; SHA256SUMS $(sha256_of "$OUT/SHA256SUMS")"
+    if [ "$cpu_only" = 0 ]; then
+        log "${OUT#$BRAINSYNCOS_ROOT/}: $(du -sh "$OUT/cpu" | cut -f1) CPU tree, $(file_size "$OUT/cuda/lib$CUDA_TARGET.so") bytes libggml-cuda.so; SHA256SUMS $(sha256_of "$OUT/SHA256SUMS")"
+    else
+        log "${OUT#$BRAINSYNCOS_ROOT/}: $(du -sh "$OUT/cpu" | cut -f1) CPU tree, no CUDA backend (--cpu-only); SHA256SUMS $(sha256_of "$OUT/SHA256SUMS")"
+    fi
 }
 
 # --- check --------------------------------------------------------------------
@@ -348,34 +371,40 @@ c_check() {
     log "generation: 8 tokens from /completion ($(cat "$W/content")), /v1/messages answers, 401 without the key; $backend"
 
     # The CUDA backend against NVIDIA's Jetson runtime.
-    cuda="$W/cuda"
-    mkdir -p "$cuda"
-    for deb in "$TEST_CUDART_URL|$TEST_CUDART_SHA256" "$TEST_CUBLAS_URL|$TEST_CUBLAS_SHA256"; do
-        x="$DOWNLOADS_DIR/llama-test/$(basename "${deb%%|*}")"
-        fetch "${deb%%|*}" "$x" "${deb#*|}"
-        dpkg-deb -x "$x" "$cuda"
-    done
-    lib="$(dirname "$(find "$cuda" -name 'libcudart.so.13' | head -n 1)")"
-    [ -f "$lib/libcublas.so.13" ] || die "the Jetson runtime debs hold no libcublas.so.13 next to libcudart.so.13"
-    f="$OUT/cuda/libggml-cuda.so"
-    check_elf "$f" "$CUDA_RE"
-    miss="$(ldd "$f" 2>&1 | awk '/not found/ {print $1}' | LC_ALL=C sort | paste -sd' ' -)"
-    [ "$miss" = "libcublas.so.13 libcudart.so.13" ] || [ "$miss" = "libcublas.so.13 libcublasLt.so.13 libcudart.so.13" ] \
-        || die "without the CUDA runtime, libggml-cuda.so should miss only cudart and cublas, misses: $miss"
-    out="$(LD_LIBRARY_PATH="$lib" ldd "$f" 2>&1)"
-    ! printf '%s\n' "$out" | grep -q 'not found' || die "ldd libggml-cuda.so with NVIDIA's runtime: $(printf '%s\n' "$out" | grep 'not found')"
-    cp "$f" "$TREE/lib/ggml/"
-    LD_LIBRARY_PATH="$lib" "$TREE/bin/llama-server" --list-devices > "$W/devices.log" 2>&1 \
-        || { cat "$W/devices.log" >&2; die "llama-server --list-devices fails with the CUDA backend in lib/ggml"; }
-    grep -q 'ggml_cuda_init: failed to initialize CUDA' "$W/devices.log" \
-        || { cat "$W/devices.log" >&2; die "the CUDA backend was not loaded and initialised"; }
-    LD_LIBRARY_PATH="$lib" serve "$W/server-cuda.log"
-    out="$(curl -sf -H "Authorization: Bearer $(cat "$W/api-key")" -H 'Content-Type: application/json' \
-        -d '{"prompt": "One, two,", "n_predict": 4, "temperature": 0}' "http://127.0.0.1:$PORT/completion")" \
-        || die "/completion failed with the CUDA backend present"
-    stop_server
-    cuda="$(grep -m1 -o 'ggml_cuda_init: failed to initialize CUDA: [^"]*' "$W/devices.log")"
-    log "CUDA backend: ldd resolves it against cuda-cudart-13-2 and libcublas-13-2; loaded with no GPU ($cuda), generation falls back to the CPU"
+    if grep -qx PARTS=cpu "$OUT/llama.env"; then
+        cuda=not-built
+        log "CUDA backend: not built here (PARTS=cpu)"
+    else
+        cuda="$W/cuda"
+        mkdir -p "$cuda"
+        for deb in "$TEST_CUDART_URL|$TEST_CUDART_SHA256" "$TEST_CUBLAS_URL|$TEST_CUBLAS_SHA256"; do
+            x="$DOWNLOADS_DIR/llama-test/$(basename "${deb%%|*}")"
+            fetch "${deb%%|*}" "$x" "${deb#*|}"
+            dpkg-deb -x "$x" "$cuda"
+        done
+        lib="$(dirname "$(find "$cuda" -name 'libcudart.so.13' | head -n 1)")"
+        [ -f "$lib/libcublas.so.13" ] || die "the Jetson runtime debs hold no libcublas.so.13 next to libcudart.so.13"
+        f="$OUT/cuda/libggml-cuda.so"
+        check_elf "$f" "$CUDA_RE"
+        miss="$(ldd "$f" 2>&1 | awk '/not found/ {print $1}' | LC_ALL=C sort | paste -sd' ' -)"
+        [ "$miss" = "libcublas.so.13 libcudart.so.13" ] || [ "$miss" = "libcublas.so.13 libcublasLt.so.13 libcudart.so.13" ] \
+            || die "without the CUDA runtime, libggml-cuda.so should miss only cudart and cublas, misses: $miss"
+        out="$(LD_LIBRARY_PATH="$lib" ldd "$f" 2>&1)"
+        ! printf '%s\n' "$out" | grep -q 'not found' || die "ldd libggml-cuda.so with NVIDIA's runtime: $(printf '%s\n' "$out" | grep 'not found')"
+        cp "$f" "$TREE/lib/ggml/"
+        LD_LIBRARY_PATH="$lib" "$TREE/bin/llama-server" --list-devices > "$W/devices.log" 2>&1 \
+            || { cat "$W/devices.log" >&2; die "llama-server --list-devices fails with the CUDA backend in lib/ggml"; }
+        grep -q 'ggml_cuda_init: failed to initialize CUDA' "$W/devices.log" \
+            || { cat "$W/devices.log" >&2; die "the CUDA backend was not loaded and initialised"; }
+        LD_LIBRARY_PATH="$lib" serve "$W/server-cuda.log"
+        out="$(curl -sf -H "Authorization: Bearer $(cat "$W/api-key")" -H 'Content-Type: application/json' \
+            -d '{"prompt": "One, two,", "n_predict": 4, "temperature": 0}' "http://127.0.0.1:$PORT/completion")" \
+            || die "/completion failed with the CUDA backend present"
+        stop_server
+        cuda="$(grep -m1 -o 'ggml_cuda_init: failed to initialize CUDA: [^"]*' "$W/devices.log")"
+        log "CUDA backend: ldd resolves it against cuda-cudart-13-2 and libcublas-13-2; loaded with no GPU ($cuda), generation falls back to the CPU"
+        cuda=loads,no-gpu-fallback
+    fi
 
     {
         echo "# written by scripts/build-llama.sh check; plain KEY=value."
@@ -383,7 +412,7 @@ c_check() {
         echo "VERIFIED_VERSION=$LLAMA_VERSION-b$LLAMA_BUILD_NUMBER-${LLAMA_COMMIT:0:7}"
         echo "VERIFIED_CPU_BACKEND=$backend"
         echo "VERIFIED_TOKENS=$tok"
-        echo "VERIFIED_CUDA=loads,no-gpu-fallback"
+        echo "VERIFIED_CUDA=$cuda"
         echo "CHECK_REV=${BSOS_GIT_REV:-unknown}"
     } > "$OUT/check.env.tmp"
     mv "$OUT/check.env.tmp" "$OUT/check.env"
