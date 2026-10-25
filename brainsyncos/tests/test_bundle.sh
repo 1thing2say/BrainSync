@@ -22,7 +22,7 @@
 #   bundle-install   in the builder (tests/bundle-checks.sh install): install.sh
 #                    in NVIDIA's real target base layer (needs the base ISO and
 #                    a repository with the CUDA runtime)
-#   shellcheck       the four scripts (koalaman/shellcheck:v0.10.0, offline)
+#   lint             the four scripts through shellcheck (koalaman/shellcheck:v0.10.0, offline)
 # Everything goes to build/tmp/bundle-test/ (deleted at the end unless --keep;
 # not build/tmp/bundle/, which make-bundle.sh stages in and deletes).
 # Per-check logs: build/test-logs/bundle/. BSOS_TEST_ONLY=NAME,... runs only
@@ -185,6 +185,6 @@ if [ -s "$TAR" ]; then
 else
     log "no bundle built: skipping the contents, tar, refusal and install checks"
 fi
-check shellcheck           t_shellcheck
+check lint                 t_shellcheck
 
 finish "Install bundle"
