@@ -63,9 +63,11 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..classify import SPATIAL_FILTERS
 from ..envfile import load_env_file
 from ..eog import GazeDecoder
-from ..recordings import EOG_MONTAGE
+from ..online import TRAIN_WINDOW_S, trained_from_recording
+from ..recordings import EOG_MONTAGE, POSTERIOR
 from ..vep.live import TRAIN_CYCLES
 from . import protocol as P
 from .decoding import DecoderBank
@@ -389,15 +391,16 @@ def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
     return CerelogBoard(serial_port=args.serial_port, ch_names=names)
 
 
-def make_bank(args: argparse.Namespace, board: Any) -> Any:
-    """The decoder: a CodeBank (c-VEP, trains itself) in code mode, else a DecoderBank."""
+def make_bank(args: argparse.Namespace, board: Any, trained: Any = None) -> Any:
+    """The decoder: a CodeBank (c-VEP, trains itself) in code mode, else a DecoderBank (FBCCA,
+    or ``--decoder-model`` / ``trained`` (``--trained``), with the ``--eog`` gaze prior)."""
     if getattr(args, "paradigm", "freq") == "code":
         from .coding import CodeBank
         return CodeBank(board.fs, ch_names=board.ch_names, refresh=args.refresh_rates[0],
                         train_cycles=args.train_cycles)
     gaze = GazeDecoder(board.fs, board.ch_names) if getattr(args, "eog", False) else None
     return DecoderBank(board.fs, ch_names=board.ch_names,
-                       model=getattr(args, "decoder_model", None), gaze=gaze)
+                       model=getattr(args, "decoder_model", None), gaze=gaze, trained=trained)
 
 
 # -- command line -------------------------------------------------------------------------
@@ -447,6 +450,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibrate-s", type=float, default=CALIBRATE_S,
                    help=f"freq mode: rest-baseline seconds for each new controller (default "
                         f"{CALIBRATE_S:g}; at least about 3.75)")
+    p.add_argument("--trained", metavar="CUED_NPZ", type=Path, default=None,
+                   help="freq mode: decode with a spatial filter fitted on this cued recording (its "
+                        "targets must include every --freqs frequency, same phases and rate) "
+                        "instead of the training-free FBCCA")
+    p.add_argument("--trained-method", default="etrca-sf", choices=list(SPATIAL_FILTERS),
+                   help="which spatial filter --trained fits (default etrca-sf; a template "
+                        "classifier is saved by brainsync.calibrate and loaded with "
+                        "--decoder-model instead)")
+    p.add_argument("--trained-window", type=float, default=TRAIN_WINDOW_S, metavar="S",
+                   help=f"training window per trial in seconds, clipped to the recorded one "
+                        f"(default {TRAIN_WINDOW_S:g}: short enough that a confirmed pick's "
+                        f"window, gate to commit, can be learnt during the session)")
     p.add_argument("--refresh-rates", metavar="HZ,...", default=None,
                    help=f"display refresh rates a controller may have, each within "
                         f"{P.REFRESH_TOLERANCE_HZ:g} Hz. Freq mode (default 60,90,120,144): "
@@ -503,9 +518,9 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         if args.train_cycles < 2:
             p.error(f"--train-cycles must be at least 2 (the held-out accuracy leaves one "
                     f"cycle out), got {args.train_cycles}")
-        if args.eog or args.decoder_model:
-            p.error("--eog and --decoder-model are for --paradigm freq (the c-VEP decoder "
-                    "trains its own template)")
+        if args.eog or args.decoder_model or args.trained is not None:
+            p.error("--eog, --decoder-model and --trained are for --paradigm freq (the c-VEP "
+                    "decoder trains its own template)")
     else:
         lowest, top = min(args.refresh_rates), max(args.freqs)
         if lowest - P.REFRESH_TOLERANCE_HZ <= 2 * top:
@@ -594,7 +609,22 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
     archive: ScanArchive | None = None
     code = getattr(args, "paradigm", "freq") == "code"
     try:
-        bank = make_bank(args, board)
+        if args.trained is not None and args.decoder_model is not None:
+            raise ValueError("--trained and --decoder-model both replace FBCCA; pass one")
+        trained = None
+        if args.trained is not None:
+            trained = trained_from_recording(args.trained, args.trained_method, channels=POSTERIOR,
+                                             window_s=args.trained_window)
+            if abs(trained.fs - board.fs) > 1e-6:
+                raise ValueError(f"{args.trained}: recorded at {trained.fs:g} Hz, the board runs "
+                                 f"at {board.fs:g} Hz")
+            trained.for_freqs(freqs)        # every layout frequency must be a trained target
+            print(f"trained {trained.name} from {args.trained.name}: {int(trained.n_train.sum())} "
+                  f"trials of {trained.templates.shape[-1] / trained.fs:g} s over "
+                  f"{', '.join(f'{f:g}' for f in trained.freqs)} Hz, channels "
+                  f"{','.join(POSTERIOR)}" + (", periodic templates" if trained.cycle is not None
+                                               else ""), file=sys.stderr)
+        bank = make_bank(args, board, trained=trained)
         if getattr(bank, "gaze", None) is not None:
             _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
         if detector is None:
@@ -633,8 +663,9 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
                           point_factory=point_factory, calibrate_s=args.calibrate_s,
                           refresh_hz=args.refresh_rates[0], refresh_rates=args.refresh_rates,
                           ignore_refresh=args.ignore_refresh, clock=time.time, log=log)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        print(f"error: {msg}", file=sys.stderr)
         return 2
     try:
         transport.start()

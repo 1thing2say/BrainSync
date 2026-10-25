@@ -9,6 +9,9 @@ when a window is opened.
 The card and the flash never touch a square's fill: the card is its own image stimulus
 and the flash is a thicker, coloured outline box, so the flicker frequencies stay exact.
 Text (a status line under the targets, a prompt above them) is only ever on still frames.
+The live decoder's lean meter (an outline on the target it leans towards, its confidence
+and vote count under the targets) may show during the flicker: its texts are rendered
+once at start, so a frame only draws them.
 
 A bridge driving the free run with JSON lines (brainsync.stimulus.feedback) sets a
 sentence beside each square and a line at the centre (placed by ``text_boxes``, so no
@@ -18,6 +21,7 @@ first flickering frame is marked "flicker_on" and the first still frame after it
 """
 from __future__ import annotations
 
+import re
 import statistics
 import struct
 import sys
@@ -29,6 +33,7 @@ from typing import Protocol, TextIO
 
 import numpy as np
 
+from . import shapes
 from .config import StimulusConfig, Trial, card_overlap
 from ..vep.codes import bit_luminance
 from .feedback import Control
@@ -37,6 +42,10 @@ from .flicker import (dropped_frames, frame_luminances, n_frames, to_psychopy_fi
 
 # The flash box's line is this many times the cue box's, so a swipe reads at a glance.
 FLASH_LINE_SCALE = 2.0
+LEAN_LINE_SCALE = 0.5            # the lean box is thinner than the committed cue box
+LEAN_COLOR = (1.0, 0.6, -0.6)    # amber, PsychoPy rgb
+LEAN_STEP = 5                    # confidence texts are pre-rendered in 5 % steps
+NO_LEAN = (-1, 0, 0, 0)
 LABEL_HEIGHT = 0.045   # screen heights
 LABEL_GAP = 0.03       # between a target's cue box and its label
 TEXT_HEIGHT = 0.028    # status and prompt lines, screen heights
@@ -82,7 +91,8 @@ class Frame:
     flashing (-1: none); neither affects ``lum``. ``text`` is drawn under the targets and
     ``prompt`` above them ("": nothing). ``labels`` holds one sentence per target, drawn
     beside its square, and ``centre`` a line at the centre of the screen (both sent by a
-    decoder; empty: nothing).
+    decoder; empty: nothing). ``lean`` is the decoder's (target, percent, n, m) meter,
+    target -1 when there is none.
     """
 
     lum: np.ndarray
@@ -95,11 +105,22 @@ class Frame:
     prompt: str = ""
     labels: tuple[str, ...] = ()
     centre: str = ""
+    lean: tuple[int, int, int, int] = NO_LEAN
 
 
 def format_marker(stamp: float, event: str) -> str:
     """``[marker <seconds>] <event>``, the line brainsync.recordings.parse_markers reads."""
     return f"[marker {stamp:.4f}] {event}"
+
+
+FREE_ON = "free_on"   # the free run's first flickering frame (its one onset)
+_FREE_ON_RE = re.compile(r"^\s*\[marker\s+([-+0-9.eE]+)\]\s+" + FREE_ON + r"\s*$", re.M)
+
+
+def free_onset(text: str) -> float | None:
+    """The stamp of the first ``free_on`` marker in a free run's log, or None."""
+    m = _FREE_ON_RE.search(text)
+    return None if m is None else float(m.group(1))
 
 
 class MarkerWriter:
@@ -206,17 +227,20 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 card: Callable[[], int] | None = None,
                 flash: Callable[[], tuple[int, int]] | None = None,
                 control: Callable[[], Control] | None = None,
-                seq: FrameSequence | None = None) -> Iterator[Frame]:
+                seq: FrameSequence | None = None,
+                lean: Callable[[], tuple[int, int, int, int]] | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
     a still screen for a rest baseline; ``seconds`` counts flicker frames only, and the
-    flicker starts from frame 0 so its onset has no jump.
+    flicker starts from frame 0 so its onset has no jump. The first flicker frame carries
+    the ``free_on`` marker, the onset a phase-locked decoder needs (--markers unix).
 
     ``card`` (the card index) and ``flash`` (target, serial) are polled once per frame,
     still frames included. A serial different from the last one seen (initially 0, as
     FeedbackReader starts) lights that target's box for [card] flash_s, restarting any
-    flash in progress. Neither changes the luminances.
+    flash in progress. Neither changes the luminances. ``lean`` (the decoder's meter) is
+    polled on flicker frames only: a still screen shows none.
 
     ``control`` (a feedback Control) is polled once per frame too. Once its ``used`` is
     true, ``hold`` no longer matters: the targets stand still until a flicker-on (a new
@@ -291,7 +315,8 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 continue
             lum = np.where(mask, lum_at(i), still)
             yield Frame(lum, cue=k, events=events + events_at(i), trial=run, card=image,
-                        flash=lit, labels=labels, centre=centre)
+                        flash=lit, labels=labels, centre=centre,
+                        lean=lean() if lean is not None else NO_LEAN)
             i += 1
             shown += 1
             continue
@@ -301,8 +326,10 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
             continue
         holding, flickering = False, True
         k = cue() if cue is not None else -1
-        yield Frame(lum_at(i), cue=k, events=events_at(i), card=image, flash=lit,
-                    labels=start if cfg.labels_during_flicker else ())
+        yield Frame(lum_at(i), cue=k,
+                    events=((FREE_ON,) if i == 0 and seq is None else ()) + events_at(i),
+                    card=image, flash=lit, labels=start if cfg.labels_during_flicker else (),
+                    lean=lean() if lean is not None else NO_LEAN)
         i += 1
         shown += 1
 
@@ -361,13 +388,13 @@ class SessionTiming:
 
 
 class Renderer(Protocol):
-    """``play`` passes ``card`` and ``flash``, ``text`` and ``prompt``, or ``labels`` and
-    ``centre`` only on frames that set them, so a renderer for plain sessions may take
-    just ``(lum, cue)``."""
+    """``play`` passes ``card`` and ``flash``, ``text`` and ``prompt``, ``labels`` and
+    ``centre``, or ``lean`` only on frames that set them, so a renderer for plain sessions
+    may take just ``(lum, cue)``."""
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
              text: str = "", prompt: str = "", labels: Sequence[str] = (),
-             centre: str = "") -> None: ...
+             centre: str = "", lean: tuple[int, int, int, int] = NO_LEAN) -> None: ...
     def flip(self) -> float: ...
     def escape_pressed(self) -> bool: ...
 
@@ -387,13 +414,15 @@ def play(frames: Iterable[Frame], renderer: Renderer, markers: MarkerWriter,
         for fr in frames:
             if renderer.escape_pressed():
                 raise Aborted
-            extra: dict[str, int | str | tuple[str, ...]] = {}
+            extra: dict[str, object] = {}
             if fr.card >= 0 or fr.flash >= 0:
                 extra.update(card=fr.card, flash=fr.flash)
             if fr.text or fr.prompt:
                 extra.update(text=fr.text, prompt=fr.prompt)
             if any(fr.labels) or fr.centre:
                 extra.update(labels=fr.labels, centre=fr.centre)
+            if fr.lean[0] >= 0:
+                extra.update(lean=fr.lean)
             renderer.draw(fr.lum, fr.cue, **extra)
             t = renderer.flip()
             markers.emit(fr.events)
@@ -666,7 +695,8 @@ def png_size(path: str | Path) -> tuple[int, int]:
 
 
 class PsychoPyRenderer:
-    """Fullscreen PsychoPy window: one grey square per target plus an outline cue box each.
+    """Fullscreen PsychoPy window: one grey square (or [targets] shapes outline) per target
+    plus an outline cue box each.
 
     With ``cards``, every PNG becomes one ImageStim at init (textures are never loaded in
     the frame loop), centred, [card] height high and as wide as its own aspect says, and
@@ -674,7 +704,8 @@ class PsychoPyRenderer:
     the audience can see what each square does. Labels are static and drawn outside the
     squares, so they never touch the flicker. Status text goes under the targets and
     prompts above them, in a monospaced font so a status table lines up; a text stimulus
-    is re-rendered only when its text changes.
+    is re-rendered only when its text changes. The lean meter (see ``draw``) has its own
+    row where the status goes, with every text it can show rendered here, once.
 
     The decoder's sentences (one TextStim per target, placed by text_boxes for this
     window's aspect) and its centre line are created once, empty, and drawn only while
@@ -696,12 +727,18 @@ class PsychoPyRenderer:
                                  checkTiming=False)
         self.win.setMouseVisible(False)
         side, box = cfg.size, 2.0 * cfg.reach
-        self.squares = []
+        self.squares = []   # the flicker targets, whatever their shape
         self.boxes = []
         self.flashes = []
         for t in cfg.targets:
-            self.squares.append(visual.Rect(self.win, size=(side, side), pos=t.pos,
-                                            lineColor=None, fillColor=to_psychopy_rgb(0.0)))
+            if t.shape == "square":
+                self.squares.append(visual.Rect(self.win, size=(side, side), pos=t.pos,
+                                                lineColor=None, fillColor=to_psychopy_rgb(0.0)))
+            else:   # ShapeStim tessellates the concave plus and arrows
+                self.squares.append(visual.ShapeStim(self.win,
+                                                     vertices=shapes.vertices(t.shape, side),
+                                                     pos=t.pos, lineColor=None,
+                                                     fillColor=to_psychopy_rgb(0.0)))
             self.boxes.append(visual.Rect(self.win, size=(box, box), pos=t.pos,
                                           fillColor=None, lineColor=cfg.cue_color,
                                           lineWidth=cfg.cue_line_px))
@@ -722,6 +759,10 @@ class PsychoPyRenderer:
         aspect = self.win.size[0] / self.win.size[1]
         # under and above the targets, or between them when they reach the screen's edge
         status, prompt = status_prompt_boxes(cfg, aspect)
+        # the lean meter's row is the status's first line: status text is only ever on
+        # still frames and the lean only on flicker frames, so they never collide
+        sign = -1.0 if status.anchor[1] == "top" else 1.0
+        self._build_lean(visual, box, status.pos[0], status.pos[1] + sign * TEXT_HEIGHT / 2.0)
         self.status = visual.TextStim(self.win, text="", pos=status.pos, height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.75), font="Menlo",
                                       wrapWidth=status.width, anchorHoriz=status.anchor[0],
@@ -769,6 +810,58 @@ class PsychoPyRenderer:
                                                size=(height * w / h, height),
                                                interpolate=True))
 
+    def _build_lean(self, visual: object, box: float, x: float, y: float) -> None:
+        """The lean meter's stimuli: an amber box per target just inside its cue box, and one
+        row centred on ``(x, y)``: "leaning <label>", a confidence bar, "<p>%" and vote pips."""
+        cfg, amber = self.cfg, LEAN_COLOR
+        self._bar_x = x
+        line = cfg.cue_line_px * LEAN_LINE_SCALE
+        inner = (cfg.size + box) / 2.0   # between the square's edge and the cue box
+        self.lean_boxes = [visual.Rect(self.win, size=(inner, inner), pos=t.pos, fillColor=None,
+                                       lineColor=amber, lineWidth=line) for t in cfg.targets]
+        self.lean_names = [visual.TextStim(self.win, text=f"leaning {t.label}",
+                                           pos=(x - 0.17, y), height=TEXT_HEIGHT, color=amber,
+                                           font="Menlo", anchorHoriz="right", alignText="right")
+                           for t in cfg.targets]
+        self._bar_w, self._bar_h, self._bar_y = 0.3, TEXT_HEIGHT * 0.7, y
+        self.lean_bar = visual.Rect(self.win, size=(self._bar_w, self._bar_h), pos=(x, y),
+                                    fillColor=None, lineColor=amber, lineWidth=2)
+        self.lean_fill = visual.Rect(self.win, size=(self._bar_w, self._bar_h), pos=(x, y),
+                                     fillColor=amber, lineColor=None)
+        self.lean_pcts = {p: visual.TextStim(self.win, text=f"{p}%", pos=(x + 0.17, y),
+                                             height=TEXT_HEIGHT, color=amber, font="Menlo",
+                                             anchorHoriz="left", alignText="left")
+                          for p in range(0, 101, LEAN_STEP)}
+        self._visual_rect = visual.Rect
+        self.lean_pips: list[object] = []
+        self._fill_pct = -1
+
+    def _draw_lean(self, lean: tuple[int, int, int, int]) -> None:
+        k, pct, n, m = lean
+        if not 0 <= k < len(self.lean_boxes):
+            return
+        self.lean_boxes[k].draw()
+        self.lean_names[k].draw()
+        self.lean_bar.draw()
+        if pct != self._fill_pct:   # resize only when the value changes
+            w = max(1e-4, self._bar_w * min(max(pct, 0), 100) / 100.0)
+            self.lean_fill.size = (w, self._bar_h)
+            self.lean_fill.pos = (self._bar_x - self._bar_w / 2.0 + w / 2.0, self._bar_y)
+            self._fill_pct = pct
+        if pct > 0:
+            self.lean_fill.draw()
+        self.lean_pcts[int(round(min(max(pct, 0), 100) / LEAN_STEP)) * LEAN_STEP].draw()
+        if len(self.lean_pips) != m:   # built once per vote count, not per frame
+            side = self._bar_h
+            self.lean_pips = [self._visual_rect(self.win, size=(side, side),
+                                                pos=(self._bar_x + 0.29 + i * 1.6 * side,
+                                                     self._bar_y),
+                                                lineColor=LEAN_COLOR, lineWidth=2)
+                              for i in range(m)]
+        for i, pip in enumerate(self.lean_pips):
+            pip.fillColor = LEAN_COLOR if i < n else None
+            pip.draw()
+
     def measure_refresh(self, n: int = 120, warmup: int = 20) -> float:
         """Median-interval rate over ``n`` blank flips, after ``warmup`` unmeasured ones."""
         stamps = [self.win.flip() for _ in range(warmup + n)]
@@ -784,7 +877,10 @@ class PsychoPyRenderer:
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
              text: str = "", prompt: str = "", labels: Sequence[str] = (),
-             centre: str = "") -> None:
+             centre: str = "", lean: tuple[int, int, int, int] = NO_LEAN) -> None:
+        """One frame. ``lean`` = (target, percent, n, m) draws the decoder's lean meter: an
+        amber box on that target and, where the status goes, "leaning <label>", a bar and
+        the percent, and m pips of which n are filled (windows agreeing so far)."""
         # the card goes first so a square drawn over an oversized card keeps its luminance
         if 0 <= card < len(self.cards):
             self.cards[card].draw()
@@ -807,6 +903,7 @@ class PsychoPyRenderer:
             self.boxes[cue].draw()
         if 0 <= flash < len(self.flashes):
             self.flashes[flash].draw()
+        self._draw_lean(lean)
         self._draw_text(self.status, text)
         self._draw_text(self.prompt, prompt)
 

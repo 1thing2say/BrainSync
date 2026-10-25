@@ -218,6 +218,14 @@ pull requests.
   their eyes rested on could be picked. Now a new page stays still for `stim.cue_s` (2 s) + 0.2 s
   per word on it, up to 6 s; a page seen again (after Didn't catch that or Back) for 2 s; the
   confirm screen for 1.5 s (`Orchestrator._cue_seconds`).
+- **Trained classifiers: three options, none chosen (2026-10-25):** #29 (`brainsync.templates`:
+  `itcca`, `ecca`, `trca`, `etrca`, `etrcar`, `sfcca`), #32 (spatial filters `trca-sf`,
+  `trca-r-sf`, `etrca-sf`, `etrca-r-sf`, `mscca`, learning from confirmed picks in
+  `brainsync.server`) and #30 (`trca-phase`, phase-locked, lean meter in `brainsync.demo`) are all
+  merged side by side under distinct names. `docs/CLASSIFIERS.md` says how to train and run
+  each, compares them, and how to choose on one held-out 4-target recording; the choice goes
+  into section 13, item 11. None is wired into the voice app's bridge yet (`cca` / `fbcca`
+  only).
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a
@@ -1135,6 +1143,24 @@ minutes first. Score it with FBCCA at 2 s and 4 s windows. Chance is 25 %.
 | About 70 % or more | Keep page mode (4 targets) |
 | 55–70 % | Train TRCA on the same recording (section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
 | Below that | List mode: options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
+
+**Trained spatial filters are built (2026-10-25, branch
+`implementing-spatial-filtering-improvements`).** `brainsync/classify.py` has TRCA, eTRCA,
+their -R variants and msCCA (Wong et al. 2020), registered as `trca-sf`, `etrca-sf`,
+`trca-r-sf`, `etrca-r-sf` and `mscca` beside the template classifiers of
+`brainsync/templates.py` (`trca`, `etrca`, `etrcar`, ...; both families are selectable);
+`python -m brainsync.score_cued --methods fbcca etrca-sf mscca` scores them leave-one-trial-out, so the gate's second row is one
+command on the gate recording. On the public Nakanishi set they lift 1 s accuracy from
+57 % (CCA) to 98 % (eTRCA); on our three 2-target recordings (4 dry channels, 7–10 trials
+per target) none beats CCA / FBCCA, as the paper's small-data caveat predicts (README,
+Phase 2). The live decoder runs one from a cued recording (`python -m brainsync.server
+--trained <cued.npz>`, README Phase 3; `--decoder-model` loads a saved template classifier
+instead), aligned to each trial's onset, and every pick the
+user then confirms is learnt as a new training trial (section 13, item 11's stretch; a
+`learned` log record). `brainsync/stimulus/configs/four_targets.toml` records the gate's
+13/15/17/11 Hz set with `python -m brainsync.record -c four_targets` on a 2x2 grid
+(`four_diamond.toml` has the same targets in the diamond layout). Judge a
+trained filter only on held-out trials, never on its training trials.
 
 **Changed 2026-10-24 to 13/15/17/11 Hz**, the teammate's `four_diamond.toml`: 15 and 17 Hz keep
 their places from `two_targets.toml` (left and right), 13 Hz goes on top and 11 Hz at the bottom,

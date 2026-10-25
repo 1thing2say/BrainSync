@@ -10,7 +10,7 @@ import pytest
 from brainsync import demo, launch
 from brainsync.board import FakeBoard
 from brainsync.classify import make
-from brainsync.online import Decoder
+from brainsync.online import Decision, Decoder
 
 HEADLESS = ["--paradigm", "freq", "--fake", "--fast", "--no-stimulus", "--no-voice"]
 
@@ -18,14 +18,16 @@ HEADLESS = ["--paradigm", "freq", "--fake", "--fast", "--no-stimulus", "--no-voi
 # feedback line to a file until EOF (or exits at once with "exit", or crashes with code 1
 # right after the first line with "crash").
 FAKE_STIMULUS = """
-import sys
+import sys, time
 print("measured refresh: 60.00 Hz", flush=True)
 if sys.argv[2] == "exit":
     sys.exit(0)
 with open(sys.argv[1], "w") as out:
-    for line in sys.stdin:
+    for n, line in enumerate(sys.stdin):
         out.write(line)
         out.flush()
+        if n == 0 and sys.argv[2] == "onset":
+            print(f"[marker {time.time():.4f}] free_on", flush=True)
         if sys.argv[2] == "crash":
             sys.exit(1)
 """
@@ -87,14 +89,56 @@ def test_feedback_reaches_the_stimulus(fake_stimulus, capsys):
         assert flag in args
     assert "--refresh" not in args                    # the 60 Hz guard stays on
     assert args[args.index("--seconds") + 1] == "25"
-    assert args[args.index("--markers") + 1] == "none"
+    assert args[args.index("--markers") + 1] == "unix"       # the free run's onset marker
     assert args[args.index("--feedback") + 1] == "stdin"
     assert calls[0]["stim"].proc.poll() == 0          # stdin closed -> it finished
     labels = {"15": "0", "17": "1", "none": "-1"}
-    sent = feedback.read_text().split()
+    lines = feedback.read_text().splitlines()
+    sent = [ln for ln in lines if not ln.startswith("lean ")]
     assert sent[0] == "-1"                            # releases the still screen
     assert sent[1:] == [labels[c] for c in commits_from(cap.out)]
     assert set(sent) <= {"0", "1", "-1"}
+    # one lean line per decoded window, after the line that starts the flicker
+    leans = [ln.split() for ln in lines if ln.startswith("lean ")]
+    status = [ln for ln in cap.err.splitlines() if " committed " in ln]
+    assert len(leans) == len(status) and not lines[0].startswith("lean ")
+    for _, k, pct, n, m in leans:
+        assert k in ("0", "1") and 50 <= int(pct) <= 100 and 0 <= int(n) <= int(m) == 4
+
+
+def test_no_lean_sends_only_cues(fake_stimulus, capsys):
+    _, feedback, _ = fake_stimulus
+    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "12", "--no-lean"]) == 0
+    capsys.readouterr()
+    assert not any(ln.startswith("lean") for ln in feedback.read_text().splitlines())
+
+
+def test_confidence_is_a_softmax_in_rest_spreads():
+    share = demo.confidence(np.array([0.2, 0.0, 0.0, 0.0]), spread=0.1)
+    assert share.sum() == pytest.approx(1.0)
+    assert share[0] == pytest.approx(np.exp(2) / (np.exp(2) + 3))
+    assert demo.confidence(np.zeros(4), 0.1) == pytest.approx(np.full(4, 0.25))
+    # a zero spread is treated as 1 rather than dividing by zero
+    assert np.isfinite(demo.confidence(np.array([1.0, 0.0]), 0.0)).all()
+
+
+def _decision(scores, raw, committed):
+    return Decision(time=0.0, scores=np.asarray(scores, float), raw=raw, committed=committed,
+                    changed=False)
+
+
+def test_lean_counts_agreeing_windows_until_the_commit():
+    lean = demo.Lean(votes=3)
+    lead0 = [0.3, 0.0]
+    assert lean.line(_decision(lead0, -1, -1), 0.1) == "lean 0 95 0 3"   # abstained: no vote
+    assert lean.update(_decision(lead0, 0, -1), 0.1)[2] == 1
+    assert lean.update(_decision(lead0, 0, -1), 0.1)[2] == 2
+    assert lean.update(_decision(lead0, 0, 0), 0.1)[2] == 3              # committed: full
+    assert lean.update(_decision(lead0, -1, 0), 0.1)[2] == 3             # still committed
+    # the lead moves to target 1: its count starts over
+    assert lean.update(_decision([0.0, 0.3], 1, 0), 0.1) == (1, 95, 1)
+    assert lean.update(_decision([0.0, 0.3], 1, 0), 0.1)[2] == 2
+    assert lean.update(_decision([0.3, 0.0], 0, 0), 0.1)[2] == 3
 
 
 def test_run_ends_when_the_stimulus_exits(fake_stimulus, capsys):
@@ -282,3 +326,161 @@ def test_status_line_shows_the_level(capsys):
     assert demo.main([*HEADLESS, "--seconds", "5"]) == 0
     status = [ln for ln in capsys.readouterr().err.splitlines() if " committed " in ln]
     assert status and all(" level " in ln for ln in status)
+
+
+# -- the trained classifier (--classifier trca-phase --model) -----------------------------
+
+def _trca_model(path: Path, freqs, ch_names) -> Path:
+    """A small TRCA model fitted directly on synthetic trials (no CV), saved to ``path``."""
+    from brainsync.synthetic import ssvep_trials
+    from brainsync.trca import TRCA, ModelInfo
+
+    X, y = ssvep_trials(freqs, n_per_target=3, n_channels=len(ch_names), seconds=3.86, seed=1)
+    info = ModelInfo(ch_names=tuple(ch_names), band=(1.0, 100.0), notch=60.0, latency=0.14,
+                     trial_s=3.86, sources=("synthetic",), created=0.0)
+    return TRCA(freqs, 250.0, fusion=(1.0, 1.0)).fit(X, y, info=info).save(path)
+
+
+@pytest.fixture(scope="module")
+def two_target_model(tmp_path_factory) -> Path:
+    """A model trained by brainsync.train on a fake session with two_targets' 15 / 17 Hz."""
+    from brainsync import train
+    from brainsync.recordings import save_recording
+    from brainsync.synthetic import fake_session
+
+    root = tmp_path_factory.mktemp("trca_demo")
+    labels = [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0]
+    X, t, text = fake_session([15.0, 17.0], labels, seed=4)
+    rec = save_recording(root / "2026-01-01_000000_cued.npz", X, t, 250.0,
+                         ("Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"), [15.0, 17.0], text)
+    model = root / "model.npz"
+    assert train.main([str(rec), "--out", str(model), "--no-replay", "--windows", "1.5"]) == 0
+    return model
+
+
+def test_parser_accepts_trca_with_a_model(tmp_path: Path) -> None:
+    args = demo.build_parser().parse_args(["--classifier", "trca-phase", "--model", str(tmp_path)])
+    assert args.classifier == "trca-phase" and args.model == str(tmp_path)
+    assert demo.build_parser().parse_args([]).model is None
+
+
+def test_trca_phase_needs_a_model() -> None:
+    with pytest.raises(SystemExit) as exc:
+        demo.main([*HEADLESS, "--classifier", "trca-phase"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("argv", [["--classifier", "fbcca", "--model", "m.npz"],
+                                  ["--model", "latest"]])
+def test_model_without_trca_phase_is_a_calibrate_model(argv, capsys) -> None:
+    """Without --classifier trca-phase, --model is brainsync.calibrate's (templates)
+    model file, so a missing one is a build error (exit 2), not a usage error."""
+    assert demo.main([*HEADLESS, *argv]) == 2
+    assert "error: " in capsys.readouterr().err
+
+
+def test_headless_run_with_a_trained_model(two_target_model, capsys) -> None:
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(two_target_model),
+                      "--seconds", "20"]) == 0
+    cap = capsys.readouterr()
+    assert "TRCA(" in cap.err and "model=['2026-01-01_000000_cued.npz']" in cap.err
+    assert "baseline from" in cap.err and "ended: time up" in cap.out
+    hit = int(cap.out.split("true one on ")[1].split("%")[0])
+    assert hit >= 70
+
+
+def test_lock_needs_trca() -> None:
+    with pytest.raises(SystemExit) as exc:
+        demo.main([*HEADLESS, "--lock"])
+    assert exc.value.code == 2
+
+
+def test_lock_takes_the_onset_from_the_stimulus_log(two_target_model, fake_stimulus,
+                                                     capsys) -> None:
+    _, _, mode = fake_stimulus
+    mode["value"] = "onset"
+    assert demo.main(["--fake", "--fast", "--no-voice", "--classifier", "trca-phase", "--model",
+                      str(two_target_model), "--lock", "--seconds", "6"]) == 0
+    cap = capsys.readouterr()
+    assert "flicker onset at 17" in cap.err and "warning: " not in cap.err
+    status = [ln for ln in cap.err.splitlines() if " committed " in ln]
+    assert status and all("  locked" in ln for ln in status)
+
+
+def test_lock_without_an_onset_decodes_phase_free(two_target_model, capsys) -> None:
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(two_target_model),
+                      "--lock", "--seconds", "6"]) == 0
+    cap = capsys.readouterr()
+    assert "warning: no stimulus; decoding phase-free" in cap.err
+    status = [ln for ln in cap.err.splitlines() if " committed " in ln]
+    assert status and not any("locked" in ln for ln in status)
+
+
+def test_model_with_other_targets_exits_2(tmp_path: Path, capsys) -> None:
+    model = _trca_model(tmp_path / "four_trca.npz", [11.0, 15.0, 17.0, 13.0],
+                        ("P7", "P8", "O1", "O2"))
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(model)]) == 2
+    assert "freq" in capsys.readouterr().err
+
+
+def test_model_on_other_channels_exits_2(tmp_path: Path, capsys) -> None:
+    model = _trca_model(tmp_path / "all8_trca.npz", [15.0, 17.0],
+                        ("Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2"))
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(model)]) == 2
+    assert "channels" in capsys.readouterr().err
+
+
+def test_latest_model_without_any_exits_2(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest"]) == 2
+    assert "no trained model" in capsys.readouterr().err
+
+
+def test_latest_model_is_found_in_the_models_dir(two_target_model, tmp_path: Path,
+                                                 monkeypatch, capsys) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "2026-01-01_000000_trca.npz").write_bytes(two_target_model.read_bytes())
+    monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest",
+                      "--seconds", "5"]) == 0
+    assert "TRCA(" in capsys.readouterr().err
+
+
+def test_printed_run_it_command_runs(tmp_path: Path, capsys) -> None:
+    """train's "run it" line, with non-default channels, harmonics and decoder settings,
+    is a demo command check_compatible accepts as printed."""
+    import shlex
+
+    from brainsync import train
+    from brainsync.recordings import MONTAGE, save_recording
+    from brainsync.synthetic import fake_session
+
+    labels = [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0]
+    X, t, text = fake_session([15.0, 17.0], labels, seed=4)
+    rec = save_recording(tmp_path / "2026-01-02_000000_cued.npz", X, t, 250.0, MONTAGE,
+                         [15.0, 17.0], text)
+    model = tmp_path / "o1o2_h2.npz"
+    assert train.main([str(rec), "--out", str(model), "--no-replay", "--windows", "1",
+                       "--channels", "O1,O2", "--harmonics", "2", "--window", "1",
+                       "--votes", "3", "--margin", "0.3"]) == 0
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("run it: "))
+    argv = shlex.split(line[len("run it: "):])[3:]                 # after python -m brainsync.demo
+    assert demo.main([*argv, *HEADLESS, "--seconds", "20"]) == 0
+    cap = capsys.readouterr()
+    assert "TRCA(" in cap.err and "ended: time up" in cap.out
+
+
+@pytest.mark.parametrize("payload", [b"", b"PK\x03\x04" + b"\0" * 64, b"not a model\n"])
+def test_unreadable_model_exits_2(two_target_model, tmp_path: Path, monkeypatch, capsys,
+                                  payload: bytes) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    bad = models / "2026-01-02_000000_trca.npz"          # newer than any good model
+    bad.write_bytes(payload)
+    (models / "2026-01-01_000000_trca.npz").write_bytes(two_target_model.read_bytes())
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", str(bad)]) == 2
+    assert "not a readable TRCA model file" in capsys.readouterr().err
+    monkeypatch.setenv("BRAINSYNC_DATA_DIR", str(tmp_path))
+    assert demo.main([*HEADLESS, "--classifier", "trca-phase", "--model", "latest"]) == 2
+    assert f"{bad.name}: not a readable TRCA model file" in capsys.readouterr().err

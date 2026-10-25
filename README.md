@@ -355,6 +355,42 @@ Per subject (CCA, FBCCA at 1/2/4 s) the results go to stderr. Subject 1 is the h
 (CCA 24/44/64%), subject 8 the easiest (CCA 91/100/100%). Starting the window at sample 0
 instead drops subject 8's 1 s CCA accuracy from 90.6% to 48.9%.
 
+### Trained spatial filters (calibration-based)
+
+`brainsync/classify.py` also has the calibration-based filters from Wong et al. 2020
+("Spatial filtering in SSVEP-based BCIs: unified framework and new improvements", IEEE
+TBME 67(11)), registered with an `-sf` suffix because `brainsync/templates.py` (Phase 1b
+below) already has its own `trca` and `etrca`: TRCA and ensemble TRCA (Nakanishi 2018), their `-R` variants (the summed
+trials projected onto the sine-cosine subspace first) and msCCA (one filter shared by all
+targets, works from one trial per target). They are fitted on labelled trials with
+`fit(X, y, t0)`, score a window by the signed correlation of the filtered window with the
+filtered template, and share the still-screen baseline and abstain rules with CCA. On the
+benchmark they are scored leave-one-block-out (14 training trials per target), which is
+the paper's protocol:
+
+```bash
+.venv/bin/python -m brainsync.nakanishi --windows 0.5 1 2 --methods cca fbcca trca-sf etrca-sf trca-r-sf etrca-r-sf mscca
+```
+
+| Method | 0.5 s | 1 s | 2 s |
+|---|---|---|---|
+| CCA | 23.3% | 56.8% | 83.7% |
+| FBCCA | 18.2% | 53.6% | 84.8% |
+| TRCA (`trca-sf`) | 88.3% | 97.2% | 99.0% |
+| eTRCA (`etrca-sf`) | 91.3% | 97.8% | 99.5% |
+| TRCA-R (`trca-r-sf`) | 86.9% | 96.0% | 98.9% |
+| eTRCA-R (`etrca-r-sf`) | 92.1% | 97.9% | 99.5% |
+| msCCA (`mscca`) | 80.7% | 93.2% | 98.7% |
+
+With 8 wet channels, 12 targets and 14 training trials per target the gain is 40 points
+at 1 s; the paper's recommendation (eTRCA or eTRCA-R with a long calibration, msCCA with
+a short one) holds here. Templates are locked to stimulus onset; because every target's
+steady-state response repeats after a common period (1 s for integer frequencies at
+250 Hz), a training window of at least one period is folded into one cycle and the live
+decoder can score a window at any offset from the onset (`offset=`, seconds since the
+onset, as for the template classifiers; `Decoder.set_onset` gives the onset). Shorter training
+windows keep the raw template and need the same window length.
+
 ## Phase 1b: trained classifiers
 
 `brainsync/templates.py` adds the classifiers that learn from the user's own cued trials,
@@ -453,6 +489,24 @@ of the best cell keeps 162029 and 161131 clearly significant. 172130 is borderli
 `--methods`, `--windows`, `--margin`, `--channels` (names or board indices) and
 `--reject`.
 
+The trained spatial filters (`--methods trca-sf etrca-sf trca-r-sf etrca-r-sf mscca`) are
+scored leave-one-trial-out on these files (fitted on the other trials, their row carries a
+`+`; the template classifiers of Phase 1b are scored leave-one-block-out and carry a `*`).
+On this 2-target, 4-dry-channel data with 7 to 10 trials per target none of them beats
+CCA or FBCCA (2026-10-25):
+
+| Session | n | CCA / FBCCA at 2 s | best trained at 2 s | at 3.86 s |
+|---|---|---|---|---|
+| 162029 (reference) | 19 | 15 / 17 | eTRCA 16 | eTRCA, TRCA 14 (FBCCA 14) |
+| 161131 | 14 | 13 / 11 | TRCA-R, msCCA 11 | msCCA 10 (FBCCA 10) |
+| 172130 | 17 | 12 / 12 | eTRCA-R, msCCA 10 | eTRCA-R 11 (CCA 14) |
+
+Several cells fall to chance (TRCA at 2 s on 161131: 6/14). This is what the paper
+predicts: a spatial filter has little to win over 4 channels and 2 classes, and 8 trials
+cannot estimate a covariance well. The methods matter for the 4-target page mode (more
+targets, and more channels once C3/C4 move to Oz/POz), where the gate recording in
+`PLAN.md` section 14 decides.
+
 ## Phase 3: live demo
 
 The online decoder takes the newest 1.5 s every 0.25 s and runs the same preprocessing
@@ -464,6 +518,29 @@ the agreement figures below). The window is scored with FBCCA minus a still-scre
 baseline. The decoder abstains unless the best target both leads the runner-up by 0.5
 rest spreads and sits 0.5 rest spreads above its own rest level. A target is committed
 after 4 agreeing windows in a row.
+
+**Trained spatial filter online.** `python -m brainsync.online --classifier etrca-sf <cued.npz>`
+replays with eTRCA (or `trca-sf`, `trca-r-sf`, `etrca-r-sf`, `mscca`) instead of FBCCA. Without
+`--train-blocks` the filter is refitted on the recording's other trials at the start of
+every trial, so each trial is decoded held out (with `--train-blocks N` it is fitted once on
+the first N blocks, as the template classifiers are), and the decoder gets each flicker's
+onset (`Decoder.set_onset`), as the server gives it the client's onset: a trained template starts at onset + latency,
+and every window is scored at its offset from that moment (the steady-state response
+repeats every 1 s for integer frequencies at 250 Hz). The offline-agreement line then
+covers only the last trial, the one the final fit belongs to. On the reference recording
+eTRCA commits 4/20 correct against FBCCA's 12/20 with the same votes, margin and
+threshold (which are in rest-spread units and were tuned for FBCCA scores), the same
+no-gain result as the offline table in Phase 2.
+
+The server (`python -m brainsync.server --trained <cued.npz> [--trained-method etrca-sf]`)
+fits the model once at start (`online.trained_from_recording`: every artifact-free trial of
+the recording over P7, P8, O1, O2, the first `--trained-window` seconds of each, default
+2 s), checks that the recording's rate matches the board
+and that every `--freqs` frequency is a trained target, prints a summary line, and gives
+each layout the model's subset for its targets (`Trained.for_freqs`): a 2-target confirm
+layout uses the filters trained on all four. The still-screen calibration still supplies
+the baseline. The 10 Hz probe decoder that measures the calibration stays plain CCA.
+`--trained` and `--decoder-model` (a saved template classifier, Phase 1b) exclude each other.
 
 The lead rule alone was not enough. Two independent rest scores differ by about 1.4
 spreads, so a 0.5-spread lead abstained on only about a third of still-screen windows,
@@ -539,6 +616,77 @@ too short: it has only about 4 independent 1.5 s windows, and on a fake board it
 margin. 30 s brings that to about 0.33. Ctrl-C or Escape ends the run. Ctrl-C during
 calibration ends the program before any decoding (exit code 130). A stimulus that
 crashes or refuses the display makes the demo exit with code 1.
+
+### Four squares, trained on your own trials, locked to the flicker
+
+The 4-square demo (`four_targets_low_first`: 11 Hz top left, 15 top right, 17 bottom
+left, 13 bottom right; `four_targets` has the same frequencies in the gate's 13/15/17/11
+order) can run calibration-free with FBCCA, or with a TRCA model trained on your own cued
+trials and locked to the flicker's phase. This TRCA is `--classifier trca-phase`
+(`brainsync/trca.py`, trained by `brainsync.train`); Phase 1b's `trca`, the spatial
+filters (`trca-sf`, ...) and the other classifiers in `brainsync/templates.py` (saved by
+`brainsync.calibrate`, loaded with `--model FILE` alone) are separate options, and all
+stay selectable. The whole loop, with the headset on for 20 minutes first:
+
+```bash
+# 1. Electrode check: a 15 Hz square in terminal 1, the per-channel report in terminal 2.
+#    Good contacts read about 7-20 uV RMS; over 6 dB at 15 Hz is a clear response, 3-6 dB weak.
+.venv/bin/python -m brainsync.stimulus -c one_target_15 --free --seconds 75 --no-wait
+.venv/bin/python -m brainsync.check --target 15 --no-show
+
+# 2. Record 32 cued trials (8 blocks of 4, about 4.5 minutes) into data/spectrum_checks/
+.venv/bin/python -m brainsync.record -c four_targets_low_first
+
+# 3. Train, and replay the held-out trials phase-free and phase-locked
+.venv/bin/python -m brainsync.train data/spectrum_checks/<stamp>_cued.npz --channels P8,O1,O2 --lock
+
+# 4. Run the demo on the saved model (train prints this "run it" line with the real path)
+.venv/bin/python -m brainsync.demo -c four_targets_low_first --classifier trca-phase --model latest --channels P8,O1,O2 --window 2 --lock
+
+# Without training: FBCCA on the same four squares
+.venv/bin/python -m brainsync.demo -c four_targets_low_first
+```
+
+`brainsync.train` cross-validates every kept trial (held out of the fit and of the rest
+baseline) and prints, per window length, the accuracy of FBCCA and TRCA on onset-aligned
+and sliding windows, how many windows the margin and threshold let through, a McNemar
+test, and a verdict that says whether TRCA beats FBCCA by more than the noise. The
+`replay window` line feeds each held-out trial through the live decoder (votes, margin,
+threshold) and counts correct, wrong and still-screen commits; with `--lock` it adds a
+`locked` column. The model goes to `data/models/<stamp>_trca.npz`; `--model latest`
+picks the newest. Its rest baseline is never saved: the demo fits it on the still screen
+every session, like FBCCA's. `--channels P8,O1,O2` leaves out P7 when that contact is
+noisy; the model remembers its channels, and the demo refuses a model whose targets,
+channels or filters differ.
+
+`--lock` is what the Jia et al. (2011) phase-coding paper gets its gain from, used the
+other way round: instead of coding targets by phase, the decoder knows the flicker's
+phase. The free-run stimulus prints `[marker <unix seconds>] free_on` on its first
+flickering frame, the demo reads it from the stimulus log, and every window is scored
+against the TRCA templates rotated to the phase the flicker has reached (one phase per
+target, from the time since onset and the training latency). The rest baseline is then
+fitted at random phases, which is what noise scores under a lock. Status lines end in
+`locked` once the onset is known; before that windows are scored phase-free. Held-out
+replay of the 2026-10-24_235732 recording (P8,O1,O2, 2 s windows, 4 votes):
+
+| method | correct / 29 | wrong | still-screen commits / 29 |
+|---|---|---|---|
+| FBCCA | 9 | 5 | 6 |
+| TRCA, phase-free | 12 | 3 | 6 |
+| TRCA, `--lock` | 18 | 2 | 9 |
+
+On a noisy recording (contacts off) the lock gains nothing, and it commits a little more
+often on a still screen, so raise `--threshold` if it picks squares nobody looks at.
+
+The demo also shows a **lean meter** during the flicker: a thin amber box on the square
+the scores favour, "leaning <label>", a confidence bar (a softmax of the baseline-corrected
+scores in rest spreads: about 49 % at rest and 60 % on a correctly led window, so a lean,
+not a probability) and one pip per agreeing window until the commit. `--no-lean` hides
+it. The stimulus takes it as `lean <k> <percent> <n> <m>` lines on stdin (`lean -1` hides).
+
+If 15 and 17 Hz decode poorly for you (they did for one of us: 3/8 and 2/8 trials against
+6/8 at 13 Hz), `four_low` is the same layout at 11/13/14/12 Hz, 13 and 12 Hz flickering in
+antiphase: `brainsync.record -c four_low`, then train and run with `-c four_low`.
 
 ## Phase 4: Instagram Reels
 
@@ -1038,7 +1186,14 @@ Point mode needs `ANTHROPIC_API_KEY` on the server. `--env-file PATH` reads KEY=
 without overriding the environment, so the key can live in a gitignored file; it is never
 printed or logged. Without a key, or with `--no-detect`, the server still runs: slots mode
 works and a point-mode client is told `detect_unavailable`. `--min-p-button` (default 0.5)
-sets which elements are shown. `--log PATH` appends a JSON-lines record of the session
+sets which elements are shown. `--trained CUED_NPZ` (with `--trained-method`, default
+`etrca-sf`) decodes with a spatial filter fitted on that cued recording instead of FBCCA
+(Phase 3 above); while it runs, every pick the user then confirms is added to the filter's
+training set and the filter is refitted (a `learned` log record), so it adapts during the
+session. The learnt window runs from the pick's gate for the training-window length and is
+skipped when it would reach past the pick's commit, since the screen changes after it:
+with the default 2 s window and a commit about 2.25 s after the gate it fits, with a longer
+`--trained-window` it never does. `--log PATH` appends a JSON-lines record of the session
 (phases, layouts, onsets, selections, scans, clicks; never the token or a screenshot).
 Screenshots are kept only with `--log-scans DIR`, in the format `tools/screen_eval.py`
 reads. Ctrl-C or SIGTERM tells every client `phase stop` and exits 0; a port in use or a
@@ -1245,6 +1400,13 @@ auto), `--channels` (default P7,P8,O1,O2), `--no-voice`, `--ignore-refresh`. The
 needs a fixed 60 Hz panel (ProMotion off) or it refuses to start. On this Mac the only
 venv with PsychoPy is the one described in "Install"; run the commands with its python.
 
+Targets need not be squares. `[targets] shapes` gives each target a circle, a plus or an
+arrow (`arrow-up`, `-down`, `-left`, `-right`) instead, one name per target; every shape
+fits the square's box, so the layout stays the same. `cvep_4_arrows` is `cvep_4` with
+arrows pointing outward, `cvep_3_plus` is `cvep_3` with plus signs (`-c cvep_4_arrows`).
+An arrow lights 45 % of its box and a plus 56 %, so both configs use a larger size, and
+the stimulus prints a warning that the response will be weaker than a square's.
+
 `web/vep-lab/index.html` is a static explainer for an audience: the three codings' stimulus
 sequences, the toy model's responses (the same kernel as `synthetic.vep_kernel`, ported to
 `vep_core.js` and checked against the Python), the paper's Figures 2 to 4 as a flash
@@ -1335,7 +1497,7 @@ What to expect on the headset, and why the defaults differ from the paper:
 | `brainsync/recordings.py` | Load and save `.npz` sessions, parse markers, cut windows, reject artifacts |
 | `brainsync/synthetic.py` | Synthetic SSVEP trials and sessions for tests |
 | `brainsync/metrics.py` | Accuracy with abstention, Wolpaw ITR, confusion matrix, binomial p |
-| `brainsync/classify.py` | CCA and FBCCA with a still-screen baseline and abstain margin |
+| `brainsync/classify.py` | CCA and FBCCA, plus the trained TRCA / eTRCA (-R) and msCCA filters, with a still-screen baseline and abstain margin |
 | `brainsync/nakanishi.py` | Nakanishi 2015 loader and accuracy table (phase 1) |
 | `brainsync/select_freqs.py` | Phase 0 frequency selection report |
 | `brainsync/score_cued.py` | Phase 2 scoring of cued sessions |
@@ -1343,8 +1505,10 @@ What to expect on the headset, and why the defaults differ from the paper:
 | `brainsync/board.py` | Cerelog X8 over BrainFlow, and a fake board |
 | `brainsync/record.py` | Record a cued session while the stimulus runs |
 | `brainsync/check.py` | Per-channel electrode check |
-| `brainsync/online.py` | Ring buffer, sliding-window decoder (with an optional per-target prior), calibration, replay and tuning grid |
+| `brainsync/online.py` | Ring buffer, sliding-window decoder (with an optional per-target prior, optionally phase-locked to the flicker onset), calibration, replay and tuning grid |
 | `brainsync/eog.py` | EOG gaze prior: LO/RO and Fp1/Fp2 to a gaze vector, layout or fitted target directions, blink and margin abstains, held-out scoring CLI |
+| `brainsync/trca.py` | `trca-phase`: filter-bank ensemble TRCA trained on the user's trials, phase-free or locked, fused with FBCCA; model files |
+| `brainsync/train.py` | `python -m brainsync.train`: cross-validate `trca-phase` against FBCCA on cued recordings, replay, save the model |
 | `brainsync/launch.py` | Start the stimulus process; spoken prompts with macOS `say` |
 | `brainsync/demo.py` | Phase 3 live demo |
 | `brainsync/scroll.py` | `ScrollGate`: decoder commits to scrolls, cooldown and vote reset |

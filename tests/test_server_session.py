@@ -1123,6 +1123,85 @@ def test_ignore_refresh_accepts_an_off_rate_display_and_says_frequencies_stay(ca
     assert [e["code"] for e in rig2.tr.to(1, "error")] == ["refresh"]
 
 
+# -- learning from confirmed picks (Phase 4) ---------------------------------------------------
+
+def test_learn_from_teaches_the_bank_on_a_confirmed_pick():
+    """A button pick is remembered with its gate and commit time; the confirm selection that
+    follows teaches the bank that window for the picked frequency; back forgets it; no trained
+    model: nothing. It receives the target of the layout the selection was made in."""
+    from types import SimpleNamespace
+
+    calls: list[tuple[float, float, float]] = []
+    logs: list[tuple[str, dict]] = []
+
+    class Bank:
+        trained = SimpleNamespace(n_train=np.array([3, 4]))
+
+        def learn(self, freq, t_start, t_end):
+            calls.append((freq, t_start, t_end))
+            return True
+
+    button = {"slot": "b2", "kind": "button", "freq": 17.0}
+    confirm = {"slot": "ok", "kind": "confirm", "freq": 15.0}
+    back = {"slot": "no", "kind": "back", "freq": 17.0}
+    me = SimpleNamespace(_bank=Bank(), _last_pick=None,
+                         _log=lambda kind, fields: logs.append((kind, fields)))
+    Session._learn_from(me, button, 123.0, 125.5, 7)       # pick b2 (17 Hz), gate 123, commit 125.5
+    assert me._last_pick == (17.0, 123.0, 125.5, 7) and calls == []
+    Session._learn_from(me, confirm, 130.0, 132.0, 8)      # confirmed (its own gate is irrelevant)
+    assert calls == [(17.0, 123.0, 125.5)] and me._last_pick is None
+    assert logs == [("learned", {"freq": 17.0, "t_start": 123.0, "t_end": 125.5, "ok": True,
+                                 "n_train": [3, 4]})]
+    Session._learn_from(me, button, 140.0, 142.0, 9)
+    Session._learn_from(me, back, 150.0, 152.0, 10)        # back: forgotten, nothing learnt
+    assert me._last_pick is None and len(calls) == 1
+    Session._learn_from(me, confirm, 160.0, 162.0, 11)     # confirm without a pick: nothing
+    assert len(calls) == 1
+    me._bank.trained = None                                # FBCCA: never learns
+    Session._learn_from(me, button, 170.0, 172.0, 12)
+    Session._learn_from(me, confirm, 180.0, 182.0, 13)
+    assert len(calls) == 1 and me._last_pick is None
+
+    class Failing(Bank):
+        def learn(self, freq, t_start, t_end):
+            raise ValueError("boom")
+
+    me._bank = Failing()
+    Session._learn_from(me, button, 190.0, 192.0, 14)
+    Session._learn_from(me, confirm, 200.0, 202.0, 15)
+    assert logs[-1][0] == "learned" and logs[-1][1]["ok"] is False
+
+
+def test_select_reads_the_pick_layout_before_the_mode_replaces_it():
+    """_select must hand _learn_from the selected target and gate of the layout the decision
+    was made in, before on_selection may swap in a new layout (an idle one has no targets)."""
+    from types import SimpleNamespace
+    from brainsync.online import Decision
+
+    seen: list[tuple] = []
+
+    class Bank:
+        gate = 55.5
+        trained = None
+
+    def mode_call(name, slot, now):
+        me._targets = []                                   # the mode moved to an idle layout
+        me._bank.gate = math.inf
+
+    me = SimpleNamespace(_targets=[{"slot": "b1", "kind": "button", "freq": 15.0},
+                                   {"slot": "more", "kind": "more", "freq": 17.0}],
+                         _bank=Bank(), _selection_seq=0, paradigm="freq",
+                         _target_slots=lambda: {0: "b1", 1: "more"},
+                         _scores=lambda d: {"b1": 0.1, "more": 0.4},
+                         _transport=SimpleNamespace(send=lambda msg: None),
+                         _log=lambda kind, fields: None, _mode_call=mode_call,
+                         _learn_from=lambda target, gate, t_commit, layout_id:
+                             seen.append((target["slot"], gate, t_commit, layout_id)))
+    d = Decision(time=57.0, scores=np.array([0.1, 0.4]), raw=1, committed=1, changed=True)
+    Session._select(me, d, 3, 57.1)                        # "more" on the last page -> idle
+    assert seen == [("more", 55.5, 57.0, 3)]
+
+
 # -- streaming gate (v3.1) ------------------------------------------------------------------
 
 def stall(rig: Rig, seconds: float) -> None:
