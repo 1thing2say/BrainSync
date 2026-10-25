@@ -1,25 +1,32 @@
-# Four targets for the trained classifier: 11/13/15/17 Hz sine (no shared harmonics below 45 Hz,
-# clear of 9-10 Hz alpha and 18-21 Hz venue interference), 2x2 grid placed so side neighbours
-# differ by 4-6 Hz except one 2 Hz pair (15/13). Record training trials with
+# Four targets for the page-mode gate recording (PLAN.md section 14): the frequencies of
+# the teammate's four_diamond.toml (13 Hz top, 15 left, 17 right, 11 bottom), here on a
+# 2x2 grid because this display places targets on a row/column grid only. The diamond with
+# fixation marks and a sentence beside each square is his PsychoPy display's layout; this
+# config records labelled trials with the same frequency set, which is what the
+# classifiers (FBCCA, and the trained TRCA / eTRCA / msCCA) are scored on:
+#
 #   python -m brainsync.record -c four_targets --trials 32
-# then python -m brainsync.train <file>.
+#   python -m brainsync.score_cued --methods fbcca etrca mscca <the new _cued.npz>
+#
+# All four sit clear of the user's eyes-closed alpha (9.25 Hz) and of the 18-21 Hz
+# interference measured at the venue; with sine flicker they share no harmonics below
+# 45 Hz. Chance is 25 %.
 name = "four_targets"
 
 [targets]
-freqs = [11.0, 15.0, 17.0, 13.0]   # row by row from the top left
-phases_pi = [0.0, 0.0, 0.0, 0.0]
-labels = ["11", "15", "17", "13"]
+freqs = [13.0, 15.0, 17.0, 11.0]   # Hz
+phases_pi = [0.0, 0.0, 0.0, 0.0]   # multiples of pi
+labels = ["13", "15", "17", "11"]
 
 [layout]
 rows = 2
 cols = 2
-size = 0.2      # side length, screen heights
-spacing = 0.54  # centre to centre: centres at +-0.27, cue boxes reach 0.39, which leaves
-                # the display's status line and two-line prompts (0.04 gap + 0.07) on screen
+size = 0.3      # side length, screen heights
+spacing = 0.6   # centre to centre, screen heights
 
 [stimulus]
-waveform = "sine"
-hold_cue = true
+waveform = "sine"   # 11, 13 and 17 do not divide 60
+hold_cue = true     # the cue box stays on through the flicker: gaze drifted after ~2 s without it
 
 [display]
 refresh_hz = 60.0   # ProMotion off
@@ -29,7 +36,7 @@ background = 0.0
 aspect = 1.5
 
 [session]
-blocks = 8      # 8 blocks of 4 trials = 32 trials of 8 s, about 4.5 minutes
+blocks = 8          # 8 trials per target, about 5 minutes
 cue_s = 1.0
 stim_s = 4.0
 rest_s = 3.0

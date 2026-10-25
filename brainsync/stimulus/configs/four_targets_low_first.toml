@@ -1,0 +1,38 @@
+# Four targets for the phase-locked TRCA (demo --classifier trca-phase): 11/13/15/17 Hz sine
+# (no shared harmonics below 45 Hz, clear of 9-10 Hz alpha and 18-21 Hz venue interference),
+# 2x2 grid placed so side neighbours differ by 4-6 Hz except one 2 Hz pair (15/13). The same
+# frequencies as four_targets in another order (11 Hz first), smaller squares closer together;
+# the 2026-10-24_235732 recording was made with it. Record training trials with
+#   python -m brainsync.record -c four_targets_low_first --trials 32
+# then python -m brainsync.train <file>.
+name = "four_targets_low_first"
+
+[targets]
+freqs = [11.0, 15.0, 17.0, 13.0]   # row by row from the top left
+phases_pi = [0.0, 0.0, 0.0, 0.0]
+labels = ["11", "15", "17", "13"]
+
+[layout]
+rows = 2
+cols = 2
+size = 0.2      # side length, screen heights
+spacing = 0.54  # centre to centre: centres at +-0.27, cue boxes reach 0.39, which leaves
+                # the display's status line and two-line prompts (0.04 gap + 0.07) on screen
+
+[stimulus]
+waveform = "sine"
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 8      # 8 blocks of 4 trials = 32 trials of 8 s, about 4.5 minutes
+cue_s = 1.0
+stim_s = 4.0
+rest_s = 3.0
+shuffle = true

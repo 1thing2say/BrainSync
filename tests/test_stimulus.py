@@ -156,8 +156,8 @@ def test_shipped_configs():
         assert not one.hold_cue and one.targets[0].pos == (0.0, 0.0)
 
 
-def test_four_targets_config():
-    four = load_config("four_targets")
+def test_four_targets_low_first_config():
+    four = load_config("four_targets_low_first")
     assert four.n_targets == 4
     np.testing.assert_array_equal(four.freqs, [11.0, 15.0, 17.0, 13.0])   # row by row
     np.testing.assert_array_equal(four.phases, [0.0, 0.0, 0.0, 0.0])
@@ -884,6 +884,17 @@ def test_hold_still_needs_stdin_feedback():
     with pytest.raises(SystemExit):
         cli.main(["--free", "--hold-still", "--plan"])
     assert cli.main(["--free", "--feedback", "stdin", "--hold-still", "--plan"]) == 0
+
+
+def test_four_targets_config_has_the_gate_frequencies():
+    """The page-mode gate set (PLAN.md section 14), recordable with brainsync.record."""
+    from brainsync.stimulus.config import load_config
+
+    cfg = load_config("four_targets")
+    assert cfg.n_targets == 4
+    assert cfg.freqs.tolist() == [13.0, 15.0, 17.0, 11.0]
+    assert cfg.phases.tolist() == [0.0] * 4
+    assert cfg.labels == ("13", "15", "17", "11")
 
 
 def test_feedback_reader_takes_text_lines_on_the_same_stream():

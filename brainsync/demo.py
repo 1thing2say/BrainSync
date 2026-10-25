@@ -2,13 +2,13 @@
 
     python -m brainsync.demo                                  # Cerelog X8 + full-screen stimulus
     python -m brainsync.demo --fake --fast --no-stimulus      # synthetic board, faster than real time
-    python -m brainsync.demo -c four_targets --classifier trca-phase --model latest
+    python -m brainsync.demo -c four_targets_low_first --classifier trca-phase --model latest
 
 --model FILE alone loads a classifier trained by brainsync.calibrate (brainsync.templates),
 which replaces --classifier. The phase-locked TRCA (--classifier trca-phase, brainsync.trca)
 needs a model fitted on the user's own cued trials with the same targets, channels and
-preprocessing: record them with ``python -m brainsync.record -c four_targets --trials 32``,
-train with
+preprocessing: record them with
+``python -m brainsync.record -c four_targets_low_first --trials 32``, train with
 ``python -m brainsync.train <file>_cued.npz`` (it says whether TRCA beats FBCCA on held-out
 trials and saves the model to data/models), then pass --model PATH or --model latest. The
 model's rest baseline is not saved: it is fitted on this session's still screen like
@@ -50,7 +50,7 @@ import numpy as np
 
 from . import trca
 from .board import Board, CerelogBoard, FakeBoard
-from .classify import ABSTAIN, TRAINING_FREE, make
+from .classify import ABSTAIN, PHASE_LOCKED, TRAINING_FREE, make
 from .launch import Stimulus, launch_stimulus, speak
 from .online import TUNED, Decision, Decoder, calibrate, threshold_arg
 from .recordings import MONTAGE, POSTERIOR, channel_indices
@@ -60,7 +60,7 @@ from .templates import load_model
 
 # brainsync.trca's phase-locked TRCA, trained by brainsync.train. Not "trca": that name is
 # brainsync.templates' TRCA, which a --model from brainsync.calibrate brings.
-PHASE_TRCA = "trca-phase"
+PHASE_TRCA = PHASE_LOCKED[0]
 STALL_S = 5.0
 POLL_S = 0.1
 ONSET_WAIT_S = 1.0     # the free_on marker follows the first feedback line within a frame

@@ -16,7 +16,7 @@ labels = ["11", "13", "14", "12"]
 [layout]
 rows = 2
 cols = 2
-size = 0.2      # as four_targets: centres at +-0.27, cue boxes reach 0.39
+size = 0.2      # as four_targets_low_first: centres at +-0.27, cue boxes reach 0.39
 spacing = 0.54
 
 [stimulus]

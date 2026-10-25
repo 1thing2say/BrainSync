@@ -96,7 +96,8 @@ def test_main_reports_every_cell_and_a_verdict(trained) -> None:
 def test_saved_model_matches_the_recording(trained) -> None:
     _, out, model, _ = trained
     assert f"model saved: {model}" in out
-    assert "python -m brainsync.demo -c four_targets --classifier trca-phase --model" in out
+    assert ("python -m brainsync.demo -c four_targets_low_first --classifier trca-phase "
+            "--model") in out
     clf = load_model(model)
     np.testing.assert_allclose(clf.freqs, FREQS4)
     assert clf.info is not None
@@ -540,8 +541,8 @@ def test_run_it_repeats_every_non_default_setting(small, tmp_path, capsys) -> No
 
 def test_run_it_with_defaults_adds_nothing(trained) -> None:
     _, out, model, _ = trained
-    assert ("run it: python -m brainsync.demo -c four_targets --classifier trca-phase "
-            f"--model {model}\n") in out
+    assert ("run it: python -m brainsync.demo -c four_targets_low_first "
+            f"--classifier trca-phase --model {model}\n") in out
 
 
 def test_run_it_names_another_montage(tmp_path, capsys) -> None:

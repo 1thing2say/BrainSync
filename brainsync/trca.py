@@ -51,7 +51,7 @@ from pathlib import Path
 import numpy as np
 from scipy.linalg import eigh
 
-from .classify import CACHE_SIZE, FBCCA, references
+from .classify import CACHE_SIZE, FBCCA, PHASE_LOCKED, references
 from .paths import models_dir
 from .signal import Band, filterbank
 
@@ -134,7 +134,7 @@ class TRCA(FBCCA):
 
     # "trca" is brainsync.templates' TRCA (classify.make, brainsync.calibrate); this one is
     # loaded from a brainsync.train model (demo --classifier trca-phase)
-    name = "trca-phase"
+    name = PHASE_LOCKED[0]   # "trca-phase"
 
     def __init__(self, freqs: Sequence[float], fs: float, harmonics: int = 3,
                  phases: Sequence[float] | None = None, margin: float = 0.0,
