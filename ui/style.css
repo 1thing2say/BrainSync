@@ -149,7 +149,9 @@ a { color: var(--text); }
 .target.code { grid-row: 2; align-self: start; width: 100%; max-width: 18rem; min-height: 0;
   padding: 0.5rem 0.25rem; gap: 0.6rem; justify-content: flex-start; border: none;
   background: transparent; overflow: visible; }
-.square { display: block; width: min(100%, 26vh, 14rem); aspect-ratio: 1; background: #ffffff; }
+/* margin-bottom: room for the cue box and the pick ring (12 px out, 3 px wide) above the text. */
+.square { display: block; width: min(100%, 26vh, 14rem); aspect-ratio: 1; background: #ffffff;
+  margin-bottom: 0.6rem; }
 /* The cue box round the training square, and the white ring round a pick: still lines, set
    apart from the square so they never touch its flicker. */
 .target.code.cue .square, .target.code.picked .square { outline: 3px solid #ffffff; outline-offset: 12px; }
