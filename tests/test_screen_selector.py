@@ -425,3 +425,143 @@ def test_patch_of_element_not_on_page_raises():
     sel = TopKSelector([a], FREQS, aspect=WIDE)
     with pytest.raises(ValueError, match="not on page"):
         sel.patch(b)
+
+
+# -- code mode (c-VEP, docs/CVEP-STANDARD.md): K = 3 lags ---------------------------------
+
+LAGS = (0, 21, 42)
+HAS_LAG = "lag" in getattr(protocol.Target, "__dataclass_fields__", {})
+needs_code_protocol = pytest.mark.skipif(
+    not HAS_LAG, reason="protocol.Target has no lag field yet (server side of CVEP-STANDARD 4.2)")
+
+
+@pytest.fixture
+def fake_code_target(monkeypatch):
+    """Stand in for the c-VEP protocol.Target: lag L becomes the distinct freq 100 + L, so
+    the plumbing (which target index each slot gets) is testable before the server side."""
+    from brainsync.screen import selector
+
+    def make(slot, lag, label, kind, rects):
+        return protocol.Target(slot, 100.0 + lag, 0.0, label, kind, tuple(rects))
+
+    monkeypatch.setattr(selector, "code_target", make)
+    return lambda t: round(t.freq - 100.0)          # the lag a stand-in target carries
+
+
+def test_code_pages_hold_two_candidates_plus_more():
+    sel = TopKSelector(grid(5), lags=LAGS, aspect=WIDE)
+    assert sel.k == 3 and sel.code and sel.freqs is None and sel.lags == LAGS
+    assert [len(p) for p in sel.pages] == [2, 2, 1]
+    assert [(p.slot, p.index, p.kind) for p in sel.plan()] == [
+        ("b1", 0, "button"), ("b2", 1, "button"), ("more", 2, "more")]
+    assert [p.label for p in sel.plan()] == ["g0", "g1", "More"]
+
+
+def test_code_targets_carry_the_lags_in_rank_order(fake_code_target):
+    sel = TopKSelector(grid(3), lags=LAGS, aspect=WIDE)
+    t = sel.targets()
+    assert [(x.slot, fake_code_target(x)) for x in t] == [("b1", 0), ("b2", 21), ("more", 42)]
+    protocol.layout(1, "pick", t)
+
+
+def test_code_confirm_uses_targets_0_and_2(fake_code_target):
+    risky = el(0.3, 0.3, risky=True, label="Pay")
+    sel = TopKSelector([risky], lags=LAGS, aspect=WIDE)
+    assert sel.back_index == 2
+    assert sel.pick("b1") == "confirm"
+    assert [(p.slot, p.index) for p in sel.plan()] == [("confirm", 0), ("back", 2)]
+    t = sel.targets()
+    assert [(x.slot, x.kind, fake_code_target(x)) for x in t] == [
+        ("confirm", "confirm", 0), ("back", "back", 42)]
+    assert t[0].rects == (patch_rect(risky, WIDE),)
+    assert t[1].rects == (sel.more_rects[0],)
+    protocol.layout(2, "confirm", t)
+    assert sel.pick("back") == "pick" and sel.chosen is None
+
+
+def test_freq_mode_keeps_back_on_the_second_frequency():
+    sel = TopKSelector([el(0.3, 0.3, risky=True)], FREQS, aspect=WIDE)
+    assert sel.back_index == 1 and not sel.code
+    sel.pick("b1")
+    assert [x.freq for x in sel.targets()] == [15.0, 17.0]
+    three = TopKSelector([el(0.3, 0.3, risky=True)], (15.0, 17.0, 20.0), aspect=WIDE)
+    three.pick("b1")
+    assert [x.freq for x in three.targets()] == [15.0, 20.0]   # K = 3: targets 0 and 2
+
+
+def test_code_mode_pages_through_and_rescans():
+    sel = TopKSelector(grid(3), lags=LAGS, aspect=WIDE)
+    assert sel.pick("more") == "pick" and sel.page_index == 1
+    assert [p.label for p in sel.plan()] == ["g2", "Rescan"]
+    assert sel.pick("more") == "rescan"
+
+
+def test_code_mode_accepts_an_empty_freqs_from_a_code_welcome():
+    sel = TopKSelector([], (), lags=LAGS, aspect=WIDE)
+    assert sel.k == 3 and [p.slot for p in sel.plan()] == ["more"]
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"lags": (0,)}, "at least 2"),
+    ({"lags": (0, 0, 21)}, "distinct"),
+    ({"lags": (0, -21, 42)}, "integer frames"),
+    ({"lags": (0, 21.0, 42)}, "integer frames"),
+    ({"lags": (0, True)}, "integer frames"),
+    ({"lags": "0,21"}, "string"),
+    ({"lags": LAGS, "freqs": FREQS}, "not both"),
+    ({"lags": LAGS, "phases": (0.0, 0.1, 0.2)}, "phases"),
+    ({"freqs": None}, "pass freqs"),
+])
+def test_code_constructor_rejects_bad_arguments(kwargs, match):
+    args = {"freqs": None, "aspect": WIDE, **kwargs}
+    with pytest.raises(ValueError, match=match):
+        TopKSelector([], **args)
+
+
+@pytest.mark.skipif(HAS_LAG, reason="protocol.Target already has a lag field")
+def test_code_target_says_what_is_missing_on_an_old_protocol():
+    from brainsync.screen.selector import code_target
+    with pytest.raises(ValueError, match="lag field"):
+        code_target("b1", 0, "x", "button", (Rect(0.1, 0.1, 0.1, 0.1),))
+
+
+@needs_code_protocol
+def test_code_targets_serialize_with_lag_and_null_freq():
+    sel = TopKSelector(grid(3), lags=LAGS, aspect=WIDE)
+    msg = protocol.layout(1, "pick", sel.targets())
+    assert [(t["slot"], t["lag"], t["freq"]) for t in msg["targets"]] == [
+        ("b1", 0, None), ("b2", 21, None), ("more", 42, None)]
+
+
+# -- the training row ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("aspect", [WIDE, 4 / 3, 1.0, 0.5, 3.5])
+@pytest.mark.parametrize("k", [2, 3, 4])
+def test_train_rects_are_a_centred_row_of_square_patches(aspect, k):
+    from brainsync.screen.selector import train_rects
+    rs = train_rects(k, aspect)
+    assert len(rs) == k and all(inside(r) for r in rs)
+    for r in rs:
+        assert r.w * aspect == pytest.approx(r.h)               # square in pixels
+        assert r.cy == pytest.approx(0.5)
+    for a, b in zip(rs, rs[1:]):
+        assert b.x > a.x and not a.overlaps(b, 0.01)
+    assert (rs[0].x + rs[-1].x + rs[-1].w) / 2 == pytest.approx(0.5)
+
+
+def test_train_targets_freq_mode_and_labels():
+    from brainsync.screen.selector import train_targets
+    t = train_targets(WIDE, freqs=(15.0, 17.0, 20.0))
+    assert [(x.slot, x.kind, x.freq, x.label) for x in t] == [
+        ("b1", "button", 15.0, "Look here"), ("b2", "button", 17.0, "Second"),
+        ("more", "more", 20.0, "More")]
+    four = train_targets(WIDE, freqs=FREQS, labels=("A", "B", "C", "D"))
+    assert [x.label for x in four] == ["A", "B", "C", "D"]
+    with pytest.raises(ValueError, match="labels"):
+        train_targets(WIDE, freqs=FREQS, labels=("A",))
+
+
+def test_train_targets_code_mode(fake_code_target):
+    from brainsync.screen.selector import train_targets
+    t = train_targets(WIDE, lags=LAGS)
+    assert [(x.slot, fake_code_target(x)) for x in t] == [("b1", 0), ("b2", 21), ("more", 42)]

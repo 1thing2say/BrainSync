@@ -1,6 +1,7 @@
 """BrainPoint: point mode for the session, from screenshot to click (PROTOCOL-v3.md section 4).
 
     mode = PointMode(Detector(), freqs=(15.0, 17.0, 12.0, 20.0), viewport=(1512, 857))
+    mode = PointMode(Detector(), lags=(0, 21, 42), viewport=(1512, 857))   # c-VEP, K = 3
     out = mode.start(time.time())             # scan_request, idle layout, phase run
     out += mode.on_message(scan, now)         # the client's screenshot: detection starts
     out += mode.tick(now)                     # scan_result, pick layout, phase run when done
@@ -18,6 +19,8 @@ Rules:
   second or two and the session's loop must keep reading the board. ``tick`` collects it.
 - While a scan is pending or being analyzed, the layout is idle, so nothing flickers.
 - After a detection, a TopKSelector makes the pages, and the pick layout shows the first one.
+  K is the number of ``freqs`` (SSVEP, 4 by default) or of ``lags`` (c-VEP, 3: the best
+  candidate, the second and More; confirm "Do it" / "Back" on targets 0 and 2).
   A failed detection (DetectError or any other exception) is answered with ``scan_result``
   ``ok: false`` and ``error`` ``scan_failed``; the layout stays idle and a new scan_request
   goes out ``retry_s`` later.
@@ -55,7 +58,8 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from brainsync.screen.detect import DetectError, Detection, Detector, Element
-from brainsync.screen.selector import GAP, MIN_P_BUTTON, MIN_PATCH, TopKSelector
+from brainsync.screen.selector import (GAP, MIN_P_BUTTON, MIN_PATCH, TopKSelector, stimulus,
+                                       train_targets)
 from brainsync.server import protocol
 from brainsync.server.protocol import SETTLE_MS
 
@@ -93,7 +97,7 @@ def _clamp01(v: float) -> float:
 class PointMode:
     """Point mode: scan, detect, show the top-K pages, click, and scan again."""
 
-    def __init__(self, detector: Detector, freqs: Sequence[float], *,
+    def __init__(self, detector: Detector, freqs: Sequence[float] | None = None, *,
                  viewport: tuple[float, float] = (16, 9),
                  executor: concurrent.futures.Executor | None = None,
                  settle_ms: int = SETTLE_MS, retry_s: float = RETRY_S,
@@ -101,16 +105,17 @@ class PointMode:
                  gap: float = GAP, history_len: int = HISTORY_LEN,
                  log: Callable[[str, dict], None] | None = None,
                  reply_timeout_s: float = REPLY_TIMEOUT_S,
-                 phases: Sequence[float] | None = None) -> None:
+                 phases: Sequence[float] | None = None,
+                 lags: Sequence[int] | None = None) -> None:
         if not callable(getattr(detector, "detect", None)):
             raise ValueError("detector must have a detect() method; pass a "
                              "brainsync.screen.detect.Detector")
-        self.freqs = tuple(freqs)
+        self.freqs, self.lags = stimulus(freqs, lags)
         self.phases = None if phases is None else tuple(phases)
         self.min_p_button, self.min_patch, self.gap = min_p_button, min_patch, gap
         # Fail now, not at the first scan, if these cannot make a page.
         TopKSelector((), self.freqs, aspect=1.0, min_p_button=min_p_button,
-                     min_patch=min_patch, gap=gap, phases=self.phases)
+                     min_patch=min_patch, gap=gap, phases=self.phases, lags=self.lags)
         try:
             vw, vh = viewport
         except (TypeError, ValueError):
@@ -146,6 +151,18 @@ class PointMode:
         self._last_rescan = -math.inf               # when the last rescan went out
         self._rescan_due: float | None = None       # a debounced rescan waiting for its turn
         self._stopped = False
+
+    @property
+    def k(self) -> int:
+        """The number of targets: frequencies, or code lags (3 in the c-VEP standard)."""
+        return len(self.lags if self.lags is not None else self.freqs or ())
+
+    def train_targets(self, labels: Sequence[str] | None = None) -> list[protocol.Target]:
+        """The targets of the c-VEP training layout (stage "train", CVEP-STANDARD 4.2): K
+        patches in a row centred in the viewport given at construction, target 0 (slot "b1",
+        the cue) first. The session sends it before the first scan; this mode keeps no state
+        about it."""
+        return train_targets(self.aspect, lags=self.lags, freqs=self.freqs, labels=labels)
 
     # -- message helpers --------------------------------------------------------------------
 
@@ -358,7 +375,7 @@ class PointMode:
                                   f"Detection", "invalid")
             sel = TopKSelector(det.elements, self.freqs, aspect=self._future_aspect,
                                min_p_button=self.min_p_button, min_patch=self.min_patch,
-                               gap=self.gap, phases=self.phases)
+                               gap=self.gap, phases=self.phases, lags=self.lags)
         except concurrent.futures.CancelledError:
             return []
         except Exception as exc:
