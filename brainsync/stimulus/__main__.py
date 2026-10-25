@@ -6,6 +6,8 @@
     python -m brainsync.stimulus --free --feedback stdin        # live demo: cue box from a decoder
     python -m brainsync.stimulus --free --feedback stdin --hold-still   # still until the first line
     python -m brainsync.stimulus -c swipe --free --feedback stdin --cards DIR   # BrainSwipe feed
+    python -m brainsync.stimulus -c cvep_2 --free --feedback stdin --labels --status stdin
+                                                                # labelled squares, live status
     python -m brainsync.stimulus --conditions square:1,sine:1,sine:0.5 --rate   # flicker A/B
 
 Markers go to stderr as "[marker <seconds>] cue:<k>|stim_on:<k>|stim_off:<k>", printed and
@@ -25,6 +27,11 @@ list, printed as "conditions: ..." before the first trial), and --rate asks for 
 comfort rating after each rest ("rate:<n>"). --status stdin shows the latest
 {"text": "..."} line under the targets between flickers, and holds the end screen until
 space, Escape or EOF.
+
+In a free run, --labels writes each target's label under its square (signage for the
+audience) and --status stdin shows {"text": "..."} lines arriving on the same stdin as
+the feedback, redrawn on every frame including flicker frames: the timing summary's
+dropped-frame count says whether the machine keeps up.
 """
 from __future__ import annotations
 
@@ -73,6 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hold-still", action="store_true",
                    help="with --feedback stdin: show the targets still (no flicker) until "
                         "the first feedback line, e.g. while a decoder calibrates")
+    p.add_argument("--labels", action="store_true",
+                   help="free run: write each target's label under its square")
     p.add_argument("--cards", metavar="DIR",
                    help="free run: show DIR/*.png (sorted by name) as a profile card between "
                         "the targets; 'card <k>' and 'flash <k>' lines on stdin drive it")
@@ -97,9 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="cued session: ask for a 1-5 comfort rating (keys 1-5) after each "
                         "trial's rest, marked rate:<n>")
     p.add_argument("--status", default="none", choices=("none", "stdin"),
-                   help="cued session: 'stdin' shows the latest {\"text\": ...} JSON line "
-                        "under the targets between flickers, and waits at the end until "
-                        "space, Escape or EOF")
+                   help="'stdin' shows the latest {\"text\": ...} JSON line under the "
+                        "targets: in a cued session between flickers (waiting at the end "
+                        "until space, Escape or EOF); in a free run on every frame, read "
+                        "from the --feedback stdin stream")
     p.add_argument("--seed", type=int, help="seed for the shuffled order (random if omitted)")
     p.add_argument("--no-wait", action="store_true", help="skip the press-space start screen")
     p.add_argument("--refresh", type=_refresh_arg,
@@ -218,7 +228,8 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
     from .display import PsychoPyRenderer
     from .feedback import FeedbackReader, StatusReader
 
-    renderer = PsychoPyRenderer(cfg, cards=cards) if cards else PsychoPyRenderer(cfg)
+    renderer = (PsychoPyRenderer(cfg, cards=cards, labels=True) if args.labels
+                else PsychoPyRenderer(cfg, cards=cards) if cards else PsychoPyRenderer(cfg))
     try:
         if cards:
             print(f"loaded {len(cards)} card(s) from {cards[0].parent}", file=sys.stderr,
@@ -247,13 +258,16 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
             stop = None if reader is None else (lambda: reader.done)
             hold = (None if reader is None or not args.hold_still
                     else (lambda: not reader.heard))
+            live_status = (None if reader is None or args.status == "none"
+                           else (lambda: reader.text))
             if cfg.coded:
                 frames = coded_free_frames(cfg, sequence_for(cfg, seed), args.seconds,
-                                           cue=cue, stop=stop, hold=hold)
+                                           cue=cue, stop=stop, hold=hold, status=live_status)
             else:
                 frames = free_frames(cfg, args.seconds, cue=cue, stop=stop, hold=hold,
                                      card=card,
-                                     flash=None if reader is None else (lambda: reader.flash))
+                                     flash=None if reader is None else (lambda: reader.flash),
+                                     status=live_status)
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0
@@ -293,10 +307,14 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--hold-still needs --free --feedback stdin")
     if args.cards is not None and not args.free:
         p.error("--cards needs --free")
+    if args.labels and not args.free:
+        p.error("--labels needs --free")
+    if args.free and args.status != "none" and args.feedback != "stdin":
+        p.error("--status stdin in a free run needs --feedback stdin (the same stream)")
     if args.seconds is not None and args.seconds <= 0:
         p.error(f"--seconds must be positive, got {args.seconds}")
-    if args.free and (args.conditions is not None or args.rate or args.status != "none"):
-        p.error("--conditions, --rate and --status are for a cued session, not --free")
+    if args.free and (args.conditions is not None or args.rate):
+        p.error("--conditions and --rate are for a cued session, not --free")
     try:
         cfg = _configure(args)
         cards = card_paths(args.cards) if args.cards is not None else []

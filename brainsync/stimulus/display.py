@@ -8,7 +8,9 @@ when a window is opened.
 
 The card and the flash never touch a square's fill: the card is its own image stimulus
 and the flash is a thicker, coloured outline box, so the flicker frequencies stay exact.
-Text (a status line under the targets, a prompt above them) is only ever on still frames.
+Text (a status line under the targets, a prompt above them) is only ever on still frames,
+except a free run's ``status`` line, which is redrawn on flicker frames too (opt-in: check
+the dropped-frame count).
 """
 from __future__ import annotations
 
@@ -176,8 +178,12 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 stop: Callable[[], bool] | None = None,
                 hold: Callable[[], bool] | None = None,
                 card: Callable[[], int] | None = None,
-                flash: Callable[[], tuple[int, int]] | None = None) -> Iterator[Frame]:
+                flash: Callable[[], tuple[int, int]] | None = None,
+                status: Callable[[], str] | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
+
+    ``status()`` is polled on every frame, flicker frames included, for the text under
+    the targets (a decoder's confidence line); None draws none.
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
     a still screen for a rest baseline; ``seconds`` counts flicker frames only, and the
@@ -205,13 +211,14 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 seen, flashing, left = serial, target, flash_len
         lit = flashing if left > 0 else -1
         left = max(0, left - 1)
+        text = status() if status is not None else ""
         if holding and hold():
-            yield Frame(still, card=shown, flash=lit)
+            yield Frame(still, card=shown, flash=lit, text=text)
             continue
         holding = False
         k = cue() if cue is not None else -1
         yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
-                    cue=k, card=shown, flash=lit)
+                    cue=k, card=shown, flash=lit, text=text)
         i += 1
 
 
@@ -373,13 +380,15 @@ class PsychoPyRenderer:
     With ``cards``, every PNG becomes one ImageStim at init (textures are never loaded in
     the frame loop), centred, [card] height high and as wide as its own aspect says, and
     each target's label (Pass, Like) is written under its cue box in its flash colour, so
-    the audience can see what each square does. Labels are static and drawn outside the
+    the audience can see what each square does; ``labels`` writes them (light grey)
+    without cards. Labels are static and drawn outside the
     squares, so they never touch the flicker. Status text goes under the targets and
     prompts above them, in a monospaced font so a status table lines up; a text stimulus
     is re-rendered only when its text changes.
     """
 
-    def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = ()) -> None:
+    def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = (),
+                 labels: bool = False) -> None:
         from psychopy import event, visual  # lazy: never imported by tests
 
         self.cfg = cfg
@@ -409,12 +418,12 @@ class PsychoPyRenderer:
             print(f"warning: {problem}", file=sys.stderr)
         height = cfg.card_spec.height
         self.labels = []
-        if cards:
+        if cards or labels:
             for t in cfg.targets:
+                color = cfg.flash_color(t.index) if cards else to_psychopy_rgb(0.9)
                 self.labels.append(visual.TextStim(self.win, text=t.label,
                                                    pos=label_pos(cfg, t.index),
-                                                   height=LABEL_HEIGHT,
-                                                   color=cfg.flash_color(t.index)))
+                                                   height=LABEL_HEIGHT, color=color))
         bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
         top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
         self.status = visual.TextStim(self.win, text="", pos=(0.0, bottom), height=TEXT_HEIGHT,

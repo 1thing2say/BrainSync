@@ -791,3 +791,39 @@ def test_hold_still_needs_stdin_feedback():
     with pytest.raises(SystemExit):
         cli.main(["--free", "--hold-still", "--plan"])
     assert cli.main(["--free", "--feedback", "stdin", "--hold-still", "--plan"]) == 0
+
+
+def test_feedback_reader_takes_text_lines_on_the_same_stream():
+    notes: list[str] = []
+    r = FeedbackReader(io.StringIO('{"text": "hello"}\n0\n{"nope": 1}\n{bad\n{"text": ""}\n'),
+                       2, note=notes.append)
+    assert r.text == ""
+    assert not r.heard
+    r.run()
+    assert r.current == 0 and r.heard
+    assert r.text == ""   # the last line cleared it
+    assert r.n_lines == 5 and r.n_ignored == 2 and len(notes) == 2
+    r2 = FeedbackReader(io.StringIO('{"text": "YES  ####  0.42"}\n'), 2, note=notes.append)
+    r2.run()
+    assert r2.text == "YES  ####  0.42" and r2.current == -1
+
+
+def test_free_frames_poll_status_on_every_frame_including_flicker():
+    cfg = load_config("two_targets")
+    texts = iter(["a", "b", "c", "d"])
+    held = iter([True, False, False, False])
+    frames = list(free_frames(cfg, seconds=3 / 60, hold=lambda: next(held),
+                              status=lambda: next(texts)))
+    assert [f.text for f in frames] == ["a", "b", "c", "d"]
+    assert frames[0].cue == -1   # the held frame carries the text too
+    plain = list(free_frames(cfg, seconds=2 / 60))
+    assert all(f.text == "" for f in plain)
+
+
+def test_labels_and_status_flags_in_a_free_run():
+    with pytest.raises(SystemExit):
+        cli.main(["--labels", "--plan"])
+    with pytest.raises(SystemExit):
+        cli.main(["--free", "--status", "stdin", "--plan"])
+    assert cli.main(["--free", "--feedback", "stdin", "--labels", "--status", "stdin",
+                     "--plan"]) == 0

@@ -237,3 +237,14 @@ def test_plan_for_coded_configs(capsys):
     assert cli.main(["--plan", "-c", "cvep_4", "--conditions", "sine:1"]) == 2
     assert "not the [code] config" in capsys.readouterr().err
     assert cli.main(["--plan", "-c", "tvep_4", "--rate"]) == 2
+
+
+def test_coded_free_frames_poll_status_every_frame():
+    cfg = load_config("cvep_4")
+    seq = sequence_for(cfg, seed=1)
+    texts = iter(["t1", "t2", "t3"])
+    held = iter([True, False, False])
+    frames = list(coded_free_frames(cfg, seq, seconds=2 / 60, hold=lambda: next(held),
+                                    status=lambda: next(texts)))
+    assert [f.text for f in frames] == ["t1", "t2", "t3"]
+    assert frames[0].cue == -1 and frames[1].events == seq.events(0)

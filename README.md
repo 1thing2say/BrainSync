@@ -991,7 +991,13 @@ its log. c-VEP trains first: `--train-cycles` cycles (default 30, about 32 s) wi
 box on square 0, the leave-one-cycle-out accuracy printed (the paper's "training
 accuracy", 95 % for c-VEP against 88 % for f-VEP), the template saved as
 `<stamp>_cvep_template.npz` in the recordings folder and reusable with `--template`. Then
-every committed change moves the cue box and speaks the label. `--fake` swaps the board
+every committed change moves the cue box and speaks the label. The display carries each
+square's label as signage (`cvep_2`, the two-square live pair: YES left, NO right) and,
+under the squares, a confidence line redrawn after every decision: one bar per target from
+the decoder's scores, the lead and the committed choice (`--no-scores` for a bare display).
+It runs the stimulus as `--free --feedback stdin --labels --status stdin`, with
+`{"text": ...}` lines on the same stdin as the cue index; redrawing the text on every
+flicker frame dropped 1 frame in 7592 on the demo Mac. `--fake` swaps the board
 for `vep.fake.SequenceFakeBoard`: a made-up flash VEP (`synthetic.vep_kernel`, a damped
 sine after a 60 ms latency) convolved with the fixated target's sequence, on the posterior
 channels over Gaussian noise, with the markers coming from the fake board itself. It
@@ -1006,6 +1012,14 @@ What to expect on the headset, and why the defaults differ from the paper:
   frames (267 ms) apart, the widest four lags allow in a 63-frame cycle, where a one-frame
   slip costs nothing; the 16-target grid with 4-frame lags (67 ms) is `cvep_16` for the
   brave. The paper's wrap-around border is not drawn.
+- First headset runs (2026-10-25, `cvep_2`, one wearer, no alpha check first): the
+  template's held-out accuracy was 63 % and then 52 % (chance 50 %). The first run's mean
+  cycle was 140-420 uV RMS per channel, 20-40 times EEG, so the occipital electrodes were
+  not in contact; the second was 7-12 uV but held no stimulus-locked response after 40
+  cycles. With a chance template the live correlations are noise against noise, and the
+  decoder alternates YES / NO every few seconds whatever the margin. Settle the headset
+  (20 min, gel on O1 / O2), pass the eyes-closed alpha check, and fixate the square's
+  centre during training before reading anything into a live c-VEP run.
 - Marker-to-sample alignment has not been measured on the demo Mac (PLAN.md V5). A constant
   offset is absorbed by training; jitter between cycles is not. Check the cycle markers'
   spacing in the stimulus log (1.0500 s apart) before trusting a live c-VEP run.

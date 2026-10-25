@@ -157,20 +157,23 @@ def coded_cued_frames(cfg: StimulusConfig, trials: list[Trial], seq: Sequence,
 def coded_free_frames(cfg: StimulusConfig, seq: Sequence, seconds: float | None = None,
                       cue: Callable[[], int] | None = None,
                       stop: Callable[[], bool] | None = None,
-                      hold: Callable[[], bool] | None = None) -> Iterator[Frame]:
+                      hold: Callable[[], bool] | None = None,
+                      status: Callable[[], str] | None = None) -> Iterator[Frame]:
     """The sequence running continuously from its frame 0; ``cue`` is polled once per
     frame, ``stop`` ends the run, and while ``hold()`` is true the targets stand still
-    (``seconds`` counts sequence frames only)."""
+    (``seconds`` counts sequence frames only). ``status()`` is polled on every frame for
+    the text under the targets, as in ``display.free_frames``."""
     total = None if seconds is None else n_frames(seconds, cfg.refresh)
     holding = hold is not None
     i = 0
     while total is None or i < total:
         if stop is not None and stop():
             return
+        text = status() if status is not None else ""
         if holding and hold():
-            yield Frame(seq.still)
+            yield Frame(seq.still, text=text)
             continue
         holding = False
         k = cue() if cue is not None else -1
-        yield Frame(seq.luminance(i), cue=k, events=seq.events(i))
+        yield Frame(seq.luminance(i), cue=k, events=seq.events(i), text=text)
         i += 1

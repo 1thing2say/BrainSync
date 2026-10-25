@@ -9,7 +9,10 @@
 A live run connects the board, starts the stimulus in free-run mode (held still until the
 first feedback line, Unix markers in its log, which this program tails) and decodes for
 --seconds: one line per decision on stderr, a committed change moves the cue box onto the
-decoded square and speaks its label, a summary at the end. c-VEP needs a template first:
+decoded square and speaks its label, a summary at the end. The display carries each
+square's label (signage) and, under the squares, a confidence line redrawn after every
+decision: one bar per target from the decoder's scores, the lead, and the committed
+choice (--no-scores for a bare display). c-VEP needs a template first:
 --train-cycles cycles with the cue box on square 0 (look at it), cross-validated, saved as
 <stamp>_cvep_template.npz and reusable with --template FILE. t-VEP decides once every
 square has --min-flashes flashes in the last --flash-window seconds. f-VEP is brainsync.demo's
@@ -25,6 +28,7 @@ anyone's visual cortex: --amp and --noise set how easy the fake data are.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import subprocess
 import sys
@@ -67,10 +71,11 @@ PAPER = {   # Bin et al. (2009), section 3.2 and 2.1: online accuracy and ITR
     "code": ("91 %, 92.8 bits/min", "(16 targets, 12 subjects)"),
 }
 PROMPTS = {
-    "train": "Look at the first square, top left, and keep looking at it.",
+    "train": "Look at the {label} square and keep looking at it.",
     "still": "Keep still and look at the middle of the screen.",
     "go": "Look at one of the squares.",
 }
+BAR_CELLS = 12
 BUILD_ERRORS = (ValueError, KeyError, FileNotFoundError, ImportError, OSError)
 
 
@@ -151,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ignore-refresh", action="store_true",
                    help="let the stimulus run when its measured refresh is not 60 Hz")
     p.add_argument("--no-voice", action="store_true", help="no spoken prompts")
+    p.add_argument("--scores", action=argparse.BooleanOptionalAction, default=True,
+                   help="label each square and show a confidence line (one bar per target, "
+                        "the lead, the committed choice) under the squares after every "
+                        "decision (default on)")
     return p
 
 
@@ -232,6 +241,37 @@ def _status(d: Decision, elapsed: float, labels: Sequence[str], truth: int | Non
             f"{_name(labels, d.committed):>3}{mark}{gap}{truth_s}")
 
 
+def _bar(value: float, cells: int = BAR_CELLS) -> str:
+    """``cells`` characters filled in proportion to ``value`` clipped to 0..1."""
+    v = 0.0 if not np.isfinite(value) else min(1.0, max(0.0, float(value)))
+    n = int(round(v * cells))
+    return "\u2588" * n + "\u2591" * (cells - n)
+
+
+def confidence_text(d: Decision, labels: Sequence[str], scale: float = 1.0) -> str:
+    """The status block under the squares: one line per target (label, bar, score), then
+    the lead and the committed choice. Scores are divided by ``scale`` for the bars (c-VEP
+    correlations are already 0..1; t-VEP amplitudes need their own scale)."""
+    width = max(len(s) for s in labels)
+    lines = []
+    for k, label in enumerate(labels):
+        s = float(d.scores[k]) if k < len(d.scores) else float("nan")
+        best = " <" if k == d.raw else "  "
+        shown = "   -  " if not np.isfinite(s) else f"{s:+.2f}"
+        lines.append(f"{label:<{width}}  {_bar(s / scale)}  {shown}{best}")
+    gap = "lead  -  " if not np.isfinite(d.gap) else f"lead {d.gap:.2f}"
+    choice = ("no choice yet" if d.committed == ABSTAIN
+              else f"choice: {labels[d.committed]}" + (" *" if d.changed else ""))
+    lines.append(f"{gap}    {choice}")
+    return "\n".join(lines)
+
+
+def send_text(stim: Stimulus | None, text: str) -> bool:
+    """Replace the display's status line (``{"text": ...}`` on its stdin); False when the
+    pipe is gone."""
+    return send(stim, json.dumps({"text": text}))
+
+
 def _coded_summary(tally: Tally, labels: Sequence[str], ended: str, paradigm: str) -> list[str]:
     lines = [f"{paradigm}: {tally.windows} decisions in {tally.seconds:.1f} s, "
              f"{tally.abstained} abstained, {len(tally.commits)} commits ({ended})"]
@@ -249,10 +289,13 @@ def _coded_summary(tally: Tally, labels: Sequence[str], ended: str, paradigm: st
 def collect_cycles(board: Any, events: Callable[[], list[Event]], n_cycles: int, fs: float,
                    rows: Sequence[int], n_samples: int, sleep: Callable[[float], None],
                    clock: Callable[[], float], stop: Callable[[], str | None],
-                   timeout_s: float) -> np.ndarray:
-    """Record until ``n_cycles`` complete cycles have been marked; the cut, filtered cycles."""
+                   timeout_s: float,
+                   progress: Callable[[int], None] | None = None) -> np.ndarray:
+    """Record until ``n_cycles`` complete cycles have been marked; the cut, filtered cycles.
+    ``progress(k)`` is called whenever the count of marked cycles changes."""
     Xs, ts, marks = [], [], []
     began = heard = clock()
+    reported = -1
     while True:
         why = stop()
         if why:
@@ -267,6 +310,9 @@ def collect_cycles(board: Any, events: Callable[[], list[Event]], n_cycles: int,
         elif now - heard >= STALL_S:
             raise RuntimeError(f"the board sent nothing for {STALL_S:g} s")
         marks += [e for e in events() if e[1] == "cycle"]
+        if progress is not None and len(marks) != reported:
+            reported = len(marks)
+            progress(min(reported, n_cycles))
         if ts and len(marks) > n_cycles:
             last_needed = marks[n_cycles - 1][0] + n_samples / fs + 1.0
             if ts[-1][-1] >= last_needed:
@@ -327,6 +373,8 @@ def coded_stimulus_args(cfg: StimulusConfig, args: argparse.Namespace) -> list[s
     its log, feedback on stdin, held still until the first line (EOF on stdin ends it)."""
     out = ["-c", str(cfg.path or cfg.name), "--free", "--markers", "unix", "--feedback", "stdin",
            "--hold-still", "--no-wait"]
+    if args.scores:
+        out += ["--labels", "--status", "stdin"]
     if args.ignore_refresh:
         out.append("--ignore-refresh")
     return out
@@ -375,10 +423,11 @@ def run_coded(args: argparse.Namespace) -> int:
                     board.start_flicker()
                 return send(stim, cue)
 
+            show = send_text if args.scores else (lambda stim, text: True)
             speak(PROMPTS["still"], voice)
             board.read()
             if decoder is None:   # c-VEP without a template: train on square 0
-                speak(PROMPTS["train"], voice)
+                speak(PROMPTS["train"].format(label=labels[0]), voice)
                 if args.fake:
                     board.set_target(0)
                 if not start_flicker(0):
@@ -387,14 +436,20 @@ def run_coded(args: argparse.Namespace) -> int:
                 cycle_s = cfg.code.cycle_frames / cfg.refresh
                 print(f"training: {args.train_cycles} cycles of {cycle_s:.2f} s on square "
                       f"{labels[0]!r}...", file=sys.stderr)
+                show(stim, f"training: keep looking at {labels[0]}")
                 cycles = collect_cycles(board, events, args.train_cycles, board.fs, rows, n,
                                         sleep, clock, stimulus_gone,
-                                        timeout_s=(args.train_cycles + 3) * cycle_s + 10)
+                                        timeout_s=(args.train_cycles + 3) * cycle_s + 10,
+                                        progress=lambda k: show(
+                                            stim, f"training: keep looking at {labels[0]}"
+                                                  f"   cycle {k}/{args.train_cycles}"))
                 tpl, cv = train_template(cycles, cfg, board.fs, [args.names[i] for i in rows])
                 path = tpl.save(template_path(args))
                 print(f"template from {tpl.n_cycles} cycles, leave-one-out accuracy "
                       f"{100 * cv:.0f} % (chance {100 / cfg.n_targets:.0f} %), saved to {path}",
                       file=sys.stderr)
+                show(stim, f"template ready: {100 * cv:.0f} % on held-out cycles "
+                           f"(chance {100 / cfg.n_targets:.0f} %)")
                 decoder = SyncDecoder(board.fs, template=tpl, channels=args.channels,
                                       ch_names=args.names, band=BAND, votes=args.votes,
                                       cycles=args.cycles, pad_s=args.pad, margin=args.margin)
@@ -402,12 +457,16 @@ def run_coded(args: argparse.Namespace) -> int:
             elif not start_flicker(ABSTAIN):
                 raise RuntimeError("stimulus pipe closed")
             speak(PROMPTS["go"], voice)
+            show(stim, PROMPTS["go"])
             board.read()
             events()
             decoder.reset()
             ended = "started"
             began = heard = clock()
             n_switch = 0
+            # c-VEP scores are correlations (0..1 bars); t-VEP amplitudes are scaled to the
+            # first decision's best score, so the bars are relative
+            score_scale = 1.0 if cfg.paradigm == "code" else float("nan")
             try:
                 while True:
                     why = stimulus_gone()
@@ -438,6 +497,12 @@ def run_coded(args: argparse.Namespace) -> int:
                         at = clock() - began
                         tally.add(d, at, truth)
                         print(_status(d, at, labels, truth), file=sys.stderr, flush=True)
+                        if not np.isfinite(score_scale):
+                            top = float(np.nanmax(d.scores)) if len(d.scores) else float("nan")
+                            score_scale = top if np.isfinite(top) and top > 0 else 1.0
+                        if not show(stim, confidence_text(d, labels, score_scale)):
+                            pipe_ok = False
+                            break
                         if d.changed:
                             if d.committed != ABSTAIN:
                                 speak(labels[d.committed], voice)

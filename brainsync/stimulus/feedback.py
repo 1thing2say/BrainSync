@@ -5,8 +5,9 @@ A decoder writes one command per line:
     k          put the cue box on target k (-1 clears it); the first one ends --hold-still
     card k     show profile card k (index into the sorted --cards PNGs)
     flash k    light target k's box in its flash colour for [card] flash_s seconds
+    {"text": "..."}   the status line under the targets (--status stdin; "" clears it)
 
-Only the integer lines count as "heard": card and flash lines may arrive while the
+Only the integer lines count as "heard": card, flash and text lines may arrive while the
 targets are still held still. Bad lines are ignored with a note. EOF ends the free run.
 The stream is read on a daemon thread; the display polls ``current``, ``card`` and
 ``flash`` once per frame, so a chatty decoder never stalls the flicker.
@@ -60,6 +61,17 @@ def _index(kind: str, text: str, n: int, noun: str) -> int:
     return k
 
 
+def parse_text(line: str) -> str:
+    """The text of a ``{"text": "..."}`` JSON line; ValueError for anything else."""
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        raise ValueError(f"not a JSON object: {line.strip()!r}") from None
+    if not isinstance(msg, dict) or not isinstance(msg.get("text"), str):
+        raise ValueError('expected {"text": "..."}')
+    return msg["text"]
+
+
 def parse_command(line: str, n_targets: int, n_cards: int = 0) -> Command:
     """The command on one feedback line (see the module docstring); ValueError otherwise."""
     words = line.split()
@@ -98,6 +110,7 @@ class FeedbackReader:
         # one tuple, replaced whole, so the display never reads a target from one flash
         # with the serial of another
         self._flash = (NONE, 0)
+        self._text = ""
         self._eof = threading.Event()
         self._heard = threading.Event()
         self._thread: threading.Thread | None = None
@@ -120,6 +133,11 @@ class FeedbackReader:
         return self._flash
 
     @property
+    def text(self) -> str:
+        """The latest {"text": ...} line's text ("" until one arrives)."""
+        return self._text
+
+    @property
     def done(self) -> bool:
         return self._eof.is_set()
 
@@ -134,6 +152,9 @@ class FeedbackReader:
             for line in iter(self.stream.readline, ""):
                 self.n_lines += 1
                 try:
+                    if line.lstrip().startswith("{"):
+                        self._text = parse_text(line)
+                        continue
                     cmd = parse_command(line, self.n_targets, self.n_cards)
                 except ValueError as exc:
                     self.n_ignored += 1
