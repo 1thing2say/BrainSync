@@ -528,3 +528,22 @@ def test_etrca_beats_cca_on_the_hardest_nakanishi_subject() -> None:
         hits += int(np.sum(clf.predict(X[te]) == ds.y[te]))
     assert cca < 0.5
     assert hits / ds.y.size > 0.9
+
+
+def test_update_adds_trials_and_refits(split) -> None:
+    Xtr, ytr, Xte, yte = split
+    clf = ETRCA(FREQS, FS).fit(Xtr, ytr)
+    before = clf.n_train.copy()
+    other = clf.templates[1].copy()
+    new = Xte[yte == 0][:3]
+    assert clf.update(new, [0, 0, 0]) is clf
+    assert clf.n_train.tolist() == [before[0] + 3, before[1], before[2]]
+    np.testing.assert_allclose(clf.templates[1], other)        # untouched target
+    assert clf.train_X.shape[0] == ytr.size + 3 and not clf.has_baseline
+    assert np.mean(clf.predict(Xte) == yte) >= 0.95
+    clf.update(Xte[0], int(yte[0]))                            # one window, one label
+    assert int(clf.n_train.sum()) == ytr.size + 4
+    with pytest.raises(ValueError, match="like the training windows"):
+        clf.update(Xte[:1, :, :-10], [0])
+    with pytest.raises(ValueError, match="not fitted"):
+        ETRCA(FREQS, FS).update(Xte[:1], [0])

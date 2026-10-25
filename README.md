@@ -862,7 +862,11 @@ Point mode needs `ANTHROPIC_API_KEY` on the server. `--env-file PATH` reads KEY=
 without overriding the environment, so the key can live in a gitignored file; it is never
 printed or logged. Without a key, or with `--no-detect`, the server still runs: slots mode
 works and a point-mode client is told `detect_unavailable`. `--min-p-button` (default 0.5)
-sets which elements are shown. `--log PATH` appends a JSON-lines record of the session
+sets which elements are shown. `--trained CUED_NPZ` (with `--trained-method`, default
+`etrca`) decodes with a spatial filter fitted on that cued recording instead of FBCCA
+(Phase 3 above); while it runs, every pick the user then confirms is added to the filter's
+training set and the filter is refitted (a `learned` log record), so it adapts during the
+session. `--log PATH` appends a JSON-lines record of the session
 (phases, layouts, onsets, selections, scans, clicks; never the token or a screenshot).
 Screenshots are kept only with `--log-scans DIR`, in the format `tools/screen_eval.py`
 reads. Ctrl-C or SIGTERM tells every client `phase stop` and exits 0; a port in use or a

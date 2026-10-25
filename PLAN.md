@@ -961,8 +961,13 @@ fbcca etrca mscca` scores them leave-one-trial-out, so the gate's second row is 
 command on the gate recording. On the public Nakanishi set they lift 1 s accuracy from
 57 % (CCA) to 98 % (eTRCA); on our three 2-target recordings (4 dry channels, 7–10 trials
 per target) none beats CCA / FBCCA, as the paper's small-data caveat predicts (README,
-Phase 2). The live decoder runs one from a cued recording (`--trained`, README Phase 3);
-judge it only on held-out trials, never on its training trials.
+Phase 2). The live decoder runs one from a cued recording (`python -m brainsync.server
+--trained <cued.npz>`, README Phase 3), aligned to each trial's onset, and every pick the
+user then confirms is learnt as a new training trial (section 13, item 11's stretch; a
+`learned` log record). `brainsync/stimulus/configs/four_targets.toml` records the gate's
+13/15/17/11 Hz set with `python -m brainsync.record -c four_targets` on a 2x2 grid (our
+display has no diamond layout; the diamond is the teammate's `four_diamond.toml`). Judge a
+trained filter only on held-out trials, never on its training trials.
 
 **Changed 2026-10-24 to 13/15/17/11 Hz**, the teammate's `four_diamond.toml`: 15 and 17 Hz keep
 their places from `two_targets.toml` (left and right), 13 Hz goes on top and 11 Hz at the bottom,

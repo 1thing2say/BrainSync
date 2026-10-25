@@ -1121,3 +1121,52 @@ def test_ignore_refresh_accepts_an_off_rate_display_and_says_frequencies_stay(ca
     rig2 = Rig()
     rig2.connect(1, hello(refresh_hz=75.0))
     assert [e["code"] for e in rig2.tr.to(1, "error")] == ["refresh"]
+
+
+# -- learning from confirmed picks (Phase 4) ---------------------------------------------------
+
+def test_learn_from_teaches_the_bank_on_a_confirmed_pick():
+    """A button pick is remembered with its gate; the confirm selection that follows teaches the
+    bank that window for the picked frequency; back forgets it; no trained model: nothing."""
+    from types import SimpleNamespace
+
+    calls: list[tuple[float, float]] = []
+    logs: list[tuple[str, dict]] = []
+
+    class Bank:
+        gate = 123.0
+        trained = SimpleNamespace(n_train=np.array([3, 4]))
+
+        def learn(self, freq, t_start):
+            calls.append((freq, t_start))
+            return True
+
+    targets = [{"slot": "b1", "kind": "button", "freq": 15.0},
+               {"slot": "b2", "kind": "button", "freq": 17.0},
+               {"slot": "ok", "kind": "confirm", "freq": 15.0},
+               {"slot": "no", "kind": "back", "freq": 17.0}]
+    me = SimpleNamespace(_targets=targets, _bank=Bank(), _last_pick=None,
+                         _log=lambda kind, fields: logs.append((kind, fields)))
+    Session._learn_from(me, 1, 7)                     # pick b2 (17 Hz) at gate 123
+    assert me._last_pick == (17.0, 123.0, 7) and calls == []
+    Session._learn_from(me, 2, 8)                     # confirmed
+    assert calls == [(17.0, 123.0)] and me._last_pick is None
+    assert logs == [("learned", {"freq": 17.0, "t_start": 123.0, "ok": True, "n_train": [3, 4]})]
+    Session._learn_from(me, 0, 9)
+    Session._learn_from(me, 3, 10)                    # back: forgotten, nothing learnt
+    assert me._last_pick is None and len(calls) == 1
+    Session._learn_from(me, 2, 11)                    # confirm without a pick: nothing
+    assert len(calls) == 1
+    me._bank.trained = None                           # FBCCA: never learns
+    Session._learn_from(me, 0, 12)
+    Session._learn_from(me, 2, 13)
+    assert len(calls) == 1 and me._last_pick is None
+
+    class Failing(Bank):
+        def learn(self, freq, t_start):
+            raise ValueError("boom")
+
+    me._bank = Failing()
+    Session._learn_from(me, 0, 14)
+    Session._learn_from(me, 2, 15)
+    assert logs[-1][0] == "learned" and logs[-1][1]["ok"] is False

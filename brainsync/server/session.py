@@ -263,6 +263,7 @@ class Session:
         self._layout_seq = 0
         self._layout: dict | None = None
         self._targets: list[dict] = []
+        self._last_pick: tuple[float, float, int] | None = None   # (freq, gate, layout_id)
         self._activated_at = -math.inf
         self._selection_seq = 0
         self._cool_until: float | None = None
@@ -770,6 +771,32 @@ class Session:
                                 "slot": slot, "t_decision": d.time, "score": scores[slot],
                                 "gate": self._bank.gate})
         self._mode_call("on_selection", slot, now)
+        self._learn_from(d.committed, layout_id)
+
+    def _learn_from(self, index: int, layout_id: int) -> None:
+        """A confirmed pick is a labelled trial: teach it to the trained classifier.
+
+        A selection of a ``button`` is remembered with its gate (the moment its templates
+        start); the following ``confirm`` selection says the user was indeed looking at it,
+        so the bank learns that window (``DecoderBank.learn``). ``back`` forgets it. Does
+        nothing without a trained classifier.
+        """
+        target = self._targets[index]
+        kind = target.get("kind")
+        if kind == "button":
+            self._last_pick = (float(target["freq"]), self._bank.gate, layout_id)
+            return
+        if kind == "confirm" and self._last_pick is not None and self._bank.trained is not None:
+            freq, start, _ = self._last_pick
+            try:
+                learned = self._bank.learn(freq, start)
+            except ValueError as exc:
+                _note(f"learn from the confirmed pick: {exc}")
+                learned = False
+            self._log("learned", {"freq": freq, "t_start": start, "ok": learned,
+                                  "n_train": [int(n) for n in self._bank.trained.n_train]})
+        if kind in ("confirm", "back"):
+            self._last_pick = None
 
     # -- fake gaze ----------------------------------------------------------------------
 

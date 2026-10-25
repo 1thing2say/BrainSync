@@ -400,3 +400,33 @@ def test_bank_with_trained_model_aligns_to_the_onset(calib):
     assert out and all(d.scores.shape == (2,) for d in out)
     with pytest.raises(ValueError, match="either a decoder factory or a trained"):
         DecoderBank(factory=lambda f, p: build_decoder(f, p), trained=model)
+
+
+def test_learn_adds_a_confirmed_trial_and_rebuilds_the_decoder(calib):
+    model = trained_model()
+    bank = make_bank(calib, trained=model)
+    assert len(bank._hist._data[0]) >= int((2.0 + 2.0 + 20.0) * FS)   # template + pad + 20 s
+    board = FakeBoard(FREQS, seed=2, t0=T0 + 6.0)
+    board.set_target(-1)
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    stream(bank, board, 3.0)                                 # still screen fills the pad
+    bank.set_onset(T0 + 9.0)
+    board.set_target(0)
+    stream(bank, board, 5.0)
+    old = bank.decoder
+    before = model.n_train.copy()
+    assert bank.learn(15.0, bank.gate) is True
+    assert model.n_train.tolist() == [before[0] + 1, *before[1:]]
+    new = bank.decoder
+    assert new is not old and new.classifier.has_baseline and new.aligned
+    assert new._align == pytest.approx(bank.gate) and new.classifier.freqs.tolist() == [15.0, 17.0]
+    out = stream(bank, board, 2.0)
+    assert out and all(d.scores.shape == (2,) for d in out)
+    assert bank.learn(15.0, T0 - 100.0) is False             # before any history
+    assert bank.learn(17.0, T0 + 6.0) is False               # no pad before the first sample
+    with pytest.raises(ValueError, match="not one of the trained"):
+        bank.learn(11.0, bank.gate)
+    with pytest.raises(ValueError, match="finite"):
+        bank.learn(15.0, math.nan)
+    with pytest.raises(ValueError, match="no trained classifier"):
+        make_bank(calib).learn(15.0, T0)

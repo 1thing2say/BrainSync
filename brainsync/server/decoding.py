@@ -40,12 +40,15 @@ from ..board import FS
 from ..classify import Trained, make
 from ..online import TUNED, Calibration, Decision, Decoder, RingBuffer, fit_rest
 from ..recordings import MONTAGE, POSTERIOR
+from ..signal import preprocess
 from .protocol import LATENCY_S
 
-__all__ = ["DecoderBank", "build_decoder", "PAD_S", "PROBE_DIVISOR"]
+__all__ = ["DecoderBank", "build_decoder", "PAD_S", "PROBE_DIVISOR", "LEARN_HISTORY_S"]
 
 PAD_S = 2.0            # filter start-up seconds dropped before each window (demo setting)
 PROBE_DIVISOR = 25.0   # the probe decoder runs at fs / 25 Hz (10 Hz at 250 Hz)
+LEARN_HISTORY_S = 20.0  # with a trained classifier: history kept past a template, so a pick
+                        # confirmed this much later can still be learnt (learn())
 
 DecoderFactory = Callable[[tuple[float, ...], tuple[float, ...]], Decoder]
 
@@ -146,6 +149,8 @@ class DecoderBank:
                  (lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names)))
         self._probe = self._make((fs / PROBE_DIVISOR,), (0.0,), factory=plain)
         n = self._probe.needed
+        if trained is not None:     # room to cut a confirmed trial's window later (learn())
+            n = max(n, trained.templates.shape[-1] + int(round((PAD_S + LEARN_HISTORY_S) * fs)))
         self._hist = RingBuffer(len(self.ch_names), n)
         self._times = RingBuffer(1, n)
         self._calib: np.ndarray | None = None
@@ -308,6 +313,60 @@ class DecoderBank:
             dec.voter.reset()
         self._gate = gate
         dec.align(gate)             # trained templates start at onset + latency
+
+    # -- learning from confirmed picks (a trained classifier only) -------------------------
+
+    def learn(self, freq: float, t_start: float) -> bool:
+        """Teach the trained classifier a trial the user confirmed: the window that began at
+        ``t_start`` (that trial's gate, onset + latency) was a look at the target at ``freq``.
+
+        The window is cut from the history at the templates' length, preprocessed like a
+        decoder window (pad before it, dropped after filtering), added to the training set
+        and the classifier refitted. Cached decoders are rebuilt from it, the active one in
+        place with its baseline, alignment and gate kept. Returns False when the history no
+        longer covers the window (too long ago, or before this process saw data).
+        """
+        if self.trained is None:
+            raise ValueError("no trained classifier to teach; start the bank with trained=")
+        hit = np.flatnonzero(np.abs(self.trained.freqs - float(freq)) <= 0.01)
+        if hit.size != 1:
+            raise ValueError(f"{float(freq):g} Hz is not one of the trained targets "
+                             f"{self.trained.freqs.tolist()}")
+        t_start = float(t_start)
+        if not math.isfinite(t_start):
+            raise ValueError(f"t_start must be finite, got {t_start}")
+        k = len(self._hist)
+        if k == 0:
+            return False
+        times = self._times.last(k)[0]
+        first = int(np.searchsorted(times, t_start - 0.5 / self.fs))
+        n_pad = int(round(PAD_S * self.fs))
+        a, b = first - n_pad, first + self.trained.templates.shape[-1]
+        if a < 0 or b > k:
+            return False
+        probe = self._probe
+        segment = self._hist.last(k)[probe.rows, a:b]
+        window = preprocess(segment, self.fs, band=probe.band, notch_hz=probe.notch_hz)[:, n_pad:]
+        self.trained.update(window, int(hit[0]))
+        self._rebuild()
+        return True
+
+    def _rebuild(self) -> None:
+        """Drop the cached decoders (their classifiers are subsets of the old fit); remake the
+        active one now, fitted on the calibration data, aligned and primed as activate() does."""
+        self._decoders.clear()
+        key = self._active
+        if key is None or self._calib is None:
+            return
+        dec = self._make(*key)
+        self._fit(dec, self._calib)
+        k = min(len(self._hist), dec.needed - 1)
+        if k > 0:
+            dec.feed(self._hist.last(k), self._times.last(k)[0])
+        dec.voter.reset()
+        if math.isfinite(self._gate):
+            dec.align(self._gate)
+        self._decoders[key] = dec
 
     def deactivate(self) -> None:
         """Stop deciding (a layout without targets, or not running); history keeps filling."""

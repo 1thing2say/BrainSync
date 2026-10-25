@@ -418,6 +418,7 @@ class Trained(CCA):
         self.templates = np.stack([X[y == i].mean(axis=0) for i in range(self.n_targets)])
         self.filters = self._fit_filters(X, y)
         self.n_train = counts
+        self.train_X, self.train_y = X, y          # kept so update() can refit on the union
         self.period = period_samples(self.freqs, self.fs)
         fits = self.period is not None and n >= self.period
         use_cycle = fits if self.periodic is None else self.periodic
@@ -427,6 +428,21 @@ class Trained(CCA):
         self.cycle = _fold(self.templates, self.period) if use_cycle else None
         self.clear_baseline()
         return self
+
+    def update(self, X: np.ndarray, y: Sequence[int] | int) -> Trained:
+        """Add labelled windows to the training set and refit on the union.
+
+        Windows must have the training windows' channels and length; ``y`` may be one label
+        for a single window. Like ``fit`` this forgets the baseline.
+        """
+        if not self.fitted:
+            raise ValueError(f"{type(self).__name__} is not fitted; call fit(X, y) first")
+        X = self._windows(X)
+        y = np.atleast_1d(np.asarray(y)).reshape(-1)
+        if X.shape[1:] != self.train_X.shape[1:]:
+            raise ValueError(f"new windows must be shaped (n, {self.train_X.shape[1]}, "
+                             f"{self.train_X.shape[2]}) like the training windows, got {X.shape}")
+        return self.fit(np.concatenate([self.train_X, X]), np.concatenate([self.train_y, y]))
 
     def templates_for(self, n: int, offset: int = 0) -> np.ndarray:
         """Templates (n_targets, n_ch, n) for a window of ``n`` samples starting ``offset``
