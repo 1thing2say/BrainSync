@@ -1,5 +1,5 @@
 /*
- * BrainSync reference page: two flickering squares, "yes" and "no", in slots mode.
+ * BrainSync reference page: three squares, "yes", "no" and "help", in slots mode.
  *
  *     python -m brainsync.server --board fake --no-auth
  *     open http://127.0.0.1:8765/#token=<token>        (add &takeover=1 to replace a controller)
@@ -29,6 +29,14 @@
  * lock while the phase is run and it is not paused, and a Full screen button appears where
  * the browser allows it. Both are feature-detected and their failures are ignored.
  *
+ * Code mode (the server's default, docs/CVEP-STANDARD.md): the squares are white on black
+ * and show the server's m-sequence one bit a frame (white or black), a "cycle" message goes
+ * out on every cycle's first frame, and under each square a label line shows its confidence
+ * ("YES  ███░░░░░ +0.42 <"), with the status line below them all: "training: keep looking at
+ * YES   cycle 12/30" while training (the cued square has a red box and the banner says where
+ * to look), then "lead 0.31   choice: YES". The HUD keeps the template's held-out accuracy.
+ * A server run with --paradigm freq gets the grey sine flicker and plain labels as before.
+ *
  * The pure parts (hash parsing, square geometry, hit testing, the page model, the wake lock
  * and the HUD text) are exported for clients/js/test/web_app.test.mjs.
  */
@@ -39,9 +47,10 @@
     (typeof require === "function" ? require("../js/brainsync-client.js") : null);
   if (!C) throw new Error("load brainsync-client.js before app.js");
 
-  const SLOTS = Object.freeze(["yes", "no"]);
+  const SLOTS = Object.freeze(["yes", "no", "help"]);
   const CLIENT = Object.freeze({ name: "brainsync-web", kind: "web", version: "0.1.0" });
   const FLASH_MS = 700;          // outline around a selected square
+  const CUE_COLOR = "#ff3b30";   // code mode: the box on the square to look at while training
   const MAX_SELECTIONS = 6;      // shown in the HUD
   const RESUME_GUARD_MS = 800;   // Resume does nothing this soon after a pause (double taps)
   const LAYOUT_MARGIN = 8;       // CSS px between the squares and the HUD or the buttons
@@ -227,6 +236,7 @@
     const send = opts.send || (() => false);
     const now = opts.now || Date.now;
     const flicker = new C.FlickerState({ wall: opts.wall });
+    const confidence = C.ConfidenceState && C.code ? new C.ConfidenceState() : null;
     const state = {
       stage: "warning",          // warning | measuring | live
       conn: "closed",
@@ -287,6 +297,7 @@
 
     function onMessage(msg) {
       flicker.handle(msg);
+      if (confidence) confidence.handle(msg);
       switch (msg.type) {
         case "welcome":
           state.welcome = msg;
@@ -373,18 +384,26 @@
      */
     function frame(ts) {
       const targets = flicker.targets();
+      const code = flicker.isCode();
+      const lines = code && confidence ? confidence.lines(targets) : null;
+      const cue = flicker.cue();
       const items = [];
-      for (const t of targets) {
-        items.push({ slot: t.slot, label: t.label || t.slot, lum: flicker.luminance(t, ts),
+      targets.forEach((t, i) => {
+        const it = { slot: t.slot, label: t.label || t.slot, lum: flicker.luminance(t, ts),
                      flash: state.flash !== null && state.flash.slot === t.slot &&
-                       now() < state.flash.until });
-      }
+                       now() < state.flash.until, cue: code && cue === t.slot };
+        if (lines) { it.line = lines[i].line; it.level = lines[i].level; it.best = lines[i].best; }
+        items.push(it);
+      });
       const onset = flicker.onsetDue(ts);
       if (onset) send(onset);
+      for (const c of flicker.cycleDue(ts)) send(c);
       const frames = flicker.framesDue(ts);
       if (frames) send(frames);
-      if (!showSquares()) return { mode: "hidden", items: [] };
-      return { mode: flicker.shouldFlicker() ? "flicker" : "still", items };
+      if (!showSquares()) return { mode: "hidden", items: [], code, status: "" };
+      return { mode: flicker.shouldFlicker() ? "flicker" : "still", items, code,
+               fill: code && flicker.code ? flicker.code.fill : null,
+               status: code && confidence ? confidence.status() : "" };
     }
 
     /** Seconds left in a timed phase (calibrate), or null. */
@@ -408,6 +427,7 @@
         const left = remaining();
         return (p.text || "Calibrating") + (left === null ? "" : " (" + Math.ceil(left) + " s)");
       }
+      if (p.phase === "train") return p.text || "Look at the marked square";
       if (p.phase === "wait") return p.text || "Waiting for the server…";
       if (p.phase === "stop") return p.text || "The server stopped.";
       if (p.phase === "pause") return p.text || "Paused by the server.";
@@ -427,6 +447,11 @@
       const w = state.welcome;
       lines.push("refresh " + (state.refreshHz === null ? "measuring…" : state.refreshHz.toFixed(2) + " Hz") +
                  (w ? " (want " + rateList(flicker.refreshRates) + " ± " + w.refresh_tolerance_hz + ")" : ""));
+      if (flicker.isCode()) {
+        const tpl = confidence ? confidence.trainedText() : "";
+        const tr = confidence && confidence.train;
+        lines.push("c-VEP code · " + (tpl || (tr ? "training " + tr.cycle + "/" + tr.of : "no template yet")));
+      }
       lines.push("selections " + (state.selections.length
         ? state.selections.map((s) => s.slot).join(", ") : "-"));
       if (state.error) lines.push("error " + state.error.code + ": " + state.error.message);
@@ -434,7 +459,7 @@
     }
 
     return {
-      state, flicker, accept, measured, onState, onClose, onMessage, pause, escape: pause,
+      state, flicker, confidence, accept, measured, onState, onClose, onMessage, pause, escape: pause,
       resume, resumeBlocked, wantsWakeLock, hover, frame, showSquares, remaining, banner, hud,
     };
   }
@@ -526,7 +551,9 @@
 
     /** The squares for n targets in the current viewport, or [] when they have no room. */
     function layoutFor(n) {
-      const inset = Object.assign({}, reserve, { bottom: reserve.bottom + 1.4 * labelPx() });
+      // code mode keeps a second line free under the labels for the status line
+      const lines = model.flicker.isCode() ? 2.8 : 1.4;
+      const inset = Object.assign({}, reserve, { bottom: reserve.bottom + lines * labelPx() });
       const sq = squareLayout(n, win.innerWidth, win.innerHeight, { inset, stack: true });
       return sq.length === n ? sq : [];
     }
@@ -538,17 +565,33 @@
       const fontPx = labelPx();
       squares = layoutFor(view.items.length);
       if (squares.length === 0) return;   // no room at all (loop pauses before flicker)
-      ctx.font = fontPx + "px system-ui, sans-serif";
+      if (view.code) {                     // the standard: white squares on black
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, w, h);
+      }
+      // code mode: label lines in a monospace font small enough to fit under a square
+      const longest = view.items.reduce((m, it) => Math.max(m, (it.line || "").length), 0);
+      const monoPx = longest ? Math.max(10, Math.min(fontPx, (1.4 * squares[0].side) /
+                                                     (0.62 * longest))) : fontPx;
+      ctx.font = (view.code ? monoPx + "px ui-monospace, Menlo, Consolas, monospace"
+                            : fontPx + "px system-ui, sans-serif");
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
+      let bottom = 0;
       for (let i = 0; i < view.items.length; i++) {
         const it = view.items[i], sq = squares[i];
         const pad = 0.04 * sq.side;
         ctx.fillStyle = "#000";
         ctx.fillRect(sq.x - pad, sq.y - pad, sq.side + 2 * pad, sq.side + 2 * pad);
-        ctx.fillStyle = GREYS[Math.max(0, Math.min(255, Math.round(it.lum * 255)))];
+        ctx.fillStyle = view.code ? (it.lum >= 0.5 ? view.fill || "#fff" : "#000")
+          : GREYS[Math.max(0, Math.min(255, Math.round(it.lum * 255)))];
         ctx.fillRect(sq.x, sq.y, sq.side, sq.side);
-        if (it.flash) {
+        bottom = Math.max(bottom, sq.y + sq.side + 3 * pad);
+        if (it.cue) {
+          ctx.strokeStyle = CUE_COLOR;
+          ctx.lineWidth = Math.max(4, 0.04 * sq.side);
+          ctx.strokeRect(sq.x - 2 * pad, sq.y - 2 * pad, sq.side + 4 * pad, sq.side + 4 * pad);
+        } else if (it.flash) {
           ctx.strokeStyle = "#3ddc84";
           ctx.lineWidth = Math.max(4, 0.03 * sq.side);
           ctx.strokeRect(sq.x - 2 * pad, sq.y - 2 * pad, sq.side + 4 * pad, sq.side + 4 * pad);
@@ -559,8 +602,17 @@
           ctx.strokeRect(sq.x - 2 * pad, sq.y - 2 * pad, sq.side + 4 * pad, sq.side + 4 * pad);
           ctx.setLineDash([]);
         }
+        ctx.fillStyle = it.best ? "#ffffff" : "#e8e8e8";
+        ctx.fillText(view.code && it.line ? it.line : it.label, sq.x + sq.side / 2,
+                     sq.y + sq.side + 3 * pad);
+      }
+      if (view.code && view.status) {      // the status line, centred under all the squares
+        const stack = squares.length > 1 && squares[1].x === squares[0].x;
+        const y = stack ? bottom + 1.4 * monoPx
+          : squares.reduce((m, sq) => Math.max(m, sq.y + sq.side), 0) +
+            0.12 * squares[0].side + 1.4 * monoPx;
         ctx.fillStyle = "#e8e8e8";
-        ctx.fillText(it.label, sq.x + sq.side / 2, sq.y + sq.side + 3 * pad);
+        ctx.fillText(view.status, w / 2, y);
       }
     }
 
