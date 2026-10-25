@@ -1,40 +1,53 @@
-"""BrainSwipe browser mock: the real swipe logic on a simulated EEG board, with no flicker.
+"""BrainSwipe browser mock: the real c-VEP swipe logic on a simulated EEG board, no flicker.
 
-    python -m brainsync.swipe_web                 # http://127.0.0.1:8780, decoder on a FakeBoard
+    python -m brainsync.swipe_web                 # http://127.0.0.1:8780, decoder on a fake board
     python -m brainsync.swipe_web --open          # same, and open the page in the browser
+    python -m brainsync.swipe_web --pretrain      # train the template at startup (instant)
     python -m brainsync.swipe_web --no-decoder    # keyboard/click swipes only
     python -m brainsync.swipe_web --port 0        # any free port (the real URL is printed)
 
 A localhost server (standard library only: http.server plus Server-Sent Events) serves a
-phone-style BrainSwipe page from brainsync/web/ and runs the same pieces as the live demo:
-the FBCCA ``Decoder``, BrainSwipe's ``Swiper`` (fresh-window votes, gaze-settle cooldown,
-stale windows ignored) and ``Feed`` (endless shuffled deck, made-up matches). Only the
-EEG is simulated: a real-time ``FakeBoard`` whose tone follows the presenter's simulated
-gaze. Hovering a square (or holding an arrow key) on the page posts that gaze, the server
-calls ``FakeBoard.set_target``, and the Swiper decides when a swipe fires, exactly as it
-would on the headset. The page never flickers: browser frame timing is not validated for
-SSVEP, and a static page is photosensitivity-safe.
+phone-style BrainSwipe page from brainsync/web/ and runs the same pieces as the live demo
+on the c-VEP standard (docs/CVEP-STANDARD.md): three white squares, Pass, Super like and
+Like on targets 0, 1 and 2 (config swipe_cvep), the self-training
+``vep.live.CodeVepDecoder``, BrainSwipe's ``CodeSwiper`` (one swipe per commit, cycles
+from before a card settled dropped) and ``Feed`` (endless shuffled deck, made-up matches;
+a Super like always matches). Only the EEG is simulated: a real-time
+``vep.live.standard_fake_board`` whose response follows the presenter's simulated gaze.
+Training comes first, as on the headset: the simulated user looks at Pass for
+--train-cycles code cycles (30, about 32 s) while the page shows the count, then the
+held-out accuracy against chance (33 %). From then on every cycle gives a decision whose
+scores (correlations) fill the confidence bar under each square. Hovering a square (or
+holding an arrow key: left Pass, up Super like, right Like) posts that gaze, the server
+calls ``set_target`` on the fake board, and the CodeSwiper decides when a swipe fires,
+exactly as it would on the headset. The page never flickers: the squares are drawn
+static white, browser frame timing is not validated here, and a static page is
+photosensitivity-safe.
 
 Startup: load the deck, deal the feed (--seed, default 0 so demos repeat), render the
 cards to a temporary folder with the feed's first card as image 0 (as the swipe CLI does),
-fit the rest baseline on --calibrate seconds of a separate FakeBoard in virtual time (about
-a second), then decode a real-time FakeBoard in a background thread. Ctrl-C or SIGTERM
-stops (exit 0); a busy port exits 1; bad arguments exit 2.
+then decode a real-time fake board in a background thread (with --pretrain the template is
+first trained on a separate fake board in virtual time, about a second, and decoding
+starts at once). Ctrl-C or SIGTERM stops (exit 0); a busy port exits 1; bad arguments
+exit 2.
 
 HTTP API (JSON responses carry Cache-Control: no-store):
 
     GET  /                  the page (brainsync/web/index.html)
     GET  /static/<name>     a file in brainsync/web/ (exact names only)
     GET  /cards/<k>.png     card image k
-    GET  /api/state         settings, deck (per image index), counts, gaze, card on screen
-    GET  /api/events        text/event-stream: state, window, swipe, gaze; ": ping" every 15 s
-    POST /api/gaze          {"gaze": "auto"|"card"|"pass"|"like"}   (409 with --no-decoder)
-    POST /api/swipe         {"target": 0|1, "card": k}: instant swipe from the keyboard or a
-                            click; "card" (optional) is the image the page shows, and a
+    GET  /api/state         settings, training, deck (per image index), counts, gaze, card
+    GET  /api/events        text/event-stream: state, train, trained, decision, swipe,
+                            gaze; ": ping" every 15 s
+    POST /api/gaze          {"gaze": "auto"|"card"|"pass"|"super"|"like"} (409 with
+                            --no-decoder)
+    POST /api/swipe         {"target": 0|1|2, "card": k}: instant swipe from the keyboard or
+                            a click; "card" (optional) is the image the page shows, and a
                             swipe that would land on another card is a 409
 
-Gaze "auto" lets the board follow its own --switch schedule, "card" means reading the card
-(no tone), "pass" and "like" hold the 15 Hz or the 17 Hz tone.
+Gaze "auto" moves the simulated eyes Pass -> Super like -> Like every --switch s, "card"
+means reading the card (no response), "pass", "super" and "like" hold that square.
+During training the simulated eyes stay on Pass whatever the gaze.
 """
 from __future__ import annotations
 
@@ -59,14 +72,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .board import FS, FakeBoard
-from .classify import ABSTAIN, make
-from .demo import CALIBRATE_S
-from .online import TUNED, Decision, Decoder, calibrate
+from .classify import ABSTAIN
+from .demo import is_standard_code
+from .online import Decision
 from .profiles import Profile, load_deck, render_deck
-from .recordings import MONTAGE, POSTERIOR
 from .stimulus import load_config
-from .swipe import LIKE, PASS, Feed, Swiper, card_order, voice_line
+from .swipe import (LIKE, PASS, SUPER_LIKE, CodeSwiper, Feed, card_order, voice_line)
+from .vep import live
 
 __all__ = ["GAZES", "CardChanged", "Engine", "NoDecoder", "Subscriber", "SwipeServer",
            "build_engine", "make_server", "main"]
@@ -74,16 +86,22 @@ __all__ = ["GAZES", "CardChanged", "Engine", "NoDecoder", "Subscriber", "SwipeSe
 NAME = "BrainSwipe"
 DEFAULT_PORT = 8780        # other branches serve on 8765 and 8000
 WEB_DIR = Path(__file__).with_name("web")
-CONFIG = "swipe"           # targets, labels and flash colours come from the stimulus config
-GAZES = ("auto", "card", "pass", "like")
-GAZE_TARGET: dict[str, int | None] = {"auto": None, "card": ABSTAIN, "pass": PASS, "like": LIKE}
+CONFIG = "swipe_cvep"      # targets, labels and accent colours come from the stimulus config
+TARGETS = (PASS, SUPER_LIKE, LIKE)
+GAZES = ("auto", "card", "pass", "super", "like")
+GAZE_TARGET: dict[str, int | None] = {"auto": None, "card": ABSTAIN, "pass": PASS,
+                                      "super": SUPER_LIKE, "like": LIKE}
 POLL_S = 0.1               # board reads per second in the decoder thread, as the demo
 PING_S = 15.0              # SSE keep-alive comment; proxies and browsers drop idle streams
-QUEUE_SIZE = 256           # events held per SSE client (about a minute of windows)
+QUEUE_SIZE = 256           # events held per SSE client (minutes of decisions)
 MAX_BODY = 4096            # bytes; the API bodies are a few dozen
 # after a stall (laptop asleep, debugger) decode only the newest seconds: catching up on
-# minutes of backlog would lag the page, and the Swiper allows one swipe per read anyway
-MAX_BACKLOG_S = 2.0
+# minutes of backlog would lag the page, and the CodeSwiper allows one swipe per read anyway
+MAX_BACKLOG_S = 4.0
+# abstain unless the best square's correlation leads the runner-up by this much. Reading
+# the card (no response) on the fake board gave 13 false swipes a minute at the standard's
+# margin 0, 0.3 at 0.15 and none at 0.2 (6 seeds x 60 s); a held gaze leads by about 0.9
+MARGIN = 0.2
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                 ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
                 ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml",
@@ -114,14 +132,20 @@ def _num(x: float) -> float:
     return round(x, 4) if math.isfinite(x) else 0.0
 
 
+def _maybe(x: float) -> float | None:
+    """A rounded number, or None (JSON null) for NaN or infinity."""
+    x = float(x)
+    return round(x, 4) if math.isfinite(x) else None
+
+
 # -- event fan-out ------------------------------------------------------------------------
 
 class Subscriber:
     """One SSE client's bounded queue of (event, data) pairs.
 
-    ``put`` never blocks: when the queue is full the oldest window event is dropped (the
-    newest scores matter, a stale streak does not), or the oldest event when there is no
-    window event to drop. ``get`` waits up to ``timeout`` and returns None on a timeout;
+    ``put`` never blocks: when the queue is full the oldest decision event is dropped (the
+    newest scores matter, old ones do not), or the oldest event when there is no
+    decision event to drop. ``get`` waits up to ``timeout`` and returns None on a timeout;
     after ``close`` it returns None at once and ``closed`` is True.
     """
 
@@ -143,7 +167,7 @@ class Subscriber:
                 return
             if len(self._items) >= self.maxsize:
                 for i, (name, _) in enumerate(self._items):
-                    if name == "window":
+                    if name == "decision":
                         del self._items[i]
                         break
                 else:
@@ -171,25 +195,28 @@ class Subscriber:
 
 @dataclass(frozen=True)
 class Look:
-    """What the page needs to draw the two targets."""
+    """What the page needs to draw the three targets: labels, accent colours, code lags."""
 
-    labels: tuple[str, str]
-    freqs: tuple[float, float]
-    colors: tuple[str, str]
+    labels: tuple[str, ...]
+    colors: tuple[str, ...]
+    lags: tuple[int, ...]       # frames each square's code is delayed (0, 21, 42)
+    cycle_s: float              # one code cycle, seconds
 
 
 class Engine:
-    """Feed, Swiper, decoder and board behind one lock, with SSE subscribers.
+    """Feed, CodeSwiper, decoder and board behind one lock, with SSE subscribers.
 
     ``order`` maps image index to deck index (and back: see swipe.card_order). Without a
     decoder (and board) only key swipes work. ``step()`` is one board read, decode and
     broadcast; the background thread from ``start()`` calls it every POLL_S. On a
-    clock-less FakeBoard, tests advance the board and call ``step()`` themselves.
+    clock-less fake board, tests advance the board and call ``step()`` themselves. The
+    board flickers from the start; while the decoder trains its simulated eyes stay on
+    Pass, then they follow the gaze.
     """
 
     def __init__(self, deck: Sequence[Profile], feed: Feed, look: Look, *,
                  cooldown_s: float = 0.5, switch_s: float = 8.0,
-                 decoder: Decoder | None = None, board: FakeBoard | None = None,
+                 decoder: live.CodeVepDecoder | None = None, board: Any = None,
                  queue_size: int = QUEUE_SIZE,
                  clock: Callable[[], float] = time.time) -> None:
         if (decoder is None) != (board is None):
@@ -204,21 +231,30 @@ class Engine:
         self.switch_s = float(switch_s)
         self.decoder = decoder
         self.board = board
-        self.swiper = Swiper(decoder, cooldown_s=cooldown_s) if decoder is not None else None
+        self.swiper = CodeSwiper(decoder, cooldown_s=cooldown_s) if decoder is not None else None
         self.gaze = "card"
         self.started = float(clock())
         self.queue_size = queue_size
-        self._began = decoder.n_seen if decoder is not None else 0
         self._lock = threading.RLock()
         self._subs: list[Subscriber] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        if board is not None:
-            board.set_target(GAZE_TARGET[self.gaze])
+        self._shown = -1               # training cycles last broadcast
+        self._decoding_from = 0.0      # board seconds when decoding began
+        if board is not None and decoder is not None:
+            board.start_flicker()
+            if decoder.training:
+                board.set_target(decoder.train_target)
+            else:
+                self._begin_decoding()
 
     @property
     def has_decoder(self) -> bool:
         return self.decoder is not None
+
+    @property
+    def training(self) -> bool:
+        return self.decoder is not None and self.decoder.training
 
     @property
     def card(self) -> int:
@@ -229,19 +265,31 @@ class Engine:
 
     def counts(self) -> dict[str, int]:
         f = self.feed
-        return {"swipes": f.swipes, "likes": f.likes, "passes": f.passes, "matches": f.matches,
+        return {"swipes": f.swipes, "likes": f.likes, "super_likes": f.super_likes,
+                "passes": f.passes, "matches": f.matches,
                 "stale": self.swiper.stale if self.swiper is not None else 0}
+
+    def training_state(self) -> dict[str, Any]:
+        """Where training is: cycles seen / needed, and once done the held-out accuracy."""
+        d = self.decoder
+        if d is None:
+            return {"active": False, "cycle": 0, "of": live.TRAIN_CYCLES, "accuracy": None,
+                    "chance": round(1 / len(TARGETS), 4), "target": PASS}
+        k, n = d.progress
+        return {"active": d.training, "cycle": k, "of": n, "accuracy": _maybe(d.train_accuracy),
+                "chance": round(d.chance, 4), "target": d.train_target}
 
     def state(self) -> dict[str, Any]:
         with self._lock:
             d = self.decoder
             return {
-                "name": NAME, "decoder": d is not None,
-                "labels": list(self.look.labels), "freqs": list(self.look.freqs),
-                "colors": list(self.look.colors),
-                "votes": self.swiper.votes if self.swiper is not None else TUNED.votes,
-                "window_s": d.window_s if d is not None else TUNED.window_s,
-                "step_s": d.step_s if d is not None else TUNED.step_s,
+                "name": NAME, "decoder": d is not None, "paradigm": "code",
+                "labels": list(self.look.labels), "colors": list(self.look.colors),
+                "lags": list(self.look.lags), "cycle_s": self.look.cycle_s,
+                "votes": d.votes if d is not None else live.VOTES,
+                "margin": d.margin if d is not None else MARGIN,
+                "cycles": d.cycles if d is not None else live.CYCLES,
+                "training": self.training_state(),
                 "cooldown_s": self.cooldown_s, "switch_s": self.switch_s,
                 "gaze": self.gaze, "card": self.card, "n_cards": len(self.deck),
                 "deck": [{"name": p.name, "age": p.age, "detail": p.detail, "color": p.color}
@@ -271,6 +319,31 @@ class Engine:
         for sub in self._subs:
             sub.put(event, data)
 
+    # -- the simulated eyes --------------------------------------------------------------
+
+    def _target(self) -> int:
+        """Where the simulated eyes are now: Pass while training, else the gaze (auto:
+        Pass, Super like, Like for --switch s each, from when decoding began)."""
+        assert self.board is not None
+        if self.training:
+            return self.decoder.train_target   # type: ignore[union-attr]
+        want = GAZE_TARGET[self.gaze]
+        if want is None:
+            elapsed = max(0.0, self.board.elapsed - self._decoding_from)
+            return TARGETS[int(elapsed // self.switch_s) % len(TARGETS)]
+        return want
+
+    def _look(self) -> None:
+        target = self._target()
+        if target != self.board.fixated:
+            self.board.set_target(target)
+
+    def _begin_decoding(self) -> None:
+        assert self.board is not None and self.swiper is not None
+        self._decoding_from = self.board.elapsed
+        self.swiper.card_changed()      # the eyes leave the Pass square for the card
+        self._look()
+
     # -- actions -------------------------------------------------------------------------
 
     def set_gaze(self, gaze: str) -> str:
@@ -280,10 +353,10 @@ class Engine:
         if gaze not in GAZE_TARGET:
             raise ValueError(f"gaze must be one of {list(GAZES)}, got {gaze!r}")
         with self._lock:
-            self.board.set_target(GAZE_TARGET[gaze])
             if gaze != self.gaze:
                 self.gaze = gaze
                 self._broadcast("gaze", {"gaze": gaze})
+            self._look()
         return gaze
 
     def key_swipe(self, target: int, card: int | None = None) -> dict[str, Any]:
@@ -293,57 +366,75 @@ class Engine:
         earlier (the key press raced the swipe event), CardChanged is raised instead of
         swiping the next card, which nobody has seen yet.
         """
-        if not isinstance(target, int) or isinstance(target, bool) or target not in (PASS, LIKE):
-            raise ValueError(f"target must be {PASS} or {LIKE}, got {target!r}")
+        if not isinstance(target, int) or isinstance(target, bool) or target not in TARGETS:
+            raise ValueError(f"target must be one of {list(TARGETS)}, got {target!r}")
         if card is not None and (not isinstance(card, int) or isinstance(card, bool)):
             raise ValueError(f"card must be an image index, got {card!r}")
         with self._lock:
             if card is not None and card != self.card:
                 raise CardChanged(self.card)
-            if self.swiper is not None:
+            if self.swiper is not None and not self.training:
                 # the decoder must not fire again on EEG from before this card
                 self.swiper.card_changed()
             return self._swipe(target, "key")
 
     def _swipe(self, target: int, source: str) -> dict[str, Any]:
         swiped = self.card
-        outcome = self.feed.swipe(liked=target == LIKE)
+        outcome = self.feed.swipe(liked=target != PASS, super_like=target == SUPER_LIKE)
         payload = {"target": target, "label": self.look.labels[target], "source": source,
                    "swiped": swiped, "card": self.card, "liked": outcome.liked,
-                   "match": outcome.match,
+                   "super_like": outcome.super_like, "match": outcome.match,
                    "voice": voice_line(self.deck[outcome.card], outcome),
                    "counts": self.counts()}
         self._broadcast("swipe", payload)
         return payload
 
     def step(self) -> list[dict[str, Any]]:
-        """One board read: decode, vote, swipe, broadcast; the window events it sent."""
+        """One board read: train or decode, swipe, broadcast; the decision events sent."""
         if self.decoder is None or self.board is None or self.swiper is None:
             return []
         out = []
         with self._lock:
+            self._look()
             X, t = self.board.read()
             keep = int(MAX_BACKLOG_S * self.decoder.fs)
             if X.shape[1] > keep:
                 X, t = X[:, -keep:], t[-keep:]
-            for d in self.decoder.feed(X, t):
+            was_training = self.decoder.training
+            decisions = self.swiper.feed(X, t, self.board.read_events())
+            if was_training:
+                self._training_news()
+                return out
+            for d in decisions:
                 out.append(self._decision(d))
         return out
 
+    def _training_news(self) -> None:
+        d = self.decoder
+        assert d is not None
+        k, n = d.progress
+        if d.training:
+            if k != self._shown:
+                self._shown = k
+                self._broadcast("train", {"cycle": k, "of": n})
+            return
+        self._broadcast("train", {"cycle": n, "of": n})
+        self._broadcast("trained", {"accuracy": _maybe(d.train_accuracy),
+                                    "chance": round(d.chance, 4), "cycles": n})
+        self._begin_decoding()
+
     def _decision(self, d: Decision) -> dict[str, Any]:
         sw = self.swiper
-        assert sw is not None and self.decoder is not None and self.board is not None
-        stale = sw.is_stale(d)
-        fired = sw.push(d)
-        event = {"t": round((d.end - self._began) / self.decoder.fs, 3),
+        assert sw is not None and self.board is not None
+        fired = sw.fires(d)
+        event = {"t": round(self.board.elapsed - self._decoding_from, 3),
                  "scores": [_num(s) for s in d.scores], "raw": int(d.raw),
-                 "pending": sw.pending, "streak": sw.streak, "votes": sw.votes,
-                 "stale": stale, "gaze": self.gaze, "true": self.board.active_target()}
-        self._broadcast("window", event)
+                 "committed": int(d.committed), "lead": _maybe(d.gap),
+                 "changed": bool(d.changed), "fired": fired, "votes": sw.votes,
+                 "stale": sw.stale, "gaze": self.gaze, "true": self.board.fixated}
+        self._broadcast("decision", event)
         if fired != ABSTAIN:
-            # the rest of this read is EEG from the old card and must count as stale,
-            # as in swipe._play: the card changes at the end of the read
-            sw.card_changed()
+            # CodeSwiper.feed has already reset the decoder for the next card
             self._swipe(fired, "decoder")
         return event
 
@@ -353,8 +444,6 @@ class Engine:
         """Run step() every ``poll_s`` in a daemon thread (none without a decoder)."""
         if self.decoder is None or self._thread is not None:
             return self._thread
-        with self._lock:
-            self.board.read()   # type: ignore[union-attr]  # samples due before now are not news
 
         def loop() -> None:
             while not self._stop.wait(poll_s):
@@ -380,45 +469,59 @@ class Engine:
             sub.close()
 
 
-def build_decoder(freqs: Sequence[float], phases: Sequence[float], fs: float = FS) -> Decoder:
-    """The live demo's decoder with its defaults (see demo.build)."""
-    clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
-               margin=TUNED.margin, threshold=TUNED.threshold)
-    return Decoder(clf, fs, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,
-                   channels=POSTERIOR, pad_s=2.0, ch_names=MONTAGE)
+def pretrained_decoder(train_cycles: int = live.TRAIN_CYCLES, seed: int = 0,
+                       fs: float = 250.0, margin: float = MARGIN) -> live.CodeVepDecoder:
+    """A CodeVepDecoder trained on its own standard fake board in virtual time (a fraction
+    of a second of CPU): the simulated user looked at Pass for ``train_cycles`` cycles."""
+    board = live.standard_fake_board(PASS, seed=seed, fs=fs)
+    decoder = live.CodeVepDecoder(board.fs, train_cycles=train_cycles, margin=margin)
+    board.start_flicker()
+    limit = (train_cycles + 5) * 63 / 60.0 + 5.0
+    while decoder.training:
+        if board.elapsed > limit:
+            raise RuntimeError(f"training saw {decoder.progress[0]} of {train_cycles} cycles")
+        board.advance(POLL_S)
+        X, t = board.read()
+        decoder.feed(X, t, board.read_events())
+    decoder.reset()
+    return decoder
 
 
 def build_engine(deck: Sequence[Profile], *, seed: int = 0, match_rate: float = 0.3,
-                 cooldown_s: float = 0.5, switch_s: float = 8.0,
-                 calibrate_s: float | None = CALIBRATE_S, realtime: bool = True,
+                 cooldown_s: float = 0.5, switch_s: float = 8.0, decoder: bool = True,
+                 train_cycles: int = live.TRAIN_CYCLES, pretrain: bool = False,
+                 margin: float = MARGIN, realtime: bool = True,
                  queue_size: int = QUEUE_SIZE) -> Engine:
-    """Deal the feed and, unless ``calibrate_s`` is None, calibrate and attach a decoder.
+    """Deal the feed and, with ``decoder``, attach a c-VEP decoder and its fake board.
 
-    The rest baseline is fit in virtual time on its own FakeBoard (no tone, like reading
-    the card), so startup takes about a second instead of ``calibrate_s``. The board the
-    decoder then reads runs in real time (``realtime``) or virtual time (tests: advance
-    it and call step()). It is seeded ``seed + 1``: with the calibration board's seed its
-    first ``calibrate_s`` seconds of noise would equal the baseline's exactly and make
-    reading the card look cleaner than it is. Raises ValueError for a too-short baseline.
+    The decoder trains on the board's first ``train_cycles`` cycles (the eyes on Pass),
+    unless ``pretrain`` trains it first on a separate fake board in virtual time (seeded
+    ``seed``; the decoding board is seeded ``seed + 1`` so its noise is new). The board
+    runs in real time (``realtime``) or virtual time (tests: advance it and call step()).
+    ``margin`` is the decoder's abstain margin (see MARGIN). Raises ValueError for a config
+    that is not the standard's three-target code, or a bad setting.
     """
     cfg = load_config(CONFIG)
-    if cfg.n_targets != 2:
-        raise ValueError(f"BrainSwipe needs two targets; config {cfg.name!r} has {cfg.n_targets}")
-    look = Look(labels=(cfg.labels[0], cfg.labels[1]),
-                freqs=(float(cfg.freqs[0]), float(cfg.freqs[1])),
-                colors=(_hex(cfg.flash_color(0)), _hex(cfg.flash_color(1))))
+    if not is_standard_code(cfg):
+        raise ValueError(f"config {cfg.name!r} is not the c-VEP standard's three-target code")
+    look = Look(labels=tuple(cfg.labels),
+                colors=tuple(_hex(cfg.flash_color(k)) for k in range(cfg.n_targets)),
+                lags=tuple(k * cfg.code.lag_frames for k in range(cfg.n_targets)),
+                cycle_s=round(cfg.code.cycle_frames / cfg.refresh, 4))
     feed = Feed(len(deck), match_rate=match_rate, seed=seed)
-    if calibrate_s is None:
+    if not decoder:
         return Engine(deck, feed, look, cooldown_s=cooldown_s, switch_s=switch_s,
                       queue_size=queue_size)
-    decoder = build_decoder(cfg.freqs, cfg.phases)
-    still = FakeBoard(cfg.freqs, switch_s=switch_s, seed=seed, ch_names=MONTAGE)
-    still.set_target(ABSTAIN)
-    calibrate(decoder, still, calibrate_s)
-    board = FakeBoard(cfg.freqs, switch_s=switch_s, seed=seed + 1, ch_names=MONTAGE,
-                      clock=time.time if realtime else None)
+    if int(train_cycles) != train_cycles or train_cycles < 2:
+        raise ValueError(f"train_cycles must be an integer >= 2, got {train_cycles!r}")
+    board = live.standard_fake_board(PASS, seed=seed + 1,
+                                     clock=time.time if realtime else None)
+    if not (math.isfinite(margin) and margin >= 0):
+        raise ValueError(f"margin must be >= 0, got {margin}")
+    dec = (pretrained_decoder(train_cycles, seed=seed, fs=board.fs, margin=margin) if pretrain
+           else live.CodeVepDecoder(board.fs, train_cycles=train_cycles, margin=margin))
     return Engine(deck, feed, look, cooldown_s=cooldown_s, switch_s=switch_s,
-                  decoder=decoder, board=board, queue_size=queue_size)
+                  decoder=dec, board=board, queue_size=queue_size)
 
 
 # -- HTTP ---------------------------------------------------------------------------------
@@ -659,8 +762,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _swipe(self, engine: Engine, body: dict[str, Any]) -> None:
         target = body.get("target")
-        if not isinstance(target, int) or isinstance(target, bool) or target not in (PASS, LIKE):
-            self._error(400, f"target must be {PASS} (Pass) or {LIKE} (Like)")
+        if not isinstance(target, int) or isinstance(target, bool) or target not in TARGETS:
+            self._error(400, f"target must be {PASS} (Pass), {SUPER_LIKE} (Super like) or "
+                             f"{LIKE} (Like)")
             return
         card = body.get("card")
         if card is not None and (not isinstance(card, int) or isinstance(card, bool)
@@ -683,17 +787,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
                    help=f"port (default {DEFAULT_PORT}; 0 picks a free one)")
     p.add_argument("--switch", type=float, default=8.0,
-                   help="seconds between target changes while the gaze is on Auto (default 8)")
+                   help="seconds on each square while the gaze is on Auto (default 8)")
     p.add_argument("--cooldown", type=float, default=0.5,
-                   help="seconds after a card change before a window may vote (default 0.5)")
+                   help="seconds after a card change before a cycle may vote (default 0.5)")
     p.add_argument("--deck", metavar="PATH", default=None,
                    help="profiles TOML (default: the bundled deck of invented profiles)")
     p.add_argument("--match-rate", type=float, default=0.3,
-                   help="chance that a Like is a match (default 0.3)")
+                   help="chance that a Like is a match (default 0.3; a Super like always is)")
     p.add_argument("--seed", type=int, default=0,
                    help="card order, matches and board noise (default 0, so demos repeat)")
-    p.add_argument("--calibrate", type=float, default=CALIBRATE_S,
-                   help=f"rest-baseline seconds, run in virtual time (default {CALIBRATE_S:g})")
+    p.add_argument("--train-cycles", type=int, default=live.TRAIN_CYCLES,
+                   help="code cycles of simulated training on Pass before decoding (default "
+                        f"{live.TRAIN_CYCLES}, about {live.TRAIN_CYCLES * 1.05:.0f} s)")
+    p.add_argument("--margin", type=float, default=MARGIN,
+                   help="abstain unless the best square leads by this correlation (default "
+                        f"{MARGIN:g}: reading the card then hardly ever swipes)")
+    p.add_argument("--pretrain", action="store_true",
+                   help="train the template at startup in virtual time: decoding starts at once")
     p.add_argument("--no-decoder", action="store_true",
                    help="no simulated board or decoder: keyboard and click swipes only")
     p.add_argument("--open", action="store_true", help="open the page in the web browser")
@@ -712,16 +822,19 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         p.error(f"--match-rate must lie in [0, 1], got {args.match_rate}")
     if args.seed < 0:   # numpy refuses negative seeds
         p.error(f"--seed must be >= 0, got {args.seed}")
-    if not (math.isfinite(args.calibrate) and args.calibrate > 0):
-        p.error(f"--calibrate must be positive, got {args.calibrate}")
+    if args.train_cycles < 2:
+        p.error(f"--train-cycles must be >= 2, got {args.train_cycles}")
+    if not (math.isfinite(args.margin) and args.margin >= 0):
+        p.error(f"--margin must be >= 0, got {args.margin}")
 
 
 def _serve(args: argparse.Namespace, server: SwipeServer, deck: list[Profile], tmp: str) -> int:
     try:
         engine = build_engine(deck, seed=args.seed, match_rate=args.match_rate,
                               cooldown_s=args.cooldown, switch_s=args.switch,
-                              calibrate_s=None if args.no_decoder else args.calibrate)
-    except ValueError as exc:   # e.g. a baseline too short for two windows
+                              decoder=not args.no_decoder, train_cycles=args.train_cycles,
+                              pretrain=args.pretrain, margin=args.margin)
+    except (ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
@@ -736,7 +849,7 @@ def _serve(args: argparse.Namespace, server: SwipeServer, deck: list[Profile], t
     server.engine, server.cards = engine, cards
     try:
         engine.start()
-        mode = ("simulated EEG board, no flicker" if engine.has_decoder
+        mode = ("c-VEP on a simulated EEG board, no flicker" if engine.has_decoder
                 else "no decoder: keyboard and click swipes only")
         print(f"{NAME} mock at {server.url} ({mode}); Ctrl-C stops", flush=True)
         if args.open:
@@ -756,7 +869,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, OSError) as exc:   # OSError: missing, a folder, unreadable
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    # bind first: a busy port should fail before a second of rendering and calibration
+    # bind first: a busy port should fail before a second of rendering and training
     busy = f"error: port {args.port} is in use; try --port 0"
     if port_taken(args.host, args.port):
         print(busy, file=sys.stderr)

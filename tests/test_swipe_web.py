@@ -1,6 +1,6 @@
-"""Tests for the BrainSwipe browser mock's server, headless: the engine on a virtual
-FakeBoard (time moves only when a test advances it), the HTTP server on a free port in a
-thread, and the CLI in a subprocess."""
+"""Tests for the BrainSwipe browser mock's server on the c-VEP standard, headless: the
+engine on a virtual standard fake board (time moves only when a test advances it), the
+HTTP server on a free port in a thread, and the CLI in a subprocess."""
 from __future__ import annotations
 
 import contextlib
@@ -18,20 +18,25 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from brainsync import swipe_web
 from brainsync.classify import ABSTAIN
 from brainsync.profiles import load_deck, render_deck
-from brainsync.swipe import LIKE, PASS, card_order
+from brainsync.swipe import LIKE, PASS, SUPER_LIKE, card_order
 from brainsync.swipe_web import Engine, Subscriber, build_engine
+from brainsync.vep import live
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE_KEYS = {"name", "decoder", "labels", "freqs", "colors", "votes", "window_s", "step_s",
-              "cooldown_s", "switch_s", "gaze", "card", "n_cards", "deck", "counts", "started"}
-COUNT_KEYS = {"swipes", "likes", "passes", "matches", "stale"}
-WINDOW_KEYS = {"t", "scores", "raw", "pending", "streak", "votes", "stale", "gaze", "true"}
-SWIPE_KEYS = {"target", "label", "source", "swiped", "card", "liked", "match", "voice", "counts"}
+STATE_KEYS = {"name", "decoder", "paradigm", "labels", "colors", "lags", "cycle_s", "votes",
+              "margin", "cycles", "training", "cooldown_s", "switch_s", "gaze", "card",
+              "n_cards", "deck", "counts", "started"}
+COUNT_KEYS = {"swipes", "likes", "super_likes", "passes", "matches", "stale"}
+DECISION_KEYS = {"t", "scores", "raw", "committed", "lead", "changed", "fired", "votes",
+                 "stale", "gaze", "true"}
+SWIPE_KEYS = {"target", "label", "source", "swiped", "card", "liked", "super_like", "match",
+              "voice", "counts"}
 POLL = 0.1   # virtual seconds per board read, as the decoder thread
 
 
@@ -43,7 +48,7 @@ def deck():
 @pytest.fixture(scope="module")
 def cards(deck, tmp_path_factory) -> list[Path]:
     """The deck drawn in the image order of seed 0 (every engine here uses seed 0)."""
-    order = build_engine(deck, calibrate_s=None).order
+    order = build_engine(deck, decoder=False).order
     return render_deck([deck[i] for i in order], tmp_path_factory.mktemp("cards"))
 
 
@@ -63,11 +68,17 @@ def web_dir(tmp_path_factory) -> Path:
 
 
 def engine_virtual(deck, **kw) -> Engine:
+    """An engine on a virtual board; it trains on its first cycles (30 by default)."""
     return build_engine(deck, realtime=False, **kw)
 
 
+def trained(deck, **kw) -> Engine:
+    """An engine on a virtual board whose decoder was trained at build time."""
+    return build_engine(deck, realtime=False, pretrain=True, **kw)
+
+
 def advance(engine: Engine, seconds: float) -> list[dict]:
-    """Run the decoder for ``seconds`` of virtual time; the window events sent."""
+    """Run the decoder for ``seconds`` of virtual time; the decision events sent."""
     out = []
     for _ in range(int(round(seconds / POLL))):
         engine.board.advance(POLL)
@@ -181,14 +192,16 @@ def png_size(body: bytes) -> tuple[int, int]:
 # -- engine -------------------------------------------------------------------------------
 
 def test_state_shape_and_image_mapping(deck):
-    e = build_engine(deck, calibrate_s=None, seed=3)
+    e = build_engine(deck, decoder=False, seed=3)
     s = e.state()
     assert set(s) == STATE_KEYS
-    assert s["name"] == "BrainSwipe" and s["decoder"] is False
-    assert s["labels"] == ["Pass", "Like"] and s["freqs"] == [15.0, 17.0]
-    assert s["colors"] == ["#d0605a", "#5aae6e"]   # swipe.toml [card] flash_colors
+    assert s["name"] == "BrainSwipe" and s["decoder"] is False and s["paradigm"] == "code"
+    assert s["labels"] == ["Pass", "Super like", "Like"] and s["lags"] == [0, 21, 42]
+    assert s["colors"] == ["#d0605a", "#5a9bd0", "#5aae6e"]   # swipe_cvep [card] flash_colors
+    assert s["cycle_s"] == 1.05 and s["votes"] == live.VOTES and s["cycles"] == live.CYCLES
     assert s["card"] == 0 and s["gaze"] == "card" and s["n_cards"] == len(deck)
     assert set(s["counts"]) == COUNT_KEYS and not any(s["counts"].values())
+    assert s["training"]["active"] is False
     # image k shows deck[order[k]], and the feed's first card is image 0
     order = card_order(len(deck), e.feed.current)
     assert e.order == order
@@ -199,139 +212,157 @@ def test_state_shape_and_image_mapping(deck):
     json.dumps(s)   # serialisable as is
 
 
-def test_key_swipe_moves_the_feed_and_reports_the_swiped_profile(deck):
-    e = build_engine(deck, calibrate_s=None, match_rate=1.0)
+def test_key_swipes_pass_super_like_and_like(deck):
+    e = build_engine(deck, decoder=False, match_rate=0.0)
     sub = e.subscribe()
     assert drain(sub)[0][0] == "state"
     before = e.card
     name = e.state()["deck"][before]["name"]
-    out = e.key_swipe(LIKE)
+    out = e.key_swipe(SUPER_LIKE)
     assert set(out) == SWIPE_KEYS
-    assert out["source"] == "key" and out["label"] == "Like" and out["liked"] and out["match"]
+    assert out["source"] == "key" and out["label"] == "Super like"
+    assert out["liked"] and out["super_like"] and out["match"]   # always, even at rate 0
     assert out["swiped"] == before and out["card"] == e.card != before
-    assert out["voice"] == f"{name} liked you back. It's a match!"
-    assert out["counts"] == {"swipes": 1, "likes": 1, "passes": 0, "matches": 1, "stale": 0}
+    assert out["voice"] == f"Super liked {name}. It's a match!"
+    assert out["counts"] == {"swipes": 1, "likes": 1, "super_likes": 1, "passes": 0,
+                             "matches": 1, "stale": 0}
     assert swipes_of(drain(sub)) == [out]
+    like = e.key_swipe(LIKE)
+    assert like["label"] == "Like" and like["liked"] and not like["super_like"]
+    assert not like["match"] and like["voice"].startswith("Liked ")
     p = e.key_swipe(PASS)
     assert p["voice"] == "Pass" and not p["liked"] and not p["match"]
-    for bad in (True, 2, -1, "1", 1.0, None):
+    for bad in (True, 3, -1, "1", 1.0, None):
         with pytest.raises(ValueError):
             e.key_swipe(bad)
 
 
+def test_training_comes_first_with_the_eyes_on_pass(deck):
+    e = engine_virtual(deck, train_cycles=10)
+    sub = e.subscribe()
+    s = drain(sub)[0][1]
+    assert s["training"] == {"active": True, "cycle": 0, "of": 10, "accuracy": None,
+                             "chance": 0.3333, "target": PASS}
+    e.set_gaze("like")                      # ignored until the template is ready
+    assert e.board.fixated == PASS
+    decisions = advance(e, 8.0)
+    assert decisions == [] and e.training and e.board.fixated == PASS
+    decisions = advance(e, 8.0)
+    assert not e.training and decisions
+    items = drain(sub)
+    cycles = [d["cycle"] for ev, d in items if ev == "train"]
+    assert cycles == sorted(cycles) and cycles[-1] == 10 and len(cycles) >= 10
+    [done] = [d for ev, d in items if ev == "trained"]
+    assert done["cycles"] == 10 and done["chance"] == 0.3333 and done["accuracy"] >= 0.9
+    assert e.board.fixated == LIKE          # the gaze takes over after training
+    assert e.state()["training"]["accuracy"] == done["accuracy"]
+
+
 def test_gaze_needs_a_decoder_and_a_known_value(deck):
     with pytest.raises(swipe_web.NoDecoder):
-        build_engine(deck, calibrate_s=None).set_gaze("like")
-    e = engine_virtual(deck)
-    assert e.board.active_target() == ABSTAIN   # reading the card: no tone
+        build_engine(deck, decoder=False).set_gaze("like")
+    e = trained(deck)
+    assert e.board.fixated == ABSTAIN       # reading the card: no response
     sub = e.subscribe()
     drain(sub)
-    for gaze, target in (("like", LIKE), ("pass", PASS), ("card", ABSTAIN)):
+    for gaze, target in (("like", LIKE), ("super", SUPER_LIKE), ("pass", PASS),
+                         ("card", ABSTAIN)):
         assert e.set_gaze(gaze) == gaze
-        assert e.board.active_target() == target
+        assert e.board.fixated == target
+    e.set_gaze("auto")                      # Pass, Super like, Like for --switch s each
+    seen = []
+    for _ in range(int(3 * e.switch_s / POLL) + 1):
+        advance(e, POLL)
+        seen.append(e.board.fixated)
+    assert [k for i, k in enumerate(seen) if i == 0 or seen[i - 1] != k][:3] in (
+        [PASS, SUPER_LIKE, LIKE], [SUPER_LIKE, LIKE, PASS], [LIKE, PASS, SUPER_LIKE])
+    gazes = [d["gaze"] for ev, d in drain(sub) if ev == "gaze"]
+    assert gazes == ["like", "super", "pass", "card", "auto"]
     e.set_gaze("auto")
-    assert e.board._forced is None   # the board's own switch schedule
-    assert [d["gaze"] for ev, d in drain(sub) if ev == "gaze"] == ["like", "pass", "card", "auto"]
-    e.set_gaze("auto")
-    assert drain(sub) == []   # no news, no event
+    assert [ev for ev, _ in drain(sub) if ev == "gaze"] == []   # no news, no event
     with pytest.raises(ValueError):
         e.set_gaze("left")
 
 
-def test_held_like_gaze_swipes_like_within_4_s_then_every_3_s(deck):
-    e = engine_virtual(deck)
+@pytest.mark.parametrize("gaze, target", [("like", LIKE), ("super", SUPER_LIKE),
+                                          ("pass", PASS)])
+def test_a_held_gaze_keeps_swiping_that_square(deck, gaze, target):
+    e = trained(deck)
     sub = e.subscribe()
-    e.set_gaze("like")
-    advance(e, 4.5)   # from an empty buffer: 3.5 s fills window + pad, then 4 fresh votes
-    first = swipes_of(drain(sub))
-    assert [s["target"] for s in first] == [LIKE]
-    assert first[0]["source"] == "decoder"
-    # after a settled stretch of reading, the change of gaze is what starts the clock
-    e.set_gaze("card")
-    advance(e, 6.0)
-    drain(sub)
-    e.set_gaze("like")
+    e.set_gaze(gaze)
     t0 = e.board.elapsed
     times = []
-    for _ in range(int(12 / POLL)):
+    for _ in range(int(20 / POLL)):
         advance(e, POLL)
-        times += [e.board.elapsed for _ in swipes_of(drain(sub))]
-    assert times and times[0] - t0 < 4.0
-    gaps = [b - a for a, b in zip(times, times[1:])]
-    assert len(gaps) >= 2
-    # cooldown + window + 3 hops = 744 samples = 2.976 s, read every 0.1 s
-    assert all(2.85 <= g <= 3.15 for g in gaps), gaps
+        times += [(e.board.elapsed, s["target"]) for s in swipes_of(drain(sub))]
+    assert len(times) >= 4 and {k for _, k in times} == {target}
+    assert times[0][0] - t0 < 4.5
+    gaps = [b - a for (a, _), (b, _) in zip(times, times[1:])]
+    # settle 0.5 s, two fresh cycles of 1.05 s and the 0.5 s pad: never faster
+    assert min(gaps) >= 3.0, gaps
 
 
-def test_window_events_carry_the_decoder_state(deck):
-    e = engine_virtual(deck)
+def test_decision_events_carry_the_decoder_state(deck):
+    e = trained(deck)
     sub = e.subscribe()
     e.set_gaze("like")
-    windows = advance(e, 8.0)
-    assert len(windows) == len([d for ev, d in drain(sub) if ev == "window"]) > 10
-    for w in windows:
-        assert set(w) == WINDOW_KEYS
-        assert len(w["scores"]) == 2 and all(isinstance(x, float) for x in w["scores"])
-        assert w["raw"] in (-1, 0, 1) and w["pending"] in (-1, 0, 1)
-        assert 0 <= w["streak"] < w["votes"] == 4
-        assert w["gaze"] == "like" and w["true"] == LIKE
-    ts = [w["t"] for w in windows]
-    assert ts[0] == pytest.approx(3.5) and all(b - a == pytest.approx(0.248) for a, b in
-                                               zip(ts, ts[1:]))
-    # right after a swipe the overlapping windows still hold EEG from the old card
-    assert any(w["stale"] for w in windows)
-    assert e.swiper.stale == sum(w["stale"] for w in windows)
+    decisions = advance(e, 12.0)
+    assert len(decisions) == len([d for ev, d in drain(sub) if ev == "decision"]) >= 6
+    for d in decisions:
+        assert set(d) == DECISION_KEYS
+        assert len(d["scores"]) == 3 and all(isinstance(x, float) for x in d["scores"])
+        assert d["raw"] in (-1, 0, 1, 2) and d["committed"] in (-1, 0, 1, 2)
+        assert d["fired"] in (-1, d["committed"])
+        assert d["votes"] == live.VOTES and d["gaze"] == "like" and d["true"] == LIKE
+        assert d["lead"] is None or 0 <= d["lead"] <= 2
+    fired = [d for d in decisions if d["fired"] != ABSTAIN]
+    assert fired and all(d["fired"] == LIKE and d["changed"] for d in fired)
+    assert 0 < decisions[-1]["stale"] <= e.swiper.stale
+    gaps = np.diff([d["t"] for d in decisions])
+    assert min(gaps) >= 1.0                  # at most one decision per 1.05 s cycle
 
 
 def test_reading_the_card_rarely_swipes(deck):
-    """Gaze on the card: the board carries no tone, so every swipe here is a false one.
-
-    The decoder does fire on pure noise now and then. Pooled over seeds 0..7 (30 s of
-    reading each, after 10 s to settle) it gave 26 false swipes in 240 s, 6.5 a minute.
-    The bound, 8 a minute, holds that rate rather than one noise draw, and still fails a
-    real regression: without the rest threshold (online.TUNED.threshold=None) the same
-    run gives 50, 12.5 a minute."""
-    seconds, n_false = 30.0, 0
-    for seed in range(8):
-        e = engine_virtual(deck, seed=seed)
+    """Gaze on the card: the fake board carries no response, so every swipe is a false
+    one. At the standard's margin 0 this gave 13 a minute (two noise decisions agree a
+    third of the time); the mock's margin 0.2 gave none over 6 seeds x 60 s."""
+    seconds, n_false = 60.0, 0
+    for seed in range(4):
+        e = trained(deck, seed=seed)
         sub = e.subscribe()
-        advance(e, 10.0)
-        drain(sub)
-        windows = advance(e, seconds)
-        assert all(w["true"] == ABSTAIN and w["gaze"] == "card" for w in windows)
+        decisions = advance(e, seconds)
+        assert decisions and all(d["true"] == ABSTAIN and d["gaze"] == "card" for d in decisions)
         n_false += len(swipes_of(drain(sub)))
-    per_minute = n_false * 60 / (8 * seconds)
-    assert per_minute <= 8.0, f"{n_false} false swipes in {8 * seconds:g} s"
+    assert n_false * 60 / (4 * seconds) <= 1.0, f"{n_false} false swipes"
 
 
-def test_key_swipe_resets_the_streak_so_the_decoder_cannot_double_fire(deck):
-    e = engine_virtual(deck)
+def test_a_key_swipe_resets_the_decoder_so_it_cannot_double_fire(deck):
+    e = trained(deck)
     sub = e.subscribe()
     e.set_gaze("like")
-    advance(e, 4.5)
-    assert swipes_of(drain(sub))
-    # wait until a fresh run is building towards the next Like
     for _ in range(100):
         advance(e, POLL)
-        assert not swipes_of(drain(sub))
-        if e.swiper.streak >= 2:
+        if swipes_of(drain(sub)):
             break
-    assert e.swiper.pending == LIKE and e.swiper.streak >= 2
+    # wait for the first decision on the new card, then swipe it by key
+    for _ in range(100):
+        if advance(e, POLL):
+            break
     e.key_swipe(LIKE)
-    assert e.swiper.pending == ABSTAIN and e.swiper.streak == 0
+    assert e.decoder.committed == ABSTAIN
     t_key = e.board.elapsed
     times = []
-    for _ in range(50):
+    for _ in range(60):
         advance(e, POLL)
         times += [e.board.elapsed for s in swipes_of(drain(sub)) if s["source"] == "decoder"]
-    # only windows wholly after the key swipe + cooldown vote: >= 0.5 + 1.5 + 3 x 0.248
-    assert times and times[0] - t_key >= 2.7
+    # only cycles that began after the key swipe + cooldown count: >= 0.5 + 2 x 1.05 + 0.5
+    assert times and times[0] - t_key >= 3.0
 
 
 def test_a_key_swipe_for_a_card_already_swiped_is_refused(deck):
     """The decoder swipes card A; a Shift+Arrow pressed while A was still on the page
     names A and must not swipe B, which nobody has seen yet."""
-    e = engine_virtual(deck, match_rate=1.0)
+    e = trained(deck, match_rate=1.0)
     sub = e.subscribe()
     seen = e.card
     e.set_gaze("like")
@@ -355,34 +386,34 @@ def test_a_key_swipe_for_a_card_already_swiped_is_refused(deck):
 
 
 def test_a_slow_client_never_blocks_the_decoder(deck):
-    e = engine_virtual(deck, queue_size=16)
+    e = trained(deck, queue_size=8)
     slow = e.subscribe()          # never read
     fast = e.subscribe()
     e.set_gaze("like")
     longest = 0.0
     seen = []
-    for _ in range(int(40 / POLL)):
+    for _ in range(int(60 / POLL)):
         e.board.advance(POLL)
         t = time.perf_counter()
         e.step()
         longest = max(longest, time.perf_counter() - t)
         seen += drain(fast)
-    n_windows = sum(ev == "window" for ev, _ in seen)
+    n_decisions = sum(ev == "decision" for ev, _ in seen)
     n_swipes = len(swipes_of(seen))
-    assert n_windows > 100 and n_swipes >= 10
-    assert len(slow) == 16 and slow.dropped > 0
+    assert n_decisions > 20 and n_swipes >= 10
+    assert len(slow) == 8 and slow.dropped > 0
     assert longest < 0.5
-    # windows go first: the slow client still has the newest swipes, in order
+    # decisions go first: the slow client still has the newest swipes, in order
     kept = [data for _, data in iter(lambda: slow.get(timeout=0), None)]
     swipes = [d for d in kept if "label" in d]
-    assert swipes == swipes_of(seen)[-len(swipes):]
+    assert swipes and swipes == swipes_of(seen)[-len(swipes):]
 
 
-def test_subscriber_drops_old_windows_first_and_closes():
+def test_subscriber_drops_old_decisions_first_and_closes():
     sub = Subscriber(3)
     sub.put("swipe", {"n": 1})
-    sub.put("window", {"n": 2})
-    sub.put("window", {"n": 3})
+    sub.put("decision", {"n": 2})
+    sub.put("decision", {"n": 3})
     sub.put("gaze", {"n": 4})
     assert [d["n"] for _, d in iter(lambda: sub.get(0), None)] == [1, 3, 4]
     for n in range(5):
@@ -399,13 +430,26 @@ def test_subscriber_drops_old_windows_first_and_closes():
 
 
 def test_engine_rejects_mismatched_parts(deck):
-    e = build_engine(deck, calibrate_s=None)
+    e = build_engine(deck, decoder=False)
     with pytest.raises(ValueError, match="both or neither"):
         Engine(deck, e.feed, e.look, decoder=engine_virtual(deck).decoder)
     with pytest.raises(ValueError, match="deck has"):
         Engine(deck[:3], e.feed, e.look)
-    with pytest.raises(ValueError, match="calibration needs"):
-        engine_virtual(deck, calibrate_s=2.0)
+    with pytest.raises(ValueError, match="train_cycles"):
+        engine_virtual(deck, train_cycles=1)
+    with pytest.raises(ValueError, match="margin"):
+        engine_virtual(deck, margin=-0.1)
+
+
+def test_pretrain_is_quick_and_decodes_at_once(deck):
+    t = time.perf_counter()
+    e = trained(deck)
+    assert time.perf_counter() - t < 5.0
+    s = e.state()["training"]
+    assert s["active"] is False and s["cycle"] == s["of"] == live.TRAIN_CYCLES
+    assert s["accuracy"] >= 0.9
+    e.set_gaze("super")
+    assert advance(e, 4.0)                   # decisions within a few cycles
 
 
 # -- HTTP ---------------------------------------------------------------------------------
@@ -416,12 +460,13 @@ def test_api_state_over_http(deck, cards, web_dir):
         status, s = get_json(server, "/api/state")
     assert status == 200
     assert set(s) == STATE_KEYS and s["decoder"] is True
-    assert s["votes"] == 4 and s["window_s"] == 1.5 and s["step_s"] == 0.25
+    assert s["votes"] == 2 and s["cycles"] == 2 and s["margin"] == 0.2
+    assert s["training"]["active"] is True and s["training"]["of"] == 30
     assert s["cooldown_s"] == 0.5 and s["switch_s"] == 8.0 and len(s["deck"]) == 20
 
 
 def test_static_files_are_whitelisted(deck, cards, web_dir):
-    with serving(build_engine(deck, calibrate_s=None), cards, web_dir) as server:
+    with serving(build_engine(deck, decoder=False), cards, web_dir) as server:
         status, headers, body = request(server, "GET", "/")
         assert status == 200 and body.startswith(b"<!doctype html>")
         assert headers["content-type"] == "text/html; charset=utf-8"
@@ -435,20 +480,28 @@ def test_static_files_are_whitelisted(deck, cards, web_dir):
                      "/static/%2e%2e%2fsecret.js", "/static/..%2fsecret.js",
                      "/static/web/../app.js", "/static//etc/passwd", "/static/%2Fetc%2Fpasswd",
                      f"/static/{web_dir / 'app.js'}", "/static/./app.js", "/secret.js",
-                     "/../secret.js", "/index.html", "/api/nothing"):
+                     "/../secret.js", "/index.html", "/api/nothing", "/static/cvep.js"):
             status, _, body = request(server, "GET", path)
             assert status == 404, path
             assert b"secret" not in body
 
 
+def test_the_real_page_is_served(deck, cards):
+    with serving(build_engine(deck, decoder=False), cards) as server:
+        status, _, body = request(server, "GET", "/")
+        assert status == 200 and b'data-side="super"' in body
+        for name in ("app.js", "logic.js", "style.css"):
+            assert request(server, "GET", f"/static/{name}")[0] == 200, name
+
+
 def test_missing_frontend_is_a_404_not_a_crash(deck, tmp_path):
-    with serving(build_engine(deck, calibrate_s=None), web_dir=tmp_path / "absent") as server:
+    with serving(build_engine(deck, decoder=False), web_dir=tmp_path / "absent") as server:
         assert request(server, "GET", "/")[0] == 404
         assert get_json(server, "/api/state")[0] == 200
 
 
 def test_card_images(deck, cards, web_dir):
-    with serving(build_engine(deck, calibrate_s=None), cards, web_dir) as server:
+    with serving(build_engine(deck, decoder=False), cards, web_dir) as server:
         status, headers, body = request(server, "GET", "/cards/0.png")
         assert status == 200 and headers["content-type"] == "image/png"
         assert png_size(body) == (600, 900)
@@ -460,10 +513,10 @@ def test_card_images(deck, cards, web_dir):
 
 
 def test_post_gaze(deck, cards):
-    e = engine_virtual(deck)
+    e = trained(deck)
     with serving(e, cards) as server:
-        assert post_json(server, "/api/gaze", {"gaze": "like"}) == (200, {"gaze": "like"})
-        assert e.board.active_target() == LIKE
+        assert post_json(server, "/api/gaze", {"gaze": "super"}) == (200, {"gaze": "super"})
+        assert e.board.fixated == SUPER_LIKE
         assert post_json(server, "/api/gaze", {"gaze": "auto"}) == (200, {"gaze": "auto"})
         assert get_json(server, "/api/state")[1]["gaze"] == "auto"
         for body in ({"gaze": "left"}, {"gaze": 1}, {}, [1], b"not json", b"\xff\xfe",
@@ -475,14 +528,15 @@ def test_post_gaze(deck, cards):
 
 
 def test_post_gaze_without_decoder_is_409(deck, cards):
-    with serving(build_engine(deck, calibrate_s=None), cards) as server:
+    with serving(build_engine(deck, decoder=False), cards) as server:
         assert post_json(server, "/api/gaze", {"gaze": "like"}) == (409, {"error": "no decoder"})
         assert get_json(server, "/api/state")[1]["decoder"] is False
-        assert post_json(server, "/api/swipe", {"target": 1})[0] == 200
+        for target in (0, 1, 2):
+            assert post_json(server, "/api/swipe", {"target": target})[0] == 200
 
 
 def test_post_swipe_advances_the_card_and_reaches_sse_clients(deck, cards):
-    e = engine_virtual(deck)
+    e = trained(deck)
     with serving(e, cards) as server:
         sse = Sse(server)
         try:
@@ -495,29 +549,44 @@ def test_post_swipe_advances_the_card_and_reaches_sse_clients(deck, cards):
             assert sse.until("swipe") == out
             _, s = get_json(server, "/api/state")
             assert s["card"] == out["card"] and s["counts"] == out["counts"]
-            # decoder windows and gaze changes stream too
+            # decisions and gaze changes stream too
             post_json(server, "/api/gaze", {"gaze": "like"})
             assert sse.until("gaze") == {"gaze": "like"}
             advance(e, 4.0)
-            w = sse.until("window")
-            assert set(w) == WINDOW_KEYS and w["gaze"] == "like"
+            d = sse.until("decision")
+            assert set(d) == DECISION_KEYS and d["gaze"] == "like"
         finally:
             sse.close()
-        for body in ({"target": 2}, {"target": True}, {"target": "1"}, {"target": 1.0}, {},
+        for body in ({"target": 3}, {"target": True}, {"target": "1"}, {"target": 1.0}, {},
                      b"{", {"target": 0, "card": "1"}, {"target": 0, "card": -1},
                      {"target": 0, "card": True}):
             assert post_json(server, "/api/swipe", body)[0] == 400, body
-        assert e.feed.swipes == 1
+        swipes = e.feed.swipes
         # the page names the card it shows: a stale one is a 409 that says which is on
         assert post_json(server, "/api/swipe", {"target": 1, "card": 0}) == (
             409, {"error": "card changed", "card": e.card})
-        assert e.feed.swipes == 1
+        assert e.feed.swipes == swipes
         status, out = post_json(server, "/api/swipe", {"target": 1, "card": e.card})
-        assert status == 200 and out["swiped"] == s["card"] and e.feed.swipes == 2
+        assert status == 200 and out["super_like"] and out["match"]
+        assert e.feed.swipes == swipes + 1 and e.feed.super_likes == 1
+
+
+def test_training_streams_to_sse_clients(deck, cards):
+    e = engine_virtual(deck, train_cycles=4)
+    with serving(e, cards) as server:
+        sse = Sse(server)
+        try:
+            assert sse.next()[1]["training"]["active"] is True
+            advance(e, 10.0)
+            assert sse.until("train")["of"] == 4
+            done = sse.until("trained")
+            assert done["cycles"] == 4 and done["chance"] == 0.3333
+        finally:
+            sse.close()
 
 
 def test_sse_pings_and_ends_on_close(deck):
-    e = build_engine(deck, calibrate_s=None)
+    e = build_engine(deck, decoder=False)
     with serving(e, ping_s=0.1) as server:
         sse = Sse(server)
         assert sse.next()[0] == "state"
@@ -546,7 +615,8 @@ def test_large_body_is_413(deck):
 
 @pytest.mark.parametrize("argv", [
     ["--port", "70000"], ["--port", "-1"], ["--seed", "-1"], ["--match-rate", "1.5"],
-    ["--match-rate", "nan"], ["--cooldown", "-0.1"], ["--switch", "0"], ["--calibrate", "0"],
+    ["--match-rate", "nan"], ["--cooldown", "-0.1"], ["--switch", "0"],
+    ["--train-cycles", "1"], ["--margin", "-0.1"], ["--margin", "nan"], ["--calibrate", "30"],
     ["--port", "x"], ["--bogus"],
 ])
 def test_bad_arguments_exit_2(argv, capsys):
@@ -556,11 +626,9 @@ def test_bad_arguments_exit_2(argv, capsys):
     assert "error:" in capsys.readouterr().err
 
 
-def test_bad_deck_and_short_calibration_exit_2(tmp_path, capsys):
+def test_bad_deck_exits_2(tmp_path, capsys):
     assert swipe_web.main(["--port", "0", "--deck", str(tmp_path / "none.toml")]) == 2
     assert capsys.readouterr().err.startswith("error: ")
-    assert swipe_web.main(["--port", "0", "--calibrate", "2"]) == 2
-    assert "calibration needs" in capsys.readouterr().err
 
 
 def test_busy_port_exits_1(capsys):
@@ -657,20 +725,20 @@ def test_cli_stops_cleanly_on_sigterm_and_removes_the_cards(tmp_path):
 
 @pytest.mark.slow
 def test_cli_decodes_a_real_time_board():
-    """End to end in real time: calibration in virtual time, then window events stream
-    within a few seconds (3.5 s fills the first window and its filter pad)."""
+    """End to end in real time: --pretrain trains in virtual time, then decision events
+    stream within a few seconds (two cycles of 1.05 s and the filter pad)."""
     t = time.monotonic()
-    proc, line, port = _launch("--calibrate", "8", "--seed", "2")
+    proc, line, port = _launch("--pretrain", "--seed", "2")
     try:
-        assert "simulated EEG board, no flicker" in line
+        assert "c-VEP on a simulated EEG board, no flicker" in line
         assert time.monotonic() - t < 10
         server = _Server(port)
         assert post_json(server, "/api/gaze", {"gaze": "like"}) == (200, {"gaze": "like"})
         sse = Sse(server, timeout=10)
         try:
             assert sse.next()[0] == "state"
-            w = sse.until("window")
-            assert w["gaze"] == "like" and w["true"] == LIKE
+            d = sse.until("decision")
+            assert d["gaze"] == "like" and d["true"] == LIKE
         finally:
             sse.close()
     finally:
@@ -693,7 +761,7 @@ class _FakeSpeaker:
 
 def test_speech_is_cartesia_through_the_server(deck, cards, tmp_path):
     fake = _FakeSpeaker(tmp_path)
-    with serving(build_engine(deck, calibrate_s=None), cards) as server:
+    with serving(build_engine(deck, decoder=False), cards) as server:
         server._speaker = fake
         status, headers, body = request(server, "GET", "/api/speech?text=Nadia%20liked%20you%20back")
         assert status == 200 and headers["content-type"] == "audio/wav"
@@ -707,6 +775,6 @@ def test_speech_is_cartesia_through_the_server(deck, cards, tmp_path):
 
 def test_speech_without_a_voice_is_503(deck, cards):
     # the suite runs with BRAINSYNC_TTS=off, so the process-wide speaker is None
-    with serving(build_engine(deck, calibrate_s=None), cards) as server:
+    with serving(build_engine(deck, decoder=False), cards) as server:
         assert server.speaker is None
         assert request(server, "GET", "/api/speech?text=hello")[0] == 503

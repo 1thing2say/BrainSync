@@ -14,10 +14,10 @@ from brainsync import demo, launch, swipe
 from brainsync.board import FakeBoard
 from brainsync.classify import ABSTAIN
 from brainsync.profiles import CARD_SIZE, Profile, load_deck
-from brainsync.swipe import LIKE, PASS, Feed, Outcome
+from brainsync.swipe import FREQ_LIKE as LIKE, FREQ_PASS as PASS, Feed, Outcome
 
-HEADLESS = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
-LIVE = ["--fake", "--fast", "--no-voice"]
+HEADLESS = ["--paradigm", "freq", "--fake", "--fast", "--no-stimulus", "--no-voice"]
+LIVE = ["--paradigm", "freq", "--fake", "--fast", "--no-voice"]
 
 # Stand-in for brainsync.stimulus --feedback stdin: reports its window, then copies each
 # feedback line to a file until EOF (or exits at once with "exit", or crashes with code 1
@@ -382,7 +382,8 @@ def test_voice_lines():
 
 def test_defaults():
     args = swipe.build_parser().parse_args([])
-    assert args.config == "swipe" and args.seconds == 300.0
+    assert demo.config_name(args) == "swipe_cvep" and args.seconds == 300.0
+    assert demo.config_name(swipe.build_parser().parse_args(["--paradigm", "freq"])) == "swipe"
     assert args.cooldown == 0.5 and args.match_rate == 0.3 and args.deck is None
     assert args.seed is None and args.calibrate >= 30.0
     help_text = swipe.build_parser().format_help()
@@ -413,7 +414,7 @@ def test_bad_deck_or_config_returns_2(capsys, tmp_path: Path):
     assert swipe.main([*HEADLESS, "-c", "one_target_15"]) == 2
     err = capsys.readouterr().err
     assert "deck.toml: profile 0" in err and "missing.toml" in err
-    assert "two targets" in err
+    assert "needs 2 targets" in err
     # a folder or an unreadable file is an error message, not a traceback
     assert swipe.main([*HEADLESS, "--deck", str(tmp_path)]) == 2
     assert capsys.readouterr().err.startswith("error: ")

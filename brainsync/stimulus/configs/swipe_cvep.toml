@@ -1,0 +1,44 @@
+# BrainSwipe on the c-VEP standard (docs/CVEP-STANDARD.md): the cvep_3 code (one 63-bit
+# m-sequence, target k delayed k * 21 frames, white squares on black) on three squares
+# around the profile card drawn at the centre of the screen. Pass (target 0, the training
+# target) on the left, Super like (target 1) above the card, Like (target 2) on the
+# right. Squares are 0.2 screen heights (cvep_3's are 0.26) so a 0.48-high card (0.32
+# wide at 2:3) clears every square and cue box. Each square's confidence line goes beside
+# it (Pass above, Super like to its right, Like below), the centre line (the profile and
+# the lead / choice) between Pass and Like; none overlaps another on 1.5:1 to 16:9.
+name = "swipe_cvep"
+
+[targets]
+labels = ["Pass", "Super like", "Like"]   # left, top, right; spoken on a swipe
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+size = 0.2
+positions = [[-0.6, 0.12], [0.0, 0.36], [0.6, 0.12]]
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true
+
+[card]
+height = 0.48
+flash_s = 0.35
+flash_colors = ["#d0605a", "#5a9bd0", "#5aae6e"]   # Pass reddish, Super like blue, Like green

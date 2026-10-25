@@ -12,7 +12,7 @@ from brainsync.board import FakeBoard
 from brainsync.classify import make
 from brainsync.online import Decoder
 
-HEADLESS = ["--fake", "--fast", "--no-stimulus", "--no-voice"]
+HEADLESS = ["--paradigm", "freq", "--fake", "--fast", "--no-stimulus", "--no-voice"]
 
 # Stand-in for brainsync.stimulus --feedback stdin: reports its window, then copies each
 # feedback line to a file until EOF (or exits at once with "exit", or crashes with code 1
@@ -79,7 +79,7 @@ def test_spoken_labels_follow_commits(capsys):
 
 def test_feedback_reaches_the_stimulus(fake_stimulus, capsys):
     calls, feedback, _ = fake_stimulus
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "25"]) == 0
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "25"]) == 0
     cap = capsys.readouterr()
     assert len(calls) == 1
     args = calls[0]["args"]
@@ -100,7 +100,7 @@ def test_feedback_reaches_the_stimulus(fake_stimulus, capsys):
 def test_run_ends_when_the_stimulus_exits(fake_stimulus, capsys):
     calls, _, mode = fake_stimulus
     mode["value"] = "exit"
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "3000"]) == 0
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "3000"]) == 0
     out = capsys.readouterr().out
     assert "ended: stimulus" in out           # exited, or its pipe closed first
     assert "before the flicker started" in out and "0 windows" in out
@@ -111,7 +111,7 @@ def test_stimulus_crash_mid_run_exits_1(fake_stimulus, capsys):
     # regression: a crashed stimulus used to leave the demo's exit code at 0
     _, _, mode = fake_stimulus
     mode["value"] = "crash"
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "3000"]) == 1
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "3000"]) == 1
     cap = capsys.readouterr()
     assert "ended: stimulus" in cap.out and "error: the stimulus exited with code 1" in cap.err
 
@@ -127,7 +127,7 @@ def test_stimulus_is_up_and_still_during_calibration(fake_stimulus, monkeypatch,
         return real(decoder, board, seconds, **kw)
 
     monkeypatch.setattr(demo, "calibrate", spy)
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "5"]) == 0
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "5"]) == 0
     assert seen == [(1, None, "")]            # window up, nothing sent: squares still
 
 
@@ -147,7 +147,7 @@ def test_ctrl_c_shuts_down_cleanly(fake_stimulus, monkeypatch, capsys):
     calls, _, _ = fake_stimulus
     InterruptingBoard.reads = 900                # past calibration (600 reads), into the run
     monkeypatch.setattr(demo, "FakeBoard", InterruptingBoard)
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "1000"]) == 0
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "1000"]) == 0
     assert "ended: interrupted" in capsys.readouterr().out
     assert calls[0]["stim"].proc.poll() == 0
 
@@ -157,7 +157,7 @@ def test_ctrl_c_during_calibration_ends_before_decoding(fake_stimulus, monkeypat
     calls, feedback, _ = fake_stimulus
     InterruptingBoard.reads = 120
     monkeypatch.setattr(demo, "FakeBoard", InterruptingBoard)
-    assert demo.main(["--fake", "--fast", "--no-voice", "--seconds", "1000"]) == 130
+    assert demo.main(["--paradigm", "freq", "--fake", "--fast", "--no-voice", "--seconds", "1000"]) == 130
     cap = capsys.readouterr()
     assert "interrupted before decoding started" in cap.err
     assert "baseline from" not in cap.err and "Look at one of the squares" not in cap.err
@@ -265,7 +265,9 @@ def test_calibration_shorter_than_two_windows_fails(capsys):
 
 
 def test_defaults_calibrate_long_and_use_the_threshold():
-    args = demo.build_parser().parse_args([])
+    args = demo.build_parser().parse_args(["--paradigm", "freq"])
+    demo.resolve(args)
+    assert args.config == "two_targets"
     assert args.calibrate >= 30.0
     assert args.threshold == 0.5 and args.margin == 0.5
     assert demo.build_parser().parse_args(["--threshold", "none"]).threshold is None
