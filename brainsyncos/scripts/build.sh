@@ -8,10 +8,13 @@
 #   wheels [--force]  build the Python wheels BrainSyncOS compiles (the
 #              BrainFlow Cerelog fork; same for both editions) -> build/wheels/
 #   packages   build the edition's packages        -> build/debs/EDITION/
+#   mirror     fetch the third-party .debs the edition's repository mirrors
+#              (NVIDIA's CUDA runtime, Jetson only; mirror/NAME/, pinned by
+#              sha256)                             -> build/downloads/mirror/
 #   repo       sign them into an apt repository    -> build/repo/EDITION/
 #   iso        build the installer ISO from it     -> build/out/ (ISO OPTIONS are
 #              passed to scripts/build-iso.sh or build-vm-iso.sh, e.g. --name)
-#   all        doctor + packages + repo + iso (vm: fetches Ubuntu's ISO first)
+#   all        doctor + packages + mirror + repo + iso (vm: fetches Ubuntu's ISO first)
 #   test [SUITE...]   run test suites: phase1 phase2 phase3 vm (default phase3)
 #   clean [--all]     delete build/out (--all: all of build/), as builder.sh clean
 #
@@ -51,7 +54,7 @@ bad() { printf '  MISSING  %s\n' "$*"; nbad=$((nbad + 1)); }
 note() { printf '  note     %s\n' "$*"; }
 
 c_doctor() {
-    local iso keys hash avail_kb need probe mode
+    local iso keys hash avail_kb need probe mode m
     echo "BrainSyncOS $BRAINSYNCOS_VERSION, $edition edition: build prerequisites"
     if ! command -v docker > /dev/null 2>&1; then
         bad "docker: not installed (Docker Desktop on Apple Silicon is the reference host)"
@@ -111,6 +114,13 @@ c_doctor() {
     else
         note "package repository: not built yet (scripts/build.sh packages and repo, or all)"
     fi
+    for m in $(mirror_names "$edition"); do
+        if [ -s "$MIRROR_CACHE/$m/InRelease" ]; then
+            ok "mirror $m: build/downloads/mirror/$m ($(find "$MIRROR_CACHE/$m" -name '*.deb' | wc -l | tr -d ' ') .debs; the repo build checks them)"
+        else
+            note "mirror $m: not fetched yet (scripts/build.sh mirror; 'all' fetches it)"
+        fi
+    done
     if [ -s "$BUILD_DIR/wheels/SHA256SUMS" ]; then
         ok "wheels: build/wheels ($(wc -l < "$BUILD_DIR/wheels/SHA256SUMS" | tr -d ' '); for the BrainSync venv)"
     else
@@ -149,6 +159,7 @@ c_key() {
 }
 
 c_packages() { "$B" run scripts/build-packages.sh --edition "$edition"; }
+c_mirror()   { "$B" run scripts/fetch-mirror.sh --edition "$edition"; }
 c_wheels() {
     case "$rest" in ''|' --force') ;; *) die "wheels takes only --force:$rest" ;; esac
     # shellcheck disable=SC2086  # [--force], split as given
@@ -170,6 +181,7 @@ c_all() {
     [ "$edition" = jetson ] || "$S/fetch-vm-base.sh"
     "$B" run scripts/build-wheels.sh   # skipped while up to date; brainsync-runtime needs them
     c_packages
+    c_mirror   # offline once build/downloads/mirror holds the pinned .debs
     c_repo
     c_iso
 }
@@ -196,6 +208,7 @@ case "$cmd" in
     key) no_args; c_key ;;
     wheels) c_wheels ;;
     packages) no_args; c_packages ;;
+    mirror) no_args; c_mirror ;;
     repo) no_args; c_repo ;;
     iso) c_iso ;;
     all) c_all ;;

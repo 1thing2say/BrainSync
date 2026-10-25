@@ -1,0 +1,9 @@
+# debs.lock: the .debs this mirror ships, pinned by sha256. Written by
+# scripts/fetch-mirror.sh --lock (scripts/mirror.py) from the signed index of
+# https://repo.download.nvidia.com/jetson/common r39.2 main (arm64).
+# PACKAGE VERSION ARCH SIZE SHA256 FILENAME
+cuda-cudart-13-2 13.2.86-1 arm64 180622 550a1c3c915637b5c0d6538b9eba87471742c4be854438ab8a050caabdea8001 pool/main/c/cuda-cudart/cuda-cudart-13-2_13.2.86-1_arm64.deb
+cuda-toolkit-13-2-config-common 13.2.86-1 all 17408 35d856d59c02d5893c831de201d78895b93a0520b594628cff9af9470b3306cb pool/main/c/cuda-cudart/cuda-toolkit-13-2-config-common_13.2.86-1_all.deb
+cuda-toolkit-13-config-common 13.2.86-1 all 17456 fa71974c9f87cd427b81dd757380c2d5f9d396b4bded62798089c957fed3a26c pool/main/c/cuda-cudart/cuda-toolkit-13-config-common_13.2.86-1_all.deb
+cuda-toolkit-config-common 13.2.86-1 all 17452 7f46bcda9ddc013b2746e872fa86fe24b5fb804cf27f4b4cb2b1f3a1b395e0b5 pool/main/c/cuda-cudart/cuda-toolkit-config-common_13.2.86-1_all.deb
+libcublas-13-2 13.4.1.3-1 arm64 483711340 f6b8cc5b1aac7815ebcd98852d2368559ff3811be499870f4490b3b0e6727983 pool/main/libc/libcublas/libcublas-13-2_13.4.1.3-1_arm64.deb

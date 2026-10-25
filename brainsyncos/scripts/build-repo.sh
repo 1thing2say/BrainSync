@@ -4,7 +4,10 @@
 # Usage: scripts/builder.sh run scripts/build-repo.sh --edition jetson|vm
 #            [--debs DIR] [--key FILE] [--out DIR]
 #
-# Input: the .debs in build/debs/EDITION/ (--debs; scripts/build-packages.sh).
+# Input: the .debs in build/debs/EDITION/ (--debs; scripts/build-packages.sh),
+# plus the edition's mirrored third-party .debs from build/downloads/mirror/
+# (mirror/NAME/, scripts/fetch-mirror.sh), each checked against its sha256
+# pin in mirror/NAME/debs.lock on every build.
 # Output: build/repo/EDITION/ (--out), replaced as a whole:
 #   pool/COMPONENT/*.deb                          the packages
 #   dists/SUITE/COMPONENT/binary-arm64/Packages   index (+ .gz), apt-ftparchive
@@ -69,6 +72,26 @@ pool="$new/pool/$REPO_COMPONENT"
 mkdir -p "$pool" "$dist/$REPO_COMPONENT/binary-arm64"
 for deb in "$debs"/*.deb; do
     cp "$deb" "$pool/"
+done
+# The edition's mirrored third-party .debs (mirror/NAME/, scripts/fetch-mirror.sh):
+# copied (never hard-linked: force_rm_tree truncates large files), then checked
+# in the pool against their sha256 pins and the cached signed index.
+for name in $(mirror_names "$edition"); do
+    (
+        load_mirror "$name"
+        s="$(scratch_dir "repo-mirror-$name")"
+        trap 'force_rm_tree "$s"' EXIT
+        mirror_keyring "$name" "$s/key.gpg"
+        cache="$MIRROR_CACHE/$name"
+        set -- --mirror "$MIRROR_DIR/$name" --cache "$cache" --keyring "$s/key.gpg"
+        for f in $(python3 -I "$BRAINSYNCOS_ROOT/scripts/mirror.py" files "$@"); do
+            [ ! -e "$pool/$f" ] || die "$name: $f is already in the pool"
+            [ -f "$cache/$f" ] || die "$name: $f is not in ${cache#$BRAINSYNCOS_ROOT/} (run: scripts/build.sh mirror --edition $edition)"
+            cp "$cache/$f" "$pool/"
+        done
+        python3 -I "$BRAINSYNCOS_ROOT/scripts/mirror.py" check "$@" --debs "$pool" \
+            || die "$name: the mirrored .debs do not match their pins"
+    ) || { force_rm_tree "$new"; die "mirror $name failed"; }
 done
 (cd "$new" && apt-ftparchive packages "pool/$REPO_COMPONENT") > "$dist/$REPO_COMPONENT/binary-arm64/Packages" \
     || die "apt-ftparchive packages failed"

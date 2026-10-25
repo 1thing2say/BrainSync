@@ -340,6 +340,53 @@ validate_repo() {
     log "package repository: ${dir#$BRAINSYNCOS_ROOT/} ($(find "$dir/pool" -name '*.deb' | wc -l | tr -d ' ') packages, key $REPO_KEY_FPR)"
 }
 
+# --- mirrored third-party .debs (mirror/NAME/, Phase 3d) ---------------------------
+# mirror/NAME/{mirror.env,debs.lock,KEY}: .debs BrainSyncOS ships unchanged
+# from another apt repository, pinned by sha256. scripts/fetch-mirror.sh
+# fills MIRROR_CACHE/NAME; scripts/build-repo.sh copies them into the
+# edition's repository; scripts/mirror.py checks them. BSOS_MIRROR_CACHE
+# overrides the cache for tests.
+MIRROR_DIR="$BRAINSYNCOS_ROOT/mirror"
+MIRROR_CACHE="${BSOS_MIRROR_CACHE:-$DOWNLOADS_DIR/mirror}"
+BSOS_MIRROR_REQUIRED_KEYS="MIRROR_NAME MIRROR_EDITIONS MIRROR_URL MIRROR_SUITE MIRROR_COMPONENT
+MIRROR_ARCH MIRROR_KEY MIRROR_KEY_FPR MIRROR_ROOTS MIRROR_FORBID"
+
+# mirror_names EDITION: the mirror/NAME folders for EDITION (jetson, vm or
+# all = every one), space-separated, in name order.
+mirror_names() {
+    local env name names=""
+    for env in "$MIRROR_DIR"/*/mirror.env; do
+        [ -e "$env" ] || continue
+        name="$(basename "$(dirname "$env")")"
+        if [ "$1" = all ] || (load_mirror "$name"; case ",$MIRROR_EDITIONS," in *,all,*|*,"$1",*) exit 0 ;; *) exit 1 ;; esac); then
+            names="$names $name"
+        fi
+    done
+    printf '%s\n' "${names# }"
+}
+
+# load_mirror NAME: load and check mirror/NAME/mirror.env (call it in a subshell).
+load_mirror() {
+    local e
+    load_env_file "$MIRROR_DIR/$1/mirror.env" "$BSOS_MIRROR_REQUIRED_KEYS"
+    [ "$MIRROR_NAME" = "$1" ] || die "mirror/$1/mirror.env: MIRROR_NAME=$MIRROR_NAME, but the folder is $1"
+    for e in $(printf '%s\n' "$MIRROR_EDITIONS" | tr ',' ' '); do
+        case "$e" in all|jetson|vm) ;; *) die "mirror/$1/mirror.env: MIRROR_EDITIONS has '$e' (all, jetson or vm)" ;; esac
+    done
+    case "$MIRROR_URL" in https://*) ;; *) die "mirror/$1/mirror.env: MIRROR_URL must be https" ;; esac
+    printf '%s\n' "$MIRROR_KEY_FPR" | grep -Eq '^[0-9A-F]{40}$' || die "mirror/$1/mirror.env: MIRROR_KEY_FPR must be 40 hex digits"
+}
+
+# mirror_keyring NAME OUT: OUT = mirror NAME's MIRROR_KEY in binary form for
+# gpgv, after checking that its one primary key is MIRROR_KEY_FPR (after load_mirror).
+mirror_keyring() {
+    local key="$MIRROR_DIR/$1/$MIRROR_KEY" fpr
+    [ -s "$key" ] || die "mirror/$1: no key file $MIRROR_KEY"
+    fpr="$(key_fingerprint "$key")"
+    [ "$fpr" = "$MIRROR_KEY_FPR" ] || die "mirror/$1/$MIRROR_KEY is key $fpr, mirror.env pins $MIRROR_KEY_FPR"
+    gpg --batch --dearmor < "$key" > "$2" 2> /dev/null || die "cannot read $key"
+}
+
 # installed_size STAGING: the Installed-Size (KiB) of the tree outside
 # DEBIAN/, counted as dpkg-gencontrol does (each file rounded up to 1 KiB,
 # 1 KiB per directory or link), so it does not depend on the filesystem.

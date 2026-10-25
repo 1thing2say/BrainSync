@@ -1,11 +1,11 @@
 # BrainSyncOS: thin wrapper around scripts/build.sh (which does the work and
 # also runs without make). EDITION is jetson (default) or vm.
 #
-#   make                  doctor, packages, repo and the installer ISO
+#   make                  doctor, packages, mirror, repo and the installer ISO
 #   make doctor           check what the build needs
 #   make key              create the package repository signing key (once)
 #   make wheels           the BrainFlow Cerelog wheel (build/wheels/)
-#   make packages repo iso
+#   make packages mirror repo iso   (mirror: NVIDIA's CUDA debs, Jetson)
 #   make test             tests/test_phase3.sh (TESTS="phase2 vm" for others)
 #   make clean            delete build/out
 #   make EDITION=vm       the same for the UTM edition
@@ -14,12 +14,12 @@ EDITION ?= jetson
 TESTS ?= phase3
 BUILD := scripts/build.sh
 
-.PHONY: all doctor key wheels packages repo iso test clean
+.PHONY: all doctor key wheels packages mirror repo iso test clean
 
 all:
 	$(BUILD) all --edition $(EDITION)
 
-doctor key packages repo iso:
+doctor key packages mirror repo iso:
 	$(BUILD) $@ --edition $(EDITION)
 
 wheels:
