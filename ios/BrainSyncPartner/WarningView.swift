@@ -10,44 +10,47 @@ struct WarningView: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.75).ignoresSafeArea()
+            Palette.bg.opacity(0.85).ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("Flicker warning")
-                        .font(.title.weight(.bold))
-                    Text("The user's screen flickers at 12 to 20 Hz, mostly in the range most likely to trigger photosensitive seizures, with up to four squares at once. Nobody with photosensitive epilepsy or flicker sensitivity should look at it.")
-                    Text("**Esc** on the flicker display or **Stop** here turns the flicker off immediately.")
-                    Text("While the session runs, the microphone listens to the conversation partner and the iPhone turns the speech into text (on the phone itself when it supports that, otherwise through Apple's speech recognition). Press **Mute** any time.")
+                VStack(alignment: .leading, spacing: 16) {
+                    Heading("Flicker warning")
+                    Callout(title: "Warning", icon: "exclamationmark.triangle.fill", tint: Palette.warn) {
+                        FlickerWarningText()
+                    }
                     Button {
                         model.acceptWarning()
                     } label: {
                         Text("I understand, start")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Palette.say)
-                    .padding(.top, 6)
+                    .buttonStyle(FilledButtonStyle(.primary, large: true))
+                    .padding(.top, 4)
                     // STOP stays reachable without accepting (and without the resume that
                     // accepting sends): the app may be relaunched while a session flickers.
-                    Button(role: .destructive) {
-                        model.stopPressed()
-                    } label: {
-                        Text(model.connected ? "Stop the flicker" : "Not connected: press Esc on the display")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(Palette.danger)
-                    .disabled(!model.connected)
+                    StopButton(title: "Stop the flicker")
                 }
                 .padding(20)
-                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 18))
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: Palette.cardRadius))
+                .overlay(RoundedRectangle(cornerRadius: Palette.cardRadius)
+                    .strokeBorder(Palette.line, lineWidth: 1))
                 .padding(16)
                 .frame(maxHeight: .infinity)
             }
         }
         .foregroundStyle(Palette.text)
         .accessibilityAddTraits(.isModal)
+    }
+}
+
+/// The warning's words, shared with the setup's Safety step.
+struct FlickerWarningText: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("The user's screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger photosensitive seizures, with up to four squares at once. Nobody with photosensitive epilepsy or flicker sensitivity should look at it.")
+            Text("**Esc** on the flicker display or **Stop** here turns the flicker off immediately.")
+            Text("While the session runs, the microphone listens to the conversation partner and the iPhone turns the speech into text (on the phone itself when it supports that, otherwise through Apple's speech recognition). Press **Mute** any time.")
+        }
+        .foregroundStyle(Palette.text)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

@@ -1,29 +1,36 @@
-// The partner screen, laid out like the web page's phone layout (ui/style.css, max-width 600px):
-// the banner, the partner's part (mic, conversation, typing), the mirror, the operator footer,
-// and Stop pinned at the bottom where it is always visible.
+// The partner screen, phrase first like Google's Look to Speak: a slim status bar (with the
+// Settings gear), what the partner said last, the replies on the user's screen as big cards,
+// then the mic, the conversation, typing and the operator footer. Stop stays pinned at the
+// bottom where it is always visible.
 
 import SwiftUI
 import BrainSyncKit
 
 struct PartnerView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("hapticPick") private var hapticPick = true
+    @AppStorage("hapticSpeak") private var hapticSpeak = true
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
-            BannerBar()
+            BannerBar { showSettings = true }
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 16) {
                     if let reason = model.stopReason {
                         StoppedCard(reason: reason)
                     }
+                    if let said = model.lastPartnerLine {
+                        PartnerSaidCard(text: said)
+                    }
+                    MirrorView()
                     MicCardView()
                     ConversationView()
                     TypedInput()
-                    MirrorView()
                     OperatorFooter()
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
             }
             .scrollDismissesKeyboard(.interactively)
         }
@@ -32,37 +39,82 @@ struct PartnerView: View {
             ControlBar()
         }
         .foregroundStyle(Palette.text)
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environment(model)
+        }
+        // A tap on the wrist for whoever holds the phone: a pick, and a reply starting.
+        .sensoryFeedback(.selection, trigger: model.pickedSlot) { old, new in
+            hapticPick && new != nil && new != old
+        }
+        .sensoryFeedback(.success, trigger: model.stateName) { old, new in
+            hapticSpeak && new == "SPEAKING" && old != "SPEAKING"
+        }
     }
 }
 
-/// The coloured status line over everything (ui/view_core.js banner), or the connection state.
+/// A slim status line over everything (ui/view_core.js banner), or the connection state: the
+/// tone colours its left edge and its text. The gear opens Settings.
 struct BannerBar: View {
     @Environment(AppModel.self) private var model
+    let onSettings: () -> Void
 
     var body: some View {
         let banner = model.banner
         let text = model.connected ? banner.text : model.connectionNote
-        let color = model.connected ? banner.tone.color : (model.stopReason == nil ? Tone.warn.color : Tone.stop.color)
-        HStack(spacing: 8) {
+        let tone = model.connected ? banner.tone : (model.stopReason == nil ? Tone.warn : Tone.stop)
+        HStack(spacing: 10) {
             Text(text.isEmpty ? "Connecting…" : text)
-                .font(.headline)
-                .lineLimit(3)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(tone == .idle ? Palette.muted : tone.color)
+                .lineLimit(2)
                 .accessibilityAddTraits(.updatesFrequently)
             Spacer(minLength: 4)
             ForEach(model.health?.flags ?? [], id: \.self) { flag in
-                Text(flag)
-                    .font(.caption2.weight(.bold))
+                MonoLabel(flag, color: Palette.warn)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(Palette.warn.opacity(0.9), in: Capsule())
-                    .foregroundStyle(Color.black)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Palette.warn.opacity(0.6), lineWidth: 1))
             }
+            Button(action: onSettings) {
+                Image(systemName: "gearshape")
+                    .font(.body)
+                    .foregroundStyle(Palette.muted)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(color)
-        .foregroundStyle(Color.white)
+        .background(Palette.panel)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(tone.color).frame(width: 3)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Palette.line).frame(height: 1)
+        }
+    }
+}
+
+/// What the partner said last, big, so the replies below read as answers to it.
+struct PartnerSaidCard: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            MonoLabel("Partner said", color: Palette.next)
+            Text(text)
+                .font(.title3.weight(.semibold))
+                .tracking(-0.3)
+                .foregroundStyle(Palette.text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .card()
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -72,7 +124,8 @@ struct StoppedCard: View {
     let reason: UIConnection.StopReason
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        Callout(title: reason == .replaced ? "Not connected" : "Link expired",
+                icon: "exclamationmark.octagon.fill", tint: Palette.danger) {
             switch reason {
             case .replaced:
                 Text("Replaced by another partner page").font(.headline)
@@ -80,38 +133,44 @@ struct StoppedCard: View {
                     .font(.subheadline)
                     .foregroundStyle(Palette.muted)
                 Button("Reconnect (use this phone instead)") { model.connect() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(FilledButtonStyle(.primary))
             case .badKey:
                 Text("Link expired — pair again").font(.headline)
                 Text("The server refused this phone's access key. It changes every time the server starts: open the new app link from the laptop's page.")
                     .font(.subheadline)
                     .foregroundStyle(Palette.muted)
                 Button("Pair") { model.forgetLink() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(FilledButtonStyle(.primary))
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Palette.danger.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
-/// The partner's mic: on by itself during the session; their words show as they talk.
+/// The partner's mic, compact: on by itself during the session; their words show as they talk.
 struct MicCardView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let card = MicCard.make(state: model.listener.state, heard: model.listener.heard, muted: model.micMuted)
+        let listening = card.tone == .look
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(card.tone == .look ? Palette.say : (card.tone == .warn ? Palette.warn : Palette.muted))
-                    .frame(width: 10, height: 10)
-                Text(card.title).font(.headline)
+                    .fill(listening ? Palette.say : (card.tone == .warn ? Palette.warn : Palette.muted))
+                    .frame(width: 8, height: 8)
+                Text(card.title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 4)
+                Button(model.micMuted ? "Unmute" : "Mute") { model.toggleMute() }
+                    .buttonStyle(FilledButtonStyle(.secondary))
+                    .accessibilityValue(model.micMuted ? "muted" : "on")
+                Button(model.sttMode == "always" ? "Restart mic" : "Listen") { model.restartMic() }
+                    .buttonStyle(FilledButtonStyle(.secondary))
             }
+            .disabled(!model.connected)
             if !card.heard.isEmpty {
                 Text("“\(card.heard)”")
-                    .font(.title3)
+                    .font(.body)
                     .foregroundStyle(model.listener.state == "sent" ? Palette.text : Palette.muted)
             }
             if !card.detail.isEmpty {
@@ -119,33 +178,24 @@ struct MicCardView: View {
                     .font(.footnote)
                     .foregroundStyle(Palette.muted)
             }
-            HStack(spacing: 10) {
-                Button(model.micMuted ? "Unmute" : "Mute") { model.toggleMute() }
-                    .buttonStyle(.bordered)
-                    .tint(model.micMuted ? Palette.warn : Palette.muted)
-                    .accessibilityValue(model.micMuted ? "muted" : "on")
-                Button(model.sttMode == "always" ? "Restart mic" : "Listen") { model.restartMic() }
-                    .buttonStyle(.bordered)
-            }
-            .disabled(!model.connected)
         }
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(card.tone.color.opacity(0.8), lineWidth: 1))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: Palette.cardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Palette.cardRadius)
+            .strokeBorder(listening ? Palette.say.opacity(0.5) : (model.micMuted ? Palette.pick.opacity(0.5) : Palette.line),
+                          lineWidth: 1))
     }
 }
 
 /// Partner lines and the user's spoken lines (under the user's first name).
 struct ConversationView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Conversation")
-                .font(.caption.weight(.semibold))
-                .textCase(.uppercase)
-                .foregroundStyle(Palette.muted)
+            MonoLabel("Conversation")
             if model.lines.isEmpty {
                 Text("Nothing said yet.")
                     .font(.footnote)
@@ -163,7 +213,9 @@ struct ConversationView: View {
                     .defaultScrollAnchor(.bottom)
                     .onChange(of: model.lines.count) { _, _ in
                         if let last = model.lines.last {
-                            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                            withAnimation(reduceMotion ? nil : .default) {
+                                proxy.scrollTo(last.id, anchor: .bottom)
+                            }
                         }
                     }
                 }
@@ -177,15 +229,15 @@ struct LineRow: View {
     let userName: String
 
     var body: some View {
-        VStack(alignment: line.fromPartner ? .leading : .trailing, spacing: 2) {
-            Text(line.fromPartner ? "Partner" : userName)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(line.fromPartner ? Palette.next : Palette.say)
+        let shape = RoundedRectangle(cornerRadius: 10)
+        VStack(alignment: line.fromPartner ? .leading : .trailing, spacing: 3) {
+            MonoLabel(line.fromPartner ? "Partner" : userName, color: line.fromPartner ? Palette.next : Palette.say)
             Text(line.text)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(line.fromPartner ? Palette.surface : Palette.say.opacity(0.22),
-                            in: RoundedRectangle(cornerRadius: 12))
+                .background(line.fromPartner ? Palette.surface : Palette.say.opacity(0.12), in: shape)
+                .overlay(shape.strokeBorder(line.fromPartner ? Palette.line : Palette.say.opacity(0.35),
+                                            lineWidth: 1))
         }
         .frame(maxWidth: .infinity, alignment: line.fromPartner ? .leading : .trailing)
     }
@@ -200,12 +252,17 @@ struct TypedInput: View {
     var body: some View {
         HStack(spacing: 8) {
             TextField("Type what the partner says", text: $text)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
                 .submitLabel(.send)
                 .focused($focused)
                 .onSubmit(send)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: Palette.radius))
+                .overlay(RoundedRectangle(cornerRadius: Palette.radius)
+                    .strokeBorder(focused ? Palette.look : Palette.line, lineWidth: 1))
             Button("Send", action: send)
-                .buttonStyle(.bordered)
+                .buttonStyle(FilledButtonStyle(.primary))
                 .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty || !model.connected)
         }
     }
@@ -222,18 +279,21 @@ struct OperatorFooter: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
+            MonoLabel("Operator")
             if let health = model.health {
                 Button {
                     expanded.toggle()
                 } label: {
                     HStack(spacing: 8) {
-                        Circle().fill(color(health.level)).frame(width: 10, height: 10)
+                        Circle().fill(color(health.level)).frame(width: 8, height: 8)
                         Text(health.text).font(.subheadline).multilineTextAlignment(.leading)
                         Spacer()
                         Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.footnote)
                             .foregroundStyle(Palette.muted)
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Shows the details")
@@ -241,30 +301,24 @@ struct OperatorFooter: View {
                     StatusDetails(status: status)
                 }
             }
-            HStack(spacing: 10) {
-                Text("Last reply:").font(.footnote).foregroundStyle(Palette.muted)
+            HStack(spacing: 8) {
+                Text("Last reply").font(.footnote).foregroundStyle(Palette.muted)
                 Button("Correct") { model.judge(correct: true) }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(FilledButtonStyle(.secondary))
                 Button("Wrong") { model.judge(correct: false) }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(FilledButtonStyle(.secondary))
                 Text(model.judged).font(.footnote).foregroundStyle(Palette.muted)
             }
             .disabled(model.lastSpokenId == nil || !model.connected)
             if let link = model.link {
-                HStack {
-                    Text(link.base.host ?? link.base.absoluteString)
-                        .font(.caption)
-                        .foregroundStyle(Palette.muted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("Pair again") { model.forgetLink() }
-                        .font(.caption)
-                }
+                Text(link.base.host ?? link.base.absoluteString)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
-        .padding(14)
-        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 16))
+        .card()
     }
 
     private func color(_ level: Health.Level) -> Color {
@@ -330,12 +384,11 @@ struct FlowBadges: View {
                 HStack(spacing: 6) {
                     ForEach(rows[row].indices, id: \.self) { index in
                         let badge = rows[row][index]
-                        Text(badge.0)
-                            .font(.caption2.weight(.bold))
+                        MonoLabel(badge.0, color: tint(badge.1))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(tint(badge.1).opacity(0.2), in: Capsule())
-                            .foregroundStyle(tint(badge.1))
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(tint(badge.1).opacity(0.5), lineWidth: 1))
                     }
                 }
             }
@@ -357,31 +410,47 @@ struct ControlBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button {
-                model.stopPressed()
-            } label: {
-                Text(model.connected ? "Stop" : "Not connected: press Esc on the display")
-                    .font(model.connected ? .title2.weight(.bold) : .subheadline.weight(.bold))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, minHeight: 56)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.danger)
-            .accessibilityHint("Turns the flicker off and pauses the session")
+            StopButton()
 
             Button {
                 model.resumePressed()
             } label: {
                 Text("Resume")
-                    .font(.headline)
-                    .frame(minWidth: 90, minHeight: 56)
+                    .frame(minWidth: 80)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(FilledButtonStyle(.secondary, large: true))
             .disabled(!model.resumeEnabled)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 6)
-        .background(.ultraThinMaterial)
+        .background(Palette.bg)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Palette.line).frame(height: 1)
+        }
+    }
+}
+
+/// The big red Stop, shared by the main screen, the setup, the warning and Settings. It works
+/// before the warning is accepted (the app may be opened while the laptop already flickers).
+struct StopButton: View {
+    @Environment(AppModel.self) private var model
+    let title: String
+
+    init(title: String = "Stop") {
+        self.title = title
+    }
+
+    var body: some View {
+        Button {
+            model.stopPressed()
+        } label: {
+            Text(model.connected ? title : "Not connected: press Esc on the display")
+                .font(model.connected ? .title3.weight(.bold) : .subheadline.weight(.bold))
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(FilledButtonStyle(.danger, large: true))
+        // Never disabled: while not connected a tap still drops a resume waiting to go out.
+        .accessibilityHint("Turns the flicker off and pauses the session")
     }
 }

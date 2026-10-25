@@ -191,15 +191,21 @@ final class Listener {
     /// Asks for speech recognition and microphone access (from a tap: the flicker warning).
     func requestPermissions() {
         Task { @MainActor [weak self] in
-            if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-                _ = await Listener.requestSpeechAuthorization()
-            }
-            if AVAudioApplication.shared.recordPermission == .undetermined {
-                _ = await AVAudioApplication.requestRecordPermission()
-            }
-            guard let self else { return }
-            if self.wanted { self.kick() }
+            await self?.askPermissions()
         }
+    }
+
+    /// The prompts themselves; returns once both are answered (the setup's Microphone step waits
+    /// for it to show the result). It opens nothing by itself: kick() only runs when the server
+    /// already wants the mic, and AppModel holds every listen back until the warning is accepted.
+    func askPermissions() async {
+        if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+            _ = await Listener.requestSpeechAuthorization()
+        }
+        if AVAudioApplication.shared.recordPermission == .undetermined {
+            _ = await AVAudioApplication.requestRecordPermission()
+        }
+        if wanted { kick() }
     }
 
     // MARK: Windows
@@ -645,6 +651,20 @@ final class Listener {
                 continuation.resume(returning: status)
             }
         }
+    }
+}
+
+/// Microphone and speech recognition access together, for the setup and Settings. iOS posts no
+/// change for them, so the screens read it again when they appear or come back to the front.
+enum MicPermission {
+    case notAsked, granted, denied
+
+    static func current() -> MicPermission {
+        let speech = SFSpeechRecognizer.authorizationStatus()
+        let mic = AVAudioApplication.shared.recordPermission
+        if speech == .denied || speech == .restricted || mic == .denied { return .denied }
+        if speech == .authorized && mic == .granted { return .granted }
+        return .notAsked
     }
 }
 

@@ -16,6 +16,7 @@ struct BrainSyncPartnerApp: App {
                 .environment(model)
                 .onOpenURL { url in model.open(url) }
                 .preferredColorScheme(.dark)
+                .tint(Palette.look)
         }
         .onChange(of: scenePhase) { _, phase in
             model.scenePhaseChanged(phase)
@@ -23,14 +24,18 @@ struct BrainSyncPartnerApp: App {
     }
 }
 
-/// Pairing until there is a server link, then the partner screen with the flicker warning on top
-/// until it is accepted (rule 10).
+/// The first-run setup until it is done, then pairing until there is a server link, then the
+/// partner screen with the flicker warning on top until it is accepted in this run (rule 10).
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("setupDone") private var setupDone = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
-            if model.link == nil || model.showPairing {
+            if !setupDone {
+                SetupFlow()
+            } else if model.link == nil || model.showPairing {
                 PairView()
             } else {
                 PartnerView()
@@ -41,6 +46,6 @@ struct RootView: View {
                     }
             }
         }
-        .animation(.default, value: model.accepted)
+        .animation(reduceMotion ? nil : .default, value: model.accepted)
     }
 }
