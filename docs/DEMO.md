@@ -19,8 +19,8 @@ slower.
       Refresh rate: 60 Hz). With ProMotion on there is no SSVEP at all, and our server rejects any
       `hello` more than 1 Hz from 60 Hz.
 - [ ] **Partner page on its own screen:** an external monitor for Chrome with PsychoPy on the
-      built-in panel, or **the partner's phone**: the iPhone app (section 2, "iPhone app") or
-      the web page (section 2, "On a phone"). The flicker is always
+      built-in panel, or **the partner's phone**: the iPhone app (section 3, "iPhone app") or
+      the web page (section 3, "On a phone"). The flicker is always
       full screen, so it cannot share a screen with Chrome.
 - [ ] **Lapel mic on the partner**, set as the macOS default input (System Settings > Sound >
       Input). Chrome uses the default input; plug it in before opening the page.
@@ -30,37 +30,159 @@ slower.
 - [ ] **Keys in `.env`** at the repo root: `ANTHROPIC_API_KEY` (Claude replies) and
       `CARTESIA_API_KEY` (voice). Never show the file on screen.
 - [ ] **Venue Wi-Fi check:** congested Wi-Fi made every Claude page time out on 2026-10-24
-      (1-4 s ping, 3-9 s TLS setup). Preflight (section 3) tests it; a phone hotspot is the fix.
+      (1-4 s ping, 3-9 s TLS setup). Preflight (section 4) tests it; a phone hotspot is the fix.
 - [ ] **Fixed-list clips on disk:** `python tools/prerender_tts.py` while the network is good.
       Then the fixed pages (shown whenever Claude is slow) speak in the Cartesia voice even with
       the Wi-Fi down. Run it again after changing the voice, model or `config/intents.yaml`.
 - [ ] **iPhone app installed** (if the partner uses it): built from `ios/BrainSyncPartner.xcodeproj`
       on the demo Mac (`ios/README.md`). A free Apple ID install expires after 7 days: run it from
       Xcode again on the day. Microphone and Speech Recognition allowed for BCI Partner.
-- [ ] Repo on the demo branch, `pip install -e ".[dev]"` done in our venv; the teammate's venv
-      for `../ssvep`.
+- [ ] Repo on the demo branch, one venv for everything: `.venv/bin/python -m pip install -e
+      ".[dev,display]"` (PsychoPy comes with `display`) plus the Cerelog fork of BrainFlow, as in
+      the README's Setup. The commands below write `python` for `.venv/bin/python`.
+- [ ] **The one-time checks in section 2 passed** on this Mac, with this headset.
 
-## 2. Start
+## 2. On the Mac, before the demo
 
-Our venv, in the repo root:
+Each check once, on the demo Mac, before the day's rehearsals. Write the numbers down: the
+honest claim (section 7) and the README need them.
+
+- [ ] **PsychoPy installed.** `python -c "import psychopy; print(psychopy.__version__)"`.
+      Passing: a version (2026.2 or newer), no traceback.
+- [ ] **Refresh check at 60 Hz, ProMotion off.** System Settings > Displays > Refresh rate:
+      60 Hz, then `python -m brainsync.stimulus -c four_diamond --free --seconds 10 --no-wait`.
+      Passing: four squares in a diamond, a small mark at the centre of each, and
+      `measured refresh: 60.00 Hz` (anything within 1 Hz of 60) on stderr. A refused rate exits
+      with code 2 and prints the rate it measured: fix the display, never `--ignore-refresh` for
+      the demo.
+- [ ] **SYNC 1.5: frame drops with text on screen.** Two 60 s runs of the page-mode screen
+      flickering, the first without sentences, the second with one beside every square, as the
+      bridge sends them. Each prints one timing line on stdout at the end:
+
+      ```
+      { echo '{"active": [0, 1, 2, 3]}'; echo '{"flicker": true}'; sleep 60; } \
+        | python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --no-wait
+      { echo '{"labels": ["Yes, I would like to go outside now.", "Not right now, maybe later.", "Could you help me with something, please?", "More options"]}'; \
+        echo '{"active": [0, 1, 2, 3]}'; echo '{"flicker": true}'; sleep 60; } \
+        | python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --no-wait
+      ```
+
+      Passing: the second run's `... frames, N dropped overall` is no worse than the first's
+      (for scale: one verified two-target run dropped 7 frames in 160 s). If the text costs
+      frames, set `labels_during_flicker = false` in
+      `brainsync/stimulus/configs/four_diamond.toml`: the sentences then show during the cue and
+      the rest and hide while the squares flicker. During the second run, also check by eye
+      that each sentence reads as its own square's: the top square's sentence sits to its
+      right, above the right square, and the bottom one's to its left, under the left square.
+      If a viewer pairs a sentence with the wrong square, move the corner boxes toward their
+      own squares in `text_boxes` (`brainsync/stimulus/display.py`) before the gate recording.
+- [ ] **The 4-target gate recording** (`PLAN.md` section 14). Headset on for 20 minutes first
+      (section 5). Preview, record, score:
+
+      ```
+      python -m brainsync.stimulus -c four_diamond --plan --seed 1   # 32 trials, 4 min 16 s
+      python -m brainsync.record -c four_diamond --trials 32         # headset + display, 8 per target
+      python -m brainsync.score_cued <the saved file>_cued.npz --windows 2
+      ```
+
+      `record` opens the display itself (Space starts it, `Esc` stops it), cues each trial with
+      the box held on its square, and saves `<date>_<time>_cued.npz` under
+      `$BRAINSYNC_DATA_DIR/spectrum_checks` (or `--save-dir`); it prints how many trials were
+      complete. `score_cued` scores CCA and FBCCA at 2 s and at the recorded 3.86 s window, with
+      the still windows as a control. Passing: the still control near chance (25 %), and the
+      best cell's accuracy and p read off for the decision:
+
+      | 4-class accuracy | Decision |
+      | --- | --- |
+      | About 70 % or more | Keep page mode (4 targets) |
+      | 55-70 % | Train TRCA on the same recording (`PLAN.md` section 13, item 11), test on held-out trials; keep page mode if it reaches 70 % |
+      | Below that | List mode (`menus.mode: list`): options visible with a moving highlight, SAY / NEXT on 15/17 Hz |
+
+      The cued session draws the diamond and the fixation marks, but not the option sentences
+      beside the squares; the live screen has them (SYNC 1.5 above checks what they cost in
+      frames, not in accuracy).
+- [ ] **10 live trials with C / W marks** (`PLAN.md` V5). `python -m app.server --bridge cerelog`
+      (section 3), run the demo script (section 6), and mark every spoken reply **C** or **W** on
+      the partner page. Then `python tools/log_summary.py`. Passing: the session line says
+      `decoder brainsync-fbcca` (not `fake decoder` or `keyboard mode`), at least 10 marked
+      replies, and the correct rate, seconds per reply, option-1 rate and Claude latency
+      printed; these are the live numbers in section 7.
+- [ ] **The iPhone app** (only if the partner uses it). Build and run it from Xcode on this Mac
+      (`ios/README.md`), then `(cd ios/BrainSyncKit && swift test)` and
+      `python tools/ui_fixture.py --check`. Passing: the app pairs with the server's app link and
+      shows the mirror, the Swift tests pass, and the fixture check exits 0 (not stale).
+- [ ] **The Jetson** (only if it is shown; it runs `brainsync.server`, the BrainPoint / reference
+      page server, not BCI Voice). On the Jetson: `sudo /opt/brainsync/deploy/jetson/install.sh`
+      (`deploy/jetson/README.md`). Passing: it prints `done: brainsync-tunnel is running with
+      --board cerelog` (notes may follow) and a link in `~/brainsync-link.txt` that held during
+      its stability check (a new link after every restart).
+- [ ] **The screen recording and two rehearsals** (`PLAN.md` V7). Record one full live run
+      (screen and room audio: the partner's line, the pick, the confirm, the spoken reply); a
+      keyboard-mode backup recording must say so on screen. Then rehearse the whole demo script
+      twice with the teammate, from a cold start (section 3) to the log summary (section 9).
+      Passing: both rehearsals reach every row of the script without a restart, or the fallback
+      used is one you will name in the pitch.
+
+## 3. Start
+
+In the repo root, one command starts the whole system: our server, and the bridge with the
+headset and the PsychoPy display.
 
 ```
-python -m app.server                    # the real bridge connects to /ws/decoder
+python -m app.server --bridge cerelog   # server + brainsync.voice_bridge (Cerelog X8 + display)
 ```
 
-It prints which voice (`Cartesia sonic-3.5` or `browser speechSynthesis only`), which replies
-(`Claude claude-haiku-5-5` or `fixed lists only`) and which profile it uses, then the partner
-page URL. The demo script (section 5) assumes `profile: the demo persona`; if it says
+The server prints which voice (`Cartesia sonic-3.5` or `browser speechSynthesis only`), which
+replies (`Claude claude-haiku-5-5` or `fixed lists only`) and which profile it uses, then the
+partner page URL. The demo script (section 6) assumes `profile: the demo persona`; if it says
 `your profile (profiles/user.yaml)`, a saved profile is in use. Open `http://127.0.0.1:8000` in
-Chrome, and leave the flicker warning up until the demo starts (section 5).
+Chrome, and leave the flicker warning up until the demo starts (section 6).
 
-The teammate's venv, in `../ssvep`, once the bridge exists (it connects the board once, about
-16 s, then opens the display full screen):
+Then the bridge (`python -m brainsync.voice_bridge`, started by the server, its log lines in the
+same terminal under `voice_bridge`):
+
+1. Connects the board once, about 16 s (the "Handshake verification failed" line is harmless).
+2. Opens the display full screen on the built-in panel and checks its refresh. A rate more than
+   1 Hz from 60 Hz stops it there (ProMotion on).
+3. Sends `hello` as soon as the refresh check passed: the partner page shows DECODER OK,
+   DISPLAY OK and BOARD OK while the display is still on its start screen.
+4. **Press Space on the display before pressing I understand, start.** Trials started before
+   Space get no onset and end as not caught; nothing flickers, and the baseline would be
+   recorded on the start screen.
+5. After **I understand, start**: a 10 s still baseline, then the first page. (`README.md`
+   phase 3 recommends 30 s for the tuned 1.5 s window; with 10 s the rest spread is noisier, so
+   live accuracy may suffer until `baseline.seconds` is raised, an agreed value to settle with
+   the teammate.)
+
+What the user's display shows: four squares in a diamond, a small fixation mark at the centre of
+each, and each option's sentence beside its square (the top square's to its right, the left
+one's above it, the right one's below it); "More options" sits beside the bottom square (NEXT).
+Only the active squares flicker, and only during a trial. The confirm screen shows the picked
+sentence at the centre, "Say it" beside the top square and "Back" beside the bottom one, and
+only those two flicker. The picked square gets a box.
+
+Rehearsal without the headset:
 
 ```
-python -m ssvep.online.bridge           # headset + PsychoPy display
-python -m ssvep.online.bridge --fake    # FakeSource instead of the headset
+python -m app.server --bridge fake                     # fake EEG, the real PsychoPy display
+python -m app.server --bridge fake --bridge-headless   # fake EEG, no window: watch the mirror
 ```
+
+The fake bridge's name starts with "fake", so the partner page shows FAKE DECODER and preflight
+warns. Its picks are a random active square per trial (a selection about 4.3 s after the onset),
+so never present them as the user's choices.
+
+To run the bridge in its own terminal (to read its log apart, or restart it while the server
+keeps running), start the server without `--bridge` and then:
+
+```
+python -m brainsync.voice_bridge            # headset + display
+python -m brainsync.voice_bridge --fake     # fake EEG, real display; --no-stimulus: no window
+```
+
+A restarted bridge connects the board again (about 16 s); the server pauses meanwhile and
+resumes with a new baseline once its `hello` passes. If the teammate's own bridge exists and
+passes `tools/contract_check.py`, it can take this one's place the same way.
 
 Fallbacks, instead of the bridge:
 
@@ -71,7 +193,8 @@ python -m app.server --keyboard         # keys 1-4 on the partner page select (n
 
 Both show a FAKE DECODER or KEYBOARD badge on the partner page. Say so out loud if you use them.
 The fake decoder is for rehearsing only: its picks (and confirms) are random, so never present
-them as the user's choices.
+them as the user's choices. `--bridge` cannot be combined with `--fake-decoder`: both connect to
+`/ws/decoder`.
 
 ### On a phone (iPhone Safari or Android Chrome)
 
@@ -107,8 +230,9 @@ python -m app.server --tunnel           # https through Cloudflare, any network
 python -m app.server                    # with server.host: 0.0.0.0, plain http on the same Wi-Fi
 ```
 
-The server prints an **iPhone app link**, `brainsync://pair?url=…&key=…`, and the laptop's
-partner page shows **Copy iPhone app link** next to the phone link. Then:
+The server prints an **iPhone app link**, `brainsync://pair?url=…&key=…`, next to the phone
+link in its terminal, and the laptop's partner page shows only **Copy iPhone app link** (the
+phone link is in the terminal). Then:
 
 - AirDrop or message the app link to the iPhone and tap it: the app opens and connects. Pasting
   the app link or the web phone link into the app's pair screen works too.
@@ -130,7 +254,7 @@ partner page shows **Copy iPhone app link** next to the phone link. Then:
   (section above), or press **Use this page instead** on the laptop page and run the demo from
   Chrome. Typing works in all three.
 
-## 3. Preflight
+## 4. Preflight
 
 With the server (and the bridge) running, in a second terminal:
 
@@ -141,14 +265,14 @@ python tools/preflight.py --skip-network          # no Claude / Cartesia test ca
 ```
 
 It prints PASS / WARN / FAIL per check (SKIP when not run), with a `fix:` line under each one
-that did not pass, a GO / NO-GO line, and the headset checklist (section 4) as a reminder. It
+that did not pass, a GO / NO-GO line, and the headset checklist (section 5) as a reminder. It
 exits 0 only if nothing failed. `--json` prints one JSON object instead. What to do:
 
 | Check | On FAIL or WARN |
 | --- | --- |
 | `server` | FAIL: start `python -m app.server` and check that `--url` matches the port it printed. "no /api/health" means an older server: restart it from this branch. |
 | `decoder` | FAIL "no bridge connected": start the bridge and read its terminal. FAIL "not ok": the bridge's `hello` was rejected (slots, waveform or refresh rate; the reason is on the partner page): fix the bridge's config, not ours. WARN keyboard / fake decoder: accepted only if you say so in the pitch. Out of time: restart with `--keyboard`. |
-| `display` | FAIL "display down": relaunch the display (restart the bridge), then **Resume**. A refresh-rate mismatch shows up as a rejected `hello` under `decoder`: ProMotion off, 60 Hz, restart the bridge. Never run the flicker at another rate. |
+| `display` | FAIL "display down": the bridge relaunches the display by itself after `Esc` or a crash; press Space on the new display, then **Resume**. If it stays down, restart the bridge. A refresh more than 1 Hz from 60 Hz stops the display at start, and the bridge exits with code 1 (its terminal says why); a bridge run with `--ignore-refresh` gets its `hello` rejected under `decoder` instead. Either way: ProMotion off, 60 Hz, restart the bridge. Never run the flicker at another rate. |
 | `ANTHROPIC_API_KEY`, `claude`, `claude (server)` | FAIL: add the key to `.env` and restart the server; on a network error, see `net` below. To go without Claude, set `menus.dynamic: false` and restart: the pages are the fixed lists (`config/intents.yaml`, LLM OFF badge) and preflight skips these checks. WARN keep-alive: rerun in 20 s. |
 | `CARTESIA_API_KEY`, `cartesia`, `voice (server)` | WARN: the browser voice speaks every reply. Add the key to `.env` and restart, or accept it. Clips already on disk still play. |
 | `clips` | WARN: some fixed-list sentences have no clip on disk yet. Run `python tools/prerender_tts.py` (the server also fetches them at start, slowly on a busy network). |
@@ -158,21 +282,22 @@ exits 0 only if nothing failed. `--json` prints one JSON object instead. What to
 
 Go only on GO (no FAIL). A WARN is a fallback you have accepted: say which one in the pitch.
 
-## 4. Headset checklist (PLAN V6 item 1)
+## 5. Headset checklist (PLAN V6 item 1)
 
 - [ ] Headset on **at least 20 minutes** before recording or demoing; unsettled contacts ruined
       the first trials of the first two-target recording.
-- [ ] One **eyes-closed alpha check** (teammate's venv, no flicker running; `-t 10` scores the
-      10 Hz band, 30 s recording by default):
-      `python -m ssvep.acquisition.spectrum_check -t 10 --names Fp1,Fp2,C3,C4,P7,P8,O1,O2`.
-      Want a posterior 9-10 Hz peak and RMS under 20 µV on O1 and O2. No peak or a large DC
+- [ ] One **eyes-closed alpha check** (no flicker running, eyes closed for the whole recording;
+      `--target 10` scores the 10 Hz band, 30 s after a 5 s warm-up):
+      `python -m brainsync.check --target 10 --names Fp1,Fp2,C3,C4,P7,P8,O1,O2`
+      (or the teammate's `python -m ssvep.acquisition.spectrum_check -t 10 --names ...` in his
+      venv). Want a posterior 9-10 Hz peak and RMS under 20 µV on O1 and O2. No peak or a large DC
       offset: fix that contact (gel or paste on O1/O2) before going on.
 - [ ] **Nothing else reads the board's serial port** (a live plot splits the stream). Close the
-      spectrum check before starting the bridge.
+      electrode check, the brain map and any other BrainSync tool before starting the bridge.
 - [ ] Allow **about 16 s** for the board to connect; the "Handshake verification failed" line it
       logs first is harmless.
 
-## 5. Demo script
+## 6. Demo script
 
 Before the first question: read the flicker warning aloud, press **I understand, start**, and wait
 for the baseline (about 10 s of still screen; the user looks at the display and relaxes). The
@@ -202,7 +327,7 @@ Notes:
 - One NEXT only: NEXT twice in a row goes back to the home list.
 - After each spoken reply the operator marks it on the partner page: **C** (correct: it was what
   the user meant) or **W** (wrong), or the Correct / Wrong buttons. The keys work only outside the
-  text box. These marks are the accuracy numbers in section 8.
+  text box. These marks are the accuracy numbers in section 9.
 - A spoken question can interrupt a page trial in progress (it is recognised by its first word,
   since speech-to-text adds no "?"), at most once per 20 s (`speech.stt_interrupt_cooldown_s`); a
   remark waits for the next cue. A spoken line never interrupts the confirm screen. Typed text
@@ -214,7 +339,7 @@ Notes:
   a different voice. **Save** applies it to the live session (saved to `profiles/user.yaml`);
   **Use the demo persona** deletes that file and puts Sam back. Put Sam back before the next run.
 
-## 6. What the audience sees, and what to say
+## 7. What the audience sees, and what to say
 
 - **The partner page mirror** (left): the same 4 boxes and sentences as the user's display, no
   flicker, with the trial phase and the picked box highlighted. Point at it, not at the flicker.
@@ -225,11 +350,13 @@ Notes:
   DISPLAY OFF and BOARD ? are expected.
 - **The conversation** panel: each partner line and each spoken reply.
 
-**While waiting (PLAN design risk 4).** One reply is cue 1 s + decode at least 5 s + highlight,
-then the confirm step (another 5 s or more), then the speech: about 13-14 s at best. Each NEXT
-adds about 7 s, and "Didn't catch that" means the decoder abstained and the trial repeats. Say
+**While waiting (PLAN design risk 4).** One reply is cue 1 s + decode + highlight, then the
+confirm step (cue and decode again), then the speech. The bridge's decoder (1.5 s windows every
+0.25 s, 4 agreeing windows in a row, starting fresh at each trial) committed about 4.3 s after
+the onset on the fake board, so a reply takes about 12-14 s at best; the headset can only be
+slower. Each NEXT adds one cue and one decode, and "Didn't catch that" means the decoder abstained and the trial repeats. Say
 something like: "The decoder needs a few seconds of steady looking before it commits, and it asks
-again rather than guess. The confirm step costs five seconds but means a wrong pick is never said
+again rather than guess. The confirm step costs a few seconds but means a wrong pick is never said
 out loud. Good ranking matters most: when option 1 is right, a reply is two looks."
 
 **The honest claim (PLAN pitch claim, V7 item 1).** "An LLM that writes context-aware replies
@@ -243,7 +370,7 @@ measured, filled in before the demo:
 - list mode only (15/17 Hz): offline re-analysis, 78 % over 50 trials with one target flickering
   per run, and in three cued recordings with both squares flickering 64-79 % at 3.86 s windows and
   71-93 % at 2 s (14-19 trials each, 30-70 % of decisions abstained) (`PLAN.md` section 14). Never quote these for 4 targets;
-- from the live log (section 8): ___ % marked correct over ___ marked replies, ___ s per spoken
+- from the live log (section 9): ___ % marked correct over ___ marked replies, ___ s per spoken
   reply.
 
 Never claim more targets, accuracy or speed than these, and say which numbers are offline and
@@ -251,11 +378,12 @@ which are live. "Dry-electrode" holds only if O1/O2 had no gel or paste (the ref
 gel pads either way): otherwise say what was used. If the run used `--keyboard` or
 `--fake-decoder`, say so.
 
-## 7. Fallbacks during the demo
+## 8. Fallbacks during the demo
 
 | Problem | Do this |
 | --- | --- |
 | Bridge drops out | The session pauses ("Decoder disconnected"). When the bridge reconnects and its `hello` passes, the session resumes by itself with a new baseline, so the flicker comes back without a Resume. **Stop** pressed while it is paused does not cancel this: if the user needs a break, press `Esc` on the display once it is back. |
+| Bridge process gone (its terminal shows it exited; NO DECODER stays) | The server does not restart it. Start it by hand in a second terminal: `python -m brainsync.voice_bridge` (the server keeps running). Exit code 1 means the board or the display failed at start: read the line above it (board unplugged, port busy, refresh refused). |
 | Decoder or bridge cannot be fixed | Restart the server with `python -m app.server --keyboard`: keys 1-4 select (confirm: 1 = Say it, 4 = Back), C / W mark replies. Say it is keyboard mode. |
 | Speech recognition fails (red MIC badge, offline, no mic) | Type the partner's line in the box and press Enter. **Restart mic** retries. |
 | iPhone app drops out or misbehaves | It reconnects by itself every second. If it stays down: the Safari phone link, or **Use this page instead** on the laptop page. A restarted server needs a new app link. |
@@ -263,9 +391,9 @@ gel pads either way): otherwise say what was used. If the run used `--keyboard` 
 | Claude fails or is slow (LLM OFF, or options lag) | Nothing to do: after `llm.timeout_s` (4 s) the fixed list appears (yes / no / maybe after a question, otherwise home). `menus.dynamic: false` (then restart the server) makes it fixed lists only. |
 | Flicker must stop now | `Esc` on the display (local, immediate), or **Stop** / `Esc` on the partner page. After Stop or `Esc` the server never restarts the flicker by itself: **Resume** runs a new baseline first. |
 | Someone feels unwell | Stop at once; end the demo. |
-| Display closed (`Esc`) | The session pauses (DISPLAY OFF). Once the bridge reports the display back, press **Resume**. |
+| Display closed (`Esc`) | The session pauses (DISPLAY OFF). The bridge relaunches the display by itself, held still, with the last screen restored, and reports it back (DISPLAY OK). Press Space on the new display's start screen first, then **Resume**: a Resume before Space runs the baseline on the start screen and the next trials get no onset. |
 
-## 8. After the demo
+## 9. After the demo
 
 ```
 python tools/log_summary.py                              # the newest session in logs/
