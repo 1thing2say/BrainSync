@@ -68,6 +68,26 @@
 #             libcudart, libcublas and libcublasLt, nothing provides
 #             libcuda.so.1, the target's apt state is unchanged, a re-run
 #             works; the step skips on the vm edition
+#   llama-debs  brainsyncos-llama (both editions, identical) and
+#             brainsyncos-llama-cuda (jetson only): files (the tree of
+#             build/llama, the 8 CPU backends, no headers; the CUDA backend
+#             only in -cuda), Depends (the C/C++ runtime; -cuda exactly
+#             brainsyncos-llama and llama.env's CUDA runtime, never libcuda),
+#             the unit's flags (127.0.0.1:9931, key from LoadCredential,
+#             IPAddressDeny=any, sandbox, no tools or router) and the drop-in,
+#             maintainer scripts that skip a chroot, root-owned, md5sums
+#   llama     payload/hook.sh with 00, 60 and 85-llama.sh against NVIDIA's
+#             target base layer, from the jetson test repository plus empty
+#             stand-ins for NVIDIA's cuda-cudart-13-2 and libcublas-13-2 when
+#             it lacks them: both packages installed, the service enabled, a
+#             64-hex key root-only, the same key in secrets.env (root:brainsync
+#             0640, template kept), systemd-analyze verify and security on the
+#             unit; a re-run keeps key and file; other secrets.env lines kept
+#             and a stale key line replaced; then a test model with its
+#             model.conf: the unit's own ExecStart, expanded as systemd would,
+#             serves it, and the Anthropic SDK in the BrainSync venv reaches it
+#             with the key from secrets.env; last the vm edition gets
+#             brainsyncos-llama only
 #   wheel     build/wheels (scripts/build-wheels.sh, TESTDIR unused): the
 #             manifest matches wheel.env and the file, the wheel holds only
 #             brainflow/*.py, three aarch64 libraries and its dist-info, pip
@@ -850,6 +870,255 @@ PY
     grep -qx '80-cuda.sh: vm-arm64 edition: skipped (no NVIDIA GPU, no CUDA)' "$W/vm.out" || die "vm: no skip message"
 }
 
+# unit_exec UNIT: the unit's ExecStart= command, its continuation lines joined.
+unit_exec() {
+    awk '/^ExecStart=/ {on = 1; sub(/^ExecStart=/, "")} on {l = $0; c = sub(/\\$/, "", l); printf "%s ", l; if (!c) exit}' "$1" \
+        | tr -s ' ' | sed 's/ $//'
+}
+
+c_llama_debs() {
+    local j="$T/debs/jetson" v="$T/debs/vm" base cuda x="$W/ld" in="$BUILD_DIR/llama" f want cmd u m d
+    load_env_file "$BRAINSYNCOS_ROOT/llama/llama.env" "LLAMA_PREFIX CPU_VARIANTS CUDA_RUNTIME"
+    base="$(ls "$j/brainsyncos-llama_${BRAINSYNCOS_VERSION}_arm64.deb")"
+    cuda="$(ls "$j/brainsyncos-llama-cuda_${BRAINSYNCOS_VERSION}_arm64.deb")"
+    cmp "$base" "$v/$(basename "$base")" || die "brainsyncos-llama differs between editions"
+    ! ls "$v"/brainsyncos-llama-cuda_* > /dev/null 2>&1 || die "the vm edition got brainsyncos-llama-cuda"
+    for f in "$base" "$cuda"; do
+        dpkg-deb -f "$f" Package Version Installed-Size Depends | sed 's/^/  /'
+        [ "$(dpkg-deb -c "$f" | awk '{print $2}' | sort -u)" = root/root ] || die "$(basename "$f"): files not all root/root"
+        dpkg-deb -R "$f" "$x/$(dpkg-deb -f "$f" Package)"
+        (cd "$x/$(dpkg-deb -f "$f" Package)" && md5sum -c --quiet DEBIAN/md5sums) || die "$(basename "$f"): md5sums"
+        for m in "$x/$(dpkg-deb -f "$f" Package)"/DEBIAN/p*; do
+            sh -n "$m" || die "$m: shell syntax"
+            grep -q 'systemd-detect-virt -q --chroot' "$m" || die "$(basename "$m") of $(basename "$f") does not skip a chroot"
+        done
+    done
+    printf '%s\n' "$(dpkg-deb -f "$base" Depends)" | grep -Eqx 'libc6 \(>= 2\.[0-9]+\), libgcc-s1, libstdc\+\+6 \(>= 14\)' \
+        || die "brainsyncos-llama Depends: $(dpkg-deb -f "$base" Depends)"
+    want="brainsyncos-llama (= $BRAINSYNCOS_VERSION)"
+    for d in $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' ' '); do want="$want, ${d%%=*} (= ${d#*=})"; done
+    [ "$(dpkg-deb -f "$cuda" Depends)" = "$want" ] || die "brainsyncos-llama-cuda Depends: $(dpkg-deb -f "$cuda" Depends), want $want"
+
+    # Files: the checked tree, nothing else of llama.cpp.
+    (cd "$in/cpu" && find . -type f | sed "s|^\.|.$LLAMA_PREFIX|" | LC_ALL=C sort) > "$W/want"
+    deb_files "$base" | grep "^\.$LLAMA_PREFIX/" | diff "$W/want" - || die "brainsyncos-llama's tree differs from build/llama/cpu"
+    printf '%s\n' ./usr/lib/systemd/system/brainsyncos-llama.service ./usr/share/doc/brainsyncos-llama/README \
+        ./usr/share/doc/brainsyncos-llama/build.env ./usr/share/doc/brainsyncos-llama/copyright > "$W/want-other"
+    deb_files "$base" | grep -v "^\.$LLAMA_PREFIX/" | diff "$W/want-other" - || die "brainsyncos-llama has other files"
+    dpkg-deb -c "$base" | grep -q " \./etc/brainsyncos/llama\.d/$" || die "no /etc/brainsyncos/llama.d/ for model.conf"
+    for d in $(printf '%s\n' "$CPU_VARIANTS" | tr ',' ' '); do
+        grep -qx "\.$LLAMA_PREFIX/lib/ggml/libggml-cpu-$d\.so" "$W/want" || die "no CPU backend $d"
+    done
+    ! grep -Eq '/include/|/cmake/|/pkgconfig/|libggml-cuda' "$W/want" || die "brainsyncos-llama ships headers, CMake files or the CUDA backend"
+    printf '%s\n' ".$LLAMA_PREFIX/lib/ggml/libggml-cuda.so" ./usr/lib/systemd/system/brainsyncos-llama.service.d/50-cuda.conf \
+        ./usr/share/doc/brainsyncos-llama-cuda/README ./usr/share/doc/brainsyncos-llama-cuda/copyright > "$W/want-cuda"
+    deb_files "$cuda" | diff "$W/want-cuda" - || die "brainsyncos-llama-cuda has other files"
+    cmp "$x/brainsyncos-llama-cuda$LLAMA_PREFIX/lib/ggml/libggml-cuda.so" "$in/cuda/libggml-cuda.so" || die "libggml-cuda.so is not the checked one"
+    ! objdump -p "$in/cuda/libggml-cuda.so" | awk '$1 == "NEEDED" {print $2}' | grep -q '^libcuda\.' || die "libggml-cuda.so needs libcuda"
+    echo "files: the checked tree ($(wc -l < "$W/want" | tr -d ' ') files, $(printf '%s\n' "$CPU_VARIANTS" | tr ',' '\n' | wc -l | tr -d ' ') CPU backends), the CUDA backend only in -cuda; Depends as built"
+
+    # The unit and the drop-in.
+    u="$x/brainsyncos-llama/usr/lib/systemd/system/brainsyncos-llama.service"
+    cmd="$(unit_exec "$u")"
+    echo "ExecStart: $cmd"
+    case "$cmd" in "/usr/bin/env -i $LLAMA_PREFIX/bin/llama-server --host 127.0.0.1 --port 9931 --api-key-file %d/api-key "*) ;;
+        *) die "ExecStart does not start llama-server on 127.0.0.1:9931 with the key file in an empty environment" ;; esac
+    for f in --offline --no-webui --no-slots '--parallel 1' '--cache-ram 512'; do
+        printf ' %s ' "$cmd" | grep -q -- " $f " || die "ExecStart lacks $f"
+    done
+    ! printf '%s\n' "$cmd" | grep -Eq -- '--tools|--mcp|--models-|--media-path|--props|--metrics|--webui-mcp|0\.0\.0\.0|--api-key ' \
+        || die "ExecStart turns on something it must not"
+    for f in ConditionPathExists=/etc/brainsyncos/llama.d/model.conf 'ConditionPathExistsGlob=/opt/brainsyncos/models/*.gguf' \
+        Type=exec EnvironmentFile=/etc/brainsyncos/llama.d/model.conf LoadCredential=api-key:/etc/brainsyncos/llama/api-key \
+        IPAddressDeny=any IPAddressAllow=localhost 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' DynamicUser=yes \
+        ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes NoNewPrivileges=yes MemoryDenyWriteExecute=yes \
+        CapabilityBoundingSet= Nice=10 CPUWeight=50 WantedBy=multi-user.target; do
+        grep -qxF "$f" "$u" || die "the unit lacks $f"
+    done
+    f="$x/brainsyncos-llama-cuda/usr/lib/systemd/system/brainsyncos-llama.service.d/50-cuda.conf"
+    for want in '[Service]' PrivateDevices=no 'SupplementaryGroups=video render' MemoryDenyWriteExecute=no; do
+        grep -qxF "$want" "$f" || die "50-cuda.conf lacks $want"
+    done
+    [ "$(grep -cv '^#\|^$' "$f")" = 4 ] || die "50-cuda.conf changes more than the devices and W^X"
+    echo "unit: 127.0.0.1:9931, key by LoadCredential, empty environment, IPAddressDeny=any, sandboxed, starts only with a model; -cuda drop-in: GPU devices, no MemoryDenyWriteExecute"
+}
+
+# cuda_stand_ins DIR: empty arm64 packages named and versioned like NVIDIA's
+# CUDA runtime (llama.env CUDA_RUNTIME), for a repository that does not
+# mirror the real ones. They test the install's dependency resolution only.
+cuda_stand_ins() {
+    local d n v s
+    for d in $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' ' '); do
+        n="${d%%=*}"
+        v="${d#*=}"
+        s="$W/stand-in-$n"
+        mkdir -p "$s/DEBIAN" "$s/usr/share/doc/$n"
+        echo "Test stand-in for NVIDIA's $n $v (tests/phase3-checks.sh). Not a CUDA runtime." > "$s/usr/share/doc/$n/README"
+        printf 'Package: %s\nVersion: %s\nArchitecture: arm64\nMaintainer: BrainSyncOS tests <test@localhost>\nDescription: test stand-in for %s\n' \
+            "$n" "$v" "$n" > "$s/DEBIAN/control"
+        build_deb "$s" "$1" > /dev/null
+    done
+}
+
+# expand_exec UNIT CONF: the unit's ExecStart= as systemd would run it, with
+# its Environment= defaults, then CONF's values, and %d (the credentials).
+expand_exec() {
+    python3 -I - "$1" "$2" <<'PY'
+import re, shlex, sys
+unit, conf = sys.argv[1:]
+text = open(unit).read().replace("\\\n", " ")
+env, cmd = {}, None
+for line in text.splitlines():
+    if line.startswith("Environment="):
+        env.update(kv.split("=", 1) for kv in shlex.split(line[len("Environment="):]))
+    if line.startswith("ExecStart="):
+        cmd = line[len("ExecStart="):]
+for line in open(conf):
+    line = line.strip()
+    if line and not line.startswith("#"):
+        k, v = line.split("=", 1)
+        env[k] = v
+cmd = cmd.replace("%d", "/run/credentials/brainsyncos-llama.service")
+cmd = re.sub(r"\$\{(\w+)\}", lambda m: shlex.quote(env[m.group(1)]), cmd)
+print(" ".join(cmd.split()))
+PY
+}
+
+c_llama() {
+    local t="$W/target" p="$W/hp" log="$W/target/var/log/brainsyncos/install.log" repo="$REPO" key sec k1 s1 cmd ok pid
+    load_env_file "$BRAINSYNCOS_ROOT/llama/llama.env" "LLAMA_PREFIX CUDA_RUNTIME TEST_MODEL_FILE TEST_MODEL_SHA256"
+    target_layer "$t"
+    if ! ls "$REPO/pool/$REPO_COMPONENT"/cuda-cudart-13-2_*.deb > /dev/null 2>&1; then
+        mkdir -p "$W/debs"
+        cp "$T/debs/jetson"/*.deb "$W/debs/"
+        cuda_stand_ins "$W/debs"
+        "$BRAINSYNCOS_ROOT/scripts/build-repo.sh" --edition jetson --debs "$W/debs" --key "$T/key/repo-signing-key.asc" \
+            --out "$W/repo" > "$W/repo.log" 2>&1 || { cat "$W/repo.log"; die "cannot sign the test repository"; }
+        cmp "$W/repo/repo-key.gpg" "$REPO/repo-key.gpg" || die "the test repository has another key"
+        repo="$W/repo"
+        echo "repository: the jetson test packages plus stand-ins for $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' ' ') (not mirrored on this branch)"
+    fi
+    in_t "$t" groupadd "$BRAINSYNC_USER"   # 30-user.sh's group
+    hook_payload "$p" 70-brainsync.sh 85-llama.sh
+    run_hook "$p" "$t" "$repo" || { tail -30 "$W/live.log"; die "hook failed"; }
+    grep -q 'BrainSyncOS layer installed (4 steps)' "$log" || die "log lacks the summary"
+    ! grep -n '^E: \|^W: \|WARNING' "$log" || die "the install logged an apt error or warning"
+    sed -n '/== 85-llama.sh/,$p' "$log" | grep '85-llama.sh'
+    grep -q "85-llama.sh: installed brainsyncos-llama $BRAINSYNCOS_VERSION, brainsyncos-llama-cuda $BRAINSYNCOS_VERSION; llama-server version: " "$log" \
+        || die "85-llama.sh did not install both packages"
+    grep -q '85-llama.sh: made a new API key' "$log" && grep -q '85-llama.sh: created /etc/brainsync/secrets.env' "$log" \
+        || die "85-llama.sh did not make the key and secrets.env"
+    key="$t/etc/brainsyncos/llama/api-key"
+    sec="$t/etc/brainsync/secrets.env"
+    [ "$(stat -c '%a %U:%G' "$key")" = "600 root:root" ] && [ "$(stat -c '%a %U:%G' "$(dirname "$key")")" = "700 root:root" ] \
+        || die "the key is $(stat -c '%a %U:%G' "$key") in a $(stat -c '%a %U:%G' "$(dirname "$key")") directory"
+    grep -Eqx '[0-9a-f]{64}' "$key" && [ "$(wc -l < "$key")" = 1 ] || die "the key is not one line of 64 hex digits"
+    [ "$(stat -c '%a %U' "$sec"):$(in_t "$t" stat -c %G /etc/brainsync/secrets.env)" = "640 root:$BRAINSYNC_USER" ] \
+        || die "secrets.env is $(stat -c '%a %U:%G' "$sec")"
+    [ "$(grep -c '^BRAINSYNC_LLAMA_API_KEY=' "$sec")" = 1 ] && grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$key")" "$sec" \
+        || die "secrets.env does not hold the key once"
+    grep -qx '# ANTHROPIC_API_KEY=' "$sec" || die "secrets.env lacks its template"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "the service is not enabled"
+    # shellcheck disable=SC2046  # one package name per word
+    in_t "$t" dpkg-query -W -f '${Package} ${Status}\n' brainsyncos-llama brainsyncos-llama-cuda \
+        $(printf '%s\n' "$CUDA_RUNTIME" | tr ',' '\n' | sed 's/=.*//') | grep -c ' install ok installed$' | grep -qx 4 \
+        || die "packages not installed"
+    [ -f "$t$LLAMA_PREFIX/lib/ggml/libggml-cuda.so" ] || die "no CUDA backend in the target"
+    no_mount_left "$t"
+    echo "jetson: both packages and the CUDA runtime installed, service enabled, key 600 root, secrets.env 640 root:$BRAINSYNC_USER with the key"
+
+    # systemd's own view of the unit, in the target.
+    in_t "$t" systemd-analyze verify brainsyncos-llama.service > "$W/verify.out" 2>&1 \
+        || { cat "$W/verify.out"; die "systemd-analyze verify rejects the unit"; }
+    ! grep -i 'brainsyncos-llama' "$W/verify.out" || die "systemd-analyze verify warns about the unit"
+    in_t "$t" systemd-analyze security --offline=true brainsyncos-llama.service > "$W/security.out" 2>&1 \
+        || { cat "$W/security.out"; die "systemd-analyze security failed"; }
+    grep 'Overall exposure level' "$W/security.out" || { tail -5 "$W/security.out"; die "no exposure level"; }
+    grep -Eq 'Overall exposure level for brainsyncos-llama.service: [0-1]\.[0-9] (OK|SAFE)' "$W/security.out" \
+        || { grep '✗' "$W/security.out" | head -20; die "exposure level above 1.9"; }
+    echo "systemd-analyze: verify clean"
+
+    # A re-run keeps the key and secrets.env as they are.
+    k1="$(sha256sum < "$key")"
+    s1="$(sha256sum < "$sec")"
+    run_hook "$p" "$t" "$repo" > /dev/null 2>&1 || { tail -20 "$W/live.log"; die "re-run failed"; }
+    [ "$(sha256sum < "$key")" = "$k1" ] && [ "$(sha256sum < "$sec")" = "$s1" ] || die "a re-run changed the key or secrets.env"
+    grep -q '85-llama.sh: keeping the API key' "$log" && grep -q 'secrets.env already has the key' "$log" || die "re-run: no keep messages"
+    echo "re-run: key and secrets.env unchanged"
+    # Other lines stay; a stale key line is replaced where it is, once; no newline at the end is fine.
+    printf 'CARTESIA_API_KEY=keep-me\nBRAINSYNC_LLAMA_API_KEY=stale\n# note\nBRAINSYNC_LLAMA_API_KEY=stale2\nANTHROPIC_API_KEY=keep-too' > "$sec"
+    cp -a "$repo" "$t/tmp/llama-repo"
+    in_t "$t" env BSOS_INSTALL_DIR=/opt/brainsyncos/installer BSOS_REPO_DIR=/tmp/llama-repo \
+        /bin/bash /opt/brainsyncos/installer/install.d/85-llama.sh > "$W/step.out" 2>&1 \
+        || { cat "$W/step.out"; die "85-llama.sh failed on an edited secrets.env"; }
+    force_rm_tree "$t/tmp/llama-repo"
+    printf 'CARTESIA_API_KEY=keep-me\nBRAINSYNC_LLAMA_API_KEY=%s\n# note\nANTHROPIC_API_KEY=keep-too\n' "$(cat "$key")" | diff - "$sec" \
+        || die "secrets.env was not merged as expected"
+    [ "$(stat -c '%a %U' "$sec"):$(in_t "$t" stat -c %G /etc/brainsync/secrets.env)" = "640 root:$BRAINSYNC_USER" ] \
+        || die "the merge changed secrets.env's mode or owner"
+    [ "$(sha256sum < "$key")" = "$k1" ] || die "the key changed"
+    echo "edited secrets.env: other lines kept, the stale key line replaced once, mode and owner kept"
+
+    # A model package's files: the unit's own command line serves the model.
+    mkdir -p "$t/opt/brainsyncos/models" "$t/etc/brainsyncos/llama.d" "$t/run/credentials/brainsyncos-llama.service"
+    cp "$DOWNLOADS_DIR/llama-test/$TEST_MODEL_FILE" "$t/opt/brainsyncos/models/test-model.gguf"
+    [ "$(sha256_of "$t/opt/brainsyncos/models/test-model.gguf")" = "$TEST_MODEL_SHA256" ] || die "test model: wrong sha256"
+    printf 'BSOS_LLAMA_MODEL=/opt/brainsyncos/models/test-model.gguf\nBSOS_LLAMA_ALIAS=test-model\nBSOS_LLAMA_CTX_SIZE=2048\n' \
+        > "$t/etc/brainsyncos/llama.d/model.conf"
+    cp "$key" "$t/run/credentials/brainsyncos-llama.service/api-key"
+    cmd="$(expand_exec "$t/usr/lib/systemd/system/brainsyncos-llama.service" "$t/etc/brainsyncos/llama.d/model.conf")"
+    echo "as systemd would run it: $cmd"
+    # shellcheck disable=SC2086  # the command line, split as systemd splits it
+    in_t "$t" $cmd > "$W/service.log" 2>&1 &
+    pid=$!
+    ok=0
+    for _ in $(seq 1 240); do
+        [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9931/health)" = 200 ] && { ok=1; break; }
+        kill -0 "$pid" 2> /dev/null || break
+        sleep 0.5
+    done
+    [ "$ok" = 1 ] || { kill "$pid" 2> /dev/null || true; tail -30 "$W/service.log"; die "the service command did not come up"; }
+    [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9931/v1/models)" = 401 ] \
+        || { kill "$pid"; die "/v1/models answers without the key"; }
+    in_t "$t" /opt/brainsyncos/venv/bin/python -I -c '
+import os, anthropic
+from app.config import load_env
+load_env("/etc/brainsync/secrets.env")
+c = anthropic.Anthropic(api_key=os.environ["BRAINSYNC_LLAMA_API_KEY"], base_url="http://127.0.0.1:9931", max_retries=0, timeout=120)
+m = c.messages.create(model="test-model", max_tokens=8, messages=[{"role": "user", "content": "Say hello."}],
+                      extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+assert m.content and m.content[0].text, m
+print("BCI Voice path: the SDK with the key from secrets.env got", m.usage.output_tokens, "tokens from", m.model)
+try:
+    anthropic.Anthropic(api_key="wrong", base_url="http://127.0.0.1:9931", max_retries=0).messages.create(
+        model="x", max_tokens=1, messages=[{"role": "user", "content": "x"}])
+    raise SystemExit("a wrong key was accepted")
+except anthropic.AuthenticationError:
+    print("a wrong key: 401")
+' || { kill "$pid" 2> /dev/null || true; tail -20 "$W/service.log"; die "the BrainSync venv cannot use the local server"; }
+    kill "$pid" 2> /dev/null || true
+    wait "$pid" 2> /dev/null || true
+    grep -o 'loaded CPU backend from [^ ]*' "$W/service.log" | head -n 1 | grep . || die "no CPU backend in the service log"
+    force_rm_tree "$t/opt/brainsyncos/models"
+    force_rm_tree "$t/run/credentials"
+    rm -f "$t/etc/brainsyncos/llama.d/model.conf"
+
+    # The vm edition: brainsyncos-llama only.
+    sed -i 's/^BSOS_EDITION=.*/BSOS_EDITION=vm-arm64/' "$t/opt/brainsyncos/installer/device.env"
+    in_t "$t" env DEBIAN_FRONTEND=noninteractive dpkg --purge brainsyncos-llama-cuda > /dev/null
+    cp -a "$T/repo/vm" "$t/tmp/vm-repo"
+    in_t "$t" env BSOS_INSTALL_DIR=/opt/brainsyncos/installer BSOS_REPO_DIR=/tmp/vm-repo \
+        /bin/bash /opt/brainsyncos/installer/install.d/85-llama.sh > "$W/vm.out" 2>&1 \
+        || { cat "$W/vm.out"; die "85-llama.sh failed on the vm edition"; }
+    force_rm_tree "$t/tmp/vm-repo"
+    grep '85-llama.sh' "$W/vm.out"
+    grep -q 'vm-arm64 edition: CPU backends only' "$W/vm.out" && grep -q "installed brainsyncos-llama $BRAINSYNCOS_VERSION; " "$W/vm.out" \
+        || die "vm: wrong packages"
+    grep -q 'model: none yet' "$W/vm.out" || die "vm: the step did not say there is no model"
+    [ ! -e "$t$LLAMA_PREFIX/lib/ggml/libggml-cuda.so" ] || die "vm: CUDA backend present"
+    echo "vm edition: brainsyncos-llama only, no model, service enabled"
+}
+
 c_wheel() {
     local d="$BUILD_DIR/wheels" m="$BUILD_DIR/wheels/brainflow-cerelog.env" whl v="$W/venv" out
     [ -f "$m" ] || die "no $m (scripts/build-wheels.sh)"
@@ -1091,6 +1360,8 @@ case "$1" in
     debs) c_debs ;;
     usbserial) c_usbserial ;;
     cuda) c_cuda ;;
+    llama-debs) c_llama_debs ;;
+    llama) c_llama ;;
     wheel) c_wheel ;;
     model-deb) c_model_deb ;;
     model-step) c_model_step ;;

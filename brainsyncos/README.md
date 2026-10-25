@@ -715,7 +715,7 @@ packages.
   - The venv build fails when a listed wheel is missing or does not match `SHA256SUMS`, and refuses unlisted ones. Their own dependencies must already be in the lock.
   - The `runtime` check requires BrainFlow in the installed venv to report the Cerelog X8 at 250 Hz.
 
-**Verified by `tests/test_phase3.sh`** (21 checks; `BSOS_TEST_ONLY=NAME,...` runs some of them):
+**Verified by `tests/test_phase3.sh`** (24 checks; `BSOS_TEST_ONLY=NAME,...` runs some of them):
 - the container really runs at the configured CPU and memory caps;
 - the key, packages and repositories for both editions; every package, the venv included, is byte-identical between the two editions' separate builds;
 - `app-debs`: the BrainSync packages' fields and dependencies, who ships what (no file in both, no app files in the runtime), the conffiles, no `.env` file, no `tests` folders but `numpy/testing`, an unchecked-hash `.pyc` beside every module;
@@ -731,6 +731,7 @@ packages.
 - `model-deb`: the model package's fields, its six files, the model and licence against the pins, the GGUF file type, and `model.conf` in `EnvironmentFile` syntax, not a conffile;
 - `model-step`: `86-model.sh` in NVIDIA's real target layer (on disk) installs the model and checks its sha256, a re-run works, a damaged model fails the step, a purge removes `model.conf`, and a repository without a model is skipped;
 - `iso-size`: the estimate, bad `ISO_MAX_BYTES` values refused, `finalize_iso` refusing an image over the limit, `build-iso.sh` stopping at its first estimate, and the test repository fitting the default limit.
+- `llama`, `llama-debs` and `llama-install`: `scripts/build-llama.sh` (cross-compiled, checked in the arm64 builder unless up to date), `brainsyncos-llama` (both editions, identical; 8 CPU backends, no headers) and `brainsyncos-llama-cuda` (Jetson only; the CUDA backend, never `libcuda`), the sandboxed unit's flags and drop-in, and `85-llama.sh` in NVIDIA's target layer: both packages installed, the service enabled, a root-only key also in `secrets.env` (kept on a re-run, a stale line replaced), `systemd-analyze verify` and `security` on the unit, and the unit's own command line serving a test model to the Anthropic SDK in the BrainSync venv; the VM edition gets `brainsyncos-llama` only.
 
 **Not tested here:** anything on hardware. Nobody has loaded the module on an Orin, plugged in a board, or streamed from BrainFlow on Linux.
 

@@ -34,7 +34,8 @@
 #                (brainsync-voice runs), secrets.env a template
 #                root:BRAINSYNC_USER 0640, and reports the offline voice
 #                (espeak-ng from Ubuntu's archive, or a note without it);
-#                80-cuda.sh skips (no CUDA on the VM)
+#                80-cuda.sh skips (no CUDA on the VM); 85-llama.sh brainsyncos-llama
+#                without the CUDA backend, the service enabled, its key in secrets.env
 # Work happens in /scratch (tmpfs); nothing is written to build/.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/scripts/lib.sh"
@@ -442,6 +443,13 @@ c_hook() {
     grep -q '80-cuda.sh: vm-arm64 edition: skipped' "$log" || die "80-cuda.sh did not skip"
     [ ! -e "$t/usr/local/cuda-13.2" ] || die "the VM got the CUDA runtime"
     echo "cuda: skipped on the VM edition"
+    grep -q '85-llama.sh: vm-arm64 edition: CPU backends only' "$log" && grep -q '85-llama.sh: installed brainsyncos-llama [^,]*; ' "$log" \
+        || die "85-llama.sh did not install brainsyncos-llama alone"
+    ! in_target "$t" dpkg -s brainsyncos-llama-cuda > /dev/null 2>&1 || die "the VM got the Jetson-only CUDA backend"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "brainsyncos-llama.service is not enabled"
+    grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$t/etc/brainsyncos/llama/api-key")" "$t/etc/brainsync/secrets.env" \
+        || die "secrets.env lacks the llama-server key"
+    echo "llm: brainsyncos-llama installed without the CUDA backend, service enabled, key in secrets.env"
     grep -q 'hook.sh: vm-arm64 edition on: QEMU QEMU Virtual Machine, serial UTM0042AB12CD (from dmi product_serial)' "$log" \
         || die "machine identity not logged: $(grep 'edition on' "$log")"
     ! grep -n 'WARNING\|No such file' "$log" || die "the VM install logged a warning"

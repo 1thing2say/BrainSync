@@ -7,6 +7,9 @@
 #   key        create the package repository signing key (once; kept in config/)
 #   wheels [--force]  build the Python wheels BrainSyncOS compiles (the
 #              BrainFlow Cerelog fork; same for both editions) -> build/wheels/
+#   llama [--force]   build llama.cpp for aarch64 (compiled in the amd64
+#              cross-builder, checked in the arm64 builder; same for both
+#              editions) -> build/llama/
 #   packages   build the edition's packages        -> build/debs/EDITION/
 #   mirror     fetch the third-party .debs the edition's repository mirrors
 #              (NVIDIA's CUDA runtime, Jetson only; mirror/NAME/, pinned by
@@ -14,7 +17,8 @@
 #   repo       sign them into an apt repository    -> build/repo/EDITION/
 #   iso        build the installer ISO from it     -> build/out/ (ISO OPTIONS are
 #              passed to scripts/build-iso.sh or build-vm-iso.sh, e.g. --name)
-#   all        doctor + packages + mirror + repo + iso (vm: fetches Ubuntu's ISO first)
+#   all        doctor + wheels + llama + packages + mirror + repo + iso (vm: fetches
+#              Ubuntu's ISO first; wheels and llama are skipped while up to date)
 #   test [SUITE...]   run test suites: phase1 phase2 phase3 vm (default phase3)
 #   clean [--all]     delete build/out (--all: all of build/), as builder.sh clean
 #
@@ -121,6 +125,11 @@ c_doctor() {
             note "mirror $m: not fetched yet (scripts/build.sh mirror; 'all' fetches it)"
         fi
     done
+    if [ -s "$BUILD_DIR/llama/check.env" ]; then
+        ok "llama.cpp: build/llama (checked; for brainsyncos-llama)"
+    else
+        note "llama.cpp: not built yet (scripts/build.sh llama; the cross-builder image is built on first use)"
+    fi
     if [ -s "$BUILD_DIR/wheels/SHA256SUMS" ]; then
         ok "wheels: build/wheels ($(wc -l < "$BUILD_DIR/wheels/SHA256SUMS" | tr -d ' '); for the BrainSync venv)"
     else
@@ -166,6 +175,13 @@ c_wheels() {
     "$B" run scripts/build-wheels.sh $rest
 }
 c_repo()     { "$B" run scripts/build-repo.sh --edition "$edition"; }
+c_llama() {
+    case "$rest" in ''|' --force') ;; *) die "llama takes only --force:$rest" ;; esac
+    # shellcheck disable=SC2086  # [--force], split as given
+    "$B" --cross run scripts/build-llama.sh compile $rest
+    # shellcheck disable=SC2086
+    "$B" run scripts/build-llama.sh check $rest
+}
 
 c_iso() {
     # shellcheck disable=SC2086  # ISO OPTIONS, split as given
@@ -180,6 +196,8 @@ c_all() {
     c_doctor || die "prerequisites missing (see above)"
     [ "$edition" = jetson ] || "$S/fetch-vm-base.sh"
     "$B" run scripts/build-wheels.sh   # skipped while up to date; brainsync-runtime needs them
+    "$B" --cross run scripts/build-llama.sh compile   # both skipped while up to date; brainsyncos-llama needs them
+    "$B" run scripts/build-llama.sh check
     c_packages
     c_mirror   # offline once build/downloads/mirror holds the pinned .debs
     c_repo
@@ -207,6 +225,7 @@ case "$cmd" in
     doctor) no_args; c_doctor ;;
     key) no_args; c_key ;;
     wheels) c_wheels ;;
+    llama) c_llama ;;
     packages) no_args; c_packages ;;
     mirror) no_args; c_mirror ;;
     repo) no_args; c_repo ;;

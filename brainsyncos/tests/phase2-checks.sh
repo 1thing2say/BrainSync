@@ -30,8 +30,10 @@
 #                ch341 module installed (modules.dep), brainsync-runtime and
 #                brainsync installed (brainsync-voice runs), secrets.env a
 #                template root:BRAINSYNC_USER 0640, the CUDA runtime installed
-#                (ldconfig resolves libcudart and libcublas), and the
-#                repository unmounted again; re-run is idempotent
+#                (ldconfig resolves libcudart and libcublas), brainsyncos-llama
+#                and -cuda installed with the service enabled and its key in
+#                secrets.env (85-llama.sh), and the repository unmounted
+#                again; re-run is idempotent
 #   hook-password  the same with a console password hash: password set, sudo
 #                asks for it
 #   hook-fail    hook.sh fails the install when a step fails, when the build
@@ -401,6 +403,18 @@ check_cuda() {
     echo "cuda: cudart and cuBLAS installed, ldconfig resolves libcudart.so.13, libcublas.so.13 and libcublasLt.so.13"
 }
 
+# check_llama TARGET: 85-llama.sh installed the local LLM with its CUDA
+# backend, enabled the service and gave BCI Voice the key.
+check_llama() {
+    local t="$1"
+    grep -q '85-llama.sh: installed brainsyncos-llama .*, brainsyncos-llama-cuda .*; llama-server version: ' \
+        "$t/var/log/brainsyncos/install.log" || die "85-llama.sh did not finish"
+    [ -L "$t/etc/systemd/system/multi-user.target.wants/brainsyncos-llama.service" ] || die "brainsyncos-llama.service is not enabled"
+    grep -qx "BRAINSYNC_LLAMA_API_KEY=$(cat "$t/etc/brainsyncos/llama/api-key")" "$t/etc/brainsync/secrets.env" \
+        || die "secrets.env lacks the llama-server key"
+    echo "llm: brainsyncos-llama and -cuda installed, service enabled, key in secrets.env"
+}
+
 c_hook() {
     setup_target
     local t="$W/target" rel
@@ -425,6 +439,7 @@ c_hook() {
     check_keyring "$t"
     check_usb_serial "$t"
     check_cuda "$t"
+    check_llama "$t"
     grep -q 'board: NVIDIA Jetson Orin Nano' "$t/var/log/brainsyncos/install.log" || die "board not detected"
     check_identity "$t" keys
     # Running the hook again (a re-run late-command) must give the same result.
