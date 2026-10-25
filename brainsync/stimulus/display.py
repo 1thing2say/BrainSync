@@ -24,6 +24,7 @@ from typing import Protocol, TextIO
 import numpy as np
 
 from .config import StimulusConfig, Trial, card_overlap
+from ..vep.codes import bit_luminance
 from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
 
 # The flash box's line is this many times the cue box's, so a swipe reads at a glance.
@@ -104,10 +105,14 @@ def still_luminances(cfg: StimulusConfig) -> np.ndarray:
     """What the targets show between flickers: the flicker's frame 0, so onset has no jump.
 
     A mixed-condition session shows mid-grey 0.5 instead (the mean of every waveform at
-    every depth), so the still screen is the same whatever condition comes next.
+    every depth), so the still screen is the same whatever condition comes next. A [code]
+    config also rests at 0.5 (the m-sequence is bright half the time); a [time] config
+    rests at its "off" level (0.5 - depth / 2), since a flash is the only bright state.
     """
-    if cfg.conditions:
+    if cfg.conditions or cfg.code is not None:
         return np.full(cfg.n_targets, 0.5)
+    if cfg.time is not None:
+        return bit_luminance(np.zeros(cfg.n_targets), cfg.depth)
     return frame_luminances(cfg.freqs, cfg.phases, 0, cfg.refresh, cfg.waveform, cfg.depth)
 
 
