@@ -492,6 +492,10 @@ class Orchestrator:
             self._record("page_refresh", refresh_hz=msg.refresh_hz)
             problem = self.page_refresh_problem()
             if problem != before:
+                if problem and self.state not in (St.IDLE, St.PAUSED):
+                    # Measured after the start button: the code it draws is the wrong speed.
+                    self._pause_session(problem, "screen_refresh")
+                    return
                 self._send_status()  # resume_ready changes
                 if problem and self.state in (St.IDLE, St.PAUSED):
                     self._send_state(problem)

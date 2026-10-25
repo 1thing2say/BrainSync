@@ -418,6 +418,16 @@ def test_a_page_at_the_wrong_refresh_cannot_start_and_a_new_page_measures_again(
     assert r.o.state is St.BASELINE and r.sent(Train)
 
 
+def test_a_wrong_refresh_measured_after_the_start_pauses_the_session():
+    r = Rig(BROWSER)
+    r.o.on_ui_connected()
+    r.o.on_ui_message(Resume(start=True))
+    assert r.o.state is St.BASELINE
+    r.o.on_ui_message(PageClock(t_client=r.clock.t, refresh_hz=120.0))
+    assert r.o.state is St.PAUSED and "120 Hz" in r.o.state_detail
+    assert r.sent(Pause)[-1].reason == "screen_refresh"
+
+
 def test_with_psychopy_drawing_the_page_refresh_does_not_matter():
     r = Rig(PSYCHOPY)
     r.o.on_ui_message(PageClock(t_client=r.clock.t, refresh_hz=120.0))
