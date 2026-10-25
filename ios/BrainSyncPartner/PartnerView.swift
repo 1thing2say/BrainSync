@@ -1,7 +1,8 @@
 // The partner screen, phrase first like Google's Look to Speak: a slim status bar (with the
 // Settings gear), what the partner said last, the replies on the user's screen as big cards,
 // then the mic, the conversation, typing and the operator footer. Stop stays pinned at the
-// bottom where it is always visible.
+// bottom where it is always visible. With a c-VEP server the phone is the user's screen
+// (LookToSpeakView) and this screen opens over it as the partner tools, with a Done button.
 
 import SwiftUI
 import BrainSyncKit
@@ -11,10 +12,16 @@ struct PartnerView: View {
     @AppStorage("hapticPick") private var hapticPick = true
     @AppStorage("hapticSpeak") private var hapticSpeak = true
     @State private var showSettings = false
+    /// Shown as the partner tools over the Look to Speak screen: Done closes it.
+    let onClose: (() -> Void)?
+
+    init(onClose: (() -> Void)? = nil) {
+        self.onClose = onClose
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            BannerBar { showSettings = true }
+            BannerBar(onClose: onClose) { showSettings = true }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if let reason = model.stopReason {
@@ -57,6 +64,8 @@ struct PartnerView: View {
 /// tone colours its left edge and its text. The gear opens Settings.
 struct BannerBar: View {
     @Environment(AppModel.self) private var model
+    /// The partner tools' Done (back to the Look to Speak screen); nil hides it.
+    var onClose: (() -> Void)? = nil
     let onSettings: () -> Void
 
     var body: some View {
@@ -85,6 +94,14 @@ struct BannerBar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Settings")
+            if let onClose {
+                Button("Done", action: onClose)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Palette.text)
+                    .frame(minHeight: 36)
+                    .padding(.horizontal, 8)
+                    .accessibilityHint("Back to the user's screen")
+            }
         }
         .padding(.leading, 16)
         .padding(.trailing, 8)

@@ -1,13 +1,16 @@
 import Foundation
 
-/// One screen of the app's first-run setup (SetupFlow), in the order they come.
+/// One screen of the app's first-run setup (SetupFlow), in the order they come. `looking`: how the
+/// user picks on this phone (Look to Speak, c-VEP): left or right card, and the calibration first.
 public enum SetupStep: String, CaseIterable, Equatable, Sendable {
-    case welcome, pair, safety, microphone, practice, done
+    case welcome, pair, safety, microphone, looking, practice, done
 }
 
 /// The first-run setup's order, kept pure so it is tested here: welcome, pair, safety,
-/// microphone, practice, done. A phone that is already paired skips pair. The app fixes the order
-/// when the setup opens, so pairing halfway through does not shift the steps.
+/// microphone, looking, practice, done. A phone that is already paired skips pair; looking comes
+/// only when this phone is the user's screen (the server sent a c-VEP `stimulus`). The app fixes
+/// the order when the setup opens, so pairing halfway through does not shift the steps; it may
+/// add looking later (`withLookToSpeak`), which never moves a step before it.
 public struct SetupSteps: Equatable, Sendable {
     /// Where a step sits: `index` from 0, out of `count` steps.
     public struct Progress: Equatable, Sendable {
@@ -21,9 +24,23 @@ public struct SetupSteps: Equatable, Sendable {
     }
 
     public let steps: [SetupStep]
+    /// The pair step is skipped (the phone was paired when the setup opened).
+    public let paired: Bool
+    /// The looking step is in the order.
+    public let lookToSpeak: Bool
 
-    public init(paired: Bool) {
-        steps = SetupStep.allCases.filter { !(paired && $0 == .pair) }
+    public init(paired: Bool, lookToSpeak: Bool = false) {
+        self.paired = paired
+        self.lookToSpeak = lookToSpeak
+        steps = SetupStep.allCases.filter {
+            !(paired && $0 == .pair) && !(!lookToSpeak && $0 == .looking)
+        }
+    }
+
+    /// The same order with the looking step, once the server turns out to run Look to Speak on
+    /// the phone. Pair stays as it was, so the steps before looking keep their places.
+    public func withLookToSpeak() -> SetupSteps {
+        SetupSteps(paired: paired, lookToSpeak: true)
     }
 
     public var first: SetupStep { steps[0] }
