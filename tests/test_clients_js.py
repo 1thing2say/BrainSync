@@ -49,9 +49,10 @@ def test_js_parses(path):
 def test_reference_page_loads_its_files_in_order():
     html = (WEB / "index.html").read_text()
     srcs = re.findall(r'<script src="([^"]+)"></script>', html)
-    assert srcs == ["/static/flicker.js", "/static/brainsync-client.js", "/static/app.js"]
+    assert srcs == ["/static/flicker.js", "/static/cvep.js", "/static/brainsync-client.js",
+                    "/static/app.js"]
     assert '<link rel="stylesheet" href="/static/style.css">' in html
-    for name in ("flicker.js", "brainsync-client.js"):
+    for name in ("flicker.js", "cvep.js", "brainsync-client.js"):
         assert (JS / name).is_file()
     for name in ("app.js", "style.css"):
         assert (WEB / name).is_file()
@@ -69,5 +70,5 @@ def test_reference_page_speaks_protocol_v3():
     assert "const PROTOCOL = 3;" in client
     assert "Object.freeze([4000, 4001, 4002])" in client
     assert "Object.freeze([1000, 2000, 4000, 5000])" in client
-    assert 'Object.freeze(["yes", "no"])' in app
+    assert 'Object.freeze(["yes", "no", "help"])' in app
     assert 'mode: "slots"' in app

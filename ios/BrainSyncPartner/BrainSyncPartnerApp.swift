@@ -1,6 +1,8 @@
-// BrainSync partner app: a native client of the server's /ws/ui socket (PLAN.md section 6). It
-// replaces the partner page on the phone. The server owns all state (PLAN rule 6); this app
-// renders, plays the replies, listens to the partner and reports events.
+// BrainSync on the iPhone: a suite of apps driven by c-VEP (SuiteModel: Home, Camera, Reels,
+// against brainsync.server's PROTOCOL-v3), plus Voice, the native client of app.server's /ws/ui
+// socket (PLAN.md section 6) that replaces the partner page on the phone. Each server owns its
+// own state (PLAN rule 6); this app renders, draws the squares, plays the replies, listens to the
+// partner and reports events.
 
 import SwiftUI
 import BrainSyncKit
@@ -8,27 +10,49 @@ import BrainSyncKit
 @main
 struct BrainSyncPartnerApp: App {
     @State private var model = AppModel()
+    @State private var suite = SuiteModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            SuiteRootView()
                 .environment(model)
-                .onOpenURL { url in model.open(url) }
+                .environment(suite)
+                .onOpenURL { url in open(url) }
+                #if DEBUG
+                .task { suite.applyDebugLaunchArguments() }
+                #endif
                 .preferredColorScheme(.dark)
                 .tint(Palette.look)
         }
         .onChange(of: scenePhase) { _, phase in
             model.scenePhaseChanged(phase)
+            suite.scenePhaseChanged(phase)
+        }
+    }
+
+    /// A brainsync:// or https link opened from outside: a Voice partner link (app.server,
+    /// `brainsync://pair` or `?key=`) goes to Voice, anything else that parses is a headset
+    /// server link (brainsync.server, `#token=` or `brainsync://v3`).
+    private func open(_ url: URL) {
+        switch V3AnyLink.parse(url) {
+        case .voice:
+            suite.open(.voice)
+            model.open(url)
+        case .v3(let link):
+            suite.open(link: link)
+        case nil:
+            break
         }
     }
 }
 
-/// The first-run setup until it is done, then pairing until there is a server link, then the
-/// main screen with the flicker warning on top until it is accepted in this run (rule 10). The
-/// main screen is the user's Look to Speak screen when the server sent a c-VEP `stimulus` (this
-/// phone flickers), otherwise the partner screen (the laptop flickers, the default config).
-struct RootView: View {
+/// Voice: the first-run setup until it is done, then pairing until there is a server link, then
+/// the main screen with the flicker warning on top until it is accepted in this run (rule 10).
+/// The main screen is the user's Look to Speak screen when app.server sent a c-VEP `stimulus`
+/// (this phone flickers, config/phone_cvep.yaml), otherwise the partner screen (the laptop
+/// flickers, the default config).
+struct VoiceRootView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("setupDone") private var setupDone = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

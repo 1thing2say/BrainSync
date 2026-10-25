@@ -558,6 +558,75 @@ def test_auto_onset_off_sends_nothing(server_factory):
     assert onsets == [] and sent == 0
 
 
+# -- code mode (v3.2) ---------------------------------------------------------------------------
+
+def code_welcome(role: str = "controller", mode: str | None = "slots") -> dict:
+    from brainsync.server.protocol import code_spec
+    from brainsync.vep.live import BITS
+    return welcome(role, mode, fake=True, waveform="sine", refresh_hz=60.0,
+                   refresh_tolerance_hz=1.0, freqs=[], max_slots=3, detect=False,
+                   refresh_rates=[60.0], paradigm="code",
+                   code=code_spec(list(BITS), 21, 63, 30))
+
+
+CODE_SLOTS = [Target(s, None, 0.0, s, "slot", lag=21 * i)
+              for i, s in enumerate(("yes", "no", "help"))]
+
+
+async def code_script(ws, srv):
+    from brainsync.server.protocol import decision, train_progress, trained
+    await srv.read(ws)
+    await ws.send(dumps(code_welcome()))
+    steps = [layout(1, "slots", CODE_SLOTS),
+             phase("train", True, text="Look at the YES square", cue="yes", cycles=30),
+             train_progress(12, 30), trained(0.83, 1 / 3, 30), phase("run", True),
+             decision(1, {"yes": 0.42, "no": 0.11, "help": -0.03}, "yes", "yes", 0.31, True),
+             status("streaming", True, "done")]
+    for msg in steps:
+        await ws.send(dumps(msg))
+
+
+def test_code_mode_client_tracks_training_and_decisions(server_factory):
+    srv = server_factory(code_script)
+    with Client(srv.url, "t", slots=("yes", "no", "help")) as c:
+        assert c.paradigm == "code" and c.welcome["code"]["lag_frames"] == 21
+        c.until("status")
+        assert c.train == {"type": "train", "cycle": 12, "of": 30}
+        assert c.trained["accuracy"] == 0.83 and c.decision["committed"] == "yes"
+        assert c.onsets == 1                      # the train phase flickers: one onset
+    srv.wait_for("bye")
+    (onset,) = [m for m in srv.received if m["type"] == "onset"]
+    assert onset["layout_id"] == 1
+    assert client_mod.decision_lines(c.decision) == [
+        "YES  ███░░░░░ +0.42 <", "NO   █░░░░░░░ +0.11", "HELP ░░░░░░░░ -0.03",
+        "lead 0.31   choice: YES *"]
+    assert client_mod.trained_text(c.trained) == \
+        "template ready: 83 % on held-out cycles (chance 33 %)"
+    assert client_mod.decision_lines({"scores": {}, "committed": None})[-1] == \
+        "lead  -     no choice yet"
+
+
+def test_paradigm_is_freq_for_an_older_welcome(server_factory):
+    async def script(ws, srv):
+        await srv.read(ws)
+        w = make_welcome()
+        w.pop("paradigm")
+        await ws.send(dumps(w))
+    srv = server_factory(script)
+    with Client(srv.url, "t") as c:
+        assert c.paradigm == "freq"
+
+
+def test_cli_prints_training_and_decisions(server_factory, capsys):
+    srv = server_factory(code_script)
+    assert main(["--url", srv.url, "--seconds", "1.0", "--decisions"]) == 0
+    out, err = capsys.readouterr()
+    assert "c-VEP code" in err
+    assert "training: keep looking at YES   cycle 12/30" in err
+    assert "template ready: 83 % on held-out cycles (chance 33 %)" in err
+    assert "YES  ███░░░░░ +0.42 <" in out and "lead 0.31   choice: YES *" in out
+
+
 def test_viewers_never_send_onsets(server_factory):
     _, onsets, sent, _, _ = run_onset_script(server_factory, role="viewer", mode=None,
                                              refresh_hz=None)

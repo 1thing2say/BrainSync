@@ -4,7 +4,7 @@ import Foundation
 // it is tested without a screen. It is the Python side's rule exactly (brainsync.vep.codes
 // .lagged_codes: target k = np.roll(cycle, lag_k)): slot s is bright on trial frame n when
 // bits[((n - lag_s) mod cycleFrames) / framesPerBit] is "1". The bridge decodes against that same
-// matrix, so one frame off here is a wrong template; Fixtures/cvep_frames.json (tools/cvep_fixture.py)
+// matrix, so one frame off here is a wrong template; Fixtures/cvep_stimulus_frames.json (tools/cvep_fixture.py)
 // pins it to the Python output frame by frame.
 //
 // Frame indices come from the display link's timestamps rounded to the frame period (as

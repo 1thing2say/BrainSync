@@ -54,7 +54,7 @@ CLAUDE.local.md
 .tribe-cache/
 extension/heatmap/clips/
 
-# Xcode per-user state and SwiftPM caches
-xcuserdata/
-.swiftpm/
+# SwiftPM and Xcode per-user state
 .build/
+.swiftpm/
+xcuserdata/

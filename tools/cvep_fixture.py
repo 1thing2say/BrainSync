@@ -26,7 +26,7 @@ from app.schemas import Stimulus  # noqa: E402
 from brainsync.vep.codes import lagged_codes, m_sequence  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = REPO_ROOT / "ios/BrainSyncKit/Tests/BrainSyncKitTests/Fixtures/cvep_frames.json"
+FIXTURE = REPO_ROOT / "ios/BrainSyncKit/Tests/BrainSyncKitTests/Fixtures/cvep_stimulus_frames.json"
 FRAMES = 140  # two full cvep_2 cycles and part of a third
 
 # (name, code length, frames per bit, lag between neighbouring slots, number of slots, depth)

@@ -201,7 +201,7 @@ class _FakeShim:
 
 def test_cerelog_board_converts_volts_and_closes() -> None:
     shim = _FakeShim()
-    board = CerelogBoard(serial_port="/dev/null", shim=shim, buffer_s=10.0)
+    board = CerelogBoard(serial_port="/dev/null", shim=shim, buffer_s=10.0, rebase=False)
     with pytest.raises(RuntimeError, match="not streaming"):
         board.read()
     with board as b:
@@ -216,6 +216,35 @@ def test_cerelog_board_converts_volts_and_closes() -> None:
         np.testing.assert_allclose(t, [1.0, 1.004, 1.008])
         assert b.read()[0].shape == (8, 0)
     assert shim.calls == ["prepare", "start:2500", "stop", "release"]
+
+
+def test_cerelog_board_rebases_stamps_onto_the_host_clock() -> None:
+    """The driver's stamps lag the host clock by a constant 0-1 s per connection; read()
+    adds the smallest lag seen over the first reads and then keeps that offset."""
+    from brainsync.board import REBASE_READS
+
+    shim = _FakeShim()
+    host = [1000.0]
+    board = CerelogBoard(serial_port="/dev/null", shim=shim, buffer_s=10.0, clock=lambda: host[0])
+    lag = 0.7          # stamps behind the host clock
+    with board as b:
+        seen = []
+        for k in range(REBASE_READS + 5):
+            rows = np.zeros((11, 2))
+            rows[10] = [host[0] - lag - 0.004, host[0] - lag]          # newest stamp = host - lag
+            # the transport sometimes delivers late, which must not pull the offset down
+            host[0] += 0.03 if k % 7 else 0.09
+            shim.data = rows
+            _, t = b.read()
+            seen.append((host[0], t[-1]))
+        assert b.stamp_offset == pytest.approx(lag + 0.03, abs=1e-9)      # smallest lag wins
+        # after the estimate is frozen the newest sample sits a link latency behind the host
+        host_now, newest = seen[-1]
+        assert 0.0 <= host_now - newest <= 0.1
+        shim.data = np.zeros((11, 0))
+        assert b.read()[1].size == 0
+    raw = CerelogBoard(serial_port="/dev/null", shim=_FakeShim(), rebase=False)
+    assert raw.stamp_offset == 0.0 and not raw.rebase
 
 
 def test_cerelog_board_rejects_bad_names() -> None:

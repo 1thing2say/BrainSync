@@ -11,7 +11,7 @@
 // - Opacity changes made in the callback are drawn for the frame at targetTimestamp, so that is the
 //   presentation time a cycle marker carries (converted from CACurrentMediaTime to Unix seconds).
 // - The bridge decodes against the Python code (brainsync.vep.codes); CVEPCode is pinned to it by
-//   Fixtures/cvep_frames.json. FrameRateCheck refuses to flicker unless the screen really runs at a
+//   Fixtures/cvep_stimulus_frames.json. FrameRateCheck refuses to flicker unless the screen really runs at a
 //   steady 60 Hz.
 // - Safety (PLAN rule 10): stop() darkens every layer in the same transaction, and the engine
 //   stops by itself when the app resigns active.

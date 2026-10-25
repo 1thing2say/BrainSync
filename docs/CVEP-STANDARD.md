@@ -62,9 +62,12 @@ probabilities; do not show them as percentages. Python: `confidence_labels`,
 
 ### 4.1 PsychoPy display (stdin of `python -m brainsync.stimulus --free --feedback stdin`)
 
-Unchanged lines plus the ones PR #28 added: a target index (cue box), `{"text": "..."}` (the
-status line, with `--status stdin`), `{"labels": ["...", "...", "..."]}` (the label lines,
-with `--labels`). Cycle times are read from the stimulus log (`cycle:<n>` markers).
+The display stdin protocol of `brainsync/stimulus/feedback.py`: a target index moves the cue
+box, `{"labels": ["...", "...", "..."]}` sets the label lines under the squares,
+`{"text": "..."}` the status line, `{"active": [...]}` which targets flicker, and
+`{"flicker": true}` / `{"flicker": false}` start and stop it (once any JSON line has been
+sent, only these two do). Cycle times are read from the stimulus log (`cycle:<n>` markers).
+`brainsync/vep/__main__.py` is the reference user.
 
 ### 4.2 Server ↔ browser (PROTOCOL-v3, `brainsync.server --paradigm code`, the default)
 

@@ -95,10 +95,10 @@ test("helloFields is a slots-mode controller hello with the measured refresh", (
   const h = W.helloFields(59.98234, { w: 800, h: 600, dpr: 2 }, true);
   assert.deepEqual(h, {
     role: "controller", takeover: true, client: { name: "brainsync-web", kind: "web", version: "0.1.0" },
-    mode: "slots", slots: ["yes", "no"], refresh_hz: 59.982, accepted: true,
+    mode: "slots", slots: ["yes", "no", "help"], refresh_hz: 59.982, accepted: true,
     viewport: { w: 800, h: 600, dpr: 2 } });
   h.slots.push("x");
-  assert.deepEqual(W.SLOTS, ["yes", "no"]);
+  assert.deepEqual(W.SLOTS, ["yes", "no", "help"]);
   assert.equal(W.helloFields(60, null, undefined).takeover, false);
 });
 
@@ -358,7 +358,7 @@ test("model: nothing is drawn before the warning is accepted", () => {
   m.onMessage(WELCOME);
   m.onMessage(RUN);
   m.onMessage(LAYOUT);
-  for (let t = 0; t < 200; t += 16.7) assert.deepEqual(m.frame(t), { mode: "hidden", items: [] });
+  for (let t = 0; t < 200; t += 16.7) assert.deepEqual(m.frame(t), { mode: "hidden", items: [], code: false, status: "" });
   assert.deepEqual(sent, []);
   assert.equal(m.banner(), "");
 });
@@ -740,7 +740,7 @@ test("page: warning gate, refresh measurement, then hello with the measured rate
   assert.equal(hello.role, "controller");
   assert.equal(hello.takeover, true);
   assert.equal(hello.mode, "slots");
-  assert.deepEqual(hello.slots, ["yes", "no"]);
+  assert.deepEqual(hello.slots, ["yes", "no", "help"]);
   assert.equal(hello.accepted, true);
   assert.ok(Math.abs(hello.refresh_hz - 60) < 0.01, String(hello.refresh_hz));
   assert.deepEqual(hello.viewport, { w: 1000, h: 600, dpr: 2 });
@@ -1223,4 +1223,106 @@ test("app.js loads in a browser-like global after the SDK and starts itself", ()
   }
   assert.equal(typeof ctx.BrainSyncWeb.createModel, "function");
   assert.equal(els.accept.listeners.click.length, 1);   // start() ran
+});
+
+// ------------------------------------------------------------------ code mode (c-VEP)
+
+const K = require("../cvep.js");
+const CODE_WELCOME = { ...WELCOME, paradigm: "code", freqs: [], max_slots: 3,
+                       code: { bits: [...K.BITS], lag_frames: 21, cycle_frames: 63,
+                               train_cycles: 30, fill: "#ffffff" } };
+const TRAIN = { type: "phase", phase: "train", flicker: true, seconds: null,
+                text: "Look at the YES square", cue: "yes", cycles: 30 };
+const CODE_LAYOUT = { type: "layout", layout_id: 5, stage: "slots",
+  targets: ["yes", "no", "help"].map((s, i) => (
+    { slot: s, freq: null, lag: 21 * i, phase: 0.0, label: s, kind: "slot", rects: [] })) };
+const DECISION = { type: "decision", layout_id: 5, scores: { yes: 0.42, no: 0.11, help: -0.03 },
+                   raw: "yes", committed: "yes", lead: 0.31, changed: false };
+
+function liveCode(phase = TRAIN) {
+  const ctx = model();
+  ctx.m.accept();
+  ctx.m.measured(60.0);
+  ctx.m.onState("open");
+  ctx.m.onMessage(CODE_WELCOME);
+  ctx.m.onMessage(CODE_LAYOUT);
+  ctx.m.onMessage(phase);
+  return ctx;
+}
+
+test("model (code): white/black bits, the cue, cycles, and the training banner", () => {
+  const { m, sent } = liveCode();
+  const p = 1000 / 60;
+  for (let n = 0; n < 130; n++) {
+    const v = m.frame(500 + n * p);
+    assert.equal(v.mode, "flicker");
+    assert.equal(v.code, true);
+    assert.deepEqual(v.items.map((i) => i.lum), [K.bit(0, n), K.bit(1, n), K.bit(2, n)]);
+    assert.deepEqual(v.items.map((i) => i.cue), [true, false, false]);
+  }
+  const cycles = sent.filter((s) => s.type === "cycle");
+  assert.deepEqual(cycles.map((c) => [c.layout_id, c.n]), [[5, 0], [5, 1], [5, 2]]);
+  assert.equal(cycles[1].t_client, 1000 + (500 + 63 * p) / 1000);
+  assert.equal(sent.filter((s) => s.type === "onset").length, 1);
+  assert.equal(m.banner(), "Look at the YES square");
+  m.onMessage({ type: "train", cycle: 12, of: 30 });
+  assert.equal(m.frame(3000).status, "training: keep looking at YES   cycle 12/30");
+  assert.match(m.hud(null).join("\n"), /c-VEP code · training 12\/30/);
+});
+
+test("model (code): after training, label lines with bars and the status line", () => {
+  const { m } = liveCode();
+  m.onMessage({ type: "trained", accuracy: 0.83, chance: 0.333, cycles: 30 });
+  m.onMessage(RUN);
+  let v = m.frame(100);
+  assert.equal(v.status, "template ready: 83 % on held-out cycles (chance 33 %)");
+  assert.ok(v.items.every((i) => !i.cue));
+  m.onMessage(DECISION);
+  v = m.frame(120);
+  assert.deepEqual(v.items.map((i) => i.line),
+                   ["YES  ███░░░░░ +0.42 <", "NO   █░░░░░░░ +0.11", "HELP ░░░░░░░░ -0.03"]);
+  assert.deepEqual(v.items.map((i) => i.best), [true, false, false]);
+  assert.equal(v.status, "lead 0.31   choice: YES");
+  assert.match(m.hud(null).join("\n"), /template ready: 83 %/);
+  m.pause();
+  v = m.frame(140);
+  assert.equal(v.mode, "still");
+  assert.ok(v.items.every((i) => i.lum === 1));           // still squares are white
+});
+
+test("page (code): white squares on black, the red cue box, label lines and cycles", () => {
+  const p = page();
+  p.els.accept.fire("click");
+  p.frames(141);
+  const ws = p.sockets[0];
+  ws.accept();
+  ws.message(CODE_WELCOME);
+  ws.message(CODE_LAYOUT);
+  ws.message(TRAIN);
+  p.ctx2d.ops.length = 0;
+  p.ctx2d.strokeRect = (...a) => p.ctx2d.ops.push(["strokeRect", p.ctx2d.strokeStyle, ...a]);
+  p.frames(64);
+  const boxes = p.ctx2d.ops.filter((o) => o[0] === "strokeRect");
+  assert.ok(boxes.length >= 64 && boxes.every((o) => o[1] === "#ff3b30"));   // the cue, each frame
+  const [yesSq] = p.app.squares();
+  assert.ok(boxes.every((o) => o[2] < yesSq.x && o[2] + o[4] > yesSq.x + yesSq.side));
+  const fills = p.ctx2d.ops.filter((o) => o[0] === "fillRect");
+  assert.ok(fills.some((o) => o[1] === "#000" && o[2] === 0 && o[3] === 0));   // black stage
+  const squares = fills.filter((o) => o[1] === "#ffffff" || (o[1] === "#000" && o[4] > 50 &&
+                                                                o[2] !== 0));
+  assert.ok(squares.some((o) => o[1] === "#ffffff") && squares.some((o) => o[1] === "#000"));
+  const texts = p.ctx2d.ops.filter((o) => o[0] === "fillText").map((o) => o[1]);
+  assert.ok(texts.includes("YES  ░░░░░░░░   -  "), texts.slice(0, 4).join("|"));
+  assert.ok(texts.includes("training: keep looking at YES   cycle 0/30"));
+  assert.deepEqual(ws.sent.filter((m) => m.type === "cycle").map((m) => m.n), [0, 1]);
+  assert.equal(p.app.model.banner(), "Look at the YES square");
+  ws.message({ type: "trained", accuracy: 0.9, chance: 0.333, cycles: 30 });
+  ws.message({ type: "phase", phase: "run", flicker: true, seconds: null, text: "" });
+  ws.message(DECISION);
+  p.ctx2d.ops.length = 0;
+  p.frames(1);
+  const after = p.ctx2d.ops.filter((o) => o[0] === "fillText").map((o) => o[1]);
+  assert.ok(after.includes("YES  ███░░░░░ +0.42 <") && after.includes("lead 0.31   choice: YES"));
+  p.clock.advance(250);
+  assert.match(p.els.hud.textContent, /template ready: 90 %/);
 });

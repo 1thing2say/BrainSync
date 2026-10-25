@@ -14,11 +14,11 @@ from brainsync.recordings import parse_markers
 from brainsync.stimulus import __main__ as cli
 from brainsync.stimulus.config import (available_configs, config_warnings, grid_positions,
                                        load_config, make_trials, override, parse_config,
-                                       resolve_config, same_phase, session_trials)
-from brainsync.stimulus.display import (Frame, MarkerWriter, SessionTiming, cued_frames,
-                                        format_marker, free_frames, layout_overflow,
+                                       resolve_config, same_phase, session_trials, validate)
+from brainsync.stimulus.display import (FREE_ON, Frame, MarkerWriter, SessionTiming, cued_frames,
+                                        format_marker, free_frames, free_onset, layout_overflow,
                                         median_rate, play, refresh_mismatch)
-from brainsync.stimulus.feedback import FeedbackReader, parse_line
+from brainsync.stimulus.feedback import FeedbackReader, parse_command, parse_line
 from brainsync.stimulus.flicker import (dropped_frames, frame_luminances, frames_per_cycle,
                                         luminance, n_frames, square_duty_even, to_psychopy_rgb)
 
@@ -154,6 +154,31 @@ def test_shipped_configs():
         assert one.n_targets == 1 and one.freqs[0] == f
         assert one.size == pytest.approx(0.7) and one.waveform == "sine"
         assert not one.hold_cue and one.targets[0].pos == (0.0, 0.0)
+
+
+def test_four_targets_low_first_config():
+    four = load_config("four_targets_low_first")
+    assert four.n_targets == 4
+    np.testing.assert_array_equal(four.freqs, [11.0, 15.0, 17.0, 13.0])   # row by row
+    np.testing.assert_array_equal(four.phases, [0.0, 0.0, 0.0, 0.0])
+    assert four.labels == ("11", "15", "17", "13")
+    assert four.waveform == "sine" and four.hold_cue
+    assert [t.pos for t in four.targets] == pytest.approx([(-0.27, 0.27), (0.27, 0.27),
+                                                          (-0.27, -0.27), (0.27, -0.27)])
+    assert max(abs(t.pos[1]) for t in four.targets) + four.reach <= 0.5   # fits the height
+    # the status line (anchored at its top, below the targets) and the prompt (anchored at
+    # its bottom, above them) are placed as PsychoPyRenderer places them; both must stay
+    # on screen with two lines (RATE_PROMPT) at about 1.25 line heights each
+    from brainsync.stimulus.display import RATE_PROMPT, TEXT_GAP, TEXT_HEIGHT
+    lines = RATE_PROMPT.count("\n") + 1
+    edge = max(abs(t.pos[1]) for t in four.targets) + four.reach + TEXT_GAP
+    assert edge + 1.25 * lines * TEXT_HEIGHT <= 0.5 + 1e-9, edge
+    validate(four)
+    s = four.session
+    assert (s.blocks, s.cue_s, s.stim_s, s.rest_s, s.shuffle) == (8, 1.0, 4.0, 3.0, True)
+    assert len(session_trials(four, seed=0)) == 32
+    warn = config_warnings(four)
+    assert len(warn) == 1 and "photosensitivity" in warn[0] and "15/17 Hz" in warn[0]
 
 
 def test_resolve_config_by_path_and_missing(tmp_path: Path):
@@ -354,6 +379,56 @@ def test_feedback_reader_stringio_until_eof():
     assert empty._thread is not None and empty._thread.daemon
 
 
+
+def test_parse_lean_lines():
+    assert parse_command("lean 2 63 1 4\n", 4).extra == (63, 1, 4)
+    assert parse_command("lean 2 63 1 4", 4).value == 2
+    assert parse_command("lean -1", 4).value == -1
+    for bad in ("lean", "lean 4 50 1 4", "lean 0 101 1 4", "lean 0 50 5 4", "lean 0 50 1 0",
+                "lean 0 x 1 4", "lean 0 50 1"):
+        with pytest.raises(ValueError):
+            parse_command(bad, 4)
+
+
+def test_feedback_reader_keeps_the_latest_lean_without_hearing_it():
+    r = FeedbackReader(io.StringIO("lean 1 70 2 4\nlean 9 1 1 1\n"), 2, note=lambda s: None)
+    assert r.lean == (-1, 0, 0, 0)
+    r.run()
+    assert r.lean == (1, 70, 2, 4) and r.n_ignored == 1
+    assert r.current == -1
+    # a lean line never releases --hold-still; "lean -1" hides the meter
+    r2 = FeedbackReader(io.StringIO("lean 0 40 0 4\nlean -1\n"), 2, note=lambda s: None)
+    r2.run()
+    assert r2.lean == (-1, 0, 0, 0) and not r2._heard.is_set()
+
+
+def test_free_frames_carry_the_lean_on_flicker_frames_only():
+    cfg = load_config("two_targets")
+    held = iter([True, True] + [False] * 100)
+    frames = list(free_frames(cfg, seconds=0.05, hold=lambda: next(held),
+                              lean=lambda: (1, 80, 3, 4)))
+    assert [f.lean for f in frames[:2]] == [(-1, 0, 0, 0)] * 2
+    assert all(f.lean == (1, 80, 3, 4) for f in frames[2:])
+
+
+def test_play_passes_the_lean_only_when_set():
+    seen = []
+
+    class Plain:
+        def draw(self, lum, cue, **kw):
+            seen.append(kw)
+
+        def flip(self):
+            return float(len(seen)) / 60.0
+
+        def escape_pressed(self):
+            return False
+
+    frames = [Frame(np.zeros(2)), Frame(np.zeros(2), lean=(0, 55, 1, 4))]
+    play(frames, Plain(), MarkerWriter("none"), 60.0)
+    assert seen == [{}, {"lean": (0, 55, 1, 4)}]
+
+
 # -- markers and playback -------------------------------------------------------------------
 
 def test_marker_format_parses():
@@ -495,6 +570,22 @@ def test_play_escape_aborts():
     assert timing.aborted and ren.flips == 5 and "ABORTED" in timing.summary()
 
 
+def test_held_free_run_marks_its_onset_after_the_hold():
+    cfg = _cfg()
+    held = iter([True] * 3 + [False] * 100)
+    out = io.StringIO()
+    ren = FakeRenderer(60.0)
+    play(free_frames(cfg, seconds=0.1, hold=lambda: next(held)), ren,
+         MarkerWriter("monotonic", stream=out, clock=lambda: ren.t), 60.0)
+    text = out.getvalue()
+    assert text.count("free_on") == 1
+    # the still frames flip first; the marker carries the fourth flip's time
+    assert free_onset(text) == pytest.approx(ren.t - (ren.flips - 4) / 60.0, abs=1e-4)
+    assert parse_markers(text) == []                   # no stim_on/off to confuse a recording
+    assert free_onset("measured refresh: 60.00 Hz\n") is None
+    assert free_onset("[marker 1792911476.6148] free_on\n") == 1792911476.6148
+
+
 def test_free_frames_poll_feedback_and_stop():
     cfg = _cfg()
     assert len(list(free_frames(cfg, seconds=0.5))) == 30
@@ -514,6 +605,8 @@ def test_free_frames_poll_feedback_and_stop():
     assert [f.cue for f in frames[:4]] == [-1, -1, 1, 1]
     for i, fr in enumerate(frames):
         np.testing.assert_allclose(fr.lum, frame_luminances(cfg.freqs, cfg.phases, i, 60.0))
+    # the first flicker frame, and only it, carries the free run's onset marker
+    assert [f.events for f in frames] == [(FREE_ON,)] + [()] * 9
     reader = FeedbackReader(io.StringIO("1\n"), 2, note=lambda s: None)
     reader.run()
     assert list(free_frames(cfg, cue=lambda: reader.current, stop=lambda: reader.done)) == []
@@ -699,6 +792,14 @@ class _FakeStim:
         self.drawn += 1
 
 
+class _FakeRect(_FakeStim):
+    pass
+
+
+class _FakeShapeStim(_FakeStim):
+    pass
+
+
 class _FakePsychoWindow:
     size = (3024, 1964)   # 14" MacBook Pro, 1.54:1
 
@@ -724,7 +825,8 @@ def test_psychopy_renderer_against_fake_psychopy(monkeypatch, capsys):
 
     from brainsync.stimulus.display import Aborted, PsychoPyRenderer
     keys: list[list[str]] = [[], ["escape"]]
-    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeStim, TextStim=_FakeStim)
+    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeStim, TextStim=_FakeStim,
+                                   ShapeStim=_FakeStim)
     event = types.SimpleNamespace(getKeys=lambda keyList: keys.pop(0) if keys else [],
                                   clearEvents=lambda: None)
     fake = types.ModuleType("psychopy")
@@ -748,6 +850,35 @@ def test_psychopy_renderer_against_fake_psychopy(monkeypatch, capsys):
     monkeypatch.setattr(_FakePsychoWindow, "size", (1440, 1080))   # 4:3 is too narrow
     PsychoPyRenderer(cfg)
     assert "cut off" in capsys.readouterr().err
+
+
+def test_psychopy_renderer_draws_target_shapes(monkeypatch):
+    import dataclasses
+    import types
+
+    from brainsync.stimulus import shapes
+    from brainsync.stimulus.display import PsychoPyRenderer
+    visual = types.SimpleNamespace(Window=_FakePsychoWindow, Rect=_FakeRect,
+                                   ShapeStim=_FakeShapeStim, TextStim=_FakeStim)
+    event = types.SimpleNamespace(getKeys=lambda keyList: [], clearEvents=lambda: None)
+    fake = types.ModuleType("psychopy")
+    fake.visual, fake.event = visual, event
+    monkeypatch.setitem(sys.modules, "psychopy", fake)
+    cfg = _cfg(targets={"freqs": [13.0, 15.0, 17.0]}, layout={"cols": 3, "spacing": 0.5})
+    names = ["square", "plus", "arrow-up"]
+    cfg = dataclasses.replace(cfg, targets=tuple(
+        dataclasses.replace(t, shape=n) for t, n in zip(cfg.targets, names)))
+    r = PsychoPyRenderer(cfg)
+    square, plus, arrow = r.squares
+    assert type(square) is _FakeRect
+    assert square.kw["size"] == (cfg.size, cfg.size) and square.kw["pos"] == cfg.targets[0].pos
+    for stim, t in ((plus, cfg.targets[1]), (arrow, cfg.targets[2])):
+        assert type(stim) is _FakeShapeStim
+        assert stim.kw["vertices"] == shapes.vertices(t.shape, cfg.size)
+        assert stim.kw["pos"] == t.pos and stim.kw["lineColor"] is None
+    r.draw(np.array([1.0, 0.0, 1.0]), -1)
+    assert [s.fillColor for s in r.squares] == [(1.0, 1.0, 1.0), (-1, -1, -1), (1.0, 1.0, 1.0)]
+    assert [s.drawn for s in r.squares] == [1, 1, 1]
 
 
 def test_ready_line_follows_the_refresh_check(fake_window, capsys):
@@ -791,6 +922,17 @@ def test_hold_still_needs_stdin_feedback():
     with pytest.raises(SystemExit):
         cli.main(["--free", "--hold-still", "--plan"])
     assert cli.main(["--free", "--feedback", "stdin", "--hold-still", "--plan"]) == 0
+
+
+def test_four_targets_config_has_the_gate_frequencies():
+    """The page-mode gate set (PLAN.md section 14), recordable with brainsync.record."""
+    from brainsync.stimulus.config import load_config
+
+    cfg = load_config("four_targets")
+    assert cfg.n_targets == 4
+    assert cfg.freqs.tolist() == [13.0, 15.0, 17.0, 11.0]
+    assert cfg.phases.tolist() == [0.0] * 4
+    assert cfg.labels == ("13", "15", "17", "11")
 
 
 def test_feedback_reader_takes_text_lines_on_the_same_stream():

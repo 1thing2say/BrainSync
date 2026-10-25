@@ -238,7 +238,7 @@ final class AppModel {
             stopReason = nil
             connectionNote = ""
             reportedMic = ""  // tell the new connection what the mic is doing
-            UIApplication.shared.isIdleTimerDisabled = true
+            IdleTimer.hold("voice", true)
             fetchConfig()
             if let id = pendingTtsDone {
                 pendingTtsDone = nil
@@ -274,7 +274,7 @@ final class AppModel {
 
     private func setDisconnected() {
         connected = false
-        UIApplication.shared.isIdleTimerDisabled = false
+        IdleTimer.hold("voice", false)
         stopClockPings()
         updateFlicker()  // no server: dark at once (draft section 9)
         // The server re-sends the mic state when we are back.
@@ -504,7 +504,7 @@ final class AppModel {
         pendingTtsDone = nil
         listener.stop("disconnected")
         speaker.cancel()
-        UIApplication.shared.isIdleTimerDisabled = false
+        IdleTimer.hold("voice", false)
     }
 
     /// Back from the pair screen to the saved server.

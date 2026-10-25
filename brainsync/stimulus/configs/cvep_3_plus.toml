@@ -1,0 +1,41 @@
+# cvep_3 with plus signs instead of squares: the same c-VEP code, labels and row of three,
+# to compare a plus against a square on the same code. One 63-bit m-sequence, every plus
+# shows it delayed by k * 21 frames (350 ms apart); each cycle lasts 63 frames = 1.05 s at
+# 60 Hz. A plus lights only 5/9 (56 %) of its size box, so the box is 0.28 here instead
+# of cvep_3's 0.26, the most the row's labels and centre line below it allow: about 64 %
+# of a cvep_3 square's lit area. Expect a weaker response than cvep_3; record both before
+# choosing.
+name = "cvep_3_plus"
+
+[targets]
+labels = ["YES", "NO", "HELP"]   # left, middle, right; spoken on a commit
+shapes = ["plus", "plus", "plus"]
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+rows = 1
+cols = 3
+size = 0.28       # the plus's box, screen heights (about 5.3 cm on a 14-inch MacBook)
+spacing = 0.55    # centre to centre
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

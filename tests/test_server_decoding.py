@@ -351,3 +351,183 @@ def test_rearm_resets_only_the_voter(calib):
 
 def test_default_channel_names_are_the_montage():
     assert DecoderBank().ch_names == tuple(MONTAGE)
+
+
+# -- CodeBank (code mode, c-VEP) ------------------------------------------------------------
+
+def coded_board(fixated: int = 0, seed: int = 0):
+    from brainsync.stimulus import load_config
+    from brainsync.stimulus.coded import CodeSequence
+    from brainsync.vep.fake import SequenceFakeBoard
+    return SequenceFakeBoard(CodeSequence(load_config("cvep_3")), t0=T0, amp=3.0, noise=8.0,
+                             fixated=fixated, seed=seed)
+
+
+def run_coded(bank, board, seconds: float, chunk: float = 0.05) -> list:
+    out = []
+    for _ in range(int(round(seconds / chunk))):
+        board.advance(chunk)
+        X, t = board.read()
+        for tt, kind, _ in board.read_events():
+            if kind == "cycle":
+                bank.add_cycle(tt)
+        out += bank.feed(X, t)
+    return out
+
+
+def test_code_bank_trains_then_decides_once_a_cycle():
+    from brainsync.server.coding import CodeBank, lag_index
+    bank = CodeBank(FS, train_cycles=4)
+    assert bank.training and bank.progress == (0, 4) and bank.accuracy is None
+    assert bank.code["lag_frames"] == 21 and len(bank.code["bits"]) == 63
+    board = coded_board(fixated=0)
+    run_coded(bank, board, 1.0)                    # nothing counts while inactive
+    assert bank.progress == (0, 4)
+    bank.activate(board.now)
+    board.start_flicker()
+    assert run_coded(bank, board, 6.0) == []       # training gives no decisions
+    assert bank.trained and bank.accuracy >= 0.8 and bank.chance == pytest.approx(1 / 3)
+    board.set_target(1)
+    ds = run_coded(bank, board, 5.3)
+    assert 4 <= len(ds) <= 6 and ds[-1].committed == 1 == lag_index(21)
+    assert lag_index(42) == 2 and lag_index(20) is None and lag_index(63) is None
+    bank.rearm()
+    assert bank.decoder.committed == ABSTAIN
+
+
+def test_code_bank_counts_cycles_only_while_active_and_after_the_activation():
+    from brainsync.server.coding import CYCLE_SLACK_S, CodeBank
+    bank = CodeBank(FS, train_cycles=4)
+    assert not bank.add_cycle(T0)                  # inactive
+    bank.activate(T0 + 10.0)
+    assert not bank.add_cycle(T0 + 10.0 - CYCLE_SLACK_S - 0.01) and bank.dropped == 1
+    assert bank.add_cycle(T0 + 10.0 - CYCLE_SLACK_S / 2)
+    assert not bank.add_cycle(math.nan)
+    bank.deactivate()
+    assert not bank.active and not bank.add_cycle(T0 + 11.0)
+
+
+def test_code_bank_retrain_and_a_failed_training():
+    from brainsync.server.coding import CodeBank
+    bank = CodeBank(FS, train_cycles=3)
+    board = coded_board()
+    bank.activate(board.now)
+    board.start_flicker()
+    run_coded(bank, board, 5.0)
+    assert bank.trained
+    bank.retrain()
+    assert bank.training and bank.progress == (0, 3)
+    # cycle times before any sample (a clock off by a little): no cycle can be cut, so the
+    # training restarts and says why
+    fresh, board = CodeBank(FS, train_cycles=3), coded_board()
+    fresh.activate(board.now)
+    for k in range(3):
+        assert fresh.add_cycle(board.now - 0.2 + 0.05 * k)
+    for _ in range(40):
+        board.advance(0.05)
+        fresh.feed(*board.read())
+    assert fresh.training and "training cycle" in fresh.train_error
+    assert fresh.progress == (0, 3)
+
+
+# -- trained classifiers --------------------------------------------------------------------
+
+from brainsync.classify import ETRCA  # noqa: E402
+from brainsync.signal import preprocess  # noqa: E402
+from brainsync.synthetic import ssvep_trials  # noqa: E402
+
+
+def trained_model(periodic: bool | None = None):
+    X, y = ssvep_trials(FREQS, FS, n_per_target=4, seconds=2.0, snr_db=0.0, seed=3)
+    # windows cut at onset + latency, as online.trained_from_recording cuts them
+    return make("etrca-sf", freqs=FREQS, fs=FS, periodic=periodic).fit(preprocess(X, FS), y,
+                                                                        LATENCY_S)
+
+
+def test_build_decoder_with_a_trained_model():
+    model = trained_model()
+    dec = build_decoder((17.0, 15.0), (0.0, 0.0), trained=model)
+    clf = dec.classifier
+    assert isinstance(clf, ETRCA) and clf.freqs.tolist() == [17.0, 15.0]
+    assert clf.margin == TUNED.margin and clf.threshold == TUNED.threshold
+    assert dec.needs_onset and dec.window_s == TUNED.window_s
+    assert model.n_targets == 4                          # the model itself is untouched
+    with pytest.raises(ValueError, match="not one of the trained"):
+        build_decoder((15.0, 11.0), (0.0, 0.0), trained=model)
+    with pytest.raises(ValueError, match="phases"):
+        build_decoder((15.0, 17.0), (0.0, 1.0), trained=model)
+    with pytest.raises(ValueError, match="Hz but the board"):
+        build_decoder((15.0,), (0.0,), fs=256.0, trained=model)
+    raw = trained_model(periodic=False)                  # 500-sample templates, 375-sample window
+    with pytest.raises(ValueError, match="templates are 500 samples"):
+        build_decoder((15.0, 17.0), (0.0, 0.0), trained=raw)
+
+
+def test_bank_with_trained_model_aligns_to_the_onset(calib):
+    model = trained_model()
+    bank = make_bank(calib, trained=model)
+    assert bank.calibrated and bank.trained is model   # the probe is a plain CCA decoder
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    dec = bank.decoder
+    assert isinstance(dec.classifier, ETRCA) and dec.classifier.has_baseline
+    assert dec.onset == pytest.approx(T0 + 6.0)
+    bank.set_onset(T0 + 6.5)
+    assert dec.onset == pytest.approx(T0 + 6.5) and bank.gate == pytest.approx(T0 + 6.5 + LATENCY_S)
+    board = FakeBoard(FREQS, seed=1, t0=T0 + 6.0)
+    board.set_target(0)
+    out = stream(bank, board, 4.0)
+    assert out and all(d.scores.shape == (2,) for d in out)
+    with pytest.raises(ValueError, match="either a decoder factory or a trained"):
+        DecoderBank(factory=lambda f, p: build_decoder(f, p), trained=model)
+    with pytest.raises(ValueError, match="either a saved model or a trained"):
+        DecoderBank(model="calibrated.npz", trained=model)          # --decoder-model and --trained
+    with pytest.raises(ValueError, match="either a saved model or a trained"):
+        build_decoder((15.0, 17.0), (0.0, 0.0), model="calibrated.npz", trained=model)
+
+
+def test_learn_adds_a_confirmed_trial_and_rebuilds_the_decoder(calib):
+    model = trained_model()
+    bank = make_bank(calib, trained=model)
+    assert len(bank._hist._data[0]) >= int((2.0 + 2.0 + 20.0) * FS)   # template + pad + 20 s
+    board = FakeBoard(FREQS, seed=2, t0=T0 + 6.0)
+    board.set_target(-1)
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    stream(bank, board, 3.0)                                 # still screen fills the pad
+    bank.set_onset(T0 + 9.0)
+    board.set_target(0)
+    stream(bank, board, 5.0)
+    old = bank.decoder
+    before = model.n_train.copy()
+    assert bank.learn(15.0, bank.gate) is True
+    assert model.n_train.tolist() == [before[0] + 1, *before[1:]]
+    new = bank.decoder
+    assert new is not old and new.classifier.has_baseline and new.onset == old.onset
+    assert new.onset == pytest.approx(T0 + 9.0) and new.classifier.freqs.tolist() == [15.0, 17.0]
+    out = stream(bank, board, 2.0)
+    assert out and all(d.scores.shape == (2,) for d in out)
+    assert bank.learn(15.0, T0 - 100.0) is False             # before any history
+    assert bank.learn(17.0, T0 + 6.0) is False               # no pad before the first sample
+    with pytest.raises(ValueError, match="not one of the trained"):
+        bank.learn(11.0, bank.gate)
+    with pytest.raises(ValueError, match="finite"):
+        bank.learn(15.0, math.nan)
+    with pytest.raises(ValueError, match="no trained classifier"):
+        make_bank(calib).learn(15.0, T0)
+
+
+def test_learn_refuses_a_window_that_reaches_past_the_commit(calib):
+    """The learnt window must end before the pick's commit, else it holds the next screen."""
+    model = trained_model()                                  # 2 s templates
+    bank = make_bank(calib, trained=model)
+    board = FakeBoard(FREQS, seed=4, t0=T0 + 6.0)
+    board.set_target(-1)
+    bank.activate((15.0, 17.0), (0.0, 0.0), now=T0 + 6.0)
+    stream(bank, board, 3.0)
+    bank.set_onset(T0 + 9.0)
+    board.set_target(0)
+    stream(bank, board, 5.0)
+    gate = bank.gate
+    assert bank.learn(15.0, gate, t_end=gate + 1.5) is False     # committed too early: not learnt
+    assert model.n_train.tolist() == [4, 4, 4, 4]
+    assert bank.learn(15.0, gate, t_end=gate + 2.5) is True      # the window fits before the commit
+    assert model.n_train.tolist() == [5, 4, 4, 4]

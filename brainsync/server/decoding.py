@@ -33,33 +33,89 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import numpy as np
 
 from ..board import FS
-from ..classify import make
+from ..classify import Trained, make
 from ..eog import GazeDecoder
 from ..online import TUNED, Calibration, Decision, Decoder, RingBuffer, fit_rest
-from ..recordings import MONTAGE, POSTERIOR
+from ..recordings import MONTAGE, POSTERIOR, channel_indices
+from ..signal import preprocess
+from ..templates import load_model
 from .protocol import LATENCY_S
 
-__all__ = ["DecoderBank", "build_decoder", "PAD_S", "PROBE_DIVISOR"]
+__all__ = ["DecoderBank", "build_decoder", "PAD_S", "PROBE_DIVISOR", "LEARN_HISTORY_S"]
 
 PAD_S = 2.0            # filter start-up seconds dropped before each window (demo setting)
 PROBE_DIVISOR = 25.0   # the probe decoder runs at fs / 25 Hz (10 Hz at 250 Hz)
+LEARN_HISTORY_S = 20.0  # with a trained classifier: history kept past a template, so a pick
+                        # confirmed this much later can still be learnt (learn())
 
 DecoderFactory = Callable[[tuple[float, ...], tuple[float, ...]], Decoder]
 
 
 def build_decoder(freqs: Sequence[float], phases: Sequence[float], fs: float = FS,
-                  ch_names: Sequence[str] = MONTAGE) -> Decoder:
+                  ch_names: Sequence[str] = MONTAGE, model: str | Path | None = None,
+                  channels: Sequence[str | int] | None = POSTERIOR,
+                  trained: Trained | None = None) -> Decoder:
     """The live demo's decoder: swipe_web.build_decoder's recipe (TUNED FBCCA, 3 harmonics,
     the POSTERIOR channels, a 2 s pad), written here so the server does not import the
-    BrainSwipe page and its dependencies."""
-    clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
-               margin=TUNED.margin, threshold=TUNED.threshold)
+    BrainSwipe page and its dependencies.
+
+    With ``model`` (a file from ``brainsync.calibrate``) the classifier is the saved, trained
+    one instead; its targets must be these ``freqs`` and ``phases`` (within 0.01 Hz) and its
+    channel count must match ``channels``. The saved margin and threshold are replaced by the
+    TUNED ones so the abstain rules stay the same as for FBCCA.
+
+    With ``trained`` (a fitted spatial filter, ``classify.Trained``, over the POSTERIOR
+    channels, see ``online.trained_from_recording``) the decoder scores with its subset for
+    ``freqs`` instead, also with the TUNED margin and threshold; every frequency must be a
+    trained target with the same phase, and the model must run at ``fs``. ``model`` and
+    ``trained`` exclude each other.
+    """
+    if model is not None and trained is not None:
+        raise ValueError("pass either a saved model or a trained spatial filter, not both")
+    if model is None and trained is None:
+        clf = make(TUNED.classifier, freqs=freqs, fs=fs, harmonics=3, phases=phases,
+                   margin=TUNED.margin, threshold=TUNED.threshold)
+    elif trained is not None:
+        if abs(trained.fs - float(fs)) > 1e-6:
+            raise ValueError(f"the trained classifier runs at {trained.fs:g} Hz but the board at "
+                             f"{float(fs):g} Hz")
+        clf = trained.for_freqs(freqs)
+        want = np.asarray(phases, dtype=float).reshape(-1)
+        if want.size != clf.n_targets or np.any(np.abs(clf.phases - want) > 1e-6):
+            raise ValueError(f"layout phases {want.tolist()} differ from the trained "
+                             f"{clf.phases.tolist()} for {list(freqs)} Hz")
+        n_window = int(round(TUNED.window_s * float(fs)))
+        if clf.cycle is None and clf.templates.shape[-1] != n_window:
+            raise ValueError(f"the trained templates are {clf.templates.shape[-1]} samples but the "
+                             f"decoder's window is {n_window}; train on a window of at least one "
+                             f"common period or exactly {TUNED.window_s:g} s")
+        clf.margin, clf.threshold = TUNED.margin, TUNED.threshold
+    else:
+        clf = load_model(model)
+        f, ph = np.asarray(freqs, float), np.asarray(phases, float)
+        if (clf.freqs.size != f.size or np.any(np.abs(clf.freqs - f) > 0.01)
+                or np.any(np.abs(np.angle(np.exp(1j * (clf.phases - ph)))) > 1e-6)):
+            raise ValueError(f"model {model} was trained for {clf.freqs.tolist()} Hz, phases "
+                             f"{clf.phases.tolist()}, not {f.tolist()} Hz, {ph.tolist()}")
+        if abs(clf.fs - fs) > 1e-6:
+            raise ValueError(f"model {model} was trained at {clf.fs} Hz, the board runs at {fs}")
+        names = tuple(str(c) for c in ch_names)
+        selected = [names[i] for i in channel_indices(names, channels)]
+        if clf.n_ch != len(selected):
+            raise ValueError(f"model {model} was trained on {clf.n_ch} channels, the decoder "
+                             f"selects {len(selected)}")
+        trained_on = clf.meta.get("channels") if isinstance(clf.meta, dict) else None
+        if trained_on and list(trained_on) != selected:
+            raise ValueError(f"model {model} was trained on channels {list(trained_on)}, the "
+                             f"decoder selects {selected}")
+        clf.margin, clf.threshold = TUNED.margin, TUNED.threshold
     return Decoder(clf, fs, window_s=TUNED.window_s, step_s=TUNED.step_s, votes=TUNED.votes,
-                   channels=POSTERIOR, pad_s=PAD_S, ch_names=ch_names)
+                   channels=channels, pad_s=PAD_S, ch_names=ch_names)
 
 
 def _key(freqs: Sequence[float], phases: Sequence[float], fs: float) -> tuple[tuple[float, ...],
@@ -99,12 +155,18 @@ class DecoderBank:
     is fed every sample, its centre is fitted on the calibration data, and while a layout
     is active with known target ``positions`` (activate), each decoder's ``prior`` adds the
     gaze scores to the SSVEP scores. A layout without positions runs on SSVEP alone.
+
+    ``model`` (a ``brainsync.calibrate`` file) or ``trained`` (a fitted spatial filter,
+    which ``learn`` keeps teaching) replaces FBCCA in every layout's decoder
+    (``build_decoder``); the probe stays training-free. They exclude each other.
     """
 
     def __init__(self, fs: float = FS, *, ch_names: Sequence[str] = MONTAGE,
                  latency_s: float = LATENCY_S,
                  factory: DecoderFactory | None = None,
-                 gaze: GazeDecoder | None = None) -> None:
+                 model: str | Path | None = None,
+                 gaze: GazeDecoder | None = None,
+                 trained: Trained | None = None) -> None:
         fs = float(fs)
         if not math.isfinite(fs) or fs <= 0:
             raise ValueError(f"fs must be a positive number of Hz, got {fs}")
@@ -117,6 +179,14 @@ class DecoderBank:
             raise ValueError(f"ch_names must be unique board channel names, got "
                              f"{list(self.ch_names)}")
         self.latency_s = latency_s
+        self.model = None if model is None else Path(model)
+        if factory is not None and trained is not None:
+            raise ValueError("pass either a decoder factory or a trained classifier, not both")
+        if model is not None and trained is not None:
+            raise ValueError("pass either a saved model or a trained spatial filter, not both")
+        self.trained = trained
+        # the probe (a single off-target frequency) only learns the window geometry, so the
+        # default factory applies the saved model to real layouts only
         if gaze is not None:
             if not isinstance(gaze, GazeDecoder):
                 raise ValueError(f"gaze must be a brainsync.eog.GazeDecoder, got "
@@ -129,10 +199,18 @@ class DecoderBank:
         self.gaze = gaze
         self._gaze_on = False   # positions known for the active layout
         self._factory: DecoderFactory = factory or (
-            lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names))
+            lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names,
+                                       model=None if len(f) == 1 and f[0] == fs / PROBE_DIVISOR
+                                       else self.model, trained=self.trained))
         self._decoders: dict[tuple[tuple[float, ...], tuple[float, ...]], Decoder] = {}
-        self._probe = self._make((fs / PROBE_DIVISOR,), (0.0,))
+        # the probe is a plain CCA decoder at a frequency no layout uses: it only measures
+        # the calibration data, so a trained classifier (fixed targets) never serves it
+        plain = (None if trained is None else
+                 (lambda f, p: build_decoder(f, p, fs=self.fs, ch_names=self.ch_names)))
+        self._probe = self._make((fs / PROBE_DIVISOR,), (0.0,), factory=plain)
         n = self._probe.needed
+        if trained is not None:     # room to cut a confirmed trial's window later (learn())
+            n = max(n, trained.templates.shape[-1] + int(round((PAD_S + LEARN_HISTORY_S) * fs)))
         self._hist = RingBuffer(len(self.ch_names), n)
         self._times = RingBuffer(1, n)
         self._calib: np.ndarray | None = None
@@ -183,9 +261,10 @@ class DecoderBank:
 
     # -- decoders -----------------------------------------------------------------------
 
-    def _make(self, freqs: tuple[float, ...], phases: tuple[float, ...]) -> Decoder:
+    def _make(self, freqs: tuple[float, ...], phases: tuple[float, ...],
+              factory: DecoderFactory | None = None) -> Decoder:
         try:
-            dec = self._factory(freqs, phases)
+            dec = (factory or self._factory)(freqs, phases)
         except KeyError as exc:      # recordings.channel_indices: a channel the board lacks
             raise ValueError(f"the decoder's channels do not fit the board's {list(self.ch_names)}"
                              f" ({exc.args[0]}); pass matching ch_names or a factory") from None
@@ -298,6 +377,7 @@ class DecoderBank:
         if k > 0:
             dec.feed(self._hist.last(k), self._times.last(k)[0])
         dec.voter.reset()
+        dec.set_onset(now)           # refined by set_onset() when the client reports its frame
         self._active = key
         self._gate = now + self.latency_s
         self.dropped = 0
@@ -318,6 +398,71 @@ class DecoderBank:
         if gate > self._gate:
             dec.voter.reset()
         self._gate = gate
+        dec.set_onset(t_onset)       # trained classifiers lock their templates to this time
+
+    # -- learning from confirmed picks (a trained spatial filter only) ---------------------
+
+    def learn(self, freq: float, t_start: float, t_end: float | None = None) -> bool:
+        """Teach the trained classifier a trial the user confirmed: the trial whose gate
+        (onset + latency_s) was ``t_start`` was a look at the target at ``freq``.
+
+        The window starts at the trial's onset + the classifier's ``t0`` (where its training
+        windows start; the same as the gate when ``t0`` equals ``latency_s``) and is cut from
+        the history at the templates' length, preprocessed like a decoder window (pad before
+        it, dropped after filtering), added to the training set and the classifier refitted.
+        Cached decoders are rebuilt from it, the active one in place with its baseline, onset
+        and gate kept. ``t_end`` is the last moment the user was certainly still looking at
+        that target (the pick's commit time): a window reaching past it would hold the next
+        screen's flicker, so it is not learnt. Returns False when the window is not learnt:
+        it reaches past ``t_end``, or the history no longer covers it (too long ago, or
+        before this process saw data).
+        """
+        if self.trained is None:
+            raise ValueError("no trained classifier to teach; start the bank with trained=")
+        hit = np.flatnonzero(np.abs(self.trained.freqs - float(freq)) <= 0.01)
+        if hit.size != 1:
+            raise ValueError(f"{float(freq):g} Hz is not one of the trained targets "
+                             f"{self.trained.freqs.tolist()}")
+        t_start = float(t_start)
+        if not math.isfinite(t_start):
+            raise ValueError(f"t_start must be finite, got {t_start}")
+        t_start += self.trained.t0 - self.latency_s     # gate -> the training alignment
+        k = len(self._hist)
+        if k == 0:
+            return False
+        times = self._times.last(k)[0]
+        first = int(np.searchsorted(times, t_start - 0.5 / self.fs))
+        n_pad = int(round(PAD_S * self.fs))
+        a, b = first - n_pad, first + self.trained.templates.shape[-1]
+        if a < 0 or b > k:
+            return False
+        if t_end is not None and times[b - 1] > float(t_end):
+            return False
+        probe = self._probe
+        segment = self._hist.last(k)[probe.rows, a:b]
+        window = preprocess(segment, self.fs, band=probe.band, notch_hz=probe.notch_hz)[:, n_pad:]
+        self.trained.update(window, int(hit[0]))
+        self._rebuild()
+        return True
+
+    def _rebuild(self) -> None:
+        """Drop the cached decoders (their classifiers are subsets of the old fit); remake the
+        active one now, fitted on the calibration data, primed as activate() does and with
+        the old one's onset."""
+        old = self.decoder
+        self._decoders.clear()
+        key = self._active
+        if key is None or self._calib is None:
+            return
+        dec = self._make(*key)
+        self._fit(dec, self._calib)
+        k = min(len(self._hist), dec.needed - 1)
+        if k > 0:
+            dec.feed(self._hist.last(k), self._times.last(k)[0])
+        dec.voter.reset()
+        if old is not None:
+            dec.set_onset(old.onset)
+        self._decoders[key] = dec
 
     def deactivate(self) -> None:
         """Stop deciding (a layout without targets, or not running); history keeps filling."""

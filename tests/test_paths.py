@@ -13,6 +13,12 @@ def test_env_var_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert paths.data_dir() == tmp_path
     assert paths.recordings_dir() == tmp_path / "spectrum_checks"
     assert paths.nakanishi_dir() == tmp_path / "nakanishi2015"
+    assert paths.models_dir() == tmp_path / "models"
+
+
+def test_models_dir_sits_under_the_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(paths.ENV_VAR, raising=False)
+    assert paths.models_dir() == paths.data_dir() / "models"
 
 
 def test_source_checkout_uses_repo_data(monkeypatch: pytest.MonkeyPatch) -> None:

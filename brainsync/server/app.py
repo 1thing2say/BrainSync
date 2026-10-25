@@ -1,14 +1,23 @@
 """The BrainSync server: the headset, the decoder and every client, in one process.
 
     python -m brainsync.server --board fake --no-auth        # try it all without a headset
+    python -m brainsync.server --board fake --no-auth --paradigm freq   # frequency flicker
     python -m brainsync.server --board cerelog               # the Cerelog X8 on USB serial
     python -m brainsync.server --origin 'https://ripe-banana\\.trycloudflare\\.com'  # behind cloudflared
     python -m brainsync.server --board fake --env-file .env  # point mode, key from a file
 
-It wires the pieces of PROTOCOL-v3.md together: the board (a real-time FakeBoard with
-``--board fake``, else the Cerelog X8 through the BrainFlow fork) feeds a DecoderBank, the
-Session runs the phases, calibration, onset gating and the client's mode, and the Transport
-serves WebSocket and HTTP on one port. ``GET /`` is the reference page from ``clients/web/``
+It wires the pieces of PROTOCOL-v3.md together: the board (with ``--board fake`` a
+real-time fake board, else the Cerelog X8 through the BrainFlow fork) feeds the decoder, the
+Session runs the phases, training or calibration, gating and the client's mode, and the
+Transport serves WebSocket and HTTP on one port.
+
+``--paradigm code`` (the default) is the c-VEP standard of docs/CVEP-STANDARD.md: three
+targets showing one 63-bit m-sequence 21 frames apart, a CodeBank that trains itself on the
+first ``--train-cycles`` cycles (the "train" phase) and the standard's fake board
+(vep.live.standard_fake_board). ``--paradigm freq`` is the frequency flicker of ``--freqs``
+with a DecoderBank and its rest calibration, as before.
+
+``GET /`` is the reference page from ``clients/web/``
 (with ``clients/js/`` beside it), ``GET /health`` the board and client state, and
 ``GET /api/speech?text=...`` a WAV of the text in the Cartesia voice of brainsync.voice
 (``speech_clip``; 503 without CARTESIA_API_KEY or with BRAINSYNC_TTS=off), so a desktop
@@ -54,9 +63,12 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..classify import SPATIAL_FILTERS
 from ..envfile import load_env_file
 from ..eog import GazeDecoder
-from ..recordings import EOG_MONTAGE
+from ..online import TRAIN_WINDOW_S, trained_from_recording
+from ..recordings import EOG_MONTAGE, POSTERIOR
+from ..vep.live import TRAIN_CYCLES
 from . import protocol as P
 from .decoding import DecoderBank
 from .session import Session
@@ -70,7 +82,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = ROOT / "clients" / "web"
 JS_DIR = ROOT / "clients" / "js"
 WEB_FILES = ("index.html", "style.css", "app.js")
-JS_FILES = ("flicker.js", "brainsync-client.js")
+JS_FILES = ("flicker.js", "cvep.js", "brainsync-client.js")
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png"}
 SPEECH_TIMEOUT_S = 10.0     # one /api/speech synthesis (Cartesia's own limit is 8 s a try)
 
@@ -299,6 +311,12 @@ class ArchivingMode:
     def stop(self) -> None:
         self.mode.stop()
 
+    def __getattr__(self, name: str) -> Any:
+        # the rest (code mode's train_targets(), k) is the wrapped mode's
+        if name == "mode":
+            raise AttributeError(name)
+        return getattr(self.mode, name)
+
 
 def make_detector(args: argparse.Namespace) -> Any | None:
     """The Detector for point mode, or None (noted on stderr) when it is off."""
@@ -314,16 +332,29 @@ def make_detector(args: argparse.Namespace) -> Any | None:
     return detector
 
 
-def make_point_factory(detector: Any, freqs: Sequence[float], *, min_p_button: float,
+def make_point_factory(detector: Any, freqs: Sequence[float] | None, *, min_p_button: float,
                        log: Callable[[str, dict], None] | None = None,
                        archive: ScanArchive | None = None,
-                       **options: Any) -> Callable[[], Any]:
+                       lags: Sequence[int] | None = None,
+                       **options: Any) -> Callable[..., Any]:
     """A factory of PointMode (one per controller), checked once now so a bad setting fails at
-    startup instead of at the first controller."""
+    startup instead of at the first controller.
+
+    Code mode passes ``lags`` (frames, one per target): the mode is then
+    ``PointMode(detector, None, lags=lags, viewport=(w, h))``, and the session calls the
+    factory with the controller's ``viewport`` (w, h), or None when the hello had none.
+    """
     from ..screen.controller import PointMode
 
-    def factory() -> Any:
-        mode = PointMode(detector, freqs, min_p_button=min_p_button, log=log, **options)
+    def factory(viewport: tuple[float, float] | None = None) -> Any:
+        kw = dict(options)
+        if viewport is not None:
+            kw["viewport"] = viewport
+        if lags is not None:
+            mode = PointMode(detector, None, lags=tuple(lags), min_p_button=min_p_button,
+                             log=log, **kw)
+        else:
+            mode = PointMode(detector, freqs, min_p_button=min_p_button, log=log, **kw)
         return mode if archive is None else ArchivingMode(mode, archive)
 
     factory().stop()
@@ -344,13 +375,31 @@ def speech_clip(text: str) -> bytes | None:
 
 
 def make_board(args: argparse.Namespace, freqs: Sequence[float]) -> Any:
-    """The board, not yet opened. ImportError when BrainFlow is missing."""
+    """The board, not yet opened. ImportError when BrainFlow is missing.
+
+    ``--board fake`` is a real-time FakeBoard on ``freqs`` in freq mode, and the c-VEP
+    standard's fake board (vep.live.standard_fake_board) in code mode."""
     from ..board import CerelogBoard, FakeBoard
 
     names = EOG_MONTAGE if getattr(args, "eog", False) else None
     if args.board == "fake":
+        if getattr(args, "paradigm", "freq") == "code":
+            from ..vep.live import standard_fake_board
+            return standard_fake_board(fixated=-1, clock=time.time,
+                                       refresh=args.refresh_rates[0])
         return FakeBoard(freqs, clock=time.time, ch_names=names)
     return CerelogBoard(serial_port=args.serial_port, ch_names=names)
+
+
+def make_bank(args: argparse.Namespace, board: Any, gaze: Any = None, trained: Any = None) -> Any:
+    """The decoder: a CodeBank (c-VEP, trains itself) in code mode, else a DecoderBank (FBCCA,
+    or the --decoder-model / --trained classifier, with the EOG gaze prior ``gaze``)."""
+    if getattr(args, "paradigm", "freq") == "code":
+        from .coding import CodeBank
+        return CodeBank(board.fs, ch_names=board.ch_names, refresh=args.refresh_rates[0],
+                        train_cycles=args.train_cycles)
+    return DecoderBank(board.fs, ch_names=board.ch_names, model=getattr(args, "decoder_model", None),
+                       gaze=gaze, trained=trained)
 
 
 # -- command line -------------------------------------------------------------------------
@@ -381,18 +430,44 @@ def build_parser() -> argparse.ArgumentParser:
                         f"{','.join(EOG_MONTAGE)}): the eye's horizontal and vertical EOG "
                         "becomes a gaze prior added to the SSVEP scores for layouts whose "
                         "target positions are known (point mode); brainsync.eog")
+    p.add_argument("--paradigm", choices=P.PARADIGMS, default="code",
+                   help="code (default): the c-VEP standard, three white squares showing one "
+                        "m-sequence 21 frames apart, trained on the first slot "
+                        "(docs/CVEP-STANDARD.md); freq: one flicker frequency per target "
+                        "(--freqs), with a rest calibration")
+    p.add_argument("--train-cycles", type=int, default=TRAIN_CYCLES,
+                   help=f"code mode: cycles (1.05 s each) recorded on the first slot for the "
+                        f"template (default {TRAIN_CYCLES}; at least 2)")
     p.add_argument("--freqs", default=",".join(f"{f:g}" for f in DEFAULT_FREQS),
-                   help="stimulus frequencies in Hz, best first (default 15,17,12,20); point "
-                        "mode shows len-1 buttons plus \"more\"")
+                   help="freq mode: stimulus frequencies in Hz, best first (default "
+                        "15,17,12,20); point mode shows len-1 buttons plus \"more\"")
+    p.add_argument("--decoder-model", metavar="FILE", default=None,
+                   help="trained SSVEP classifier saved by brainsync.calibrate, instead of FBCCA; "
+                        "every layout's targets must be the ones it was trained for (same "
+                        "frequencies and phases), or activating that layout fails (freq "
+                        "mode only)")
     p.add_argument("--calibrate-s", type=float, default=CALIBRATE_S,
-                   help=f"rest-baseline seconds for each new controller (default "
+                   help=f"freq mode: rest-baseline seconds for each new controller (default "
                         f"{CALIBRATE_S:g}; at least about 3.75)")
-    p.add_argument("--refresh-rates", metavar="HZ,...",
-                   default=",".join(f"{r:g}" for r in P.REFRESH_RATES),
+    p.add_argument("--trained", metavar="CUED_NPZ", type=Path, default=None,
+                   help="decode with a spatial filter fitted on this cued recording (its "
+                        "targets must include every --freqs frequency, same phases and rate) "
+                        "instead of the training-free FBCCA (freq mode only)")
+    p.add_argument("--trained-method", default="etrca-sf", choices=list(SPATIAL_FILTERS),
+                   help="which spatial filter --trained fits (default etrca-sf; a template "
+                        "classifier is saved by brainsync.calibrate and loaded with "
+                        "--decoder-model instead)")
+    p.add_argument("--trained-window", type=float, default=TRAIN_WINDOW_S, metavar="S",
+                   help=f"training window per trial in seconds, clipped to the recorded one "
+                        f"(default {TRAIN_WINDOW_S:g}: short enough that a confirmed pick's "
+                        f"window, gate to commit, can be learnt during the session)")
+    p.add_argument("--refresh-rates", metavar="HZ,...", default=None,
                    help=f"display refresh rates a controller may have, each within "
-                        f"{P.REFRESH_TOLERANCE_HZ:g} Hz (default 60,90,120,144); the first is "
-                        f"the nominal one, and a client at another computes the flicker at its "
-                        f"own measured refresh, so the frequencies stay the same")
+                        f"{P.REFRESH_TOLERANCE_HZ:g} Hz. Freq mode (default 60,90,120,144): "
+                        f"the first is the nominal one, and a client at another computes the "
+                        f"flicker at its own measured refresh, so the frequencies stay the "
+                        f"same. Code mode takes one rate (default 60): the code shows one bit "
+                        f"a frame, so the template holds for that rate only")
     p.add_argument("--ignore-refresh", action="store_true",
                    help="accept clients whose display is at none of --refresh-rates; such a "
                         "client computes the flicker at its own measured refresh, so the "
@@ -426,15 +501,28 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
     if args.no_auth and not is_loopback(args.host):
         p.error(f"--no-auth is allowed only with a loopback --host (127.0.0.1, ::1 or "
                 f"localhost), not {args.host}; drop --no-auth and use the token")
+    code = args.paradigm == "code"
+    if args.refresh_rates is None:
+        args.refresh_rates = "60" if code else ",".join(f"{r:g}" for r in P.REFRESH_RATES)
     try:
         args.freqs = parse_freqs(args.freqs)
         args.refresh_rates = parse_refresh_rates(args.refresh_rates)
     except ValueError as exc:
         p.error(str(exc))
-    lowest, top = min(args.refresh_rates), max(args.freqs)
-    if lowest - P.REFRESH_TOLERANCE_HZ <= 2 * top:
-        p.error(f"--refresh-rates {lowest:g} cannot show the {top:g} Hz of --freqs (a display "
-                f"shows less than half its refresh); drop that rate or lower --freqs")
+    if code:
+        if len(args.refresh_rates) != 1:
+            p.error(f"--refresh-rates takes one rate with --paradigm code (the code shows one "
+                    f"bit a frame, so the template holds for one refresh), got "
+                    f"{','.join(f'{r:g}' for r in args.refresh_rates)}")
+        if args.train_cycles < 2:
+            p.error(f"--train-cycles must be at least 2 (the held-out accuracy leaves one "
+                    f"cycle out), got {args.train_cycles}")
+    else:
+        lowest, top = min(args.refresh_rates), max(args.freqs)
+        if lowest - P.REFRESH_TOLERANCE_HZ <= 2 * top:
+            p.error(f"--refresh-rates {lowest:g} cannot show the {top:g} Hz of --freqs (a "
+                    f"display shows less than half its refresh); drop that rate or lower "
+                    f"--freqs")
     if not (math.isfinite(args.calibrate_s) and args.calibrate_s > 0):
         p.error(f"--calibrate-s must be a positive number of seconds, got {args.calibrate_s}")
     if not 0.0 <= args.min_p_button <= 1.0:   # also rejects NaN
@@ -515,11 +603,32 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         print(f"error: cannot set up the board: {exc}", file=sys.stderr)
         return 1
     archive: ScanArchive | None = None
+    code = getattr(args, "paradigm", "freq") == "code"
     try:
-        gaze = GazeDecoder(board.fs, board.ch_names) if args.eog else None
-        bank = DecoderBank(board.fs, ch_names=board.ch_names, gaze=gaze)
+        if code and (args.trained is not None or args.decoder_model is not None):
+            raise ValueError("--trained and --decoder-model are frequency-flicker classifiers; "
+                             "use them with --paradigm freq (code mode trains its own template)")
+        if args.trained is not None and args.decoder_model is not None:
+            raise ValueError("--trained and --decoder-model both replace FBCCA; pass one")
+        trained = None
+        if args.trained is not None:
+            trained = trained_from_recording(args.trained, args.trained_method, channels=POSTERIOR,
+                                             window_s=args.trained_window)
+            if abs(trained.fs - board.fs) > 1e-6:
+                raise ValueError(f"{args.trained}: recorded at {trained.fs:g} Hz, the board runs "
+                                 f"at {board.fs:g} Hz")
+            trained.for_freqs(freqs)        # every layout frequency must be a trained target
+            print(f"trained {trained.name} from {args.trained.name}: {int(trained.n_train.sum())} "
+                  f"trials of {trained.templates.shape[-1] / trained.fs:g} s over "
+                  f"{', '.join(f'{f:g}' for f in trained.freqs)} Hz, channels "
+                  f"{','.join(POSTERIOR)}" + (", periodic templates" if trained.cycle is not None
+                                               else ""), file=sys.stderr)
+        gaze = GazeDecoder(board.fs, board.ch_names) if args.eog and not code else None
+        bank = make_bank(args, board, gaze, trained)
         if gaze is not None:
             _note("EOG gaze prior on: channels LO and RO at the temples (brainsync.eog)")
+        elif args.eog:
+            _note("--eog: the gaze prior works in freq mode only; code mode ignores it")
         if detector is None:
             detector = make_detector(args)
         elif args.no_detect:
@@ -528,9 +637,20 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         if detector is not None:
             if args.log_scans is not None:
                 archive = ScanArchive(args.log_scans)
-            point_factory = make_point_factory(
-                detector, freqs, min_p_button=args.min_p_button, archive=archive,
-                log=None if log is None else log.prefixed("point."))
+            lags = None
+            if code:     # the c-VEP PointMode (brainsync.screen): K = 3 targets on lags
+                lags = tuple(k * bank.lag_frames for k in range(bank.n_targets))
+            try:
+                point_factory = make_point_factory(
+                    detector, None if code else freqs, min_p_button=args.min_p_button,
+                    archive=archive, log=None if log is None else log.prefixed("point."),
+                    lags=lags)
+            except TypeError as exc:     # a PointMode that does not take lags yet
+                if not code:
+                    raise
+                _note(f"point mode is off: this PointMode cannot place code targets ({exc})")
+                point_factory = None
+        max_slots = P.CODE_MAX_SLOTS if code else len(freqs)
         # The transport and the session need each other; the session is made right below,
         # before the transport starts, so these lambdas never see None.
         session: Any = None
@@ -539,13 +659,15 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
                               health=lambda: session.health(),
                               catchup=lambda conn_id, role, hello:
                                   session.catchup(conn_id, role, hello),
-                              speech=speech_clip, max_slots=len(freqs))
-        session = Session(transport, board, bank, freqs, fake=args.board == "fake",
+                              speech=speech_clip, max_slots=max_slots)
+        session = Session(transport, board, bank, () if code else freqs,
+                          fake=args.board == "fake",
                           point_factory=point_factory, calibrate_s=args.calibrate_s,
                           refresh_hz=args.refresh_rates[0], refresh_rates=args.refresh_rates,
                           ignore_refresh=args.ignore_refresh, clock=time.time, log=log)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        print(f"error: {msg}", file=sys.stderr)
         return 2
     try:
         transport.start()
@@ -561,8 +683,10 @@ def _serve(args: argparse.Namespace, token: str | None, log: JsonLog | None,
         try:
             what = "fake board" if args.board == "fake" else "Cerelog X8"
             detect = "point mode on" if point_factory is not None else "point mode off"
-            print(f"BrainSync server on {transport.url} ({what}, {detect}, "
-                  f"freqs {','.join(f'{f:g}' for f in freqs)})", flush=True)
+            stim = (f"c-VEP code, {bank.n_targets} targets {bank.lag_frames} frames apart, "
+                    f"{bank.train_cycles} training cycles" if code
+                    else f"freqs {','.join(f'{f:g}' for f in freqs)}")
+            print(f"BrainSync server on {transport.url} ({what}, {detect}, {stim})", flush=True)
             print(f"open {browser_url(args.host, transport.port, token)}", flush=True)
             if ready is not None:
                 ready(transport)

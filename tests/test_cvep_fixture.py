@@ -21,7 +21,7 @@ def test_the_committed_fixture_is_the_generated_one():
 
 def test_check_passes_on_the_committed_fixture_and_fails_on_a_stale_one(tmp_path):
     assert cvep_fixture.main(["--check"]) == 0
-    stale = tmp_path / "cvep_frames.json"
+    stale = tmp_path / "cvep_stimulus_frames.json"
     stale.write_text("{}\n")
     assert cvep_fixture.main(["--check", "--out", str(stale)]) == 1
     assert cvep_fixture.main(["--check", "--out", str(tmp_path / "missing.json")]) == 1
