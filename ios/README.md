@@ -13,7 +13,8 @@ ios/
   BrainSyncPartner.xcodeproj   the app project (Xcode 16+)
   BrainSyncPartner/            app sources (SwiftUI) and Assets.xcassets
   BrainSyncPartner-Info.plist  mic / speech / local network texts, the brainsync:// scheme
-  BrainSyncKit/                Swift package: links, messages, the socket, ListenCore (tested)
+  BrainSyncKit/                Swift package: links, messages, the socket, ListenCore and the
+                               setup order (tested)
 ```
 
 ## Requirements
@@ -37,6 +38,26 @@ ios/
 4. Choose the phone as the run destination at the top of Xcode and press **Run** (Cmd-R).
 5. First run with a free account: the phone refuses to open the app until you trust the
    developer under Settings > General > VPN & Device Management.
+
+## First run: the setup
+
+The first time the app opens it walks through a short setup, one step per screen like Google's
+Look to Speak, with a step indicator and a big **Continue**:
+
+1. **Welcome:** what the app does (the user picks replies with their eyes on the laptop's flicker
+   screen; this phone shows what they see, listens to the partner and plays the replies).
+2. **Pair:** the pair form below. Skipped when the phone is already paired.
+3. **Safety:** the full flicker warning, and "I have read this warning" before Continue.
+4. **Microphone:** asks iOS for microphone and speech recognition access. It only asks: the mic
+   opens when the server wants it, after the session starts.
+5. **Practice:** an offline walk-through with sample replies (no server, nothing spoken): a
+   question, three reply cards and More options, a pick, the Say it / Back screen, Speaking.
+6. **Done:** "Start the session" accepts the warning for this run and sends resume, like the
+   warning's "I understand, start".
+
+Nothing before the last step starts the session. Once the phone is paired, a red **Stop** is on
+every step, because the app may be opened while the laptop already flickers. Settings > Show setup
+again runs it again.
 
 ## Pair with the server
 
@@ -70,18 +91,30 @@ and edits the profile.
 
 ## Using it
 
-- The **flicker warning** comes first, every time the app starts (PLAN rule 10). "I understand,
-  start" starts the session and asks for the microphone and speech recognition. Resume stays off
-  until the warning is accepted.
+- The **flicker warning** comes first, every time the app starts after the setup (PLAN rule 10).
+  "I understand, start" starts the session and asks for the microphone and speech recognition.
+  Resume stays off until the warning is accepted.
+- The screen is **phrase first**: a slim status line (with the Settings gear), what the partner
+  said last, then the user's screen as big cards: the three replies, each with a chip saying
+  where its square sits on the user's diamond (Top / Left / Right / Bottom), then More options.
+  A flickering target is only a steady lighter card and the picked one gets a yellow ring;
+  nothing blinks. The confirm screen shows the sentence large with Say it and Back side by side;
+  while a reply plays, one large Speaking card. In keyboard mode a tap on a card is its key.
 - **Stop** is pinned at the bottom and always visible: it pauses the session and turns the
   flicker off. `Esc` on the flicker display does the same, and is the one to use when the app
   says it is not connected.
 - The mic follows the server: on during the session, off while a reply plays (so the phone never
   hears itself), when paused, or muted. **Mute** is held by the server. **Restart mic** starts a
   new recognition session now.
-- Typing always works (the text field above the mirror).
+- Typing always works (the text field under the conversation).
 - The operator line at the bottom says "Ready" or what is wrong; tap it for the badges. Correct /
   Wrong mark the last spoken reply, like C / W on the laptop.
+- **Settings** (the gear) stay on the phone: text size of the reply cards (standard, large,
+  extra large; a larger iOS text size still wins), a vibration on a pick and when a reply is
+  spoken, **Test the speaker** (the phone's own voice, only while the mic is off), the microphone
+  permission with a link to iOS Settings, the server with **Pair again**, and **Show setup
+  again**. Mute and the session stay on the main screen (the server holds them), and Stop is on
+  the Settings sheet too.
 
 ## Troubleshooting
 

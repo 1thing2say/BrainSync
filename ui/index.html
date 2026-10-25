@@ -3,17 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f1115">
+  <meta name="theme-color" content="#000000">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BCI Voice">
   <title>BCI Voice</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="partner">
   <!-- Flicker warning: the first trial waits until this is accepted (PLAN rule 10). -->
   <div id="warning" class="overlay" role="dialog" aria-modal="true" aria-labelledby="warning-title">
-    <div class="card">
+    <div class="card callout warn">
+      <p class="callout-title">Safety</p>
       <h1 id="warning-title">Flicker warning</h1>
       <p>The user's screen flickers at 11 to 17 Hz, mostly in the range most likely to trigger
         photosensitive seizures, with up to four squares at once. Nobody with photosensitive
@@ -28,13 +29,24 @@
 
   <!-- Shown when another tab or phone opened the partner page (only one can be connected). -->
   <div id="replaced" class="overlay" role="dialog" aria-modal="true" aria-labelledby="replaced-title" hidden>
-    <div class="card">
+    <div class="card callout">
+      <p class="callout-title">Note</p>
       <h1 id="replaced-title">Open on another page</h1>
       <p>The partner page was opened in another tab or on another device, which now runs the
         session. Only one partner page can be connected at a time.</p>
       <button id="take-over" class="primary">Use this page instead</button>
     </div>
   </div>
+
+  <!-- Top bar: the name, which page this is, the profile link. -->
+  <header class="topbar">
+    <span class="wordmark">BrainSync</span>
+    <span class="topbar-sep" aria-hidden="true">/</span>
+    <span class="topbar-label">Partner</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/profile.html" class="profile-link" title="Edit the user's profile">Profile</a>
+    </nav>
+  </header>
 
   <main class="layout">
     <section class="mirror" aria-label="User's screen (mirror, no flicker)">
@@ -97,7 +109,8 @@
         <button id="health" class="health level-ok" aria-expanded="false" aria-controls="health-details">
           <span class="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span>
         </button>
-        <div id="health-details" class="health-details" hidden>
+        <div id="health-details" class="health-details callout" hidden>
+          <p class="callout-title">Details</p>
           <div class="badges" id="badges"></div>
           <p class="decoder-message" id="decoder-message" aria-live="polite"></p>
         </div>
@@ -115,7 +128,6 @@
           <span id="phone-copied" class="judged" aria-live="polite"></span>
           <code id="app-url" class="phone-url"></code>
         </div>
-        <a href="/profile.html" class="profile-link">Edit the user's profile</a>
       </footer>
     </aside>
   </main>

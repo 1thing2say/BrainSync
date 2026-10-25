@@ -130,8 +130,8 @@ pull requests.
   ("Ready" or what is wrong, details on a click), Correct / Wrong, the profile link. FAKE DECODER /
   KEYBOARD stay on the mirror. Phone layout (≤ 600 px): partner's part first, Stop fixed at the
   bottom. Logic in `ui/view_core.js` (node-tested); `python tools/ui_shots.py` screenshots every
-  state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root`, palette
-  still to choose.
+  state with headless Chrome into `cache/ui_shots/`. Colours are variables in `:root` (palette:
+  `feat/ui-vercel` below).
 
 - **Phone version (2026-10-24, branch `feat/mobile`):** `python -m app.server --tunnel` opens a
   Cloudflare quick tunnel (`app/tunnel.py`, `cloudflared`, no account) and prints a phone link
@@ -156,6 +156,18 @@ pull requests.
   `ListenCore`) is tested against `ui_messages.json`, written from `app/schemas.py` by
   `tools/ui_fixture.py` (`--check` fails when stale). Built on the teammate's Mac with Xcode 16
   (`ios/README.md`); not yet compiled or run on a device.
+- **Vercel look and Look to Speak setup (2026-10-24, branch `feat/ui-vercel`):** the partner page
+  is dark in the Vercel style: the `:root` palette (black, 1 px greys, colour only for status),
+  Geist and Geist Mono bundled in `ui/fonts/` (OFL, no network), a top bar, Docker-docs-style
+  callouts for the flicker warning and the health details, and phrase cards on phones (≤ 600 px).
+  Stop is fixed at the bottom up to 900 px. `tests/test_ui_page.py` checks every id the scripts
+  use, the fonts, no external URLs and no blinking CSS. The iPhone app follows Google Look to
+  Speak: a first-run setup (welcome, pair, flicker warning, mic permission, an offline practice,
+  "Start the session"; Stop on every step once paired; `SetupSteps` in BrainSyncKit), a
+  phrase-first main screen (the partner's last line, full-width option cards with their place on
+  the user's screen) and a Settings sheet (text size, haptics, speaker test, mic access, pair
+  again, show setup again). `Palette.swift` uses the same colours as `ui/style.css`. Not yet
+  compiled.
 - **Slot frequencies (2026-10-24):** `stim.slots` now matches the teammate's `four_diamond.toml`:
   s1 13, s2 15, s3 17, s4 11 Hz (was 15/17/20/12), so his bridge's `hello` passes our check.
 - **Windows as an extra platform (2026-10-24, branch `feat/windows-setup`):** an addition, not a

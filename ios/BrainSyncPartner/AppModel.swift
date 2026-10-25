@@ -399,6 +399,17 @@ final class AppModel {
 
     var keyboardMode: Bool { status?.keyboardMode ?? false }
 
+    /// Settings' "Test the speaker": the phone's own voice says a fixed sentence. Not a reply
+    /// (rule 2 is about replies), and only while no reply plays and the mic is off, so it never
+    /// cuts a reply short and the mic never hears it as the partner.
+    var canTestSpeaker: Bool { !speaker.isSpeaking && !listener.wanted }
+
+    func testSpeaker() {
+        guard canTestSpeaker else { return }
+        speaker.speak(text: "This is the speaker test.", utteranceId: "",
+                      audioURL: nil) { _ in }
+    }
+
     /// Correct / Wrong for the last spoken reply (keys C / W on the laptop).
     func judge(correct: Bool) {
         guard lastSpokenId != nil, connected else { return }
@@ -454,6 +465,11 @@ final class AppModel {
         lines.append(ConversationLine(id: nextLineId, fromPartner: fromPartner, text: text))
     }
 
+    /// What the partner said last, big above the replies (nil before they said anything).
+    var lastPartnerLine: String? {
+        lines.last(where: { $0.fromPartner })?.text
+    }
+
     var userName: String {
         let name = (config?.userName ?? "").trimmingCharacters(in: .whitespaces)
         return name.isEmpty ? "User" : name
@@ -488,15 +504,16 @@ final class AppModel {
 enum Tone {
     case idle, cue, look, picked, say, warn, stop
 
+    /// The banner's accent (ui/style.css .banner.tone-*): its left edge and its text.
     var color: Color {
         switch self {
-        case .idle: return Color(white: 0.25)
-        case .cue: return Color(red: 0.16, green: 0.36, blue: 0.62)
-        case .look: return Color(red: 0.12, green: 0.50, blue: 0.40)
-        case .picked: return Color(red: 0.58, green: 0.42, blue: 0.08)
-        case .say: return Color(red: 0.40, green: 0.25, blue: 0.62)
-        case .warn: return Color(red: 0.62, green: 0.38, blue: 0.08)
-        case .stop: return Color(red: 0.62, green: 0.14, blue: 0.14)
+        case .idle: return Palette.muted
+        case .cue: return Palette.text
+        case .look: return Palette.look
+        case .picked: return Palette.pick
+        case .say: return Palette.say
+        case .warn: return Palette.warn
+        case .stop: return Palette.danger
         }
     }
 }

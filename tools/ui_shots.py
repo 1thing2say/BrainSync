@@ -93,11 +93,27 @@ STATES: dict[str, tuple[int, int, list[dict], tuple[str, str], bool]] = {
     # spoken and the phone links must still fit without a page scroll.
     "laptop-busy": (1366, 650, [READY, *LONG_TALK, CONFIRM, state("SPEAKING", "Yes, let's go outside."),
                                 trial("rest")], ("speaking", ""), False),
+    # A small laptop window: the diamond's side targets must stay inside their thirds of the mirror.
+    "laptop-narrow": (1024, 768, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
+                      ("listening", ""), False),
+    # A tablet or narrow window (one column): Stop in the bar fixed at the bottom.
+    "tablet": (800, 700, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
+               ("listening", ""), False),
     # Headless Chrome on Windows lays out no narrower than about 510 px; 520 is still a phone
     # (the 600 px breakpoint in style.css).
     "phone": (520, 960, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
               ("listening", "do you want"), False),
+    # Tall enough to show the mirror under the partner's part: the page as a list of phrase cards,
+    # and the confirm screen's Say it and Back side by side.
+    "phone-page": (520, 1400, [READY, *TALK, PAGE, state("STIMULATING"), trial("flicker")],
+                   ("listening", ""), False),
+    "phone-confirm": (520, 1300, [READY, *TALK, CONFIRM, state("CONFIRMING"), trial("flicker")],
+                      ("listening", ""), False),
+    # The flicker warning, as it opens before the first trial.
+    "warning": (1440, 900, [READY, *TALK, PAGE, state("IDLE")], ("idle", ""), False),
 }
+# States that keep the flicker warning open (the others close it, as after the start tap).
+WARNING_STATES = {"warning"}
 
 CONFIG = {"tts_rate": 1.0, "keyboard_mode": False, "stt_mode": "always", "listen_window_s": 10,
           "stt_gap_s": 1.2, "stt_max_line_s": 15, "stt_echo_s": 4, "cue_s": 1.0, "max_trial_s": 10.0,
@@ -126,7 +142,7 @@ class ShotSocket {{
   constructor() {{ this.readyState = 1; setTimeout(() => {{
     this.onopen && this.onopen();
     for (const m of {json.dumps(messages)}) this.onmessage({{ data: JSON.stringify(m) }});
-    document.getElementById("warning").hidden = true;
+    document.getElementById("warning").hidden = {json.dumps(name not in WARNING_STATES)};
   }}, 20); }}
   send() {{}} close() {{}}
 }}
