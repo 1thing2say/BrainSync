@@ -48,7 +48,7 @@ CASPER_LAYERFS_PATH AUTOINSTALL_LAYER KERNEL_LAYER_MANIFEST BOOT_TARGETS
 BUILDER_IMAGE_NAME BUILDER_PLATFORM MIN_FREE_GB"
 
 BSOS_PRODUCT_REQUIRED_KEYS="BRAINSYNCOS_VERSION TARGET_BOARD HOOKED_AUTOINSTALL
-INSTALL_TARGET_DEFAULT GRUB_TIMEOUT BRAINSYNC_USER HOSTNAME_PREFIX"
+INSTALL_TARGET_DEFAULT GRUB_TIMEOUT BRAINSYNC_USER HOSTNAME_PREFIX ISO_MAX_BYTES"
 
 BSOS_VM_REQUIRED_KEYS="BASE_ISO_NAME BASE_ISO_URL BASE_ISO_SHA256 BASE_ISO_SIZE BASE_ISO_VOLID
 BASE_ISO_DISK_INFO_BUILD BASE_ISO_ARCH BASE_ESP_START_SECTOR BASE_ESP_SIZE_SECTORS
@@ -119,6 +119,8 @@ load_product_config() {
     # Leaves room for "-" and a 6-character serial suffix within 63 characters.
     printf '%s\n' "$HOSTNAME_PREFIX" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,54}[a-z0-9])?$' \
         || die "HOSTNAME_PREFIX must be lowercase letters, digits and inner hyphens, got $HOSTNAME_PREFIX"
+    printf '%s\n' "$ISO_MAX_BYTES" | grep -Eq '^[1-9][0-9]{9,11}$' \
+        || die "ISO_MAX_BYTES must be a number of bytes from 1000000000 up (e.g. 7800000000), got $ISO_MAX_BYTES"
 }
 
 # product_iso_name: basename (no .iso) of the build-iso.sh output, e.g.
@@ -456,12 +458,41 @@ merge_stage_md5sums() {
     log "md5sum.txt: $(wc -l < "$stage/md5sum.txt" | tr -d ' ') entries (vendor $(wc -l < "$vendor" | tr -d ' '))"
 }
 
+# --- ISO size limit (ISO_MAX_BYTES, config/brainsyncos.env) ----------------------
+
+# iso_tree_bytes DIR...: about what the files under the DIRs take in an ISO
+# image, a little more rather than less: each file's data rounded up to 2 KiB
+# blocks plus 256 bytes for its ISO 9660, Rock Ridge and Joliet records, and
+# 2 KiB per folder. Links count like empty files.
+iso_tree_bytes() {
+    local d
+    for d in "$@"; do
+        [ -d "$d" ] || die "iso_tree_bytes: $d is not a directory"
+        find "$d" \( -type d -printf 'd 0\n' \) -o \( -type f -printf 'f %s\n' \) -o -printf 'l 0\n'
+    done | awk '{ if ($1 == "d") b += 2048; else b += int(($2 + 2047) / 2048) * 2048 + 256 } END { printf "%.0f\n", b }'
+}
+
+# bytes_gb BYTES: BYTES in decimal GB, two decimals (USB sticks are sold so).
+bytes_gb() { awk -v b="$1" 'BEGIN {printf "%.2f", b / 1e9}'; }
+
+# iso_size_check WHAT BYTES [MAX]: stop the build when BYTES (the ISO, or an
+# estimate of it made before the expensive steps) is over MAX, by default
+# ISO_MAX_BYTES: the largest ISO an 8 GB USB stick takes (config/brainsyncos.env).
+iso_size_check() {
+    local what="$1" bytes="$2" max="${3:-$ISO_MAX_BYTES}"
+    if [ "$bytes" -gt "$max" ]; then
+        die "$what: $bytes bytes ($(bytes_gb "$bytes") GB) is over ISO_MAX_BYTES=$max ($(bytes_gb "$max") GB, config/brainsyncos.env: what an 8 GB USB stick takes) by $((bytes - max)) bytes. Leave something out (the model: PKG_EDITIONS in packages/brainsyncos-model/package.env) or, for a larger stick, raise ISO_MAX_BYTES"
+    fi
+    log "$what: $bytes bytes ($(bytes_gb "$bytes") GB), $(bytes_gb $((max - bytes))) GB under ISO_MAX_BYTES"
+}
+
 # write_stage_iso [--map SRC ISO_PATH]... BASE STAGE NAME ISO_PATH...:
 # OUT_DIR/NAME.iso = BASE with its boot setup replayed, STAGE mapped over /
 # and each SRC tree mapped at its ISO_PATH (large trees such as the package
 # repository, mapped in place instead of copied into STAGE); the given ISO
 # paths and the --map ones (what the build adds or replaces) get the vendor's
-# 0:0 ownership and read-only modes. Then finalize_iso and NAME.manifest.txt
+# 0:0 ownership and read-only modes. Then finalize_iso (which refuses an image
+# over ISO_MAX_BYTES; needs load_product_config) and NAME.manifest.txt
 # (sha256 of every staged and mapped file, by ISO path).
 write_stage_iso() {
     local maps="" mapped=""
@@ -486,7 +517,7 @@ write_stage_iso() {
         -chown_r 0 $paths -- \
         -chgrp_r 0 $paths -- \
         -chmod_r a-w,a+r $paths --
-    finalize_iso "$partial" "$out"
+    finalize_iso "$partial" "$out" "$ISO_MAX_BYTES"
     trap - EXIT
     {
         (cd "$stage" && find . -type f -print0 | xargs -0r sha256sum)
@@ -660,15 +691,17 @@ write_replayed_iso() {
     grep -q 'Replayed [0-9]* boot related commands' "$xlog" || die "xorriso did not replay the boot setup (log: $xlog)"
 }
 
-# finalize_iso PARTIAL OUT: truncate PARTIAL to the image size (xorriso pads
-# stdio output to 32 blocks; the backup GPT must sit at the very end of the
-# file), check the partition table, move it to OUT and write OUT.sha256.
+# finalize_iso PARTIAL OUT [MAX_BYTES]: truncate PARTIAL to the image size
+# (xorriso pads stdio output to 32 blocks; the backup GPT must sit at the very
+# end of the file), refuse it if it is larger than MAX_BYTES (iso_size_check),
+# check the partition table, move it to OUT and write OUT.sha256.
 finalize_iso() {
-    local partial="$1" out="$2" sectors vlog
+    local partial="$1" out="$2" max="${3:-}" sectors vlog
     vlog="$partial.sfdisk-V"
     sectors="$(xorriso -indev "$partial" -report_system_area plain 2>/dev/null | awk '/ISO image size\/512/ {print $NF}')"
     [ -n "$sectors" ] || die "could not read the image size of $partial"
     truncate -s $((sectors * 512)) "$partial"
+    [ -z "$max" ] || iso_size_check "the ISO" "$(file_size "$partial")" "$max"
     sfdisk -V "$partial" > "$vlog" 2>&1 || true
     if ! grep -q 'No errors detected' "$vlog"; then
         cat "$vlog" >&2; rm_released "$vlog"
