@@ -4,10 +4,37 @@ app.server over /ws/decoder (INTERFACE-v2-draft.md).
     python -m brainsync.voice_bridge                          # Cerelog X8 + full-screen display
     python -m brainsync.voice_bridge --fake                   # synthetic board, real display
     python -m brainsync.voice_bridge --fake --fast --no-stimulus   # no hardware, no window
+    python -m brainsync.voice_bridge --paradigm freq          # the 4-target f-VEP fallback
     python -m app.server --bridge fake --bridge-headless      # the server starts it for you
 
+Two paradigms. ``--paradigm code`` (the default, docs/CVEP-STANDARD.md): the c-VEP standard of
+three white squares (stimulus config voice_cvep3: one 63-bit m-sequence, square k delayed by
+k x 21 frames), decoded by brainsync.vep.live.CodeVepDecoder; the hello says ``paradigm:
+"code"`` with each slot's ``lag_frames``, and the server's ``train`` takes the place of
+``baseline`` (INTERFACE-v2-draft.md section 9, proposed). ``--paradigm freq``: the
+frequency-coded protocol 2 as first written (four_diamond, FBCCA, baseline). Code mode:
+
+  train       every square flickers with the cue box on the training slot's square and the
+              text "Look at the <label> square"; one train_progress per complete cycle (cycle
+              k/N on the display too), then trained {ok, accuracy, chance, cycles} once the
+              template is fitted (the leave-one-cycle-out accuracy). A bridge that already has
+              a template answers at once unless retrain is true. A pause or a newer train cuts
+              it short ("interrupted"); one it cannot start answers "not_ready" /
+              "display_down"
+  stim_start  as below, but each cycle's decision (the mean of the last --cycles cycles,
+              votes counted among the active slots) goes out as decision {scores, raw,
+              committed, lead, changed}, and under every active square the display shows its
+              sentence with a confidence bar and score (--no-scores: the sentence only), the
+              lead / choice line at the bottom when the server sent no text. The first commit
+              is the selection, its scores the correlations (score_kind "correlation")
+  baseline    answered with ok false, "code mode: send train"
+
+The cycle times come from the display's ``cycle:<n>`` markers (with --fake, from the fake
+board, which then shows the code of a random active target during a trial and the training
+target while training).
+
 Startup: connect the board once (about 16 s for the Cerelog X8), start the display
-(``python -m brainsync.stimulus -c four_diamond --free --feedback stdin --hold-still --markers
+(``python -m brainsync.stimulus -c <config> --free --feedback stdin --hold-still --markers
 unix``) and wait for its refresh line; every launch writes ``{"flicker": false}`` as its first
 stdin line, so a later integer line (a highlight) can never end --hold-still by itself. Then
 connect to the server and send ``hello`` with the slots (s1..s4 in config order), waveform and
@@ -40,8 +67,8 @@ display measured a different refresh (or none went out on this connection yet). 
 reconnects every --reconnect-s seconds. When the bridge stops, the display is closed (EOF on
 its stdin, then terminate and kill if it lingers) and never relaunched.
 
---fake uses FakeBoard; during a trial it carries the tone of a random active target, so trials
-end in a selection. --fast runs it in virtual time, FAST_SPEED times faster than real time.
+--fake uses FakeBoard (freq) or a SequenceFakeBoard over the stimulus config (code); during a
+trial it carries the response to a random active target, so trials end in a selection. --fast runs it in virtual time, FAST_SPEED times faster than real time.
 --no-stimulus replaces the display with a headless stand-in: no window, the onset is the time
 the flicker would start, the refresh comes from the config.
 
@@ -85,7 +112,11 @@ log = logging.getLogger("voice_bridge")
 
 PROTOCOL = 2
 DEFAULT_URL = "ws://127.0.0.1:8000/ws/decoder"
-DEFAULT_CONFIG = "four_diamond"
+DEFAULT_CONFIG = "four_diamond"          # --paradigm freq
+DEFAULT_CODE_CONFIG = "voice_cvep3"      # --paradigm code (the default)
+PARADIGMS = ("code", "freq")
+CODE_SCORE_KIND = "correlation"          # code mode: selection scores are Pearson correlations
+TRAIN_SLACK_S = 15.0                     # a training's flicker limit: its cycles x 1.5 + this
 REPLACED = 4000          # close code from app/server.py: a newer bridge took over
 FLICKER_ON = '{"flicker": true}'
 FLICKER_OFF = '{"flicker": false}'
@@ -198,6 +229,58 @@ def hello_message(cfg: StimulusConfig, refresh_hz: float, name: str,
     if score_kind is not None:
         msg["score_kind"] = score_kind
     return msg
+
+
+def code_hello_message(cfg: StimulusConfig, refresh_hz: float, name: str,
+                       decoder: dict[str, Any] | None, train_cycles: int) -> dict[str, Any]:
+    """The code-mode hello (INTERFACE-v2-draft.md section 9) for ``cfg``'s [code] targets:
+    slot k (s1..sN) shows the m-sequence delayed by k x lag_frames frames."""
+    code = cfg.code
+    if code is None:
+        raise ValueError(f"stimulus config {cfg.name!r} has no [code] table")
+    slots = [{"slot": slot, "lag_frames": k * code.lag_frames}
+             for k, slot in enumerate(slot_ids(cfg.n_targets))]
+    msg: dict[str, Any] = {"type": "hello", "protocol": PROTOCOL, "name": name,
+                           "paradigm": "code", "refresh_hz": round(float(refresh_hz), 3),
+                           "slots": slots,
+                           "code": {"length": code.length, "cycle_frames": code.cycle_frames,
+                                    "train_cycles": int(train_cycles)},
+                           "score_kind": CODE_SCORE_KIND}
+    if decoder is not None:
+        msg["decoder"] = decoder
+    return msg
+
+
+def _finite(value: float) -> float | None:
+    v = float(value)
+    return round(v, 4) if math.isfinite(v) else None
+
+
+def score_line(score: float, best: bool) -> str:
+    """The bar line under one square: an 8-cell bar of the correlation clipped to 0..1, the
+    signed score, and "<" on this decision's best target (docs/CVEP-STANDARD.md section 3)."""
+    from .vep.live import bar
+    shown = "  -  " if not math.isfinite(score) else f"{score:+.2f}"
+    return f"{bar(score)} {shown}{' <' if best else ''}"
+
+
+def scored_labels(labels: Sequence[str], scores: Sequence[float], active: Sequence[int],
+                  raw: int) -> list[str]:
+    """Each active square's sentence with its bar line under it; the others unchanged."""
+    out = list(labels)
+    for k in active:
+        line = score_line(float(scores[k]) if k < len(scores) else math.nan, k == raw)
+        out[k] = f"{labels[k]}\n{line}" if labels[k] else line
+    return out
+
+
+def status_line(lead: float | None, committed: int, labels: Sequence[str]) -> str:
+    """"lead 0.31   choice: <its label>" ("no choice yet" before the first commit)."""
+    gap = "lead  -  " if lead is None else f"lead {lead:.2f}"
+    if committed == ABSTAIN or not 0 <= committed < len(labels):
+        return f"{gap}   no choice yet"
+    name = labels[committed] or f"square {committed + 1}"
+    return f"{gap}   choice: {name[:40]}"
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +731,270 @@ class BoardEngine:
                 return
 
 
+class CodeEngine:
+    """Code mode: reads ``board`` on its own thread and feeds a CodeVepDecoder.
+
+    Commands from the event loop (applied at the thread's next read): ``start_train(train_id,
+    target, cycles, retrain, t_start)``, ``start_trial(trial_id, targets, t_start)``,
+    ``stop()``; the display's cycle markers come in through ``add_event`` (with a fake board
+    its own events are used instead). Results come back on the loop:
+    ``on_progress(train_id, cycle, of)``, ``on_trained(train_id, ok, accuracy, chance, cycles,
+    message)``, ``on_decision(trial_id, scores, raw, committed, lead, changed)`` and
+    ``on_commit(trial_id, target, scores)``. A trial votes only among its active targets:
+    each decision's best active target (abstain when it leads the runner-up by less than
+    ``margin``) goes to a ``votes``-long voter, and the first commit ends the decoding.
+    """
+
+    paradigm = "code"
+
+    def __init__(self, board: Any, decoder: Any, *, fake: bool = False, fast: bool = False,
+                 speed: float = FAST_SPEED, seed: int | None = None, poll_s: float = POLL_S,
+                 stall_s: float = STALL_S, votes: int = 2, margin: float = 0.0,
+                 refresh: float = 60.0) -> None:
+        self.board = board
+        self.decoder = decoder
+        self.fake = fake
+        self.fast = fast
+        self.speed = speed
+        self.poll_s = poll_s
+        self.stall_s = stall_s
+        self.votes = int(votes)
+        self.margin = float(margin)
+        self.refresh = float(refresh)
+        self._rng = random.Random(seed)
+        self._commands: queue.SimpleQueue[tuple] = queue.SimpleQueue()
+        self._events: queue.SimpleQueue[tuple] = queue.SimpleQueue()
+        self._closed = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._heard = time.monotonic()
+        self._error: str | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._on_commit: Callable[..., None] | None = None
+        self._on_progress: Callable[..., None] | None = None
+        self._on_trained: Callable[..., None] | None = None
+        self._on_decision: Callable[..., None] | None = None
+        # thread-side state
+        self._mode = "idle"
+        self._id: int | None = None
+        self._targets: list[int] = []
+        self._t_start = 0.0
+        self._voter: Voter | None = None
+        self._reported = -1
+        if self.fake:
+            board.set_target(ABSTAIN)
+
+    @property
+    def cycle_s(self) -> float:
+        return self.decoder.cycle_frames / self.refresh
+
+    @property
+    def decoder_params(self) -> dict[str, Any]:
+        """For the hello: a decision every cycle from the mean of the last ``cycles``."""
+        return {"window_s": round(self.decoder.cycles * self.cycle_s, 4),
+                "step_s": round(self.cycle_s, 4), "votes": self.votes}
+
+    @property
+    def score_kind(self) -> str:
+        return CODE_SCORE_KIND
+
+    @property
+    def trained(self) -> bool:
+        return not self.decoder.training
+
+    def attach(self, loop: asyncio.AbstractEventLoop, on_commit: Callable[..., None],
+               on_baseline: Callable[..., None] | None = None) -> None:
+        self._loop, self._on_commit = loop, on_commit
+
+    def attach_code(self, on_progress: Callable[..., None], on_trained: Callable[..., None],
+                    on_decision: Callable[..., None]) -> None:
+        self._on_progress, self._on_trained = on_progress, on_trained
+        self._on_decision = on_decision
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._heard = time.monotonic()
+            self._thread = threading.Thread(target=self._run, name="board", daemon=True)
+            self._thread.start()
+
+    # -- commands from the event loop ---------------------------------------
+
+    def start_train(self, train_id: int, target: int, cycles: int, retrain: bool,
+                    t_start: float) -> None:
+        self._commands.put(("train", train_id, int(target), int(cycles), bool(retrain), t_start))
+
+    def start_trial(self, trial_id: int, targets: list[int], t_start: float) -> None:
+        self._commands.put(("trial", trial_id, list(targets), t_start))
+
+    def stop(self) -> None:
+        self._commands.put(("stop",))
+
+    def add_event(self, t_unix: float, kind: str, n: int) -> None:
+        """A display marker (``cycle:<n>``) on the board's clock; ignored with a fake board."""
+        if not self.fake:
+            self._events.put((float(t_unix), kind, int(n)))
+
+    def board_ok(self) -> bool:
+        alive = self._thread is not None and self._thread.is_alive()
+        return alive and self._error is None and time.monotonic() - self._heard < self.stall_s
+
+    @property
+    def message(self) -> str:
+        if self._error is not None:
+            return f"board error: {self._error}"
+        silent = time.monotonic() - self._heard
+        if silent >= self.stall_s:
+            return f"board sent nothing for {silent:.0f} s"
+        return f"{'fake board' if self.fake else 'Cerelog X8'} at {self.board.fs:g} Hz"
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    # -- the thread ------------------------------------------------------------
+
+    def _post(self, fn: Callable[..., None] | None, *data: Any) -> None:
+        if self._loop is not None and fn is not None:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(fn, *data)
+
+    def _flicker(self, target: int | None) -> None:
+        """The fake board's stimulus: the code of ``target`` (None: still)."""
+        if not self.fake:
+            return
+        if target is None:
+            self.board.stop_flicker()
+            self.board.set_target(ABSTAIN)
+        else:
+            self.board.set_target(target)
+            self.board.start_flicker()
+
+    def _apply(self) -> None:
+        while True:
+            try:
+                cmd = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            if cmd[0] == "train":
+                _, self._id, target, cycles, retrain, self._t_start = cmd
+                d = self.decoder
+                if not retrain and not d.training:
+                    self._mode = "idle"   # the template there is: answer at once
+                    self._post(self._on_trained, self._id, True, _finite(d.train_accuracy),
+                               d.chance, d.train_cycles, "")
+                    continue
+                d.train_cycles, d.train_target = int(cycles), int(target)
+                d.retrain()
+                self._reported = -1
+                self._mode = "train"
+                self._flicker(target)
+            elif cmd[0] == "trial":
+                _, self._id, self._targets, self._t_start = cmd
+                self.decoder.reset()
+                self._voter = Voter(self.votes)
+                self._mode = "trial"
+                self._flicker(self._rng.choice(self._targets))
+            else:
+                self._mode = "idle"
+                self._flicker(None)
+
+    def _drain_events(self) -> list[tuple]:
+        if self.fake:
+            return list(self.board.read_events())
+        out = []
+        while True:
+            try:
+                out.append(self._events.get_nowait())
+            except queue.Empty:
+                return out
+
+    def _run(self) -> None:
+        while not self._closed.is_set():
+            self._apply()
+            try:
+                if self.fast:
+                    self.board.advance(self.poll_s * self.speed)
+                time.sleep(self.poll_s)
+                X, t = self.board.read()
+                self._error = None
+            except Exception as exc:   # a driver error: report it, keep trying
+                self._error = str(exc) or type(exc).__name__
+                time.sleep(self.poll_s)
+                continue
+            events = self._drain_events()
+            if X.shape[1] == 0 and not events:
+                continue
+            if X.shape[1]:
+                self._heard = time.monotonic()
+            self._apply()   # a command that came during the read applies to these samples
+            try:
+                if self._mode == "train":
+                    self._train_data(X, t, events)
+                elif self._mode == "trial":
+                    self._trial_data(X, t, events)
+            except Exception as exc:   # never let a decoder error kill the board thread
+                log.exception("decoder error")
+                if self._mode == "train":
+                    self.decoder.retrain()
+                    self._post(self._on_trained, self._id, False, None, None, 0, f"error: {exc}")
+                self._error = f"decoder: {exc}"
+                self._mode = "idle"
+                self._flicker(None)
+
+    def _since_start(self, X: np.ndarray, t: np.ndarray,
+                     events: list[tuple]) -> tuple[np.ndarray, np.ndarray, list[tuple]]:
+        """Samples and cycle markers from this command on (an earlier flicker's are dropped)."""
+        keep = t >= self._t_start - ONSET_SLACK_S
+        if not keep.all():
+            X, t = X[:, keep], t[keep]
+        return X, t, [e for e in events if e[1] == "cycle" and e[0] >= self._t_start - ONSET_SLACK_S]
+
+    def _train_data(self, X: np.ndarray, t: np.ndarray, events: list[tuple]) -> None:
+        X, t, events = self._since_start(X, t, events)
+        d = self.decoder
+        try:
+            d.feed(X, t, events)
+        except RuntimeError as exc:   # too few cycles could be cut: the markers are off
+            d.retrain()
+            self._mode = "idle"
+            self._flicker(None)
+            self._post(self._on_trained, self._id, False, None, None, 0, str(exc))
+            return
+        done, of = d.progress
+        if d.training and done != self._reported:
+            self._reported = done
+            self._post(self._on_progress, self._id, done, of)
+        if not d.training:
+            self._mode = "idle"
+            self._flicker(None)
+            if self._reported != of:
+                self._post(self._on_progress, self._id, of, of)
+            self._post(self._on_trained, self._id, True, _finite(d.train_accuracy), d.chance,
+                       d.train_cycles, "")
+
+    def _trial_data(self, X: np.ndarray, t: np.ndarray, events: list[tuple]) -> None:
+        X, t, events = self._since_start(X, t, events)
+        idx = self._targets
+        for dec in self.decoder.feed(X, t, events):
+            scores = np.asarray(dec.scores, dtype=float)
+            sub = scores[idx]
+            raw, lead = ABSTAIN, None
+            if np.isfinite(sub).all() and sub.size:
+                order = np.argsort(sub)[::-1]
+                lead = float(sub[order[0]] - sub[order[1]]) if sub.size > 1 else float(sub[0])
+                if lead >= self.margin:
+                    raw = idx[int(order[0])]
+            assert self._voter is not None
+            changed = self._voter.push(raw)
+            committed = self._voter.committed
+            self._post(self._on_decision, self._id, scores.copy(), raw, committed, lead, changed)
+            if changed and committed != ABSTAIN:
+                self._post(self._on_commit, self._id, committed, scores.copy())
+                self._mode = "idle"   # one answer per trial: stop decoding
+                self._flicker(None)
+                return
+
+
 # ---------------------------------------------------------------------------
 # The bridge: protocol 2 over the websocket
 # ---------------------------------------------------------------------------
@@ -673,9 +1020,22 @@ class BaselineRun:
     interrupted: bool = False
 
 
+@dataclass
+class TrainRun:
+    """Code mode: one ``train`` in progress."""
+
+    train_id: int
+    target: int
+    label: str
+    cycles: int
+    outbox: Any = None   # the connection that asked: its answer goes there or nowhere
+    timer: asyncio.TimerHandle | None = None
+
+
 class Bridge:
     """One bridge: create it with parsed args, the stimulus config, an engine and a display,
-    then ``await run()`` (returns the exit code)."""
+    then ``await run()`` (returns the exit code). An engine whose ``paradigm`` is "code"
+    (CodeEngine) makes it speak code mode."""
 
     def __init__(self, args: argparse.Namespace, cfg: StimulusConfig, engine: Any,
                  display: Any) -> None:
@@ -684,6 +1044,9 @@ class Bridge:
         self.engine = engine
         self.display = display
         self.slots = slot_ids(cfg.n_targets)
+        self.code = getattr(engine, "paradigm", "freq") == "code"
+        self.training: TrainRun | None = None
+        self.scores_on_display = not getattr(args, "no_scores", False)
         self.name = bridge_name(args)
         self.labels = [""] * cfg.n_targets
         self.text = ""
@@ -717,6 +1080,8 @@ class Bridge:
         the server. A display that does not come up at startup raises RuntimeError."""
         self.loop = asyncio.get_running_loop()
         self.engine.attach(self.loop, self._on_commit, self._on_baseline)
+        if self.code:
+            self.engine.attach_code(self._on_train_progress, self._on_trained, self._on_decision)
         self.display.attach(self.loop, self._on_display_event)
         self.engine.start()
         from websockets.asyncio.client import connect
@@ -811,6 +1176,11 @@ class Bridge:
         self.acked = self.rejected = self.ready = False
         self.hello_sent = self.outbox is not None
         self.hello_refresh = self.refresh if self.refresh is not None else self.cfg.refresh
+        if self.code:
+            self._emit(code_hello_message(self.cfg, self.hello_refresh, self.name,
+                                          self.engine.decoder_params,
+                                          self.engine.decoder.train_cycles))
+            return
         self._emit(hello_message(self.cfg, self.hello_refresh, self.name,
                                  self.engine.decoder_params, self.engine.score_kind))
 
@@ -819,6 +1189,7 @@ class Bridge:
         self._flicker_off(force=True)
         self._end_trial(send_off=False)
         self._interrupt_baseline(cancel=True)
+        self._interrupt_training(None)   # nobody to answer
         self._drop_answers()
         self.acked = self.ready = self.rejected = self.hello_sent = False
 
@@ -890,6 +1261,7 @@ class Bridge:
         self.flickering = False   # the process is gone, and with it the flicker
         self.refresh = None
         self._end_trial(send_off=False)
+        self._interrupt_training("display_down")
         self._send_status()
         if self.relaunching is None or self.relaunching.done():
             self.relaunching = asyncio.create_task(self._relaunch())
@@ -938,6 +1310,9 @@ class Bridge:
             t_unix, name = data
             if name == "flicker_on":
                 self._on_onset(float(t_unix))
+            elif self.code and name.startswith("cycle:"):
+                with contextlib.suppress(ValueError):
+                    self.engine.add_event(float(t_unix), "cycle", int(name.split(":", 1)[1]))
 
     def _flicker_off(self, force: bool = False) -> None:
         if self.flickering or force:
@@ -953,8 +1328,11 @@ class Bridge:
             return "the display is down"
         if self.baseline is not None:
             return "a baseline is running"
+        if self.training is not None:
+            return "a training is running"
         if not self.ready:
-            return "no baseline since the last hello or pause"
+            return ("no trained template since the last hello or pause" if self.code
+                    else "no baseline since the last hello or pause")
         return None
 
     def _on_stim_start(self, msg: dict[str, Any]) -> None:
@@ -1029,7 +1407,8 @@ class Bridge:
         slot = self.slots[target]
         if slot not in t.active:
             return
-        values = {s: round(float(v), 5) for s, v in zip(self.slots, scores)}
+        values = {s: round(float(v), 5) if math.isfinite(float(v)) else 0.0
+                  for s, v in zip(self.slots, scores)}
         sel = {"type": "selection", "trial_id": trial_id, "slot": slot, "t_unix": time.time(),
                "score": values[slot], "scores": values}
         t.answered = True
@@ -1048,9 +1427,10 @@ class Bridge:
         if not isinstance(bid, int) or not isinstance(seconds, (int, float)) or seconds <= 0:
             log.warning("ignored invalid baseline: %.200s", msg)
             return
-        if not self.acked or not self.display_ok:
+        if self.code or not self.acked or not self.display_ok:
             # It cannot record this one; the answer still waits the seconds asked for (rule 12).
-            why = "not_ready" if not self.acked else "display_down"
+            why = ("code mode: send train" if self.code else
+                   "not_ready" if not self.acked else "display_down")
             log.warning("baseline %d: cannot record it (%s)", bid, why)
             self._track(self._refuse_baseline(bid, float(seconds), why, self.outbox))
             return
@@ -1122,6 +1502,7 @@ class Bridge:
             self._flicker_off(force=True)
             self._end_trial(send_off=False)
             self._interrupt_baseline(cancel=True)
+            self._interrupt_training(None)
             self._drop_answers()
             self.acked = self.ready = False
             self.rejected = True
@@ -1129,6 +1510,8 @@ class Bridge:
             log.info("ignored %s: the server rejected hello", kind)
         elif kind == "baseline":
             self._on_baseline_msg(msg)
+        elif kind == "train":
+            self._on_train_msg(msg)
         elif kind == "display":
             if self.trial is not None:
                 log.warning("ignored display during trial %d (rule 5)", self.trial.trial_id)
@@ -1145,9 +1528,134 @@ class Bridge:
             self._flicker_off(force=True)
             self._end_trial(send_off=False)
             self._interrupt_baseline()
+            self._interrupt_training("interrupted")
             self.ready = False
         else:
             log.warning("ignored unknown message type %r", kind)
+
+    # -- code mode: training and decisions -------------------------------------------------
+
+    def _on_train_msg(self, msg: dict[str, Any]) -> None:
+        tid, slot, cycles = msg.get("train_id"), msg.get("slot"), msg.get("cycles", 30)
+        if (not isinstance(tid, int) or not isinstance(cycles, int) or cycles < 2
+                or not isinstance(slot, str)):
+            log.warning("ignored invalid train: %.200s", msg)
+            return
+        why = None if self.code else "not code mode"
+        if why is None and not self.acked:
+            why = "not_ready"
+        elif why is None and not self.display_ok:
+            why = "display_down"
+        elif why is None and slot not in self.slots:
+            why = "unknown_slot"
+        if why is not None:
+            log.warning("train %d: cannot train (%s)", tid, why)
+            self._emit({"type": "trained", "train_id": tid, "ok": False, "message": why})
+            return
+        self._end_trial()
+        self._interrupt_baseline()
+        self._interrupt_training("interrupted")
+        self.ready = False
+        target = self.slots.index(slot)
+        label = str(msg.get("label") or "")
+        run = TrainRun(tid, target, label, cycles, outbox=self.outbox)
+        retrain = bool(msg.get("retrain", False))
+        if not retrain and self.engine.trained:
+            self.training = run   # the engine answers at once, from its template
+            self.engine.start_train(tid, target, cycles, False, time.time())
+            return
+        self.training = run
+        where = f"the {label} square" if label else f"square {target + 1}"
+        self.display.send(active_line(range(len(self.slots))))
+        self.display.send(_line({"text": f"Look at {where}"}))
+        self.display.send(str(target))   # the cue box on the training square
+        self.flickering = True
+        limit = cycles * self.engine.cycle_s * 1.5 + TRAIN_SLACK_S
+        run.timer = self.loop.call_later(limit, self._train_limit, tid)   # type: ignore[union-attr]
+        self.engine.start_train(tid, target, cycles, True, time.time())
+        if not self.display.send(FLICKER_ON):
+            self._display_down("it does not take stdin lines")
+            return
+        log.info("train %d: %d cycles on %s (%s)", tid, cycles, slot, where)
+
+    def _train_limit(self, train_id: int) -> None:
+        """The flicker of a training that never ends goes off here (photosensitive safety)."""
+        if self.training is not None and self.training.train_id == train_id:
+            log.warning("train %d: no template after its time limit: flicker off", train_id)
+            self._interrupt_training("no template in time (are the cycle markers arriving?)")
+
+    def _finish_training(self) -> TrainRun | None:
+        run, self.training = self.training, None
+        if run is None:
+            return None
+        if run.timer is not None:
+            run.timer.cancel()
+        self._flicker_off()
+        if self.display_ok:
+            self.display.send(str(self.highlight))   # the cue box back where the server had it
+        return run
+
+    def _interrupt_training(self, message: str | None) -> None:
+        """Cut the running training short; ``message`` None: send nothing (no server)."""
+        run = self._finish_training()
+        if run is None:
+            return
+        self.engine.stop()
+        if message is not None and self.outbox is run.outbox:
+            self._emit({"type": "trained", "train_id": run.train_id, "ok": False,
+                        "message": message})
+
+    def _on_train_progress(self, train_id: int, cycle: int, of: int) -> None:
+        run = self.training
+        if run is None or run.train_id != train_id:
+            return
+        where = f"the {run.label} square" if run.label else f"square {run.target + 1}"
+        if self.display_ok:
+            self.display.send(_line({"text": f"training: keep looking at {where}   "
+                                             f"cycle {cycle}/{of}"}))
+        self._emit({"type": "train_progress", "train_id": train_id, "cycle": int(cycle),
+                    "of": int(of)})
+
+    def _on_trained(self, train_id: int, ok: bool, accuracy: float | None,
+                    chance: float | None, cycles: int, message: str) -> None:
+        run = self.training
+        if run is None or run.train_id != train_id:
+            return
+        outbox = run.outbox
+        self._finish_training()
+        self.ready = bool(ok)
+        if ok and self.display_ok:
+            score = "-" if accuracy is None else f"{100 * accuracy:.0f} %"
+            odds = "" if chance is None else f" (chance {100 * chance:.0f} %)"
+            self.display.send(_line({"text": f"template ready: {score} on held-out cycles{odds}"}))
+        log.info("train %d: %s", train_id,
+                 f"template ready, accuracy {accuracy}" if ok else f"failed ({message})")
+        if self.outbox is outbox:
+            msg: dict[str, Any] = {"type": "trained", "train_id": train_id, "ok": bool(ok),
+                                   "cycles": int(cycles), "message": message}
+            if accuracy is not None:
+                msg["accuracy"] = min(1.0, max(0.0, float(accuracy)))
+            if chance is not None:
+                msg["chance"] = round(float(chance), 4)
+            self._emit(msg)
+
+    def _on_decision(self, trial_id: int, scores: np.ndarray, raw: int, committed: int,
+                     lead: float | None, changed: bool) -> None:
+        t = self.trial
+        if t is None or t.trial_id != trial_id or t.onset is None:
+            return   # late, or before the onset (nothing has flickered yet)
+        active = [self.slots.index(s) for s in t.active]
+        values = {s: (round(float(v), 4) if math.isfinite(float(v)) else 0.0)
+                  for s, v in zip(self.slots, scores)}
+        name = lambda k: self.slots[k] if k != ABSTAIN and 0 <= k < len(self.slots) else None  # noqa: E731
+        self._emit({"type": "decision", "trial_id": trial_id, "scores": values,
+                    "raw": name(raw), "committed": name(committed),
+                    "lead": None if lead is None or not math.isfinite(lead) else round(lead, 4),
+                    "changed": bool(changed)})
+        if self.scores_on_display and self.display_ok:
+            self.display.send(_line({"labels": scored_labels(self.labels, scores, active, raw)}))
+            if not self.text:
+                self.display.send(_line({"text": status_line(lead, committed, self.labels)}))
 
     def _apply_display(self, msg: dict[str, Any]) -> None:
         lines, self.labels = display_lines(msg, self.slots, self.labels)
@@ -1167,17 +1675,50 @@ class Bridge:
 # ---------------------------------------------------------------------------
 
 
+def resolve(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill in --paradigm and --config from each other (idempotent): no -c means the
+    paradigm's default config (code without --paradigm); a -c without --paradigm means the
+    config's own paradigm."""
+    if getattr(args, "config", None) is None:
+        args.paradigm = getattr(args, "paradigm", None) or "code"
+        args.config = DEFAULT_CODE_CONFIG if args.paradigm == "code" else DEFAULT_CONFIG
+    elif getattr(args, "paradigm", None) is None:
+        try:
+            args.paradigm = "code" if load_config(args.config).paradigm == "code" else "freq"
+        except BUILD_ERRORS:
+            args.paradigm = "freq"   # build() reports the bad config
+    return args
+
+
 def bridge_name(args: argparse.Namespace) -> str:
     """The hello name: "fake-..." with the fake board, so the server shows FAKE DECODER."""
-    return f"{'fake-' if args.fake else ''}brainsync-{args.classifier}"
+    kind = "cvep" if resolve(args).paradigm == "code" else args.classifier
+    return f"{'fake-' if args.fake else ''}brainsync-{kind}"
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m brainsync.voice_bridge", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default=DEFAULT_URL, help=f"server websocket (default {DEFAULT_URL})")
-    p.add_argument("-c", "--config", default=DEFAULT_CONFIG,
-                   help=f"stimulus config name or .toml path (default {DEFAULT_CONFIG})")
+    p.add_argument("--paradigm", choices=PARADIGMS, default=None,
+                   help="code: the c-VEP standard (the default); freq: the f-VEP fallback "
+                        "(default: the stimulus config's, code without -c)")
+    p.add_argument("-c", "--config", default=None,
+                   help=f"stimulus config name or .toml path (default {DEFAULT_CODE_CONFIG} for "
+                        f"code, {DEFAULT_CONFIG} for freq)")
+    code = p.add_argument_group("code mode (c-VEP)")
+    code.add_argument("--cycles", type=int, default=2,
+                      help="cycles averaged per decision (default 2)")
+    code.add_argument("--train-cycles", type=int, default=30,
+                      help="cycles recorded for the template unless train asks otherwise "
+                           "(default 30; reported in hello)")
+    code.add_argument("--code-votes", type=int, default=2,
+                      help="agreeing decisions needed to commit (default 2)")
+    code.add_argument("--code-margin", type=float, default=0.0,
+                      help="abstain unless the best active target's correlation leads by this "
+                           "much (default 0)")
+    code.add_argument("--no-scores", action="store_true",
+                      help="no confidence bars on the display (the decision messages still go out)")
     dec = p.add_argument_group("decoder (defaults as brainsync.demo)")
     dec.add_argument("--classifier", default=TUNED.classifier, choices=("cca", "fbcca"),
                      help=f"default {TUNED.classifier}")
@@ -1240,6 +1781,14 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
     """Reject inconsistent flags through ``p.error`` (exit code 2)."""
     if args.fast and not args.fake:
         p.error("--fast needs --fake")
+    resolve(args)
+    if args.paradigm == "code" and args.no_stimulus and not args.fake:
+        p.error("--paradigm code with --no-stimulus needs --fake: the cycle markers come from "
+                "the display")
+    if args.cycles < 1 or args.train_cycles < 2 or args.code_votes < 1 or args.code_margin < 0:
+        p.error(f"--cycles and --code-votes must be >= 1, --train-cycles >= 2 and --code-margin "
+                f">= 0, got {args.cycles}, {args.code_votes}, {args.train_cycles}, "
+                f"{args.code_margin}")
     for flag, value in (("--window", args.window), ("--step", args.step),
                         ("--reconnect-s", args.reconnect_s),
                         ("--status-interval", args.status_interval),
@@ -1258,6 +1807,7 @@ def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> Non
 def stimulus_args(args: argparse.Namespace) -> list[str]:
     """The display's command line: free run, feedback on stdin, still until {"flicker": true},
     flip-time markers; no --seconds, so it runs until its stdin closes or Esc."""
+    resolve(args)
     out = ["-c", str(args.config), "--free", "--feedback", "stdin", "--hold-still",
            "--markers", "unix"]
     if args.no_wait:
@@ -1272,7 +1822,7 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
 
     Raises one of BUILD_ERRORS on a bad setting.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(resolve(args).config)
     if args.fake:
         board: Any = FakeBoard(cfg.freqs, switch_s=math.inf, seed=args.seed or 0,
                                clock=None if args.fast else time.time, ch_names=args.names)
@@ -1286,10 +1836,35 @@ def build(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Decoder]:
     return cfg, board, decoder
 
 
+def build_code(args: argparse.Namespace) -> tuple[StimulusConfig, Any, Any]:
+    """Code mode: the [code] stimulus config, the board (not yet connected) and a
+    CodeVepDecoder for its targets. Raises one of BUILD_ERRORS on a bad setting."""
+    from .vep.live import CodeVepDecoder
+    cfg = load_config(resolve(args).config)
+    if cfg.code is None:
+        raise ValueError(f"stimulus config {cfg.name!r} has no [code] table; --paradigm code "
+                         f"needs one (default {DEFAULT_CODE_CONFIG})")
+    if args.fake:
+        from .stimulus.coded import CodeSequence
+        from .vep.fake import SequenceFakeBoard
+        board: Any = SequenceFakeBoard(CodeSequence(cfg), refresh=cfg.refresh, fixated=ABSTAIN,
+                                       amp=3.0, noise=8.0, seed=args.seed or 0,
+                                       clock=None if args.fast else time.time,
+                                       ch_names=args.names)
+    else:
+        board = CerelogBoard(serial_port=args.port, ch_names=args.names, verbose=args.verbose)
+    decoder = CodeVepDecoder(board.fs, n_targets=cfg.n_targets, lag_frames=cfg.code.lag_frames,
+                             cycle_frames=cfg.code.cycle_frames, refresh=cfg.refresh,
+                             channels=args.channels, ch_names=args.names, votes=args.code_votes,
+                             cycles=args.cycles, margin=args.code_margin,
+                             train_cycles=args.train_cycles)
+    return cfg, board, decoder
+
+
 async def serve(args: argparse.Namespace) -> int:
     """Build everything, connect the board once, run the bridge; the exit code."""
     try:
-        cfg, board, decoder = build(args)
+        cfg, board, decoder = build_code(args) if resolve(args).paradigm == "code" else build(args)
     except BUILD_ERRORS as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1304,10 +1879,19 @@ async def serve(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    engine = BoardEngine(board, decoder, fake=args.fake, fast=args.fast, seed=args.seed)
-    print(f"{engine.message}; {decoder.classifier!r}; channels "
-          f"{','.join(decoder.channel_names)}; window {args.window:g} s, step {args.step:g} s, "
-          f"{args.votes} votes; server {args.url}", file=sys.stderr)
+    if args.paradigm == "code":
+        engine: Any = CodeEngine(board, decoder, fake=args.fake, fast=args.fast, seed=args.seed,
+                                 votes=args.code_votes, margin=args.code_margin,
+                                 refresh=cfg.refresh)
+        print(f"{engine.message}; c-VEP {cfg.name} ({cfg.n_targets} targets, "
+              f"{cfg.code.lag_frames}-frame lags); decision every cycle from {args.cycles}, "
+              f"{args.code_votes} votes; {args.train_cycles} training cycles; server {args.url}",
+              file=sys.stderr)
+    else:
+        engine = BoardEngine(board, decoder, fake=args.fake, fast=args.fast, seed=args.seed)
+        print(f"{engine.message}; {decoder.classifier!r}; channels "
+              f"{','.join(decoder.channel_names)}; window {args.window:g} s, step {args.step:g} s, "
+              f"{args.votes} votes; server {args.url}", file=sys.stderr)
     bridge = Bridge(args, cfg, engine, display)
     loop = asyncio.get_running_loop()
     # app.server stops its children with SIGTERM: end like Ctrl-C, so the display's stdin is

@@ -1,0 +1,39 @@
+# BCI Voice in c-VEP (docs/CVEP-STANDARD.md section 5): the cvep_3 standard (three white squares
+# in a row, one 63-bit m-sequence, square k delayed by k * 21 frames = 350 ms at 60 Hz) with the
+# voice app's roles: option 1 left (the training square), option 2 middle, More options right;
+# the confirm screen flickers only the left (Say it) and right (Back) squares. The bridge
+# (python -m brainsync.voice_bridge) writes each option's sentence and its confidence bar under
+# its square ({"labels": [...]}) and the lead / choice line at the bottom ({"text": ...}).
+name = "voice_cvep3"
+
+[targets]
+labels = ["Option 1", "Option 2", "More options"]   # left, middle, right (replaced by the bridge)
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+rows = 1
+cols = 3
+size = 0.26       # side, screen heights (about 5 cm on a 14-inch MacBook)
+spacing = 0.55    # centre to centre
+
+[stimulus]
+hold_cue = true
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true
