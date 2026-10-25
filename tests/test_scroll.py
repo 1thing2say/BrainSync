@@ -160,7 +160,7 @@ def test_custom_directions_map_targets():
 @pytest.mark.parametrize("kwargs, match", [
     ({"directions": ()}, "at least one"),
     ({"directions": ("up", "left")}, "'left'"),
-    ({"directions": ("15", "17")}, "up or down"),
+    ({"directions": ("15", "17")}, "up, down or pause"),
     ({"cooldown_s": -1.0}, "cooldown_s"),
     ({"cooldown_s": math.nan}, "cooldown_s"),
     ({"cooldown_s": math.inf}, "cooldown_s"),
@@ -206,3 +206,95 @@ def test_rearm_resets_only_the_voter_so_the_buffer_keeps_deciding():
     # 7th (1.736 s) and four more make 2.728 s
     assert np.median(np.diff([a.time for a in actions])) == pytest.approx(2.728, abs=0.01)
     assert gate.rearms >= len(actions) - 1
+
+
+# -- three actions (the c-VEP layout: up, pause, down) ---------------------------------------
+
+CODE_STEP = 63 / 60.0   # one c-VEP decision per cycle
+
+
+def simulate_code(raws: list[int], cooldown_s: float = COOLDOWN_S, votes: int = 2):
+    """simulate() for the c-VEP reels layout: three targets, one decision per cycle."""
+    voter = Voter(votes)
+    gate = ScrollGate(("up", "pause", "down"), cooldown_s=cooldown_s, votes=votes,
+                      rearm=voter.reset)
+    actions = []
+    for i, raw in enumerate(raws):
+        changed = voter.push(raw)
+        a = gate.push(Decision(time=i * CODE_STEP, scores=np.zeros(3), raw=raw,
+                               committed=voter.committed, changed=changed), i * CODE_STEP)
+        if a is not None:
+            actions.append(a)
+    return actions, gate
+
+
+def test_three_targets_map_to_up_pause_down():
+    gate = ScrollGate(("up", "pause", "down"), cooldown_s=0.0)
+    assert gate.push(dec(0, True), 0.0).dir == "up"
+    gate.push(dec(ABSTAIN, False), 0.5)
+    assert gate.push(dec(2, True), 1.0).dir == "down"
+    gate.push(dec(ABSTAIN, False), 1.5)
+    assert gate.push(dec(1, True), 2.0) == Action(dir="pause", target=1, id=3, time=2.0)
+
+
+def test_dwelling_on_down_scrolls_every_four_cycles():
+    actions, gate = simulate_code([2] * 30)
+    assert {a.dir for a in actions} == {"down"} and len(actions) >= 6
+    np.testing.assert_allclose(np.diff([a.time for a in actions]), 4 * CODE_STEP)
+
+
+def test_dwelling_on_pause_toggles_once_per_look():
+    actions, gate = simulate_code([1] * 30)
+    assert [a.dir for a in actions] == ["pause"]
+    assert gate.ignored == 1            # the re-commit after the re-arm is dropped
+    # one decision elsewhere (or abstaining) releases it: looking back toggles again
+    actions, _ = simulate_code([1] * 8 + [ABSTAIN] + [1] * 8)
+    assert [a.dir for a in actions] == ["pause", "pause"]
+    actions, _ = simulate_code([1] * 8 + [0] + [1] * 8)
+    assert [a.dir for a in actions] == ["pause", "pause"]
+
+
+def test_once_can_be_changed():
+    gate = ScrollGate(("up", "pause", "down"), cooldown_s=0.0, once=())
+    assert gate.push(dec(1, True), 0.0).dir == "pause"
+    gate.push(dec(ABSTAIN, False, raw=1), 0.5)
+    assert gate.push(dec(1, True), 1.0).dir == "pause"       # repeats on dwell
+    gate = ScrollGate(("up", "pause", "down"), cooldown_s=0.0, once=("up",))
+    assert gate.push(dec(0, True), 0.0).dir == "up"
+    gate.push(dec(ABSTAIN, False, raw=0), 0.5)
+    assert gate.push(dec(0, True), 1.0) is None              # held
+    gate.push(dec(ABSTAIN, False, raw=2), 1.5)              # released
+    assert gate.push(dec(0, True), 2.0).dir == "up"
+
+
+def test_every_target_needs_its_own_action():
+    with pytest.raises(ValueError, match="its own action"):
+        ScrollGate(("up", "up"))
+    with pytest.raises(ValueError, match="'like'"):
+        ScrollGate(("up", "like", "down"))
+
+
+def test_rearm_resets_only_the_cvep_votes_so_cycles_keep_deciding():
+    from brainsync.vep.live import CodeVepDecoder, standard_fake_board
+
+    board = standard_fake_board(fixated=0, seed=4)
+    decoder = CodeVepDecoder(board.fs, train_cycles=12)
+    board.start_flicker()
+    while decoder.training:
+        board.advance(0.1)
+        decoder.feed(*board.read(), board.read_events())
+    board.set_target(2)
+    gate = ScrollGate(("up", "pause", "down"), cooldown_s=1.5, votes=2,
+                      rearm=decoder.decoder.voter.reset)
+    times, actions = [], []
+    for _ in range(int(25 / 0.1)):
+        board.advance(0.1)
+        for d in decoder.feed(*board.read(), board.read_events()):
+            times.append(d.time)
+            a = gate.push(d, d.time)
+            if a is not None:
+                actions.append(a)
+    assert np.diff(times).max() == pytest.approx(CODE_STEP, abs=0.01)   # no blind spell
+    assert len(actions) >= 4 and {a.dir for a in actions} == {"down"}
+    assert np.median(np.diff([a.time for a in actions])) == pytest.approx(4 * CODE_STEP,
+                                                                          abs=0.01)
