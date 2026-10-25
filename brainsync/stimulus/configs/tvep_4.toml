@@ -21,6 +21,7 @@ spacing = 0.5
 
 [stimulus]
 hold_cue = true
+depth = 0.8     # off level 0.1, flash 0.9: the squares stay faintly visible between flashes
 
 [display]
 refresh_hz = 60.0
