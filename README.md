@@ -963,7 +963,7 @@ each on the same board and PsychoPy display:
 |---|---|---|---|---|
 | t-VEP | Brief flashes that never overlap; targets flash in rounds of one slot each, so each flashes once a second | Average the 0.5 s after each target's own flashes; the largest peak-to-valley response wins (`vep.tvep`) | `tvep_4` | under 30 bits/min; no online run |
 | f-VEP | Each target at its own frequency; the paper's six: 15, 12, 10, 8.6, 7.5, 6 Hz (4 to 10 frames per cycle) | FFT, SNR of the peak against its neighbouring bins, argmax (`vep.fvep.SNR`, the paper's rule; `--classifier cca` / `fbcca` also work) | `fvep_6` | 85 %, 39.7 bits/min |
-| c-VEP | One 63-bit m-sequence; every target shows it delayed by k lags (the paper: 16 targets, 4-frame lags) | One template trained while looking at square 0, shifted per target, Pearson correlation, argmax (`vep.cvep`) | `cvep_4` (16-frame lags), `cvep_16` (the paper's grid) | 91 %, 92.8 bits/min |
+| c-VEP | One 63-bit m-sequence; every target shows it delayed by k lags (the paper: 16 targets, 4-frame lags) | One template trained while looking at square 0, shifted per target, Pearson correlation, argmax (`vep.cvep`) | `cvep_4` (diamond, 16-frame lags), `cvep_2` (two squares), `cvep_16` (the paper's grid) | 91 %, 92.8 bits/min |
 
 ```bash
 # plans and synthetic runs (no headset)
@@ -971,11 +971,11 @@ each on the same board and PsychoPy display:
 .venv/bin/python -m brainsync.stimulus -c cvep_2 --plan          # the two-square pair (YES / NO)
 .venv/bin/python -m brainsync.vep --compare --fake               # all three on the synthetic board
 .venv/bin/python -m brainsync.vep --paradigm code --fake --fast --no-stimulus   # instant dry run
-.venv/bin/python -m brainsync.vep --paradigm code --fake --seconds 120          # display + fake user
+.venv/bin/python -m brainsync.vep --paradigm code --fake --seconds 120          # 4-square display + fake user
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --fake --seconds 20 --train-cycles 10 --no-voice
 
 # live: Cerelog X8 + the PsychoPy display (train on the first square, then decode)
-.venv/bin/python -m brainsync.vep --paradigm code                # 4 squares, cvep_4
+.venv/bin/python -m brainsync.vep --paradigm code                # 4 squares in a diamond, cvep_4 (YES / NO / HELP / WATER)
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2      # 2 squares, labels + confidence line
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --cycles 3 --votes 2 --margin 0.1 --train-cycles 40 --seconds 120
 .venv/bin/python -m brainsync.vep --paradigm code -c cvep_2 --template data/spectrum_checks/<stamp>_cvep_template.npz
@@ -1018,8 +1018,15 @@ square's label as signage (`cvep_2`, the two-square live pair: YES left, NO righ
 under the squares, a confidence line redrawn after every decision: one bar per target from
 the decoder's scores, the lead and the committed choice (`--no-scores` for a bare display).
 It runs the stimulus as `--free --feedback stdin --labels --status stdin`, with
-`{"text": ...}` lines on the same stdin as the cue index; redrawing the text on every
-flicker frame dropped 1 frame in 7592 on the demo Mac. `--fake` swaps the board
+`{"text": ...}` and `{"labels": [...]}` lines on the same stdin as the cue index;
+redrawing the text on every flicker frame dropped 1 frame in 7592 on the demo Mac.
+The 4-square demo (`cvep_4`) uses the diamond of the four-target SSVEP studies (top,
+left, right, bottom, `[layout] shape = "diamond"`, `spacing` up and down and a wider
+`spacing_x` to the sides, red squares on black through `[stimulus] fill = [1, 0, 0]`;
+grey, the default, has more luminance contrast) with the signage YES / NO / HELP /
+WATER: each square's label line carries its bar and score, and the lead / choice line
+sits in the free centre, because the bottom square's label leaves no room below and a
+MacBook's notch hides the top edge. `--fake` swaps the board
 for `vep.fake.SequenceFakeBoard`: a made-up flash VEP (`synthetic.vep_kernel`, a damped
 sine after a 60 ms latency) convolved with the fixated target's sequence, on the posterior
 channels over Gaussian noise, with the markers coming from the fake board itself. It

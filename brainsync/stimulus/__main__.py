@@ -29,9 +29,10 @@ comfort rating after each rest ("rate:<n>"). --status stdin shows the latest
 space, Escape or EOF.
 
 In a free run, --labels writes each target's label under its square (signage for the
-audience) and --status stdin shows {"text": "..."} lines arriving on the same stdin as
-the feedback, redrawn on every frame including flicker frames: the timing summary's
-dropped-frame count says whether the machine keeps up.
+audience; a {"labels": [...]} line on stdin replaces them, one string per target) and
+--status stdin shows {"text": "..."} lines arriving on the same stdin as the feedback,
+redrawn on every frame including flicker frames: the timing summary's dropped-frame
+count says whether the machine keeps up.
 """
 from __future__ import annotations
 
@@ -81,7 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with --feedback stdin: show the targets still (no flicker) until "
                         "the first feedback line, e.g. while a decoder calibrates")
     p.add_argument("--labels", action="store_true",
-                   help="free run: write each target's label under its square")
+                   help="free run: write each target's label under its square; a "
+                        "{\"labels\": [...]} line on the feedback stdin replaces them")
     p.add_argument("--cards", metavar="DIR",
                    help="free run: show DIR/*.png (sorted by name) as a profile card between "
                         "the targets; 'card <k>' and 'flash <k>' lines on stdin drive it")
@@ -260,14 +262,17 @@ def _run_display(cfg: StimulusConfig, args: argparse.Namespace, seed: int,
                     else (lambda: not reader.heard))
             live_status = (None if reader is None or args.status == "none"
                            else (lambda: reader.text))
+            live_labels = (None if reader is None or not args.labels
+                           else (lambda: reader.labels))
             if cfg.coded:
                 frames = coded_free_frames(cfg, sequence_for(cfg, seed), args.seconds,
-                                           cue=cue, stop=stop, hold=hold, status=live_status)
+                                           cue=cue, stop=stop, hold=hold, status=live_status,
+                                           labels=live_labels)
             else:
                 frames = free_frames(cfg, args.seconds, cue=cue, stop=stop, hold=hold,
                                      card=card,
                                      flash=None if reader is None else (lambda: reader.flash),
-                                     status=live_status)
+                                     status=live_status, labels=live_labels)
             timing = play(frames, renderer, markers, cfg.refresh, measured_refresh=measured)
             print(timing.summary(), flush=True)
             return 0

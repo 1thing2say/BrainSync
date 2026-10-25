@@ -5,7 +5,8 @@ A decoder writes one command per line:
     k          put the cue box on target k (-1 clears it); the first one ends --hold-still
     card k     show profile card k (index into the sorted --cards PNGs)
     flash k    light target k's box in its flash colour for [card] flash_s seconds
-    {"text": "..."}   the status line under the targets (--status stdin; "" clears it)
+    {"text": "..."}   the status line (--status stdin; "" clears it)
+    {"labels": ["...", ...]}   one label per target, replacing the config's (--labels)
 
 Only the integer lines count as "heard": card, flash and text lines may arrive while the
 targets are still held still. Bad lines are ignored with a note. EOF ends the free run.
@@ -61,15 +62,21 @@ def _index(kind: str, text: str, n: int, noun: str) -> int:
     return k
 
 
-def parse_text(line: str) -> str:
-    """The text of a ``{"text": "..."}`` JSON line; ValueError for anything else."""
+def parse_json(line: str, n_targets: int) -> tuple[str, str | tuple[str, ...]]:
+    """A ``{"text": "..."}`` or ``{"labels": [...]}`` JSON line as ``("text", str)`` or
+    ``("labels", tuple)`` (one string per target); ValueError for anything else."""
     try:
         msg = json.loads(line)
     except ValueError:
         raise ValueError(f"not a JSON object: {line.strip()!r}") from None
-    if not isinstance(msg, dict) or not isinstance(msg.get("text"), str):
-        raise ValueError('expected {"text": "..."}')
-    return msg["text"]
+    if isinstance(msg, dict) and isinstance(msg.get("text"), str):
+        return "text", msg["text"]
+    if isinstance(msg, dict) and isinstance(msg.get("labels"), list):
+        labels = msg["labels"]
+        if len(labels) != n_targets or not all(isinstance(s, str) for s in labels):
+            raise ValueError(f'"labels" needs {n_targets} strings, got {labels!r}')
+        return "labels", tuple(labels)
+    raise ValueError('expected {"text": "..."} or {"labels": [...]}')
 
 
 def parse_command(line: str, n_targets: int, n_cards: int = 0) -> Command:
@@ -111,6 +118,7 @@ class FeedbackReader:
         # with the serial of another
         self._flash = (NONE, 0)
         self._text = ""
+        self._labels: tuple[str, ...] | None = None
         self._eof = threading.Event()
         self._heard = threading.Event()
         self._thread: threading.Thread | None = None
@@ -138,6 +146,11 @@ class FeedbackReader:
         return self._text
 
     @property
+    def labels(self) -> tuple[str, ...] | None:
+        """The latest {"labels": [...]} line, one string per target; None until one arrives."""
+        return self._labels
+
+    @property
     def done(self) -> bool:
         return self._eof.is_set()
 
@@ -153,7 +166,11 @@ class FeedbackReader:
                 self.n_lines += 1
                 try:
                     if line.lstrip().startswith("{"):
-                        self._text = parse_text(line)
+                        kind, value = parse_json(line, self.n_targets)
+                        if kind == "text":
+                            self._text = str(value)
+                        else:
+                            self._labels = tuple(value)
                         continue
                     cmd = parse_command(line, self.n_targets, self.n_cards)
                 except ValueError as exc:

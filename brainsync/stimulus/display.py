@@ -27,11 +27,13 @@ import numpy as np
 
 from .config import StimulusConfig, Trial, card_overlap
 from ..vep.codes import bit_luminance
-from .flicker import dropped_frames, frame_luminances, n_frames, to_psychopy_rgb
+from .flicker import (dropped_frames, frame_luminances, n_frames, to_psychopy_fill,
+                      to_psychopy_rgb)
 
 # The flash box's line is this many times the cue box's, so a swipe reads at a glance.
 FLASH_LINE_SCALE = 2.0
-LABEL_HEIGHT = 0.045   # screen heights
+LABEL_HEIGHT = 0.045   # screen heights (card labels)
+LIVE_LABEL_HEIGHT = 0.032   # --labels: a label may carry a confidence bar, so it is narrower
 LABEL_GAP = 0.03       # between a target's cue box and its label
 TEXT_HEIGHT = 0.028    # status and prompt lines, screen heights
 TEXT_GAP = 0.04        # between the targets' cue boxes and the status or prompt text
@@ -58,7 +60,8 @@ class Frame:
 
     ``card`` is the profile card shown (-1: none) and ``flash`` the target whose box is
     flashing (-1: none); neither affects ``lum``. ``text`` is drawn under the targets and
-    ``prompt`` above them ("": nothing).
+    ``prompt`` above them ("": nothing); ``labels`` replaces the targets' labels (one
+    string each; (): the config's).
     """
 
     lum: np.ndarray
@@ -69,6 +72,7 @@ class Frame:
     flash: int = -1
     text: str = ""
     prompt: str = ""
+    labels: tuple[str, ...] = ()
 
 
 def format_marker(stamp: float, event: str) -> str:
@@ -179,11 +183,13 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
                 hold: Callable[[], bool] | None = None,
                 card: Callable[[], int] | None = None,
                 flash: Callable[[], tuple[int, int]] | None = None,
-                status: Callable[[], str] | None = None) -> Iterator[Frame]:
+                status: Callable[[], str] | None = None,
+                labels: Callable[[], Sequence[str] | None] | None = None) -> Iterator[Frame]:
     """Continuous flicker; ``cue`` is polled once per frame, ``stop`` ends the run.
 
     ``status()`` is polled on every frame, flicker frames included, for the text under
-    the targets (a decoder's confidence line); None draws none.
+    the targets (a decoder's confidence line); None draws none. ``labels()`` likewise
+    gives the targets' current labels (None: the config's).
 
     While ``hold()`` is true the targets stand still (frame-0 luminance, no cue box), as
     a still screen for a rest baseline; ``seconds`` counts flicker frames only, and the
@@ -212,14 +218,23 @@ def free_frames(cfg: StimulusConfig, seconds: float | None = None,
         lit = flashing if left > 0 else -1
         left = max(0, left - 1)
         text = status() if status is not None else ""
+        names = polled_labels(labels)
         if holding and hold():
-            yield Frame(still, card=shown, flash=lit, text=text)
+            yield Frame(still, card=shown, flash=lit, text=text, labels=names)
             continue
         holding = False
         k = cue() if cue is not None else -1
         yield Frame(frame_luminances(cfg.freqs, cfg.phases, i, r, cfg.waveform, cfg.depth),
-                    cue=k, card=shown, flash=lit, text=text)
+                    cue=k, card=shown, flash=lit, text=text, labels=names)
         i += 1
+
+
+def polled_labels(labels: Callable[[], Sequence[str] | None] | None) -> tuple[str, ...]:
+    """The polled labels as a tuple, () when there is no callable or it returns None."""
+    if labels is None:
+        return ()
+    got = labels()
+    return () if got is None else tuple(got)
 
 
 @dataclass
@@ -270,7 +285,7 @@ class Renderer(Protocol):
     that set them, so a renderer for plain sessions may take just ``(lum, cue)``."""
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
-             text: str = "", prompt: str = "") -> None: ...
+             text: str = "", prompt: str = "", labels: Sequence[str] = ()) -> None: ...
     def flip(self) -> float: ...
     def escape_pressed(self) -> bool: ...
 
@@ -295,6 +310,8 @@ def play(frames: Iterable[Frame], renderer: Renderer, markers: MarkerWriter,
                 extra.update(card=fr.card, flash=fr.flash)
             if fr.text or fr.prompt:
                 extra.update(text=fr.text, prompt=fr.prompt)
+            if fr.labels:
+                extra["labels"] = fr.labels   # type: ignore[assignment]
             renderer.draw(fr.lum, fr.cue, **extra)
             t = renderer.flip()
             markers.emit(fr.events)
@@ -345,10 +362,23 @@ def layout_overflow(cfg: StimulusConfig, width_px: float, height_px: float) -> s
             f"{2 * half_width:.3f}:1 window ends at +/-{half_width:.3f}; they will be cut off")
 
 
-def label_pos(cfg: StimulusConfig, k: int) -> tuple[float, float]:
+def label_pos(cfg: StimulusConfig, k: int, height: float = LABEL_HEIGHT) -> tuple[float, float]:
     """Centre of target ``k``'s label: just below its cue box, never over the square."""
     x, y = cfg.targets[k].pos
-    return (x, y - cfg.reach - LABEL_GAP - LABEL_HEIGHT / 2.0)
+    return (x, y - cfg.reach - LABEL_GAP - height / 2.0)
+
+
+def status_pos(cfg: StimulusConfig, labels: bool) -> tuple[float, str]:
+    """(y, anchorVert) of the status text: under the targets, under their labels when
+    those are drawn, or at the centre of the screen when the labels leave no room below
+    (a diamond keeps its middle free; the top edge is under a MacBook's notch)."""
+    bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
+    if labels:
+        lowest = min(label_pos(cfg, t.index, LIVE_LABEL_HEIGHT)[1] for t in cfg.targets)
+        bottom = lowest - LIVE_LABEL_HEIGHT / 2.0 - TEXT_GAP / 2.0
+    if bottom - TEXT_HEIGHT * 1.2 < -0.5:
+        return 0.0, "center"
+    return bottom, "top"
 
 
 def card_paths(directory: str | Path) -> list[Path]:
@@ -380,11 +410,14 @@ class PsychoPyRenderer:
     With ``cards``, every PNG becomes one ImageStim at init (textures are never loaded in
     the frame loop), centred, [card] height high and as wide as its own aspect says, and
     each target's label (Pass, Like) is written under its cue box in its flash colour, so
-    the audience can see what each square does; ``labels`` writes them (light grey)
-    without cards. Labels are static and drawn outside the
-    squares, so they never touch the flicker. Status text goes under the targets and
-    prompts above them, in a monospaced font so a status table lines up; a text stimulus
-    is re-rendered only when its text changes.
+    the audience can see what each square does; ``labels`` writes them (light grey,
+    monospaced, smaller) without cards, and ``draw(labels=...)`` can replace their text,
+    for a confidence bar beside each one. Labels are drawn outside the squares, so they
+    never touch the flicker. Status text goes under the targets (under their labels,
+    or above the targets when the labels leave no room below) and prompts above them,
+    in a monospaced font so a status table lines up; a text stimulus is re-rendered only
+    when its text changes. The squares are grey unless the config's [stimulus] fill
+    tints them.
     """
 
     def __init__(self, cfg: StimulusConfig, cards: Sequence[str | Path] = (),
@@ -418,17 +451,24 @@ class PsychoPyRenderer:
             print(f"warning: {problem}", file=sys.stderr)
         height = cfg.card_spec.height
         self.labels = []
+        self._label_texts: list[str] = []
         if cards or labels:
+            label_h = LABEL_HEIGHT if cards else LIVE_LABEL_HEIGHT
             for t in cfg.targets:
                 color = cfg.flash_color(t.index) if cards else to_psychopy_rgb(0.9)
-                self.labels.append(visual.TextStim(self.win, text=t.label,
-                                                   pos=label_pos(cfg, t.index),
-                                                   height=LABEL_HEIGHT, color=color))
-        bottom = min(t.pos[1] for t in cfg.targets) - cfg.reach - TEXT_GAP
+                stim = visual.TextStim(self.win, text=t.label,
+                                       pos=label_pos(cfg, t.index, label_h),
+                                       height=label_h, color=color)
+                if not cards:
+                    stim.font = "Menlo"
+                self.labels.append(stim)
+                self._label_texts.append(t.label)
+        bottom, anchor = status_pos(cfg, bool(labels) and not cards)
         top = max(t.pos[1] for t in cfg.targets) + cfg.reach + TEXT_GAP
         self.status = visual.TextStim(self.win, text="", pos=(0.0, bottom), height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.75), font="Menlo",
-                                      wrapWidth=1.5, anchorVert="top", alignText="left")
+                                      wrapWidth=1.5, anchorVert=anchor,
+                                      alignText="left" if anchor == "top" else "center")
         self.prompt = visual.TextStim(self.win, text="", pos=(0.0, top), height=TEXT_HEIGHT,
                                       color=to_psychopy_rgb(0.9), font="Menlo",
                                       wrapWidth=1.5, anchorVert="bottom")
@@ -458,14 +498,17 @@ class PsychoPyRenderer:
         stim.draw()
 
     def draw(self, lum: np.ndarray, cue: int, card: int = -1, flash: int = -1,
-             text: str = "", prompt: str = "") -> None:
+             text: str = "", prompt: str = "", labels: Sequence[str] = ()) -> None:
         # the card goes first so a square drawn over an oversized card keeps its luminance
         if 0 <= card < len(self.cards):
             self.cards[card].draw()
         for k, square in enumerate(self.squares):
-            square.fillColor = to_psychopy_rgb(lum[k])
+            square.fillColor = to_psychopy_fill(lum[k], self.cfg.fill)
             square.draw()
-        for label in self.labels:
+        for k, label in enumerate(self.labels):
+            if k < len(labels) and labels[k] != self._label_texts[k]:
+                label.text = labels[k]
+                self._label_texts[k] = labels[k]
             label.draw()
         if 0 <= cue < len(self.boxes):
             self.boxes[cue].draw()

@@ -9,10 +9,10 @@
 A live run connects the board, starts the stimulus in free-run mode (held still until the
 first feedback line, Unix markers in its log, which this program tails) and decodes for
 --seconds: one line per decision on stderr, a committed change moves the cue box onto the
-decoded square and speaks its label, a summary at the end. The display carries each
-square's label (signage) and, under the squares, a confidence line redrawn after every
-decision: one bar per target from the decoder's scores, the lead, and the committed
-choice (--no-scores for a bare display). c-VEP needs a template first:
+decoded square and speaks its label, a summary at the end. Under each square the display
+writes its label (signage) with a confidence bar and score from the decoder, redrawn
+after every decision, and a status line gives the lead and the committed choice
+(--no-scores for a bare display). c-VEP needs a template first:
 --train-cycles cycles with the cue box on square 0 (look at it), cross-validated, saved as
 <stamp>_cvep_template.npz and reusable with --template FILE. t-VEP decides once every
 square has --min-flashes flashes in the last --flash-window seconds. f-VEP is brainsync.demo's
@@ -75,7 +75,7 @@ PROMPTS = {
     "still": "Keep still and look at the middle of the screen.",
     "go": "Look at one of the squares.",
 }
-BAR_CELLS = 12
+BAR_CELLS = 8
 BUILD_ERRORS = (ValueError, KeyError, FileNotFoundError, ImportError, OSError)
 
 
@@ -248,28 +248,38 @@ def _bar(value: float, cells: int = BAR_CELLS) -> str:
     return "\u2588" * n + "\u2591" * (cells - n)
 
 
-def confidence_text(d: Decision, labels: Sequence[str], scale: float = 1.0) -> str:
-    """The status block under the squares: one line per target (label, bar, score), then
-    the lead and the committed choice. Scores are divided by ``scale`` for the bars (c-VEP
+def confidence_labels(d: Decision, labels: Sequence[str], scale: float = 1.0) -> list[str]:
+    """One label line per target for under its square: the label, a bar and the score,
+    "<" after this decision's raw best. Scores are divided by ``scale`` for the bars (c-VEP
     correlations are already 0..1; t-VEP amplitudes need their own scale)."""
     width = max(len(s) for s in labels)
     lines = []
     for k, label in enumerate(labels):
         s = float(d.scores[k]) if k < len(d.scores) else float("nan")
-        best = " <" if k == d.raw else "  "
-        shown = "   -  " if not np.isfinite(s) else f"{s:+.2f}"
-        lines.append(f"{label:<{width}}  {_bar(s / scale)}  {shown}{best}")
+        best = " <" if k == d.raw else ""
+        shown = "  -  " if not np.isfinite(s) else f"{s:+.2f}"
+        lines.append(f"{label:<{width}} {_bar(s / scale)} {shown}{best}")
+    return lines
+
+
+def confidence_line(d: Decision, labels: Sequence[str]) -> str:
+    """The status line: the lead and the committed choice ("*" when this decision moved it)."""
     gap = "lead  -  " if not np.isfinite(d.gap) else f"lead {d.gap:.2f}"
     choice = ("no choice yet" if d.committed == ABSTAIN
               else f"choice: {labels[d.committed]}" + (" *" if d.changed else ""))
-    lines.append(f"{gap}    {choice}")
-    return "\n".join(lines)
+    return f"{gap}   {choice}"
 
 
 def send_text(stim: Stimulus | None, text: str) -> bool:
     """Replace the display's status line (``{"text": ...}`` on its stdin); False when the
     pipe is gone."""
     return send(stim, json.dumps({"text": text}))
+
+
+def send_labels(stim: Stimulus | None, labels: Sequence[str]) -> bool:
+    """Replace the labels under the squares (``{"labels": [...]}`` on the display's stdin);
+    False when the pipe is gone."""
+    return send(stim, json.dumps({"labels": list(labels)}))
 
 
 def _coded_summary(tally: Tally, labels: Sequence[str], ended: str, paradigm: str) -> list[str]:
@@ -424,6 +434,7 @@ def run_coded(args: argparse.Namespace) -> int:
                 return send(stim, cue)
 
             show = send_text if args.scores else (lambda stim, text: True)
+            show_labels = send_labels if args.scores else (lambda stim, names: True)
             speak(PROMPTS["still"], voice)
             board.read()
             if decoder is None:   # c-VEP without a template: train on square 0
@@ -500,7 +511,8 @@ def run_coded(args: argparse.Namespace) -> int:
                         if not np.isfinite(score_scale):
                             top = float(np.nanmax(d.scores)) if len(d.scores) else float("nan")
                             score_scale = top if np.isfinite(top) and top > 0 else 1.0
-                        if not show(stim, confidence_text(d, labels, score_scale)):
+                        if not (show_labels(stim, confidence_labels(d, labels, score_scale))
+                                and show(stim, confidence_line(d, labels))):
                             pipe_ok = False
                             break
                         if d.changed:

@@ -66,9 +66,9 @@ _KEYS: dict[str, frozenset[str]] = {
     "targets": frozenset({"freqs", "phases_pi", "labels", "count"}),
     "code": frozenset({"length", "lag_frames", "frames_per_bit"}),
     "time": frozenset({"flash_frames", "gap_frames", "order"}),
-    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset"}),
+    "layout": frozenset({"rows", "cols", "size", "spacing", "x_offset", "shape", "spacing_x"}),
     "stimulus": frozenset({"waveform", "hold_cue", "cue_color", "cue_scale", "cue_line_px",
-                           "depth"}),
+                           "depth", "fill"}),
     "display": frozenset({"refresh_hz", "refresh_tolerance_hz", "screen", "background",
                           "aspect"}),
     "session": frozenset({"blocks", "cue_s", "stim_s", "rest_s", "shuffle"}),
@@ -188,6 +188,10 @@ class StimulusConfig:
     cols: int = 1
     spacing: float = 0.0
     x_offset: float = 0.0   # screen heights the grid is shifted right (negative: left)
+    shape: str = "grid"     # or "diamond": 4 targets at top, left, right, bottom
+    spacing_x: float = 0.0  # diamond: the left and right squares' distance from the centre
+                            # (default: spacing); the screen is wider than it is high
+    fill: tuple[float, float, float] = (1.0, 1.0, 1.0)   # per-channel tint of the squares
     path: Path | None = None
     card: Card | None = None   # None: the config has no [card] table
     conditions: tuple[Condition, ...] = ()   # mixed per trial; empty: waveform and depth
@@ -372,6 +376,18 @@ def load_config(name_or_path: str | Path = DEFAULT_CONFIG) -> StimulusConfig:
     return parse_config(data, default_name=path.stem, path=path)
 
 
+def diamond_positions(n: int, spacing: float,
+                      spacing_x: float | None = None) -> list[tuple[float, float]]:
+    """Four targets at top, left, right, bottom (the layout of the four-target SSVEP
+    studies, e.g. Nakanishi et al. 2013): ``spacing`` from the centre up and down,
+    ``spacing_x`` (default ``spacing``) to the sides."""
+    if n != 4:
+        raise ValueError(f"[layout] shape = \"diamond\" needs 4 targets, got {n}")
+    sy = float(spacing)
+    sx = sy if spacing_x is None else float(spacing_x)
+    return [(0.0, sy), (-sx, 0.0), (sx, 0.0), (0.0, -sy)]
+
+
 def grid_positions(n: int, rows: int, cols: int, spacing: float) -> list[tuple[float, float]]:
     """Centres of ``n`` cells filled row by row from the top left, grid centred on (0, 0)."""
     if rows < 1 or cols < 1:
@@ -440,6 +456,16 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
     x_offset = lay.number("x_offset", 0.0)
     if not math.isfinite(x_offset):
         raise ValueError(f"[layout] x_offset must be finite, got {x_offset}")
+    shape = lay.text("shape", "grid")
+    if shape not in ("grid", "diamond"):
+        raise ValueError(f'[layout] shape must be "grid" or "diamond", got {shape!r}')
+    spacing_x = lay.number("spacing_x", spacing)
+    if "spacing_x" in data.get("layout", {}) and shape != "diamond":
+        raise ValueError('[layout] spacing_x is for shape = "diamond"')
+    fill = stim.numbers("fill", [1.0, 1.0, 1.0])
+    if len(fill) != 3 or not all(0.0 <= v <= 1.0 for v in fill) or max(fill) <= 0.0:
+        raise ValueError(f"[stimulus] fill must be three values in [0, 1], not all 0, "
+                         f"got {fill}")
 
     color = stim.numbers("cue_color", [1.0, -1.0, -1.0])
     if len(color) != 3 or not all(-1.0 <= v <= 1.0 for v in color):
@@ -451,7 +477,9 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         card = Card(height=ct.number("height", 0.6), flash_s=ct.number("flash_s", 0.35),
                     flash_colors=ct.colors("flash_colors"))
 
-    positions = [(x + x_offset + 0.0, y) for x, y in grid_positions(n, rows, cols, spacing)]
+    cells = (diamond_positions(n, spacing, spacing_x) if shape == "diamond"
+             else grid_positions(n, rows, cols, spacing))
+    positions = [(x + x_offset + 0.0, y) for x, y in cells]
     cfg = StimulusConfig(
         name=name,
         targets=tuple(Target(index=k, freq=freqs[k], phase=phases_pi[k] * math.pi,
@@ -477,6 +505,9 @@ def parse_config(data: Mapping[str, Any], default_name: str = "config",
         cols=cols,
         spacing=spacing,
         x_offset=x_offset,
+        shape=shape,
+        spacing_x=spacing_x,
+        fill=(fill[0], fill[1], fill[2]),
         path=path,
         card=card,
         code=code,
@@ -544,6 +575,10 @@ def _check_geometry(cfg: StimulusConfig) -> None:
     if cfg.n_targets > 1 and cfg.spacing < cfg.size:
         raise ValueError(f"[layout] spacing {cfg.spacing:g} < size {cfg.size:g}: "
                          "targets would overlap")
+    if cfg.shape == "diamond" and cfg.spacing_x < cfg.size and cfg.spacing < cfg.size:
+        raise ValueError(f"[layout] diamond spacing {cfg.spacing:g} and spacing_x "
+                         f"{cfg.spacing_x:g} are both under size {cfg.size:g}: "
+                         "neighbouring squares would overlap")
     aspect = cfg.display.aspect
     if aspect <= 0:
         raise ValueError(f"[display] aspect must be positive, got {aspect}")

@@ -129,21 +129,20 @@ def test_coded_stimulus_args_carry_labels_and_status_unless_no_scores():
     assert "--labels" not in b and "--status" not in b
 
 
-def test_confidence_text_lists_every_target_with_a_bar_and_the_choice():
+def test_confidence_labels_and_line():
     import numpy as np
     from brainsync.online import Decision
     d = Decision(time=0.0, scores=np.array([0.42, 0.11]), raw=0, committed=0, changed=True,
                  gap=0.31, level=float("nan"))
-    text = cli.confidence_text(d, ["YES", "NO"])
-    lines = text.split("\n")
-    assert len(lines) == 3
-    assert lines[0].startswith("YES") and "+0.42" in lines[0] and lines[0].endswith("<")
-    assert lines[1].startswith("NO ") and "+0.11" in lines[1]
-    assert lines[0].count("█") == 5 and lines[1].count("█") == 1
-    assert "lead 0.31" in lines[2] and "choice: YES *" in lines[2]
+    lines = cli.confidence_labels(d, ["YES", "NO"])
+    assert len(lines) == 2
+    assert lines[0].startswith("YES ") and "+0.42" in lines[0] and lines[0].endswith("<")
+    assert lines[1].startswith("NO  ") and "+0.11" in lines[1] and not lines[1].endswith("<")
+    assert lines[0].count("\u2588") == 3 and lines[1].count("\u2588") == 1   # of 8 cells
+    assert cli.confidence_line(d, ["YES", "NO"]) == "lead 0.31   choice: YES *"
     abstained = Decision(time=0.0, scores=np.array([0.1, 0.1]), raw=-1, committed=-1,
                          changed=False, gap=float("nan"), level=float("nan"))
-    text = cli.confidence_text(abstained, ["YES", "NO"], scale=0.2)
-    assert "no choice yet" in text and "lead  -" in text
-    assert text.split("\n")[0].count("█") == 6   # 0.1 / 0.2 of 12 cells
-    assert cli.send_text(None, "x") is True
+    lines = cli.confidence_labels(abstained, ["YES", "NO"], scale=0.2)
+    assert lines[0].count("\u2588") == 4 and not lines[0].endswith("<")   # 0.1 / 0.2 of 8
+    assert cli.confidence_line(abstained, ["YES", "NO"]) == "lead  -     no choice yet"
+    assert cli.send_text(None, "x") is True and cli.send_labels(None, ["a", "b"]) is True

@@ -827,3 +827,56 @@ def test_labels_and_status_flags_in_a_free_run():
         cli.main(["--free", "--status", "stdin", "--plan"])
     assert cli.main(["--free", "--feedback", "stdin", "--labels", "--status", "stdin",
                      "--plan"]) == 0
+
+
+def test_feedback_reader_takes_label_lines_for_every_target():
+    notes: list[str] = []
+    r = FeedbackReader(io.StringIO('{"labels": ["YES  .4", "NO  .1"]}\n{"labels": ["one"]}\n'
+                                   '{"labels": [1, 2]}\n0\n'), 2, note=notes.append)
+    assert r.labels is None
+    r.run()
+    assert r.labels == ("YES  .4", "NO  .1") and r.current == 0
+    assert r.n_ignored == 2 and all("labels" in n for n in notes)
+
+
+def test_free_frames_carry_polled_labels():
+    cfg = load_config("two_targets")
+    names = iter([None, ("a", "b"), ("a", "c")])
+    frames = list(free_frames(cfg, seconds=3 / 60, labels=lambda: next(names)))
+    assert [f.labels for f in frames] == [(), ("a", "b"), ("a", "c")]
+
+
+def test_diamond_layout_and_fill():
+    cfg = load_config("cvep_4")
+    assert cfg.shape == "diamond" and cfg.fill == (1.0, 0.0, 0.0)
+    assert [t.pos for t in cfg.targets] == [(0.0, 0.32), (-0.55, 0.0), (0.55, 0.0),
+                                            (0.0, -0.32)]
+    from brainsync.stimulus.config import diamond_positions, parse_config
+    with pytest.raises(ValueError, match="needs 4 targets"):
+        diamond_positions(3, 0.3)
+    assert diamond_positions(4, 0.3) == [(0.0, 0.3), (-0.3, 0.0), (0.3, 0.0), (0.0, -0.3)]
+    base = {"targets": {"freqs": [10.0, 12.0, 14.0, 16.0]}, "layout": {"shape": "diamond",
+            "size": 0.2, "spacing": 0.3}}
+    assert parse_config(base).shape == "diamond" and parse_config(base).spacing_x == 0.3
+    with pytest.raises(ValueError, match="overlap"):
+        parse_config({**base, "layout": {"shape": "diamond", "size": 0.25, "spacing": 0.2,
+                                         "spacing_x": 0.2}})
+    with pytest.raises(ValueError, match="shape"):
+        parse_config({**base, "layout": {"shape": "ring"}})
+    with pytest.raises(ValueError, match="spacing_x"):
+        parse_config({**base, "layout": {"rows": 2, "cols": 2, "spacing_x": 0.5}})
+    with pytest.raises(ValueError, match="fill"):
+        parse_config({**base, "stimulus": {"fill": [0.0, 0.0, 0.0]}})
+    from brainsync.stimulus.flicker import to_psychopy_fill
+    assert to_psychopy_fill(1.0, (1.0, 0.0, 0.0)) == (1.0, -1.0, -1.0)
+    assert to_psychopy_fill(0.5) == (0.0, 0.0, 0.0)
+
+
+def test_status_goes_above_when_labels_leave_no_room_below():
+    from brainsync.stimulus.display import status_pos
+    y, anchor = status_pos(load_config("cvep_4"), labels=True)
+    assert anchor == "center" and y == 0.0
+    y, anchor = status_pos(load_config("cvep_2"), labels=True)
+    assert anchor == "top" and -0.35 < y < -0.3
+    y, anchor = status_pos(load_config("cvep_2"), labels=False)
+    assert anchor == "top" and -0.3 < y < -0.27

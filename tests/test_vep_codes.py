@@ -147,7 +147,8 @@ def test_shipped_paradigm_configs():
     c4 = load_config("cvep_4")
     assert c4.paradigm == "code" and c4.coded and c4.n_targets == 4
     assert c4.code.length == 63 and c4.code.lag_frames == 16 and c4.code.cycle_frames == 63
-    assert all(math.isnan(t.freq) for t in c4.targets) and c4.labels == ("0", "1", "2", "3")
+    assert all(math.isnan(t.freq) for t in c4.targets)
+    assert c4.labels == ("YES", "NO", "HELP", "WATER") and c4.shape == "diamond"
     assert c4.session.stim_s == pytest.approx(5 * 63 / 60)
     c16 = load_config("cvep_16")
     assert c16.n_targets == 16 and c16.code.lag_frames == 4 and (c16.rows, c16.cols) == (4, 4)
