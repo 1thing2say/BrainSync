@@ -11,7 +11,15 @@
 One port serves both HTTP and WebSocket (PROTOCOL-v3 section 1). ``GET /`` serves
 ``static_files["index.html"]``, ``GET /static/<name>`` serves the file of that exact name in
 ``static_files`` (nothing else on disk is reachable), ``GET /health`` serves ``health()`` as
-JSON, and ``GET /ws`` upgrades to WebSocket. Every other path gets 404.
+JSON, ``GET /api/speech?text=...`` serves ``speech(text)`` as WAV (v3.1; see below), and
+``GET /ws`` upgrades to WebSocket. Every other path gets 404.
+
+``/api/speech`` lets a client speak a status line ("headset disconnected") in the server's
+Cartesia voice without holding the key. The text is the ``text`` query parameter with its
+whitespace collapsed: empty or over SPEECH_MAX_CHARS (300) characters gets 400. ``speech``
+runs on a worker thread, so a slow synthesis never stalls the WebSocket loop; when it is None,
+returns None, raises or takes longer than SPEECH_TIMEOUT_S, the answer is 503 (no voice),
+which a client treats as "stay silent".
 
 The transport handles everything the session should not have to think about: the token, the
 hello-first rule, the hello timeout, the Origin check, who is the controller, what a viewer
@@ -69,6 +77,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -92,6 +101,8 @@ WS_PING_TIMEOUT_S = 10.0     # interval + timeout (the websockets default is 20 
 CLOSE_BAD_HELLO = 1008       # policy violation: the hello was refused for another reason
 CLOSE_INTERNAL = 1011
 CLOSE_BYE = 1000
+SPEECH_MAX_CHARS = 300       # one short status sentence (as brainsync/swipe_web.py)
+SPEECH_TIMEOUT_S = 12.0      # Cartesia's own limit is 8 s a try
 
 # Chrome extension ids are 32 letters a-p; pages on this machine may use any port.
 LOCAL_ORIGINS = re.compile(r"chrome-extension://[a-p]{32}"
@@ -183,6 +194,7 @@ class Transport:
                  static_files: Mapping[str, Path | str] = MappingProxyType({}),
                  health: Callable[[], dict] | None = None,
                  catchup: Callable[[int, str, Hello], list[dict]] | None = None,
+                 speech: Callable[[str], bytes | None] | None = None,
                  max_slots: int = 4, ping_s: float = PING_S,
                  hello_timeout_s: float = HELLO_TIMEOUT_S, max_frame: int = MAX_FRAME) -> None:
         if not isinstance(host, str) or not host:
@@ -206,6 +218,8 @@ class Transport:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
         if health is not None and not callable(health):
             raise ValueError("health must be a function returning a dict, or None")
+        if speech is not None and not callable(speech):
+            raise ValueError("speech must be a function text -> WAV bytes (or None), or None")
         if catchup is not None and not callable(catchup):
             raise ValueError("catchup must be a function (conn_id, role, hello) -> list of "
                              "messages, or None")
@@ -240,6 +254,7 @@ class Transport:
         self._files = files
         self._health = health
         self._catchup = catchup
+        self._speech = speech
         self._ids = itertools.count(1)
         self._conns: dict[int, ServerConnection] = {}               # every open connection
         self._joined: dict[int, tuple[ServerConnection, str]] = {}  # after hello: (conn, role)
@@ -345,8 +360,9 @@ class Transport:
 
     # -- HTTP --------------------------------------------------------------------------------
 
-    def _http(self, conn: ServerConnection, request: Request) -> Response | None:
-        """Route a request: 403 for a refused Origin, files, health, the /ws upgrade, or 404."""
+    def _http(self, conn: ServerConnection, request: Request) -> Any:
+        """Route a request: 403 for a refused Origin, files, health, speech (a coroutine,
+        which websockets awaits), the /ws upgrade, or 404."""
         origins = request.headers.get_all("Origin")
         origin = origins[0] if len(origins) == 1 else None
         if len(origins) > 1 or not origin_allowed(origin, request.headers.get("Host"),
@@ -366,6 +382,14 @@ class Transport:
                 _note(f"health() failed: {type(exc).__name__}: {exc}")
                 return self._response(500, b"health check failed\n")
             return self._response(200, body, "application/json")
+        if path == "/api/speech":
+            # The voice costs Cartesia credits: behind a tunnel anyone could reach it, so with
+            # auth on it takes the same token as the WebSocket, as "Authorization: Bearer ...".
+            if self.token is not None and not self._bearer_ok(request.headers.get("Authorization")):
+                return self._response(401, dumps({"error": "send the server token as "
+                                                           "Authorization: Bearer <token>"}
+                                                 ).encode(), "application/json")
+            return self._speak(request.path.partition("?")[2])
         if path == "/":
             name: str | None = "index.html"
         elif path.startswith("/static/"):
@@ -383,19 +407,47 @@ class Transport:
         ctype = CONTENT_TYPES.get(file.suffix.lower(), "application/octet-stream")
         return self._response(200, body, ctype)
 
+    def _bearer_ok(self, header: str | None) -> bool:
+        """True when ``header`` is "Bearer <token>" (compared in constant time)."""
+        scheme, _, sent = (header or "").partition(" ")
+        return (self.token is not None and scheme.lower() == "bearer"
+                and hmac.compare_digest(sent.strip().encode(), self.token.encode()))
+
+    async def _speak(self, query: str) -> Response:
+        """The WAV of the query's ``text`` from ``speech``; 400 for a bad text, 503 without
+        a voice."""
+        values = urllib.parse.parse_qs(query).get("text") or [""]
+        text = " ".join(values[0].split())
+        if not text or len(text) > SPEECH_MAX_CHARS:
+            return self._response(400, dumps({"error": f"text must be 1..{SPEECH_MAX_CHARS} "
+                                                       f"characters"}).encode(),
+                                  "application/json")
+        body = None
+        if self._speech is not None:
+            try:
+                body = await asyncio.wait_for(asyncio.to_thread(self._speech, text),
+                                              SPEECH_TIMEOUT_S)
+            except Exception as exc:     # a timeout, a vanished cache file: no voice
+                _note(f"speech failed: {type(exc).__name__}: {_short(str(exc))}")
+                body = None
+        if not isinstance(body, (bytes, bytearray)) or not body:
+            return self._response(503, dumps({"error": "no voice (Cartesia unavailable)"}
+                                             ).encode(), "application/json")
+        return self._response(200, bytes(body), "audio/wav", cache="private, max-age=3600")
+
     def _default_health(self) -> dict[str, Any]:
         return {"ok": True, "board": "unknown", "controller": self.controller is not None,
                 "viewers": self.n_viewers}
 
     @staticmethod
-    def _response(status: int, body: bytes,
-                  ctype: str = "text/plain; charset=utf-8") -> Response:
+    def _response(status: int, body: bytes, ctype: str = "text/plain; charset=utf-8",
+                  cache: str = "no-store") -> Response:
         from websockets.datastructures import Headers
         from websockets.http11 import Response
 
         headers = Headers([("Date", email.utils.formatdate(usegmt=True)),
                            ("Connection", "close"), ("Content-Length", str(len(body))),
-                           ("Content-Type", ctype), ("Cache-Control", "no-store"),
+                           ("Content-Type", ctype), ("Cache-Control", cache),
                            ("X-Content-Type-Options", "nosniff")])
         return Response(status, http.HTTPStatus(status).phrase, headers, body)
 

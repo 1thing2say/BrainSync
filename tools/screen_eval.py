@@ -3,6 +3,7 @@
     python -m tools.screen_eval data/screens --with-hints               # every page, hints sent
     python -m tools.screen_eval data/screens --no-hints --limit 5       # first 5 pages, image only
     python -m tools.screen_eval data/screens --with-hints --env-file .env --out run1.json
+    python -m tools.screen_eval --ax data/axdumps --env-file .env       # desktop AX ranking
 
 The dataset (tools/screen_capture.md) is a folder of pages: ``<name>.jpg`` (or .jpeg, .png,
 .webp) plus ``<name>.json`` holding ``{url, title, viewport: {w, h, dpr}, image: {w, h},
@@ -44,6 +45,19 @@ ANTHROPIC_API_KEY can live in a gitignored file. Values are never printed or log
 codes: 0 when at least one page was scored, 1 when none could be (no API key, every detection
 failed, the output cannot be written), 2 for bad arguments or an unusable dataset. Each
 detection is a paid API call: about $0.001 per page.
+
+``--ax DIR`` scores ``Detector.rank`` (protocol v3.1, the text-only ranking of a desktop
+window's accessibility tree) instead. DIR holds ``<bundle id>.json`` dumps written by
+``bp-probe axdump``: ``{app: {bundle_id, name, pid}, window: {title, frame: {x, y, w, h}},
+items: [{id, role, subrole, label, frame: {x, y, w, h}, enabled, actions}], walk_ms,
+truncated}``, frames in global screen points. Each dump becomes the scan hints a desktop
+client sends (window-relative points, the first 200 items, role = AX role, tag = subrole,
+text = label) and is ranked once, in name order. There is no ground truth for what the user
+wants next, so the report measures the cost and the sanity of the answer: latency (median,
+p90), tokens and cost, ``n_elements`` returned, and ``pressable``, the share of returned
+elements whose item is enabled and offers a press action (AXPress, AXPick, AXConfirm,
+AXShowMenu or AXOpen). The full result goes to ``--out``, by default
+``<DIR>/results/ax-rank.json``. Exit codes are as above.
 """
 from __future__ import annotations
 
@@ -364,6 +378,219 @@ def evaluate(pages: Sequence[Page], detector: Any, *, with_hints: bool,
     return {"pages": rows, "totals": summarize(rows), "interrupted": interrupted}
 
 
+# -- AX dumps (protocol v3.1) -----------------------------------------------------------------
+
+PRESS_ACTIONS = frozenset({"AXPress", "AXPick", "AXConfirm", "AXShowMenu", "AXOpen"})
+MAX_AX_HINTS = 200               # what a desktop client sends at most (PROTOCOL-v3 MAX_HINTS)
+
+
+@dataclass(frozen=True)
+class AxDump:
+    """One window's accessibility dump, as the scan hints a desktop client would send."""
+    name: str
+    app: dict
+    window_title: str
+    viewport_w: float
+    viewport_h: float
+    hints: tuple[dict, ...]
+    n_items: int
+    walk_ms: float | None
+    truncated: bool
+
+    def hint_by_id(self) -> dict[int, dict]:
+        return {h["id"]: h for h in self.hints}
+
+
+def _frame(obj: Any, what: str, where: Path) -> tuple[float, float, float, float]:
+    if not (isinstance(obj, dict) and all(_number(obj.get(k)) for k in ("x", "y", "w", "h"))):
+        raise ValueError(f"{where.name}: {what} must be an object with numbers x, y, w and h "
+                         f"in screen points; re-run bp-probe axdump")
+    return obj["x"], obj["y"], obj["w"], obj["h"]
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def load_ax_dump(json_path: str | Path) -> AxDump:
+    """Read one ``bp-probe axdump`` file as scan hints; ValueError says what is wrong."""
+    json_path = Path(json_path)
+    try:
+        meta = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{json_path.name}: cannot read it as JSON ({exc}); fix or delete "
+                         f"the file") from None
+    if not isinstance(meta, dict) or not isinstance(meta.get("app"), dict):
+        raise ValueError(f"{json_path.name}: the top level must be an object with app, window "
+                         f"and items (a bp-probe axdump file)")
+    window = meta.get("window")
+    if not isinstance(window, dict):
+        raise ValueError(f"{json_path.name}: window must be an object with title and frame")
+    wx, wy, ww, wh = _frame(window.get("frame"), "window.frame", json_path)
+    if ww <= 0 or wh <= 0:
+        raise ValueError(f"{json_path.name}: the window frame has no area ({ww} x {wh})")
+    items = meta.get("items")
+    if not isinstance(items, list):
+        raise ValueError(f"{json_path.name}: items must be a list (use [] for none)")
+    hints: list[dict] = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict) or isinstance(item.get("id"), bool) \
+                or not isinstance(item.get("id"), int):
+            raise ValueError(f"{json_path.name}: item {i} needs an integer id")
+        x, y, w, h = _frame(item.get("frame"), f"item {i} frame", json_path)
+        actions = item.get("actions")
+        hints.append({"id": item["id"], "x": x - wx, "y": y - wy, "w": w, "h": h,
+                      "role": _text(item.get("role")), "text": _text(item.get("label")),
+                      "tag": _text(item.get("subrole")),
+                      "actions": [a for a in actions if isinstance(a, str)]
+                      if isinstance(actions, list) else [],
+                      "enabled": item.get("enabled") is not False})
+    ids = [h["id"] for h in hints]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{json_path.name}: two items share an id; give each item its own id")
+    app = meta["app"]
+    pid = app.get("pid")
+    walk_ms = meta.get("walk_ms")
+    return AxDump(name=json_path.stem,
+                  app={"bundle_id": _text(app.get("bundle_id")), "name": _text(app.get("name")),
+                       "pid": pid if isinstance(pid, int) and not isinstance(pid, bool) else 0},
+                  window_title=_text(window.get("title")), viewport_w=ww, viewport_h=wh,
+                  hints=tuple(hints[:MAX_AX_HINTS]), n_items=len(items),
+                  walk_ms=float(walk_ms) if _number(walk_ms) else None,
+                  truncated=meta.get("truncated") is True)
+
+
+def load_ax_dataset(directory: str | Path, limit: int | None = None
+                    ) -> tuple[list[AxDump], list[dict]]:
+    """The dumps of ``directory`` in name order (the first ``limit``), and the skipped files.
+    ValueError when the folder is missing or holds no usable dump."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise ValueError(f"{directory} is not a folder; pass the folder bp-probe axdump writes "
+                         f"to (data/axdumps)")
+    if limit is not None and limit < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}")
+    dumps: list[AxDump] = []
+    skipped: list[dict] = []
+    for path in sorted(directory.glob("*.json")):
+        if limit is not None and len(dumps) >= limit:
+            break
+        try:
+            dumps.append(load_ax_dump(path))
+        except ValueError as exc:
+            _note(f"skipped {path.name}: {exc}")
+            skipped.append({"name": path.stem, "reason": str(exc)})
+    if not dumps:
+        raise ValueError(f"no usable dump in {directory}: it needs <bundle id>.json files from "
+                         f"bp-probe axdump")
+    return dumps, skipped
+
+
+def pressable(hint: dict | None) -> bool:
+    """True when the item is enabled and offers a press action."""
+    return (hint is not None and hint.get("enabled") is not False
+            and bool(PRESS_ACTIONS.intersection(hint.get("actions") or ())))
+
+
+def score_ax(dump: AxDump, detection: Any) -> dict:
+    """One dump's row: counts, the pressable share, latency, tokens and cost."""
+    by_id = dump.hint_by_id()
+    elements = list(detection.elements)
+    n_pressable = sum(pressable(by_id.get(el.hint_id)) for el in elements)
+    return {
+        "name": dump.name, "ok": True, "app": dump.app.get("name", ""),
+        "bundle_id": dump.app.get("bundle_id", ""), "window_title": dump.window_title,
+        "n_items": dump.n_items, "n_hints": len(dump.hints),
+        "n_hints_pressable": sum(pressable(h) for h in dump.hints),
+        "walk_ms": dump.walk_ms, "truncated": dump.truncated,
+        "n_elements": len(elements), "n_pressable": n_pressable,
+        "pressable": _ratio(n_pressable, len(elements)),
+        "n_risky": sum(bool(getattr(el, "risky", False)) for el in elements),
+        "top3": [str(el.label)[:60] for el in elements[:3]],
+        "ms": int(detection.ms), "input_tokens": int(detection.input_tokens),
+        "output_tokens": int(detection.output_tokens),
+        "cost_usd": cost_usd(detection.input_tokens, detection.output_tokens),
+        "cached": bool(getattr(detection, "cached", False)),
+    }
+
+
+def summarize_ax(rows: Sequence[dict]) -> dict:
+    """Totals over the ax rows: latency, tokens, cost, elements and the pressable share."""
+    good = [r for r in rows if r["ok"]]
+    ms = [r["ms"] for r in good]
+    tokens_in = sum(r["input_tokens"] for r in good)
+    tokens_out = sum(r["output_tokens"] for r in good)
+    n_elements = sum(r["n_elements"] for r in good)
+    return {
+        "n_dumps": len(rows), "n_ok": len(good), "n_failed": len(rows) - len(good),
+        "n_hints": sum(r["n_hints"] for r in good), "n_elements": n_elements,
+        "n_elements_mean": n_elements / len(good) if good else None,
+        "pressable": _ratio(sum(r["n_pressable"] for r in good), n_elements),
+        "pressable_page_mean": _mean([r["pressable"] for r in good]),
+        "ms_median": percentile(ms, 50), "ms_p90": percentile(ms, 90),
+        "input_tokens": tokens_in, "output_tokens": tokens_out,
+        "cost_usd": cost_usd(tokens_in, tokens_out),
+        "cost_usd_per_dump": cost_usd(tokens_in, tokens_out) / len(good) if good else None,
+    }
+
+
+def evaluate_ax(dumps: Sequence[AxDump], detector: Any,
+                progress: Callable[[dict], None] | None = None) -> dict:
+    """Run ``detector.rank`` on every dump: ``{"dumps", "totals", "interrupted"}``.
+
+    A ranking that raises becomes a row with ``ok: false`` and the error; Ctrl-C stops after
+    the dump in progress and returns what was scored.
+    """
+    rows: list[dict] = []
+    interrupted = False
+    for dump in dumps:
+        t0 = time.perf_counter()
+        try:
+            det = detector.rank(list(dump.hints), dump.viewport_w, dump.viewport_h,
+                                app=dict(dump.app), window_title=dump.window_title,
+                                history=(), url="")
+            row = score_ax(dump, det)
+            row["model"] = getattr(det, "model", None)
+            row["summary"] = str(getattr(det, "summary", ""))[:200]
+        except KeyboardInterrupt:
+            interrupted = True
+            _note(f"interrupted at {dump.name}; reporting the {len(rows)} dump(s) done")
+            break
+        except Exception as exc:   # DetectError, an SDK error, a broken stub: keep going
+            row = {"name": dump.name, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:500],
+                   "wall_ms": int((time.perf_counter() - t0) * 1000)}
+        rows.append(row)
+        if progress is not None:
+            progress(row)
+    return {"dumps": rows, "totals": summarize_ax(rows), "interrupted": interrupted}
+
+
+def format_ax_row(row: dict) -> str:
+    """One line per dump for the report."""
+    if not row["ok"]:
+        return f"{row['name'][:32]:32}  FAILED  {row['error'][:90]}"
+    return (f"{row['name'][:32]:32}  hints {row['n_hints']:3}  elements {row['n_elements']:2}  "
+            f"pressable {_pct(row['pressable'])}  {row['ms']:5} ms  "
+            f"{row['input_tokens']:6} in {row['output_tokens']:5} out  ${row['cost_usd']:.4f}")
+
+
+def format_ax_totals(totals: dict) -> str:
+    """The summary block printed after the ax rows."""
+    t = totals
+    ms = ("-" if t["ms_median"] is None
+          else f"median {t['ms_median']:.0f} ms, p90 {t['ms_p90']:.0f} ms")
+    mean = "-" if t["n_elements_mean"] is None else f"{t['n_elements_mean']:.1f}"
+    per = "" if t["cost_usd_per_dump"] is None else f", ${t['cost_usd_per_dump']:.4f}/dump"
+    return "\n".join([
+        f"dumps      {t['n_ok']} ranked, {t['n_failed']} failed",
+        f"elements   {t['n_elements']} returned ({mean} per dump) from {t['n_hints']} hints",
+        f"pressable  {_pct(t['pressable']).strip()} of the returned elements are enabled and "
+        f"pressable (dump mean {_pct(t['pressable_page_mean']).strip()})",
+        f"latency    {ms}",
+        f"tokens     {t['input_tokens']} in, {t['output_tokens']} out: "
+        f"${t['cost_usd']:.4f}{per}"])
+
+
 # -- the report -----------------------------------------------------------------------------
 
 def _pct(v: float | None) -> str:
@@ -415,12 +642,17 @@ def format_totals(totals: dict, *, with_hints: bool) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m tools.screen_eval", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("dir", metavar="DIR", help="dataset folder of <name>.jpg + <name>.json pages")
-    hints = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("dir", metavar="DIR", nargs="?", default=None,
+                   help="dataset folder of <name>.jpg + <name>.json pages")
+    p.add_argument("--ax", metavar="DIR", default=None,
+                   help="score Detector.rank on the bp-probe axdump files in DIR instead "
+                        "(no screenshots; DIR and --with-hints/--no-hints are not used)")
+    hints = p.add_mutually_exclusive_group()
     hints.add_argument("--with-hints", dest="with_hints", action="store_true",
                        help="send the page's hints along with the image, as the extension does")
     hints.add_argument("--no-hints", dest="with_hints", action="store_false",
                        help="send the image only")
+    p.set_defaults(with_hints=None)
     p.add_argument("--limit", type=int, default=None,
                    help="score only the first N pages in name order")
     p.add_argument("--out", metavar="PATH", default=None,
@@ -438,6 +670,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def check_arguments(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject bad values through ``p.error`` (exit code 2)."""
+    if args.ax is not None:
+        if args.dir is not None or args.with_hints is not None:
+            p.error("--ax DIR scores accessibility dumps on its own; drop the dataset DIR and "
+                    "--with-hints/--no-hints")
+    elif args.dir is None:
+        p.error("give the dataset folder DIR (data/screens), or --ax DIR for accessibility "
+                "dumps")
+    elif args.with_hints is None:
+        p.error("one of the arguments --with-hints --no-hints is required")
     if args.limit is not None and args.limit < 1:
         p.error(f"--limit must be at least 1, got {args.limit}")
     if not 0.0 <= args.min_p_button <= 1.0:   # also rejects NaN
@@ -464,7 +705,10 @@ def main(argv: list[str] | None = None, *,
         _note(f"read {len(names)} variable(s) from {args.env_file}"
               + (f": {', '.join(names)}" if names else ""))
     try:
-        pages, skipped = load_dataset(args.dir, args.limit)
+        if args.ax is not None:
+            dumps, skipped = load_ax_dataset(args.ax, args.limit)
+        else:
+            pages, skipped = load_dataset(args.dir, args.limit)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -481,6 +725,8 @@ def main(argv: list[str] | None = None, *,
                or "the detector is disabled; set ANTHROPIC_API_KEY or pass --env-file")
         print(f"error: {why}", file=sys.stderr)
         return 1
+    if args.ax is not None:
+        return _main_ax(args, dumps, skipped, detector)
     hints_word = "with" if args.with_hints else "no"
     out = Path(args.out) if args.out else Path(args.dir) / "results" / f"{hints_word}-hints.json"
     _note(f"scoring {len(pages)} page(s) {hints_word} hints"
@@ -508,6 +754,36 @@ def main(argv: list[str] | None = None, *,
     print(f"results    {out}")
     if result["totals"]["n_ok"] == 0:
         print("error: no page was scored; see the errors above", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _main_ax(args: argparse.Namespace, dumps: list[AxDump], skipped: list[dict],
+             detector: Any) -> int:
+    """The --ax run: rank every dump, print the report and write the JSON result."""
+    out = Path(args.out) if args.out else Path(args.ax) / "results" / "ax-rank.json"
+    _note(f"ranking {len(dumps)} dump(s)" + (f", {len(skipped)} skipped" if skipped else ""))
+    result = evaluate_ax(dumps, detector,
+                         progress=lambda row: print(format_ax_row(row), flush=True))
+    model = next((r["model"] for r in result["dumps"] if r.get("model")), args.model)
+    result = {
+        "settings": {"ax": str(args.ax), "limit": args.limit, "model": model,
+                     "price_in_per_m": PRICE_IN_PER_M, "price_out_per_m": PRICE_OUT_PER_M,
+                     "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
+        "totals": result["totals"], "interrupted": result["interrupted"],
+        "dumps": result["dumps"], "skipped": skipped,
+    }
+    print()
+    print(format_ax_totals(result["totals"]))
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write {out}: {exc}", file=sys.stderr)
+        return 1
+    print(f"results    {out}")
+    if result["totals"]["n_ok"] == 0:
+        print("error: no dump was ranked; see the errors above", file=sys.stderr)
         return 1
     return 0
 

@@ -984,3 +984,120 @@ def test_websocket_on_another_path_is_not_upgraded(site):
             await connect(base + "/nope")
 
     asyncio.run(main())
+
+
+# -- /api/speech (v3.1) ---------------------------------------------------------------------
+
+WAV = b"RIFF\x24\x00\x00\x00WAVEfmt " + bytes(40)
+AUTH = [("Authorization", f"Bearer {TOKEN}")]
+
+
+@pytest.mark.parametrize("headers", [(), [("Authorization", "Bearer wrong")],
+                                     [("Authorization", TOKEN)],
+                                     [("Authorization", f"Basic {TOKEN}")]])
+def test_speech_needs_the_token_when_auth_is_on(headers):
+    said: list[str] = []
+    t = make(speech=lambda text: said.append(text) or WAV)
+    try:
+        status, _, body = http_get(t.port, "/api/speech?text=hello", headers)
+        assert status == 401 and "Bearer" in json.loads(body)["error"] and said == []
+        assert TOKEN not in body.decode()
+    finally:
+        t.stop()
+
+
+def test_speech_needs_no_token_when_auth_is_off():
+    t = make(token=None, speech=lambda text: WAV)
+    try:
+        assert http_get(t.port, "/api/speech?text=hello")[0] == 200
+    finally:
+        t.stop()
+
+
+def test_speech_serves_wav_from_the_speech_function():
+    said: list[str] = []
+    t = make(speech=lambda text: said.append(text) or WAV)
+    try:
+        status, headers, body = http_get(t.port, "/api/speech?text=Headset%20%20streaming%0A", AUTH)
+        assert status == 200 and body == WAV
+        assert headers["content-type"] == "audio/wav"
+        assert headers["cache-control"] == "private, max-age=3600"
+        assert said == ["Headset streaming"]                    # whitespace collapsed
+        status, _, _ = http_get(t.port, "/api/speech?text=" + "a" * 300, AUTH)
+        assert status == 200 and said[-1] == "a" * 300
+    finally:
+        t.stop()
+
+
+@pytest.mark.parametrize("query", ["", "?text=", "?text=%20%20", "?other=x",
+                                   "?text=" + "a" * 301])
+def test_speech_refuses_an_empty_or_long_text(query):
+    said: list[str] = []
+    t = make(speech=lambda text: said.append(text) or WAV)
+    try:
+        status, headers, body = http_get(t.port, "/api/speech" + query, AUTH)
+        assert status == 400 and headers["content-type"] == "application/json"
+        assert "1..300 characters" in json.loads(body)["error"]
+        assert said == []
+    finally:
+        t.stop()
+
+
+@pytest.mark.parametrize("speech", [None, lambda text: None, lambda text: b"",
+                                    lambda text: 1 / 0])
+def test_speech_without_a_voice_is_503(speech, capsys):
+    t = make(speech=speech)
+    try:
+        status, _, body = http_get(t.port, "/api/speech?text=hello", AUTH)
+        assert status == 503 and "no voice" in json.loads(body)["error"]
+    finally:
+        t.stop()
+
+
+def test_slow_speech_does_not_block_the_websocket_loop():
+    release = threading.Event()
+
+    def slow(text):
+        release.wait(5)
+        return WAV
+
+    t = make(speech=slow)
+    try:
+        got: dict = {}
+        thread = threading.Thread(target=lambda: got.update(r=http_get(t.port,
+                                                                        "/api/speech?text=hi", AUTH)))
+        thread.start()
+        time.sleep(0.1)
+        t0 = time.monotonic()
+        assert http_get(t.port, "/health")[0] == 200            # served meanwhile
+        assert time.monotonic() - t0 < 1.0
+        release.set()
+        thread.join(5)
+        assert got["r"][0] == 200
+    finally:
+        release.set()
+        t.stop()
+
+
+def test_speech_must_be_callable():
+    with pytest.raises(ValueError, match="speech must be a function"):
+        Transport(token=TOKEN, speech="say")
+
+
+def test_speech_obeys_the_origin_check():
+    t = make(speech=lambda text: WAV)
+    try:
+        assert http_get(t.port, "/api/speech?text=hi",
+                        [("Origin", "https://evil.example")])[0] == 403
+    finally:
+        t.stop()
+
+
+def test_a_viewer_may_not_rescan(transport):
+    async def main():
+        v = await join(transport, role="viewer")
+        await v.send(json.dumps({"type": "rescan"}))
+        assert (await recv(v))["code"] == "not_allowed"
+        await v.close()
+
+    asyncio.run(main())
