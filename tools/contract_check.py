@@ -19,6 +19,18 @@ scores are sent, a status about once a second. Each check prints PASS or FAIL; t
 
 A trial the decoder does not answer within max_trial_s is not a failure (the server would end it
 as not caught); it is reported as INFO.
+
+A bridge whose hello says ``paradigm: code`` (draft section 9, c-VEP drawn by the phone) is
+checked against config/phone_cvep.yaml (``--code-config``) unless ``--config`` is a code config
+already, and the check plays the phone too: during each trial it sends ``stim_markers`` (cycle
+0 shortly after stim_start, then one per cycle, ``--marker-latency`` s after the cycle began). The
+code session is: hello, baseline 1, a trial before training (an untrained bridge must answer
+``no_selection`` "not_trained"), a calibration trial with ``train`` (``--train-cycles``) that must
+end in ``train_done`` ok with an accuracy and then ``trained: true`` in status, N trials, a paused
+trial, baseline 2. There is no stim_onset in code mode: answers count only after the trial's
+first marker, and a selection's time is not before its cycle 0.
+
+    python tools/contract_check.py   # then: python -m brainsync.voice_bridge --paradigm code --fake
 """
 
 from __future__ import annotations
@@ -40,10 +52,11 @@ from pydantic import ValidationError
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from app.config import AppConfig, load_config
+from app.config import REPO_ROOT, AppConfig, ConfigError, load_config
 from app.schemas import (
     PROTOCOL,
     Baseline,
+    CycleMarker,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -53,15 +66,19 @@ from app.schemas import (
     Pause,
     ProtocolError,
     Selection,
+    StimMarkers,
     StimOnset,
     StimStart,
     StimStop,
+    Train,
+    TrainDone,
     hello_problems,
     parse_decoder_to_server,
     to_json,
 )
 
-ROLE_LABELS = {"say": "SAY", "next": "NEXT"}  # list mode
+ROLE_LABELS = {"say": "SAY", "next": "NEXT", "left": "Left", "right": "Right"}  # list, halves
+CODE_CONFIG = REPO_ROOT / "config" / "phone_cvep.yaml"  # a code hello is checked against it
 NEXT_PAGE_LABEL, SAY_IT, BACK = "More options", "Say it", "Back"  # page mode, as app/orchestrator.py
 REPLACED = 4000  # close code for a second bridge while a check is running
 
@@ -113,6 +130,8 @@ class Inbox:
         self.answered: set[int] = set()
         self.hello: DecoderHello | None = None
         self.closed = False
+        self.code = False  # paradigm code: no stim_onset; answers only after a marker
+        self.first_marker: dict[int, float] = {}  # trial -> cycle 0's t_unix, once sent
 
     async def read(self) -> None:
         try:
@@ -143,6 +162,14 @@ class Inbox:
         self.queue.put_nowait(msg)
 
     def _answer_ok(self, msg: StimOnset | Selection | NoSelection) -> bool:
+        if self.code and isinstance(msg, StimOnset):
+            self.report.fail("no stim_onset in paradigm code (the onset is cycle 0's marker)",
+                             f"trial {msg.trial_id}")
+            return False
+        if self.code and msg.trial_id == self.active and msg.trial_id not in self.first_marker:
+            self.report.fail(f"{msg.type} only after the trial's first stim_markers (rule 8)",
+                             f"trial {msg.trial_id}")
+            return False
         if msg.trial_id != self.active:
             when = "outside a trial" if self.active is None else f"while trial {self.active} runs"
             self.report.fail(f"{msg.type} only for the current trial (rule 1)",
@@ -190,9 +217,15 @@ class ContractCheck:
     """One scripted session against a connected bridge."""
 
     def __init__(self, cfg: AppConfig, args: argparse.Namespace, report: Report) -> None:
-        self.cfg = cfg
         self.args = args
         self.report = report
+        self.scores_seen = False
+        self._use(cfg)
+
+    def _use(self, cfg: AppConfig) -> None:
+        """Check against ``cfg``: its slots, roles and labels."""
+        self.cfg = cfg
+        self.code = cfg.stim.paradigm == "code"
         self.slots = [s.slot for s in cfg.stim.slots]
         self.roles = dict(cfg.stim.roles)
         self.page_mode = cfg.menus.mode == "page"
@@ -202,14 +235,14 @@ class ContractCheck:
                            for slot, role in self.roles.items()}
         else:
             self.labels = {slot: ROLE_LABELS[role] for slot, role in self.roles.items()}
-        self.scores_seen = False
 
     async def run(self, ws: ServerConnection) -> None:
         inbox = Inbox(ws, self.report)
         reader = asyncio.create_task(inbox.read())
         try:
             if await self._handshake(ws, inbox):
-                await self._session(ws, inbox)
+                inbox.code = self.code
+                await (self._code_session(ws, inbox) if self.code else self._session(ws, inbox))
                 self._final_checks(inbox)
         finally:
             reader.cancel()
@@ -228,13 +261,29 @@ class ContractCheck:
             return False
         self.report.check(True, "hello is valid v2",
                           f"{hello.name}, {hello.refresh_hz:g} Hz {hello.waveform}, "
-                          + ", ".join(f"{s.slot}={s.freq_hz:g} Hz" for s in hello.slots))
+                          + ", ".join(f"{s.slot}={s.freq_hz:g} Hz" if s.lag_frames is None
+                                      else f"{s.slot} lag {s.lag_frames} frames"
+                                      for s in hello.slots)
+                          + (f", code {hello.code.length} bits" if hello.code else ""))
         if hello.decoder is not None:
             d = hello.decoder
             self.report.info("decoder", f"window {d.window_s:g} s, step {d.step_s:g} s, {d.votes} votes")
+        if hello.paradigm == "code" and not self.code:
+            try:
+                self._use(load_config(self.args.code_config))
+            except ConfigError as exc:
+                self.report.fail("a code config to check against", str(exc))
+                return False
+            self.report.info("the bridge speaks paradigm code",
+                             f"checking against {self.args.code_config}; this check plays the phone")
+        code = self.cfg.stim.code
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
-                                  self.cfg.display.expected_refresh_hz)
-        if not self.report.check(not problems, "hello matches config/default.yaml", "; ".join(problems)):
+                                  self.cfg.display.expected_refresh_hz,
+                                  paradigm=self.cfg.stim.paradigm,
+                                  code_length=code.length if code else None,
+                                  frames_per_bit=code.frames_per_bit if code else None)
+        what = "hello matches the code config" if self.code else "hello matches config/default.yaml"
+        if not self.report.check(not problems, what, "; ".join(problems)):
             await self._send(ws, ProtocolError(message="; ".join(problems)))
             return False
         await self._send(ws, HelloAck(protocol=PROTOCOL, roles=self.roles, labels=self.labels))
@@ -356,6 +405,149 @@ class ContractCheck:
         self.report.check(len(self.report.failures) == failures,
                           f"nothing answers the paused trial within {self.args.quiet_s:g} s")
 
+    # -- paradigm code: this check plays the phone -----------------------------------
+
+    @property
+    def cycle_s(self) -> float:
+        assert self.cfg.stim.code is not None
+        return self.cfg.stim.code.cycle_frames / self.cfg.display.expected_refresh_hz
+
+    async def _play_markers(self, ws: ServerConnection, inbox: Inbox, trial_id: int) -> None:
+        """The phone's cycle_markers, relayed as stim_markers: cycle k began at t0 + k cycles
+        and is sent --marker-latency s later, until the trial stops."""
+        t0 = time.time() + self.args.code_onset_s
+        k = 0
+        while inbox.active == trial_id:
+            t_k = t0 + k * self.cycle_s
+            await asyncio.sleep(max(0.0, t_k + self.args.marker_latency - time.time()))
+            if inbox.active != trial_id:
+                return
+            inbox.first_marker.setdefault(trial_id, t0)
+            await self._send(ws, StimMarkers(trial_id=trial_id,
+                                             markers=[CycleMarker(cycle=k, t_unix=t_k)]))
+            k += 1
+
+    async def _code_start(self, ws: ServerConnection, inbox: Inbox,
+                          trial_id: int) -> asyncio.Task:
+        await self._start(ws, inbox, trial_id, *self._screen(trial_id, confirm=False))
+        return asyncio.create_task(self._play_markers(ws, inbox, trial_id))
+
+    async def _code_stop(self, ws: ServerConnection, inbox: Inbox, trial_id: int, reason: str,
+                         markers: asyncio.Task) -> list[Message]:
+        early = await self._stop(ws, inbox, trial_id, reason)
+        markers.cancel()
+        await asyncio.gather(markers, return_exceptions=True)
+        return early
+
+    def _trained(self, inbox: Inbox) -> bool | None:
+        return inbox.statuses[-1][1].trained if inbox.statuses else None
+
+    async def _code_session(self, ws: ServerConnection, inbox: Inbox) -> None:
+        if not await self._baseline(ws, inbox, 1):
+            return
+        trained = self._trained(inbox)
+        self.report.check(trained is not None, "status carries trained (paradigm code)",
+                          f"trained {trained}")
+        trial_id = 1
+        if not trained:
+            await self._code_trial(ws, inbox, trial_id, untrained=True)
+            trial_id += 1
+        else:
+            self.report.info("the bridge is trained already (--template?): no not_trained trial")
+        await self._train_trial(ws, inbox, trial_id, train_id=1)
+        for _ in range(self.args.trials):
+            trial_id += 1
+            if inbox.closed:
+                break
+            await self._code_trial(ws, inbox, trial_id)
+        trial_id += 1
+        await self._code_paused_trial(ws, inbox, trial_id)
+        await self._baseline(ws, inbox, 2)
+        if inbox.closed:
+            self.report.fail("bridge stays connected for the whole check")
+
+    async def _code_trial(self, ws: ServerConnection, inbox: Inbox, trial_id: int,
+                          untrained: bool = False) -> None:
+        markers = await self._code_start(ws, inbox, trial_id)
+        limit = self.cfg.stim.max_trial_s
+        answer = await inbox.expect({"selection", "no_selection"}, limit)
+        if untrained:
+            ok = isinstance(answer, NoSelection) and answer.reason == "not_trained"
+            got = "nothing" if answer is None else (
+                answer.type + (f" {answer.reason}" if isinstance(answer, NoSelection) else ""))
+            self.report.check(ok, f"trial {trial_id}: untrained, no_selection not_trained",
+                              f"got {got}")
+            reason = "no_selection"
+        elif answer is None:
+            self.report.info(f"trial {trial_id}: no answer within {limit:g} s (the server times it out)")
+            reason = "timeout"
+        elif isinstance(answer, Selection):
+            self._check_code_selection(answer, inbox, trial_id)
+            reason = "selected"
+        else:
+            self.report.check(True, f"trial {trial_id}: no_selection", answer.reason)
+            reason = "no_selection"
+        await self._code_stop(ws, inbox, trial_id, reason, markers)
+        await asyncio.sleep(self.cfg.stim.rest_s)
+
+    def _check_code_selection(self, sel: Selection, inbox: Inbox, trial_id: int) -> None:
+        onset = inbox.first_marker.get(trial_id, float("inf"))
+        self.report.check(sel.slot in self.slots, f"trial {trial_id}: selection is an active slot",
+                          f"{sel.slot} of {', '.join(self.slots)}, {sel.t_unix - onset:.2f} s "
+                          "after cycle 0")
+        self.report.check(sel.t_unix >= onset, f"trial {trial_id}: selection time after cycle 0")
+        if sel.scores is not None:
+            self.report.check(set(self.slots) <= set(sel.scores) <= set(self.slots),
+                              f"trial {trial_id}: scores cover the active slots", str(sorted(sel.scores)))
+        if sel.score is not None or sel.scores is not None:
+            self.scores_seen = True
+
+    async def _train_trial(self, ws: ServerConnection, inbox: Inbox, trial_id: int,
+                           train_id: int) -> None:
+        cycles = self.args.train_cycles
+        cue = self.cfg.stim.confirm.say if self.cfg.stim.confirm.say in self.slots else self.slots[0]
+        markers = await self._code_start(ws, inbox, trial_id)
+        await self._send(ws, Train(train_id=train_id, trial_id=trial_id, slot=cue, cycles=cycles))
+        limit = cycles * self.cycle_s + self.cfg.stim.max_trial_s
+        self.report.info(f"trial {trial_id}: calibration", f"train {train_id}: {cycles} cycles "
+                         f"looking at {cue}, up to {limit:.0f} s")
+        done = await inbox.expect({"train_done"}, limit)
+        trained_at = time.monotonic()
+        await self._code_stop(ws, inbox, trial_id, "selected" if done is not None else "timeout",
+                              markers)
+        if not self.report.check(done is not None, f"train {train_id}: train_done",
+                                 "" if done is not None else f"none within {limit:.0f} s"):
+            return
+        assert isinstance(done, TrainDone)
+        self.report.check(done.train_id == train_id, "train_done echoes the train_id",
+                          f"sent {train_id}, got {done.train_id}")
+        if not self.report.check(done.ok, f"train {train_id}: template fitted", done.message):
+            return
+        acc = "none" if done.accuracy is None else f"{100 * done.accuracy:.0f} %"
+        self.report.check(done.accuracy is not None, f"train {train_id}: train_done has an accuracy",
+                          f"{acc} from {done.cycles} cycles")
+        self.report.check(done.cycles >= cycles, f"train {train_id}: at least the cycles asked for",
+                          f"{done.cycles} of {cycles}")
+        while time.monotonic() - trained_at < self.args.status_gap and not self._trained(inbox):
+            await asyncio.sleep(0.05)
+        self.report.check(bool(self._trained(inbox)), "status says trained after train_done")
+        await asyncio.sleep(self.cfg.stim.rest_s)
+
+    async def _code_paused_trial(self, ws: ServerConnection, inbox: Inbox, trial_id: int) -> None:
+        """STOP during a trial (after its first cycle): nothing may answer it afterwards."""
+        markers = await self._code_start(ws, inbox, trial_id)
+        await asyncio.sleep(self.args.code_onset_s + self.args.marker_latency + self.cycle_s)
+        self.report.check(trial_id in inbox.first_marker,
+                          f"trial {trial_id}: markers sent before the pause")
+        early = await self._code_stop(ws, inbox, trial_id, "paused", markers)
+        if any(isinstance(m, (Selection, NoSelection)) for m in early):
+            self.report.info(f"trial {trial_id}: answered before the pause (allowed)")
+        await self._send(ws, Pause(reason="contract_check"))
+        failures = len(self.report.failures)
+        await asyncio.sleep(self.args.quiet_s)
+        self.report.check(len(self.report.failures) == failures,
+                          f"nothing answers the paused trial within {self.args.quiet_s:g} s")
+
     def _final_checks(self, inbox: Inbox) -> None:
         if self.scores_seen:
             self.report.check(inbox.hello is not None and inbox.hello.score_kind is not None,
@@ -398,6 +590,21 @@ def build_parser(cfg: AppConfig) -> argparse.ArgumentParser:
                    help="how long to watch for answers after a pause (default 1.5)")
     p.add_argument("--wait", type=float, default=None,
                    help="give up if no bridge connects within this many seconds (default: wait)")
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="the server config to check against (default config/default.yaml)")
+    code = p.add_argument_group("paradigm code (a bridge whose hello says paradigm code)")
+    code.add_argument("--code-config", default=str(CODE_CONFIG), metavar="FILE",
+                      help="checked against this config when --config is not a code config "
+                           "(default config/phone_cvep.yaml)")
+    train = cfg.stim.code.train_cycles if cfg.stim.code is not None else 20
+    code.add_argument("--train-cycles", type=int, default=train,
+                      help=f"cycles asked for in train (default {train}, stim.code.train_cycles)")
+    code.add_argument("--marker-latency", type=float, default=0.1,
+                      help="seconds after its cycle began that each marker is sent (default 0.1; "
+                           "1.05 = a whole cycle late)")
+    code.add_argument("--code-onset-s", type=float, default=0.1,
+                      help="seconds from stim_start to the phone's first flicker frame "
+                           "(default 0.1)")
     return p
 
 
@@ -437,6 +644,13 @@ async def serve_once(cfg: AppConfig, args: argparse.Namespace, report: Report,
 def main(argv: list[str] | None = None) -> int:
     cfg = load_config()
     args = build_parser(cfg).parse_args(argv)
+    if args.config is not None:   # its defaults (timings, train cycles) come from that config
+        try:
+            cfg = load_config(args.config)
+        except ConfigError as exc:
+            print(f"contract_check: {exc}", file=sys.stderr)
+            return 2
+        args = build_parser(cfg).parse_args(argv)
     report = Report()
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(serve_once(cfg, args, report))

@@ -10,6 +10,15 @@ from ``config/default.yaml`` (slots, waveform, refresh rate), so it passes the s
 ``hello_ack`` (or after ``error``) it refuses ``stim_start``, as the real bridge keeps its flicker
 off then (draft rule 3).
 
+``--paradigm code`` (draft section 9, c-VEP drawn by the phone) sends a code hello instead: slots
+with ``--lags`` (lag_frames), the m-sequence ``--code-bits`` and ``--frames-per-bit``. There is no
+``stim_onset``: a trial is answered only after its first ``stim_markers`` (relayed cycle onsets)
+and ``--latency`` after its ``stim_start``. ``train`` gets ``train_done`` ok (accuracy 0.9) once
+that trial's markers came (or ``--train-delay`` s after it, if none come), only while the trial
+runs; from then on ``status`` says ``trained: true`` (``--trained``: from the start). Untrained,
+a trial that is not a training trial gets ``no_selection`` "not_trained" at its first markers,
+as the real bridge answers.
+
 Modes (pick one):
   --random          pick a random active slot (default); --fail-rate sends no_selection sometimes
   --keyboard        during a trial, type a number + Enter: 1 = active_slots[0], 2 = active_slots[1],
@@ -20,6 +29,7 @@ Modes (pick one):
 Run:
   python tools/fake_decoder.py --random
   python -m tools.fake_decoder --script tools/scripts/demo.yaml --latency 2
+  python tools/fake_decoder.py --random --paradigm code --lags s1=0,s2=31 --waveform square
 """
 
 from __future__ import annotations
@@ -51,6 +61,7 @@ from app.schemas import (
     PROTOCOL,
     Baseline,
     BaselineDone,
+    CodeSpec,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -62,9 +73,12 @@ from app.schemas import (
     Selection,
     SlotId,
     SlotSpec,
+    StimMarkers,
     StimOnset,
     StimStart,
     StimStop,
+    Train,
+    TrainDone,
     parse_server_to_decoder,
     to_json,
 )
@@ -74,6 +88,8 @@ REPLACED = 4000  # close code from app/server.py: a newer decoder connection rep
 PARENT_CHECK_S = 1.0  # how often --parent-pid is checked
 
 FALLBACK_SLOTS = "s1=15,s2=17,s3=20,s4=12"  # only if config/default.yaml cannot be loaded
+FALLBACK_LAGS = "s1=0,s2=31"  # paradigm code, as config/phone_cvep.yaml and cvep_2.toml
+FAKE_ACCURACY = 0.9  # what train_done reports
 
 
 def _load_config(path: str | None = None) -> AppConfig | None:
@@ -100,6 +116,29 @@ def parse_slots(text: str) -> list[SlotSpec]:
                 for slot, freq in (item.split("=") for item in text.split(","))]
     except (ValueError, ValidationError) as exc:
         raise argparse.ArgumentTypeError(f"expected s1=15,s2=17, got {text!r}") from exc
+
+
+def parse_lags(text: str) -> list[SlotSpec]:
+    """``"s1=0,s2=31"`` -> c-VEP slot specs (lag in frames)."""
+    try:
+        return [SlotSpec(slot=slot.strip(), lag_frames=int(lag))
+                for slot, lag in (item.split("=") for item in text.split(","))]
+    except (ValueError, ValidationError) as exc:
+        raise argparse.ArgumentTypeError(f"expected s1=0,s2=31, got {text!r}") from exc
+
+
+def _bits(text: str) -> str:
+    text = text.strip()
+    if len(text) < 3 or set(text) - {"0", "1"}:
+        raise argparse.ArgumentTypeError(f"expected a string of 0 and 1 (at least 3), got {text!r}")
+    return text
+
+
+def default_code_bits(length: int = 63) -> str:
+    """One period of brainsync.vep.codes.m_sequence(length) (seed 1), as the bridge sends it."""
+    from brainsync.vep.codes import m_sequence
+
+    return "".join(str(int(b)) for b in m_sequence(length))
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +198,13 @@ def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
         prog="fake_decoder", description="Fake bridge speaking protocol 2 (INTERFACE-v2-draft.md)."
     )
     url = default_url(cfg)
-    slots = (",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots) if cfg else FALLBACK_SLOTS)
+    code_cfg = cfg is not None and cfg.stim.paradigm == "code"
+    paradigm = "code" if code_cfg else "freq"
+    slots = (",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+             if cfg is not None and not code_cfg else FALLBACK_SLOTS)
+    lags = (",".join(f"{s.slot}={s.lag_frames}" for s in cfg.stim.slots)
+            if code_cfg else FALLBACK_LAGS)
+    frames_per_bit = cfg.stim.code.frames_per_bit if code_cfg and cfg.stim.code else 1
     refresh = cfg.display.expected_refresh_hz if cfg else 60.0
     waveform = cfg.stim.waveform if cfg else "sine"
     parser.add_argument("--url", default=url, help=f"server websocket (default {url}, from config)")
@@ -170,6 +215,22 @@ def build_parser(cfg: AppConfig | None = None) -> argparse.ArgumentParser:
                         help=f"refresh rate in hello (default {refresh:g}); 120 simulates ProMotion")
     parser.add_argument("--waveform", choices=["sine", "square"], default=waveform,
                         help=f"waveform in hello (default {waveform}, from config)")
+    code = parser.add_argument_group("paradigm code (c-VEP drawn by the phone, draft section 9)")
+    code.add_argument("--paradigm", choices=["freq", "code"], default=paradigm,
+                      help=f"freq: SSVEP slots with frequencies; code: c-VEP slots with lags "
+                           f"(default {paradigm}, from config)")
+    code.add_argument("--lags", type=parse_lags, default=parse_lags(lags),
+                      help=f"code: slot lags in frames, e.g. s1=0,s2=31 (default {lags})")
+    code.add_argument("--code-bits", type=_bits, default=None, metavar="BITS",
+                      help="code: one m-sequence period as 0/1 (default: brainsync's "
+                           "m_sequence(63), as cvep_2)")
+    code.add_argument("--frames-per-bit", type=int, default=frames_per_bit,
+                      help=f"code: frames each bit is held (default {frames_per_bit})")
+    code.add_argument("--trained", action="store_true",
+                      help="code: start with a template (status trained true, no train needed)")
+    code.add_argument("--train-delay", type=float, default=1.0,
+                      help="code: answer train after this many seconds if no markers came "
+                           "(default 1.0)")
     parser.add_argument("--baseline-s", type=float, default=None,
                         help="seconds before baseline_done (default: what the server asks for)")
     mode = parser.add_mutually_exclusive_group()
@@ -209,6 +270,8 @@ def parse_args(argv: list[str] | None = None, cfg: AppConfig | None = None) -> a
         args.mode = "random"
     if args.once:
         args.max_trials = 1
+    if args.paradigm == "code" and args.code_bits is None:
+        args.code_bits = default_code_bits()
     return args
 
 
@@ -236,6 +299,12 @@ class FakeDecoder:
         self.current_trial: int | None = None
         self.pending: asyncio.Task[None] | None = None
         self.baseline_task: asyncio.Task[None] | None = None
+        # paradigm code
+        self.code = getattr(args, "paradigm", "freq") == "code"
+        self.trained = bool(getattr(args, "trained", False))
+        self.markers = asyncio.Event()  # the current trial's first stim_markers came
+        self.train_trial: int | None = None  # the current trial is this train's
+        self.train_task: asyncio.Task[None] | None = None
         self.answered = 0
         self.finished = False
         self.replaced = False  # the server closed with code 4000: a newer decoder took over
@@ -281,9 +350,21 @@ class FakeDecoder:
             await self.ws.close()
 
     def hello(self) -> DecoderHello:
+        if self.code:
+            bits = self.args.code_bits
+            return DecoderHello(protocol=PROTOCOL, name=self.args.name,
+                                refresh_hz=self.args.refresh_hz, waveform=self.args.waveform,
+                                slots=self.args.lags, paradigm="code",
+                                code=CodeSpec(length=len(bits),
+                                              frames_per_bit=self.args.frames_per_bit, bits=bits),
+                                score_kind="fake" if self.args.scores else None)
         return DecoderHello(protocol=PROTOCOL, name=self.args.name, refresh_hz=self.args.refresh_hz,
                             waveform=self.args.waveform, slots=self.args.slots,
                             score_kind="fake" if self.args.scores else None)
+
+    def status(self) -> DecoderStatus:
+        return DecoderStatus(ok=True, board_ok=True, display_ok=True, message="fake decoder",
+                             trained=self.trained if self.code else None)
 
     async def _session(self, ws: ClientConnection) -> None:
         self.acked = False  # draft rule 3: nothing flickers until this connection is acked
@@ -299,12 +380,12 @@ class FakeDecoder:
             status_task.cancel()
             self._cancel_pending()
             self._cancel_baseline()
+            self._cancel_train()
 
     async def _send_status(self, ws: ClientConnection) -> None:
-        status = to_json(DecoderStatus(ok=True, board_ok=True, display_ok=True, message="fake decoder"))
         try:
             while True:
-                await ws.send(status)
+                await ws.send(to_json(self.status()))
                 await asyncio.sleep(self.args.status_interval)
         except ConnectionClosed:
             pass
@@ -333,10 +414,16 @@ class FakeDecoder:
             self._on_stim_start(ws, msg)
         elif isinstance(msg, StimStop):
             self._on_stim_stop(msg)
+        elif isinstance(msg, StimMarkers):
+            if self.code and msg.trial_id == self.current_trial:
+                self.markers.set()
+        elif isinstance(msg, Train):
+            self._on_train(ws, msg)
         elif isinstance(msg, Pause):
             log.info("pause (%s): flicker and decoding off", msg.reason)
             self._cancel_pending()
             self._cancel_baseline()
+            self._fail_train(ws, "paused before training finished")
             self.current_trial = None
 
     def _on_baseline(self, ws: ClientConnection, msg: Baseline) -> None:
@@ -364,7 +451,10 @@ class FakeDecoder:
             log.info("trial %s superseded by trial %d; its answer is dropped",
                      self.current_trial, msg.trial_id)
         self._cancel_pending()
+        self._fail_train(ws, f"trial {msg.trial_id} started before training finished")
         self.current_trial = msg.trial_id
+        self.markers = asyncio.Event()
+        self.train_trial = None
         log.info("trial %d started (active %s)", msg.trial_id, ",".join(msg.active_slots))
         self.pending = asyncio.create_task(self._answer(ws, msg))
 
@@ -374,6 +464,8 @@ class FakeDecoder:
             return
         log.info("trial %d stopped (%s)", msg.trial_id, msg.reason)
         self._cancel_pending()
+        if self.ws is not None:
+            self._fail_train(self.ws, "the trial stopped before training finished")
         self.current_trial = None
 
     def _cancel_pending(self) -> None:
@@ -381,18 +473,72 @@ class FakeDecoder:
             self.pending.cancel()
         self.pending = None
 
+    # -- paradigm code: training -----------------------------------------
+
+    def _on_train(self, ws: ClientConnection, msg: Train) -> None:
+        if not self.code:
+            log.warning("ignored train: this fake decoder runs paradigm freq")
+            return
+        if msg.trial_id != self.current_trial:
+            self._send_soon(ws, TrainDone(train_id=msg.train_id, ok=False,
+                                          message=f"trial {msg.trial_id} is not running"))
+            return
+        self._cancel_train()
+        self.train_trial = msg.trial_id
+        log.info("train %d: trial %d, looking at %s", msg.train_id, msg.trial_id, msg.slot)
+
+        async def train() -> None:
+            # once the trial's markers came (the phone flickers), or after --train-delay
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.markers.wait(), self.args.train_delay)
+            if self.current_trial != msg.trial_id:
+                return
+            self.trained = True
+            with contextlib.suppress(ConnectionClosed):
+                await ws.send(to_json(TrainDone(train_id=msg.train_id, ok=True,
+                                                accuracy=FAKE_ACCURACY, cycles=msg.cycles,
+                                                message="fake template")))
+                await ws.send(to_json(self.status()))
+            log.info("train %d done: trained", msg.train_id)
+
+        self.train_task = asyncio.create_task(train())
+        self.train_task.train_id = msg.train_id  # type: ignore[attr-defined]
+
+    def _cancel_train(self) -> int | None:
+        """Cancel a training still running; its train_id, or None."""
+        task, self.train_task = self.train_task, None
+        if task is None or task.done():
+            return None
+        task.cancel()
+        return getattr(task, "train_id", None)
+
+    def _fail_train(self, ws: ClientConnection, why: str) -> None:
+        train_id = self._cancel_train()
+        if train_id is not None:
+            self._send_soon(ws, TrainDone(train_id=train_id, ok=False, message=why))
+
+    def _send_soon(self, ws: ClientConnection, msg: Message) -> None:
+        async def send() -> None:
+            with contextlib.suppress(ConnectionClosed):
+                await ws.send(to_json(msg))
+
+        asyncio.create_task(send())
+
     # -- answering --------------------------------------------------------
 
     async def _answer(self, ws: ClientConnection, start: StimStart) -> None:
-        # The display's first flickering frame comes one refresh period after the command.
-        await asyncio.sleep(1.0 / self.args.refresh_hz)
-        try:
-            await ws.send(to_json(StimOnset(trial_id=start.trial_id, t_unix=time.time())))
-        except ConnectionClosed:
-            return
-        answer = await self._decide(start)
+        if self.code:
+            answer = await self._answer_code(start)
+        else:
+            # The display's first flickering frame comes one refresh period after the command.
+            await asyncio.sleep(1.0 / self.args.refresh_hz)
+            try:
+                await ws.send(to_json(StimOnset(trial_id=start.trial_id, t_unix=time.time())))
+            except ConnectionClosed:
+                return
+            answer = await self._decide(start)
         if answer is None:
-            log.info("trial %d: sending nothing (timeout step)", start.trial_id)
+            log.info("trial %d: sending nothing (timeout step or training trial)", start.trial_id)
             return
         if self.current_trial != start.trial_id:
             return  # trial ended while deciding
@@ -407,6 +553,22 @@ class FakeDecoder:
         if self.args.max_trials is not None and self.answered >= self.args.max_trials:
             self.finished = True
             await ws.close()
+
+    async def _answer_code(self, start: StimStart) -> Message | None:
+        """Paradigm code: no stim_onset; the answer waits for the trial's first stim_markers
+        (and --latency from stim_start, which _decide sleeps meanwhile). A training trial is
+        never answered; without a template the answer is not_trained."""
+        decide = asyncio.create_task(self._decide(start))
+        try:
+            await self.markers.wait()
+            if self.train_trial == start.trial_id:
+                return None
+            if not self.trained:
+                return NoSelection(trial_id=start.trial_id, reason="not_trained")
+            answer = await decide
+            return None if self.train_trial == start.trial_id else answer
+        finally:
+            decide.cancel()
 
     async def _decide(self, start: StimStart) -> Message | None:
         """Wait for the answer according to the mode. None means send nothing."""
