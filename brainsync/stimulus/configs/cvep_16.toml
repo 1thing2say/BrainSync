@@ -1,0 +1,36 @@
+# The paper's c-VEP layout: 16 targets in a 4 x 4 grid, one 63-bit m-sequence, target k
+# delayed by 4 k frames (67 ms). The paper's wrap-around border, which gives every target
+# the same neighbours, is not drawn. Expect this to be hard on four dry electrodes: the
+# paper had 47 channels and a tuned bipolar reference. Start with cvep_4.
+name = "cvep_16"
+
+[targets]
+count = 16
+
+[code]
+length = 63
+lag_frames = 4
+frames_per_bit = 1
+
+[layout]
+rows = 4
+cols = 4
+size = 0.16
+spacing = 0.24
+
+[stimulus]
+hold_cue = true
+
+[display]
+refresh_hz = 60.0
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 2
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true

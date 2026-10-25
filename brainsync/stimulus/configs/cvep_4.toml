@@ -1,0 +1,37 @@
+# c-VEP (Bin et al. 2009) with four targets: one 63-bit m-sequence, every square shows it
+# delayed by k * 16 frames (267 ms apart, the widest spacing four lags allow in a 63-frame
+# cycle), so a one-frame timing slip costs nothing. Each cycle lasts 63 frames = 1.05 s at
+# 60 Hz; the decoder correlates every cycle with one trained template shifted per target.
+# cvep_16 is the paper's 4 x 4 grid with 4-frame lags.
+name = "cvep_4"
+
+[targets]
+labels = ["0", "1", "2", "3"]
+
+[code]
+length = 63
+lag_frames = 16
+frames_per_bit = 1
+
+[layout]
+rows = 2
+cols = 2
+size = 0.3
+spacing = 0.5
+
+[stimulus]
+hold_cue = true
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true
