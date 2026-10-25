@@ -5,6 +5,13 @@ Nano and is developed on a Mac with `--board fake`. A **client** is any app that
 flickering targets on the screen the user looks at and receives what the user picked. The server
 never draws anything, and the client never sees EEG.
 
+Two stimulus paradigms (**v3.2**, section 6): **`code`**, the default, is the c-VEP standard of
+`docs/CVEP-STANDARD.md`: three white squares on black showing one 63-bit m-sequence, 21 frames
+apart, with a training phase on the first target and live confidence bars. **`freq`**
+(`python -m brainsync.server --paradigm freq`) is the frequency flicker this document first
+described, one frequency per target. Sections 1–5 describe both; where they differ, the code
+mode's rules are in section 6.
+
 Two client modes:
 
 - **`slots`**: the client names its own targets (`["yes", "no"]`) and draws them wherever it likes.
@@ -98,6 +105,9 @@ windows only after it arrives (section 4).
 {"type": "onset", "layout_id": 7, "t_client": 1792809201.512}
 ```
 
+**`cycle`** (**v3.2**, code mode): the flip time of each code cycle's first frame,
+`{"type": "cycle", "layout_id": 7, "n": 12, "t_client": 1792809201.512}` (section 6).
+
 **`frames`**: every 5 s while flickering: `{"type": "frames", "refresh_hz": 59.98, "dropped": 0}`.
 `refresh_hz` is the measured refresh and `dropped` the running count of late frames (a frame
 interval over 1.5 refresh periods) since the client started. The server compares consecutive
@@ -184,8 +194,9 @@ true the server closes the connection after sending it. The codes are `bad_token
 | `phase` | `flicker` | What it means |
 |---|---|---|
 | `wait` | false | No controller, or the controller is not ready (refresh, detect). |
-| `calibrate` | false | Rest baseline: targets drawn still at luminance 0.5, `seconds` long. |
-| `run` | true | Targets flicker at their frequencies; selections can happen. |
+| `calibrate` | false | Rest baseline: targets drawn still at luminance 0.5, `seconds` long (freq mode). |
+| `train` | true | **v3.2**, code mode: targets flicker while the user looks at the `cue` slot; the decoder records its template (section 6). |
+| `run` | true | Targets flicker (at their frequencies, or their code lags); selections can happen. |
 | `pause` | false | The user paused (Esc), or a click is in flight. |
 | `stop` | false | The server is shutting down; hide everything and show `text`. |
 
@@ -205,7 +216,10 @@ true the server closes the connection after sending it. The codes are `bad_token
   in `slots` mode, where the client places its own targets.
 - In point mode, rects of different targets never overlap.
 - `stage` is `slots`, `pick`, `confirm` or `idle`. `idle` has no targets: nothing to show, for
-  example while a scan is being analyzed.
+  example while a scan is being analyzed. **v3.2** adds `train` (point mode's training
+  patches, section 6).
+- **v3.2**, code mode: each target has `"lag"` (frames) and `"freq": null` instead of a
+  frequency (section 6).
 - `phase` is the wave's starting phase in radians. Luminance follows `brainsync/stimulus/flicker.py`
   and `flicker.js`: `0.5 * (1 + sin(2π f n / refresh + phase))`, where `n` counts frames since
   this layout's first flickering frame, and `refresh` is the welcome's `refresh_hz`. A client
@@ -381,11 +395,138 @@ point mode also asks for a fresh scan, because the screen may have changed while
 **`click`** is unchanged. A desktop client presses `element.hint_id` from its own registry of
 the last walk, and `x` and `y` are informational.
 
-## 6. Testing
+## 6. Version 3.2: code mode (c-VEP)
 
-- `python -m brainsync.server --board fake --no-auth` runs the server, and `http://127.0.0.1:8765/`
-  opens the reference page (`slots` mode). Hovering a square sends `gaze`.
+These additions add fields, one phase, one stage and three message types; `protocol` stays 3.
+The server runs code mode by default (`--paradigm code`); `--paradigm freq` behaves exactly as
+sections 1–5 describe, except that its welcome now also says `"paradigm": "freq"`. The
+stimulus, decoder and confidence text are those of `docs/CVEP-STANDARD.md`; the reference
+implementations are `brainsync/vep/live.py` (server) and `clients/js/cvep.js` (browser).
+
+**`welcome`** adds `paradigm` and, in code mode, `code`. There are no frequencies and at most
+three slots:
+
+```json
+{"type": "welcome", "protocol": 3, "role": "controller", "mode": "slots", "paradigm": "code",
+ "server": {"name": "brainsync", "version": "0.1.0"}, "fake": true, "waveform": "sine",
+ "refresh_hz": 60.0, "refresh_tolerance_hz": 1.0, "refresh_rates": [60.0],
+ "freqs": [], "max_slots": 3, "detect": false,
+ "code": {"bits": [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, …], "lag_frames": 21,
+          "cycle_frames": 63, "train_cycles": 30, "fill": "#ffffff"}}
+```
+
+- `bits` is the 63-bit m-sequence (`brainsync.vep.codes.m_sequence(63)`), one bit a frame;
+  `cycle_frames` equals its length. `train_cycles` is the server's `--train-cycles`.
+- `refresh_rates` holds one rate (`--refresh-rates`, default 60): the code shows one bit a
+  frame, so the template holds for that refresh only. A client at another rate gets
+  `error` `refresh` as in section 2 (unless `--ignore-refresh`; it then keeps one bit a frame
+  at its own rate and reports it).
+- A hello with more than three slots gets `error` `too_many_slots`.
+- An older server sends no `paradigm`: a client treats that as `"freq"`.
+
+**`layout`** targets carry `"lag"` (frames) and `"freq": null`:
+
+```json
+{"type": "layout", "layout_id": 7, "stage": "slots", "targets": [
+  {"slot": "yes", "freq": null, "lag": 0, "phase": 0.0, "label": "yes", "kind": "slot", "rects": []},
+  {"slot": "no", "freq": null, "lag": 21, "phase": 0.0, "label": "no", "kind": "slot", "rects": []},
+  {"slot": "help", "freq": null, "lag": 42, "phase": 0.0, "label": "help", "kind": "slot", "rects": []}]}
+```
+
+- Slots mode: slot i gets lag 21 i. Point mode: the K = 3 targets of a page (two candidates
+  plus "more", or "Do it" and "Back") get lags 0, 21, 42.
+- **Frame rule.** Frame `n` of a target is lit (`code.fill`, white) when
+  `bits[(n - lag) mod 63]` is 1 and black when 0, on a black background; `n` counts frames
+  since this layout's first flickering frame, at the refresh of section 3's `layout` rule. A
+  still target is drawn white. Lags are unique within a layout.
+- A cycle starts on every frame with `n mod 63 == 0` (1.05 s at 60 Hz). The train and run
+  phases of one layout share one count: the train → run change does not restart it.
+
+**`phase` `train`** (flicker true) comes after a controller is ready and before its first
+`run`, in place of `calibrate`:
+
+```json
+{"type": "phase", "phase": "train", "flicker": true, "seconds": null,
+ "text": "Look at the YES square", "cue": "yes", "cycles": 30}
+```
+
+- The client draws a cue box on the `cue` slot (the target at lag 0) and shows `text`.
+  `cycles` is the number of training cycles. Only `train` carries `cue` and `cycles`.
+- Slots mode trains on its own layout. Point mode trains on a layout of stage **`train`**:
+  three patches in a centred row (BrainPoint's `b1`, `b2` and `more`, kinds `button` and
+  `more`; a mode without its own training patches gets `t0`, `t1`, `t2` of kind `slot`),
+  and its scans start once the template is ready.
+- A controller skips training when the server holds a template under 10 minutes old. A
+  pause during training restarts it on resume, and so does a resume after a pause of 120 s
+  or more (the headset may have moved). A controller that leaves mid-training drops it.
+
+**`cycle`** (client → server, controller only): the flip of each cycle's first frame.
+
+```json
+{"type": "cycle", "layout_id": 7, "n": 12, "t_client": 1792809201.512}
+```
+
+- `n` is the cycle index (frame `63 n`), `t_client` that flip's Unix time (seconds). When
+  that frame was dropped and the next frame drawn is at most 2 frames later, the client
+  sends the time the frame was due; a cycle start missed by more is not sent.
+- The server maps `t_client` to the board's clock with the same offset as `onset` (the
+  median of the last 8 ping offsets, or the receipt time while no ping has come), never later
+  than the receipt. Only cycles of the current layout, while it flickers, are decoded;
+  others are logged (`cycle_ignored`). A viewer gets `not_allowed`; a freq-mode server
+  ignores cycles.
+- With `--board fake` the server takes the cycle times from its fake board (whose simulated
+  EEG follows its own frames) and ignores the client's.
+- `onset` is still sent once per layout; in code mode the server only logs it.
+
+**`train`** (server → clients): training progress, on every new cycle.
+
+```json
+{"type": "train", "cycle": 12, "of": 30}
+```
+
+**`trained`**: the template is ready; `accuracy` is its leave-one-cycle-out accuracy (null
+when it could not be measured), `chance` is 1/3. The phase turns `run` right after.
+
+```json
+{"type": "trained", "accuracy": 0.83, "chance": 0.333, "cycles": 30}
+```
+
+A client joining during training gets the last `train` after the welcome, phase, layout and
+status; one joining later gets the last `trained`.
+
+**`decision`**: after every decision of the running layout (about one a cycle).
+
+```json
+{"type": "decision", "layout_id": 7, "scores": {"yes": 0.42, "no": 0.11, "help": -0.03},
+ "raw": "yes", "committed": "yes", "lead": 0.31, "changed": false}
+```
+
+- `scores` are Pearson correlations per slot (the confidence values; not probabilities),
+  `raw` the best slot of this decision, `committed` the slot the votes hold (null: no choice
+  yet), `lead` the best score's lead over the runner-up, `changed` whether this decision moved
+  the commitment. Each new layout resets the votes.
+- Clients show them as the standard's label lines under each square (`YES  ███░░░░░ +0.42 <`)
+  and the status line (`lead 0.31   choice: YES`), and while training
+  `training: keep looking at YES   cycle 12/30`, then
+  `template ready: 83 % on held-out cycles (chance 33 %)` (`ConfidenceState` in
+  `clients/js/brainsync-client.js`, `decision_lines` in `brainsync/server/client.py`).
+
+**`selection`** is unchanged, but its `score` and `scores` are correlations. Rule 2's onset
+gate does not apply: an epoch starts at its own cycle time, which belongs to the layout. A
+decision commits after 2 agreeing decisions (each the mean of the last 2 cycles), and rule
+3's 1.5 s cooldown applies in slots mode, and also right after training ends, so a gaze still
+on the cue does not pick it at once. The streaming gate of section 5 applies as before.
+
+**`gaze`** (fake board): `{"type": "gaze", "slot": "help"}` points the fake board's response
+at that slot's lag; during training the fake board looks at the cue whatever the gaze says.
+
+## 7. Testing
+
+- `python -m brainsync.server --board fake --no-auth` runs the server in code mode, and
+  `http://127.0.0.1:8765/` opens the reference page (`slots` mode, yes / no / help); it trains
+  on yes (about 32 s, or `--train-cycles 6`), then hovering a square sends `gaze`.
+  `--paradigm freq` runs the frequency flicker.
 - `python -m brainsync.server.client --url ws://127.0.0.1:8765/ws --token … --slots yes,no`
-  prints selections.
+  prints selections (`--decisions` also prints the confidence lines in code mode).
 - `tools/screen_eval.py` scores Haiku detection against DOM ground truth, and with `--ax DIR`
   the text-only ranking of accessibility dumps (see its docstring).
