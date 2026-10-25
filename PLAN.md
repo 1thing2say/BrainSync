@@ -180,6 +180,17 @@ pull requests.
   Windows quoting in `record.score_command`; POSIX paths untouched. Not WSL: only Windows sees
   the COM port, and WSLg windows are not vsynced. BrainFlow checks pass on Windows; the live run
   with the board is still to do. Details and known Windows test gaps: `deploy/windows/INSTALL.md`.
+- **VEP paradigm demos (2026-10-25, branch `different-according-interfaces-modulations`):** the
+  three codings of Bin et al. (2009), t-VEP, f-VEP and c-VEP, as `python -m brainsync.vep`
+  (README "VEP paradigms"). Stimulus configs may carry a `[code]` (m-sequence, lags) or `[time]`
+  (non-overlapping flashes) table instead of frequencies (`cvep_4`, `cvep_16`, `tvep_4`,
+  `fvep_6`); `brainsync.stimulus.coded` draws them with `cycle:<n>` / `flash:<k>` markers;
+  `brainsync.vep` holds the paper's three decoders (FFT-SNR, shifted template, flash averages),
+  a marker-synchronous live decoder, a synthetic board that follows the sequence, c-VEP
+  training with a saved template, and `--compare --fake` (accuracy, s/selection, ITR beside the
+  paper's numbers; synthetic, pipeline only). Not touched: the `/ws/decoder` contract and the
+  bridge. Still to do: a live run on the headset, and the marker-to-sample jitter check (V5)
+  that c-VEP depends on.
 
 ## System design
 
