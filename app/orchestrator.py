@@ -12,6 +12,16 @@ run it without timers, sockets or threads. Pages of options come from the LLM (V
 options"; the next MENU_CUE waits for it in PREPARING for up to ``llm.timeout_s``, then uses the
 fallback lists in ``config/intents.yaml``. The decoder side speaks protocol 2
 (INTERFACE-v2-draft.md).
+
+Code mode (``stim.paradigm: code``, the default config; docs/CVEP-STANDARD.md): three c-VEP
+targets, option 1 on s1, option 2 on s2, NEXT on s3, the confirm screen Say it on s1 and Back on
+s3. The BASELINE step becomes training: the server sends ``train`` (the user looks at the first
+slot's square while the bridge records ``stim.code.train_cycles`` cycles) and waits for
+``trained`` (up to ``train.timeout_s``); the state is still called BASELINE (the log summary
+reads it), with a "Training: ..." detail. The first training of a session asks for a fresh
+template (``retrain``); after a pause the bridge may reuse the one it has. During a trial every
+``decision`` from the bridge goes to the partner page as ``confidence`` (the bars under each
+option).
 """
 
 from __future__ import annotations
@@ -30,6 +40,8 @@ from app.schemas import (
     PROTOCOL,
     Baseline,
     BaselineDone,
+    Confidence,
+    Decision,
     DecoderHello,
     DecoderStatus,
     Display,
@@ -55,6 +67,10 @@ from app.schemas import (
     StimStart,
     StimStop,
     Stop,
+    Train,
+    Trained,
+    Training,
+    TrainProgress,
     Transcript,
     Trial,
     TTSDone,
@@ -199,6 +215,11 @@ class Orchestrator:
         self.bridge_message = ""
         self.baseline_id = 0
         self.expected_baseline: int | None = None  # baseline_id we wait for, if a bridge records it
+        # Code mode: the train_id we wait for (ids share the baseline counter), and the last
+        # training's result (shown on the partner page).
+        self.paradigm = cfg.stim.paradigm
+        self.expected_train: int | None = None
+        self.train_accuracy: float | None = None
 
     @property
     def decoder_fake(self) -> bool:
@@ -221,7 +242,11 @@ class Orchestrator:
 
     def _on_deadline(self) -> None:
         if self.state is St.BASELINE:
-            if self.expected_baseline is None:
+            if self.expected_train is not None:
+                self._record("train_timeout", train_id=self.expected_train)
+                self._pause_session(f"Training failed: no result within "
+                                    f"{self.cfg.train.timeout_s:g} s", "train_failed")
+            elif self.expected_baseline is None:
                 self._enter_menu_cue()  # no bridge recording it: the still screen was the baseline
             else:
                 self._record("baseline_timeout", baseline_id=self.expected_baseline)
@@ -275,6 +300,15 @@ class Orchestrator:
             self._on_bridge_status(msg)
         elif isinstance(msg, BaselineDone):
             self._on_baseline_done(msg)
+        elif isinstance(msg, TrainProgress):
+            self._on_train_progress(msg)
+        elif isinstance(msg, Trained):
+            self._on_trained(msg)
+        elif isinstance(msg, Decision):
+            # Code mode: the bars under each option follow the decoder, decision by decision.
+            if self._is_current(msg.trial_id):
+                self._send_ui(Confidence(trial_id=msg.trial_id, scores=msg.scores, raw=msg.raw,
+                                         committed=msg.committed, lead=msg.lead))
         elif isinstance(msg, Selection):
             self._on_selection(msg.trial_id, msg.slot, source="decoder")
         elif isinstance(msg, NoSelection):
@@ -290,7 +324,8 @@ class Orchestrator:
     def _on_hello(self, hello: DecoderHello) -> None:
         """Check the bridge's hello against config: hello_ack, or error and stay paused."""
         problems = hello_problems(hello, self.cfg.stim.slots, self.cfg.stim.waveform,
-                                  self.cfg.display.expected_refresh_hz)
+                                  self.cfg.display.expected_refresh_hz,
+                                  paradigm=self.paradigm, code=self.cfg.stim.code)
         self.decoder_name = ""  # a new hello: only an acked one names the decoder
         if problems:
             self.acked = False
@@ -336,6 +371,35 @@ class Orchestrator:
         else:
             self._pause_session(f"Baseline failed: {msg.message or 'no reason given'}",
                                 "baseline_failed")
+
+    def _on_train_progress(self, msg: TrainProgress) -> None:
+        if self.state is not St.BASELINE or msg.train_id != self.expected_train:
+            return  # logged on arrival; a late one changes nothing
+        self._send_ui(Training(slot=self.slots[0], label=self.cfg.train.label, cycle=msg.cycle,
+                               of=msg.of))
+        self._send_state(self._train_detail(msg.cycle, msg.of))
+
+    def _on_trained(self, msg: Trained) -> None:
+        if self.state is not St.BASELINE or msg.train_id != self.expected_train:
+            self._record("stale_trained", train_id=msg.train_id)
+            return
+        self.expected_train = None
+        of = self.cfg.stim.code.train_cycles if self.cfg.stim.code else max(msg.cycles, 1)
+        self._send_ui(Training(slot=self.slots[0], label=self.cfg.train.label,
+                               cycle=msg.cycles or of, of=max(of, msg.cycles or 1),
+                               accuracy=msg.accuracy if msg.ok else None,
+                               chance=msg.chance, message="" if msg.ok else msg.message))
+        if msg.ok:
+            self.train_accuracy = msg.accuracy
+            self._record("trained", train_id=msg.train_id, accuracy=msg.accuracy,
+                         chance=msg.chance, cycles=msg.cycles)
+            self._enter_menu_cue()
+        else:
+            self._pause_session(f"Training failed: {msg.message or 'no reason given'}",
+                                "train_failed")
+
+    def _train_detail(self, cycle: int, of: int) -> str:
+        return f"Training: look at the {self.cfg.train.label} square, cycle {cycle}/{of}"
 
     def resume_problem(self) -> str:
         """Why Resume would not start a session now; empty if it would."""
@@ -508,8 +572,13 @@ class Orchestrator:
         With an acked bridge, wait for its baseline_done (up to baseline.timeout_s); without one
         (keyboard mode) the still screen simply lasts baseline.seconds.
         """
+        fresh = self.state is St.IDLE  # the session's first start: a new template
         self.paused_by_decoder = False
         self.baseline_id += 1
+        if self.paradigm == "code" and self.acked:
+            self._enter_training(fresh)
+            return
+        self.expected_train = None
         self.expected_baseline = self.baseline_id if self.acked else None
         wait = self.cfg.baseline.timeout_s if self.acked else self.cfg.baseline.seconds
         self._enter(St.BASELINE, wait, "Keep still and look at the screen")
@@ -517,6 +586,21 @@ class Orchestrator:
         self._send_decoder(Baseline(baseline_id=self.baseline_id, seconds=self.cfg.baseline.seconds))
         self._send_status()  # resume_ready changes
         self._listen(True, "start")  # turn mode: the partner may speak first (also after a reconnect)
+
+    def _enter_training(self, fresh: bool) -> None:
+        """Code mode's BASELINE: every square flickers while the user looks at the first slot's
+        (the cue box on it); the bridge answers ``trained`` (up to train.timeout_s)."""
+        code = self.cfg.stim.code
+        slot, label = self.slots[0], self.cfg.train.label
+        self.expected_baseline = None
+        self.expected_train = self.baseline_id
+        self._enter(St.BASELINE, self.cfg.train.timeout_s, self._train_detail(0, code.train_cycles))
+        self._send_ui(Trial(trial_id=self.trial_id, phase="train"))
+        self._send_ui(Training(slot=slot, label=label, cycle=0, of=code.train_cycles))
+        self._send_decoder(Train(train_id=self.baseline_id, slot=slot, label=label,
+                                 cycles=code.train_cycles, retrain=fresh))
+        self._send_status()  # resume_ready changes
+        self._listen(True, "start")
 
     def _enter_menu_cue(self) -> None:
         """Show the next screen (page, confirm or list), still, for cue_s before its trial.
@@ -696,6 +780,7 @@ class Orchestrator:
         self._stop_trial("paused")
         self.picked = None
         self.expected_baseline = None
+        self.expected_train = None
         self._enter(St.PAUSED, None, detail)
         # The mirror's phase (and its selection timer) follows Trial messages, not the state.
         self._send_ui(Trial(trial_id=self.trial_id, phase="paused"))
@@ -757,7 +842,9 @@ class Orchestrator:
         return self.state in TRIAL_STATES and trial_id is not None and trial_id == self.active_trial
 
     def _fallback(self, name: str) -> OptionList:
-        options = [Option(**o.model_dump()) for o in self.intents.fallback_lists[name]]
+        # A fixed list is ranked: a page shows its first option_count options.
+        fixed = self.intents.fallback_lists[name][:self.cfg.menus.option_count]
+        options = [Option(**o.model_dump()) for o in fixed]
         return OptionList(list_id=f"m{next(self._list_ids)}", name=name, options=options)
 
     def _set_list(self, options: OptionList) -> None:

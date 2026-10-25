@@ -14,6 +14,11 @@ gitignored .env.
     python -m app.server --bridge fake --bridge-headless   # the bridge on fake EEG, no window
     python -m app.server --keyboard         # keys 1-4 on the partner page select
     python -m app.server --tunnel           # also a public https link for the partner's phone
+    python -m app.server --config config/fvep_page.yaml   # the 4-target f-VEP fallback
+
+The default config is c-VEP (three targets: 2 options + NEXT, a training step instead of the
+baseline, confidence bars; docs/CVEP-STANDARD.md); --bridge and --fake-decoder follow the
+config's paradigm.
 """
 
 from __future__ import annotations
@@ -66,6 +71,14 @@ UI_CLIENTS = ("browser", "ios")  # /ws/ui?client=...: the iPhone app says ios; a
 APP_SCHEME = "brainsync"  # the BrainSync Partner iPhone app's pairing link: brainsync://pair?url=...&key=...
 
 log = logging.getLogger("app.server")
+
+
+def screen_layout(cfg: AppConfig) -> str:
+    """The user's screen as the mirror draws it: "row" (c-VEP's three squares, or list mode's
+    two) or "diamond" (f-VEP page mode's four)."""
+    if cfg.stim.paradigm == "code" or cfg.menus.mode == "list":
+        return "row"
+    return "diamond"
 
 
 def ui_client(raw: str | None) -> str:
@@ -273,6 +286,10 @@ def create_app(
                 "stt_gap_s": cfg.speech.stt_gap_s, "stt_max_line_s": cfg.speech.stt_max_line_s,
                 "stt_echo_s": cfg.speech.stt_echo_s, "cue_s": cfg.stim.cue_s,
                 "max_trial_s": cfg.stim.max_trial_s, "user_name": first_name(menus.profile),
+                # How the mirror lays out the user's screen: code mode's three squares in a row
+                # (s1 left, s2 middle, s3 right), f-VEP page mode's diamond, list mode's row.
+                "paradigm": cfg.stim.paradigm, "layout": screen_layout(cfg),
+                "slots": [s.slot for s in cfg.stim.slots],
                 # The phone links carry the access key: only this computer's page gets them.
                 "phone_url": "" if remote else app.state.phone_url,
                 "app_link": "" if remote else app_link(app.state.phone_url)}
@@ -439,14 +456,19 @@ BRIDGE_KINDS = ("cerelog", "fake")  # --bridge: the Cerelog X8, or brainsync's F
 BRIDGE_STOP_S = 12.0  # how long the bridge gets to clean up after SIGTERM
 
 
-def bridge_command(kind: str, url: str, parent_pid: int, headless: bool = False) -> list[str]:
+def bridge_command(kind: str, url: str, parent_pid: int, headless: bool = False,
+                   paradigm: str = "code", stimulus: str | None = None) -> list[str]:
     """``python -m brainsync.voice_bridge`` for ``--bridge``: ``kind`` "cerelog" (the headset) or
-    "fake" (FakeBoard); ``headless`` adds --no-stimulus (no PsychoPy window). --parent-pid makes
-    it exit once this server is gone, however the server was stopped."""
+    "fake" (FakeBoard); ``headless`` adds --no-stimulus (no PsychoPy window). ``paradigm`` is the
+    config's ("code": c-VEP, the bridge's default; "freq": f-VEP) and ``stimulus`` the stimulus
+    config to pass with -c (None: the bridge's default for the paradigm). --parent-pid makes it
+    exit once this server is gone, however the server was stopped."""
     if kind not in BRIDGE_KINDS:
         raise ValueError(f"bridge kind must be one of {BRIDGE_KINDS}, got {kind!r}")
     cmd = [sys.executable, "-m", "brainsync.voice_bridge", "--url", url,
-           "--parent-pid", str(parent_pid)]
+           "--parent-pid", str(parent_pid), "--paradigm", paradigm]
+    if stimulus:
+        cmd += ["-c", stimulus]
     if kind == "fake":
         cmd.append("--fake")
     if headless:
@@ -520,21 +542,32 @@ def main(argv: list[str] | None = None) -> None:
         if args.fake_decoder:
             # It retries every second until the server is up, so starting it first is fine.
             # Its hello uses this server's config, so it passes the handshake check.
-            slots = ",".join(f"{s.slot}={s.freq_hz:g}" for s in cfg.stim.slots)
+            from tools.fake_decoder import slots_text
+
             # --parent-pid: it exits once this server is gone, however the server was stopped.
-            fake = subprocess.Popen([sys.executable, "-m", "tools.fake_decoder", "--random",
-                                     "--parent-pid", str(os.getpid()),
-                                     "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
-                                     "--slots", slots, "--waveform", cfg.stim.waveform,
-                                     "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"],
-                                    cwd=REPO_ROOT)
+            cmd = [sys.executable, "-m", "tools.fake_decoder", "--random",
+                   "--parent-pid", str(os.getpid()),
+                   "--url", f"ws://{url_host}:{cfg.server.port}/ws/decoder",
+                   "--paradigm", cfg.stim.paradigm, "--slots", slots_text(cfg),
+                   "--waveform", cfg.stim.waveform,
+                   "--refresh-hz", f"{cfg.display.expected_refresh_hz:g}"]
+            if cfg.stim.code is not None:
+                cmd += ["--code-length", str(cfg.stim.code.length),
+                        "--cycle-frames", str(cfg.stim.code.cycle_frames)]
+            fake = subprocess.Popen(cmd, cwd=REPO_ROOT)
             app.state.on_shutdown.append(lambda: stop_process(fake))
         if args.bridge:
             # Like the fake decoder: it retries every second until the server is up. The board
             # connects once (about 16 s for the Cerelog X8) before its hello.
+            # The f-VEP list mode's two targets are two_targets.toml; page modes use the
+            # bridge's default for the paradigm (voice_cvep3, four_diamond).
+            stimulus = ("two_targets" if cfg.stim.paradigm == "freq" and cfg.menus.mode == "list"
+                        else None)
             bridge = subprocess.Popen(bridge_command(args.bridge,
                                                      f"ws://{url_host}:{cfg.server.port}/ws/decoder",
-                                                     os.getpid(), headless=args.bridge_headless),
+                                                     os.getpid(), headless=args.bridge_headless,
+                                                     paradigm=cfg.stim.paradigm,
+                                                     stimulus=stimulus),
                                       cwd=REPO_ROOT)
             # SIGTERM ends it like Ctrl-C; its cleanup (display EOF, terminate and kill, up to
             # 3 s; the board thread, 2 s; then the board) must finish before a kill, or the
