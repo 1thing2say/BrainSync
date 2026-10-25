@@ -6,13 +6,14 @@
     python -m brainsync.vep --paradigm code --fake --fast --no-stimulus   # synthetic, instant
     python -m brainsync.vep --compare --fake                # all three on the synthetic board
 
-A live run connects the board, starts the stimulus in free-run mode (held still until the
-first feedback line, Unix markers in its log, which this program tails) and decodes for
---seconds: one line per decision on stderr, a committed change moves the cue box onto the
-decoded square and speaks its label, a summary at the end. Under each square the display
-writes its label (signage) with a confidence bar and score from the decoder, redrawn
-after every decision, and a status line gives the lead and the committed choice
-(--no-scores for a bare display). c-VEP needs a template first:
+A live run connects the board, starts the stimulus in free-run mode (held still until a
+{"flicker": true} line on its stdin, Unix markers in its log, which this program tails) and
+decodes for --seconds: one line per decision on stderr, a committed change moves the cue
+box onto the decoded square and speaks its label, a summary at the end. Beside each square
+the display writes its label (signage) with a confidence bar and score from the decoder,
+redrawn after every decision, and the centre line gives the lead and the committed choice
+(--no-scores for a bare display). These are the display's JSON control lines
+(brainsync.stimulus.feedback: {"labels": [...]}, {"text": ...}, {"flicker": ...}). c-VEP needs a template first:
 --train-cycles cycles with the cue box on square 0 (look at it), cross-validated, saved as
 <stamp>_cvep_template.npz and reusable with --template FILE. t-VEP decides once every
 square has --min-flashes flashes in the last --flash-window seconds. f-VEP is brainsync.demo's
@@ -168,9 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "recordings folder, or a temp folder with --fake), for "
                         "python -m brainsync.vep.timing")
     p.add_argument("--scores", action=argparse.BooleanOptionalAction, default=True,
-                   help="code / time: label each square and show a confidence line (one bar per target, "
-                        "the lead, the committed choice) under the squares after every "
-                        "decision (default on)")
+                   help="code / time: label each square with a confidence bar and show a "
+                        "centre line (the lead, the committed choice) after every decision "
+                        "(default on)")
     return p
 
 
@@ -289,7 +290,7 @@ def _bar(value: float, cells: int = BAR_CELLS) -> str:
 
 
 def confidence_labels(d: Decision, labels: Sequence[str], scale: float = 1.0) -> list[str]:
-    """One label line per target for under its square: the label, a bar and the score,
+    """One label line per target, for beside its square: the label, a bar and the score,
     "<" after this decision's raw best. Scores are divided by ``scale`` for the bars (c-VEP
     correlations are already 0..1; t-VEP amplitudes need their own scale)."""
     width = max(len(s) for s in labels)
@@ -303,7 +304,7 @@ def confidence_labels(d: Decision, labels: Sequence[str], scale: float = 1.0) ->
 
 
 def confidence_line(d: Decision, labels: Sequence[str]) -> str:
-    """The status line: the lead and the committed choice ("*" when this decision moved it)."""
+    """The centre line: the lead and the committed choice ("*" when this decision moved it)."""
     gap = "lead  -  " if not np.isfinite(d.gap) else f"lead {d.gap:.2f}"
     choice = ("no choice yet" if d.committed == ABSTAIN
               else f"choice: {labels[d.committed]}" + (" *" if d.changed else ""))
@@ -311,13 +312,13 @@ def confidence_line(d: Decision, labels: Sequence[str]) -> str:
 
 
 def send_text(stim: Stimulus | None, text: str) -> bool:
-    """Replace the display's status line (``{"text": ...}`` on its stdin); False when the
+    """Replace the display's centre line (``{"text": ...}`` on its stdin); False when the
     pipe is gone."""
     return send(stim, json.dumps({"text": text}))
 
 
 def send_labels(stim: Stimulus | None, labels: Sequence[str]) -> bool:
-    """Replace the labels under the squares (``{"labels": [...]}`` on the display's stdin);
+    """Replace the labels beside the squares (``{"labels": [...]}`` on the display's stdin);
     False when the pipe is gone."""
     return send(stim, json.dumps({"labels": list(labels)}))
 
@@ -422,11 +423,12 @@ def build_coded(args: argparse.Namespace) -> tuple[StimulusConfig, Any, SyncDeco
 
 def coded_stimulus_args(cfg: StimulusConfig, args: argparse.Namespace) -> list[str]:
     """The stimulus command line for a coded run: free run of the config, Unix markers in
-    its log, feedback on stdin, held still until the first line (EOF on stdin ends it)."""
+    its log, feedback on stdin, held still until {"flicker": true} (EOF on stdin ends it);
+    with --scores the config's labels beside the squares from the first frame."""
     out = ["-c", str(cfg.path or cfg.name), "--free", "--markers", "unix", "--feedback", "stdin",
            "--hold-still", "--no-wait"]
     if args.scores:
-        out += ["--labels", "--status", "stdin"]
+        out.append("--labels")
     if args.ignore_refresh:
         out.append("--ignore-refresh")
     return out
@@ -488,9 +490,11 @@ def run_coded(args: argparse.Namespace) -> int:
                 return None
 
             def start_flicker(cue: int) -> bool:
+                # JSON from the first line on, so later integer lines only move the cue box
+                # and the text lines never stop the flicker (brainsync.stimulus.feedback)
                 if args.fake:
                     board.start_flicker()
-                return send(stim, cue)
+                return send(stim, json.dumps({"flicker": True})) and send(stim, cue)
 
             show = send_text if args.scores else (lambda stim, text: True)
             show_labels = send_labels if args.scores else (lambda stim, names: True)

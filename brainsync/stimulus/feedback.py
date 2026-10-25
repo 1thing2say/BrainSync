@@ -5,36 +5,144 @@ A decoder writes one command per line:
     k          put the cue box on target k (-1 clears it); the first one ends --hold-still
     card k     show profile card k (index into the sorted --cards PNGs)
     flash k    light target k's box in its flash colour for [card] flash_s seconds
-    {"text": "..."}   the status line (--status stdin; "" clears it)
-    {"labels": ["...", ...]}   one label per target, replacing the config's (--labels)
 
-Only the integer lines count as "heard": card, flash and text lines may arrive while the
+A bridge that owns the screen (protocol 2, INTERFACE-v2-draft.md section 7) also writes
+JSON objects, one per line, next to the integer lines:
+
+    {"labels": ["...", "...", "...", "..."]}   one sentence per target, beside its square
+                                                ("" clears that one); one entry per target
+    {"text": "..."}       one line at the centre of the screen ("" clears it)
+    {"active": [0, 3]}    which targets flicker on the next flicker-on; the others stay
+                          drawn still (all of them until the first "active")
+    {"flicker": true}     start flickering the active targets, phase restarting at 0
+    {"flicker": false}    hold every target still
+
+One object may carry several of these keys; "active" then applies before "flicker".
+A line with an unknown key or a bad value is ignored whole, with a note. From the first
+JSON line on (a rejected one counts too: any line starting with "{"), only
+{"flicker": ...} turns the flicker on or off: integer lines then only move the cue box
+(see ``Control.used``). A decoder that sends only integer lines keeps the
+old behaviour, where its first integer line ends --hold-still.
+
+Only the integer lines count as "heard": card and flash lines may arrive while the
 targets are still held still. Bad lines are ignored with a note. EOF ends the free run.
-The stream is read on a daemon thread; the display polls ``current``, ``card`` and
-``flash`` once per frame, so a chatty decoder never stalls the flicker.
+The stream is read on a daemon thread; the display polls ``current``, ``card``,
+``flash`` and ``control`` once per frame, so a chatty decoder never stalls the flicker.
 
 A cued session with ``--status stdin`` reads ``{"text": "..."}`` JSON lines instead
 (StatusReader): the latest text is shown under the targets between flickers.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TextIO
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, TextIO
 
 NONE = -1
-CUE, CARD, FLASH = "cue", "card", "flash"
+CUE, CARD, FLASH, CONTROL = "cue", "card", "flash", "control"
+# the JSON keys a bridge may send, in the order they are applied within one line
+CONTROL_KEYS = ("labels", "text", "active", "flicker")
 
 
 @dataclass(frozen=True)
 class Command:
-    """One parsed feedback line: ``kind`` is cue, card or flash; ``value`` its index."""
+    """One parsed feedback line: ``kind`` is cue, card, flash or control; ``value`` the
+    cue, card or flash index; ``fields`` the checked JSON keys of a control line."""
 
     kind: str
     value: int
+    fields: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Control:
+    """What the JSON lines have set so far; replaced whole by the reader on every line.
+
+    ``used`` turns true with the first JSON line (even one that is rejected), and from then on
+    the flicker follows ``flicker`` only. ``serial`` counts {"flicker": true} lines, so the
+    display sees every flicker-on (a repeated one restarts the phase), and ``flickering`` is
+    the active set captured by the latest one. ``active`` is the set for the next flicker-on.
+    """
+
+    used: bool = False
+    labels: tuple[str, ...] = ()
+    text: str = ""
+    active: tuple[int, ...] = ()
+    flicker: bool = False
+    serial: int = 0
+    flickering: tuple[int, ...] = ()
+
+
+def initial_control(n_targets: int, labels: Sequence[str] = ()) -> Control:
+    """Before any JSON line: no text, every target active, nothing flickering. ``labels``
+    (one per target) is the text beside the squares until a {"labels": ...} line; none by
+    default."""
+    if labels and len(labels) != n_targets:
+        raise ValueError(f"{len(labels)} labels for {n_targets} targets")
+    return Control(labels=tuple(labels) if labels else ("",) * n_targets,
+                   active=tuple(range(n_targets)))
+
+
+def parse_control(text: str, n_targets: int) -> dict[str, Any]:
+    """The checked keys of one JSON control line; ValueError for anything else."""
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        raise ValueError(f"not valid JSON: {text.strip()!r}") from None
+    if not isinstance(msg, dict) or not msg:
+        raise ValueError(f"expected a JSON object with one of {list(CONTROL_KEYS)}, "
+                         f"got {text.strip()!r}")
+    unknown = sorted(set(msg) - set(CONTROL_KEYS))
+    if unknown:
+        raise ValueError(f"unknown key(s) {unknown}; known: {list(CONTROL_KEYS)}")
+    out: dict[str, Any] = {}
+    if "labels" in msg:
+        labels = msg["labels"]
+        if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+            raise ValueError(f"labels must be a list of strings, got {labels!r}")
+        if len(labels) != n_targets:
+            raise ValueError(f"labels has {len(labels)} entries for {n_targets} targets")
+        out["labels"] = tuple(labels)
+    if "text" in msg:
+        if not isinstance(msg["text"], str):
+            raise ValueError(f"text must be a string, got {msg['text']!r}")
+        out["text"] = msg["text"]
+    if "active" in msg:
+        active = msg["active"]
+        if (not isinstance(active, list)
+                or any(isinstance(k, bool) or not isinstance(k, int) for k in active)):
+            raise ValueError(f"active must be a list of target indices, got {active!r}")
+        bad = [k for k in active if not 0 <= k < n_targets]
+        if bad:
+            raise ValueError(f"active target {bad[0]} out of range 0..{n_targets - 1}")
+        if len(set(active)) != len(active):
+            raise ValueError(f"active lists a target twice: {active!r}")
+        out["active"] = tuple(active)
+    if "flicker" in msg:
+        if not isinstance(msg["flicker"], bool):
+            raise ValueError(f"flicker must be true or false, got {msg['flicker']!r}")
+        out["flicker"] = msg["flicker"]
+    return out
+
+
+def apply_control(state: Control, fields: Mapping[str, Any]) -> Control:
+    """``state`` after one control line's ``fields`` (labels, text, active, then flicker)."""
+    changes: dict[str, Any] = {"used": True}
+    for key in ("labels", "active"):
+        if key in fields:
+            changes[key] = tuple(fields[key])
+    if "text" in fields:
+        changes["text"] = fields["text"]
+    if "flicker" in fields:
+        changes["flicker"] = fields["flicker"]
+        if fields["flicker"]:
+            changes["serial"] = state.serial + 1
+            changes["flickering"] = changes.get("active", state.active)
+    return dataclasses.replace(state, **changes)
 
 
 def parse_line(line: str, n_targets: int) -> int:
@@ -62,25 +170,10 @@ def _index(kind: str, text: str, n: int, noun: str) -> int:
     return k
 
 
-def parse_json(line: str, n_targets: int) -> tuple[str, str | tuple[str, ...]]:
-    """A ``{"text": "..."}`` or ``{"labels": [...]}`` JSON line as ``("text", str)`` or
-    ``("labels", tuple)`` (one string per target); ValueError for anything else."""
-    try:
-        msg = json.loads(line)
-    except ValueError:
-        raise ValueError(f"not a JSON object: {line.strip()!r}") from None
-    if isinstance(msg, dict) and isinstance(msg.get("text"), str):
-        return "text", msg["text"]
-    if isinstance(msg, dict) and isinstance(msg.get("labels"), list):
-        labels = msg["labels"]
-        if len(labels) != n_targets or not all(isinstance(s, str) for s in labels):
-            raise ValueError(f'"labels" needs {n_targets} strings, got {labels!r}')
-        return "labels", tuple(labels)
-    raise ValueError('expected {"text": "..."} or {"labels": [...]}')
-
-
 def parse_command(line: str, n_targets: int, n_cards: int = 0) -> Command:
     """The command on one feedback line (see the module docstring); ValueError otherwise."""
+    if line.lstrip().startswith("{"):
+        return Command(CONTROL, NONE, parse_control(line, n_targets))
     words = line.split()
     if len(words) == 2 and words[0] == CARD:
         return Command(CARD, _index(CARD, words[1], n_cards, "cards"))
@@ -99,11 +192,13 @@ class FeedbackReader:
     """Holds the latest cue, card and flash read from ``stream``; ``done`` once it hits EOF.
 
     ``n_cards`` is how many card images the display has loaded (0: none, so every card
-    line is refused).
+    line is refused). ``labels`` is the text beside the squares until a {"labels": ...}
+    line replaces it (see initial_control).
     """
 
     def __init__(self, stream: TextIO, n_targets: int,
-                 note: Callable[[str], None] = _stderr_note, n_cards: int = 0) -> None:
+                 note: Callable[[str], None] = _stderr_note, n_cards: int = 0,
+                 labels: Sequence[str] = ()) -> None:
         if n_targets < 1:
             raise ValueError(f"need at least one target, got {n_targets}")
         if n_cards < 0:
@@ -117,8 +212,7 @@ class FeedbackReader:
         # one tuple, replaced whole, so the display never reads a target from one flash
         # with the serial of another
         self._flash = (NONE, 0)
-        self._text = ""
-        self._labels: tuple[str, ...] | None = None
+        self._control = initial_control(n_targets, labels)
         self._eof = threading.Event()
         self._heard = threading.Event()
         self._thread: threading.Thread | None = None
@@ -141,14 +235,9 @@ class FeedbackReader:
         return self._flash
 
     @property
-    def text(self) -> str:
-        """The latest {"text": ...} line's text ("" until one arrives)."""
-        return self._text
-
-    @property
-    def labels(self) -> tuple[str, ...] | None:
-        """The latest {"labels": [...]} line, one string per target; None until one arrives."""
-        return self._labels
+    def control(self) -> Control:
+        """The state the JSON lines have set (labels, text, active targets, flicker)."""
+        return self._control
 
     @property
     def done(self) -> bool:
@@ -165,19 +254,19 @@ class FeedbackReader:
             for line in iter(self.stream.readline, ""):
                 self.n_lines += 1
                 try:
-                    if line.lstrip().startswith("{"):
-                        kind, value = parse_json(line, self.n_targets)
-                        if kind == "text":
-                            self._text = str(value)
-                        else:
-                            self._labels = tuple(value)
-                        continue
                     cmd = parse_command(line, self.n_targets, self.n_cards)
                 except ValueError as exc:
                     self.n_ignored += 1
                     self._note(f"ignored line {self.n_lines}: {exc}")
+                    if line.lstrip().startswith("{") and not self._control.used:
+                        # fail safe: a driver that speaks JSON at all (even a rejected or
+                        # reserved line such as {"scores": ...}) never gets flicker from an
+                        # integer line, only from {"flicker": true}
+                        self._control = dataclasses.replace(self._control, used=True)
                     continue
-                if cmd.kind == CARD:
+                if cmd.kind == CONTROL:
+                    self._control = apply_control(self._control, cmd.fields)
+                elif cmd.kind == CARD:
                     self._card = cmd.value
                 elif cmd.kind == FLASH:
                     self._flash = (cmd.value, self._flash[1] + 1)

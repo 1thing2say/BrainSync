@@ -797,53 +797,67 @@ def test_feedback_reader_takes_text_lines_on_the_same_stream():
     notes: list[str] = []
     r = FeedbackReader(io.StringIO('{"text": "hello"}\n0\n{"nope": 1}\n{bad\n{"text": ""}\n'),
                        2, note=notes.append)
-    assert r.text == ""
+    assert r.control.text == ""
     assert not r.heard
     r.run()
     assert r.current == 0 and r.heard
-    assert r.text == ""   # the last line cleared it
+    assert r.control.text == ""   # the last line cleared it
     assert r.n_lines == 5 and r.n_ignored == 2 and len(notes) == 2
     r2 = FeedbackReader(io.StringIO('{"text": "YES  ####  0.42"}\n'), 2, note=notes.append)
     r2.run()
-    assert r2.text == "YES  ####  0.42" and r2.current == -1
+    assert r2.control.text == "YES  ####  0.42" and r2.current == -1
 
 
-def test_free_frames_poll_status_on_every_frame_including_flicker():
+def test_free_frames_show_the_centre_text_on_flicker_frames_too():
+    from brainsync.stimulus.feedback import Control
     cfg = load_config("two_targets")
-    texts = iter(["a", "b", "c", "d"])
-    held = iter([True, False, False, False])
-    frames = list(free_frames(cfg, seconds=3 / 60, hold=lambda: next(held),
-                              status=lambda: next(texts)))
-    assert [f.text for f in frames] == ["a", "b", "c", "d"]
-    assert frames[0].cue == -1   # the held frame carries the text too
+    states = iter([Control(used=True, labels=("", ""), text="a", active=(0, 1)),
+                   Control(used=True, labels=("", ""), text="b", active=(0, 1), flicker=True,
+                           serial=1, flickering=(0, 1)),
+                   Control(used=True, labels=("", ""), text="c", active=(0, 1), flicker=True,
+                           serial=1, flickering=(0, 1))])
+    frames = list(free_frames(cfg, seconds=2 / 60, control=lambda: next(states)))
+    assert [f.centre for f in frames] == ["a", "b", "c"]
+    assert frames[0].trial == -1 and frames[1].trial == frames[2].trial == 0
     plain = list(free_frames(cfg, seconds=2 / 60))
-    assert all(f.text == "" for f in plain)
+    assert all(f.centre == "" and not any(f.labels) for f in plain)
 
 
-def test_labels_and_status_flags_in_a_free_run():
+def test_labels_flag_in_a_free_run():
     with pytest.raises(SystemExit):
         cli.main(["--labels", "--plan"])
-    with pytest.raises(SystemExit):
-        cli.main(["--free", "--status", "stdin", "--plan"])
-    assert cli.main(["--free", "--feedback", "stdin", "--labels", "--status", "stdin",
-                     "--plan"]) == 0
+    with pytest.raises(SystemExit):   # a free run's text comes as JSON lines on --feedback
+        cli.main(["--free", "--feedback", "stdin", "--status", "stdin", "--plan"])
+    assert cli.main(["--free", "--feedback", "stdin", "--labels", "--plan"]) == 0
+    assert cli.main(["--free", "--labels", "--plan"]) == 0
 
 
 def test_feedback_reader_takes_label_lines_for_every_target():
     notes: list[str] = []
     r = FeedbackReader(io.StringIO('{"labels": ["YES  .4", "NO  .1"]}\n{"labels": ["one"]}\n'
                                    '{"labels": [1, 2]}\n0\n'), 2, note=notes.append)
-    assert r.labels is None
+    assert r.control.labels == ("", "")
     r.run()
-    assert r.labels == ("YES  .4", "NO  .1") and r.current == 0
+    assert r.control.labels == ("YES  .4", "NO  .1") and r.current == 0
     assert r.n_ignored == 2 and all("labels" in n for n in notes)
+    seeded = FeedbackReader(io.StringIO(""), 2, labels=("YES", "NO"))
+    assert seeded.control.labels == ("YES", "NO") and not seeded.control.used
+    with pytest.raises(ValueError, match="labels"):
+        FeedbackReader(io.StringIO(""), 2, labels=("YES",))
 
 
-def test_free_frames_carry_polled_labels():
+def test_free_frames_show_the_starting_labels_until_a_labels_line():
+    from brainsync.stimulus.feedback import apply_control, initial_control
     cfg = load_config("two_targets")
-    names = iter([None, ("a", "b"), ("a", "c")])
-    frames = list(free_frames(cfg, seconds=3 / 60, labels=lambda: next(names)))
-    assert [f.labels for f in frames] == [(), ("a", "b"), ("a", "c")]
+    start = initial_control(2, ("YES", "NO"))
+    on = apply_control(start, {"labels": ("a", "b"), "flicker": True})
+    states = iter([start, start, on])
+    held = iter([True, False])
+    frames = list(free_frames(cfg, seconds=2 / 60, hold=lambda: next(held),
+                              control=lambda: next(states)))
+    assert [f.labels for f in frames] == [("YES", "NO"), ("YES", "NO"), ("a", "b")]
+    # held, then the legacy flicker, then the JSON branch's first flicker run
+    assert [f.trial for f in frames] == [-1, -1, 0] and frames[2].events == ("flicker_on",)
 
 
 def test_diamond_layout_and_fill():
@@ -872,18 +886,22 @@ def test_diamond_layout_and_fill():
     assert to_psychopy_fill(0.5) == (0.0, 0.0, 0.0)
 
 
-def test_status_goes_above_when_labels_leave_no_room_below():
-    from brainsync.stimulus.display import status_pos
-    y, anchor = status_pos(load_config("cvep_4"), labels=True)
-    assert anchor == "center" and y == 0.0
-    y, anchor = status_pos(load_config("cvep_2"), labels=True)
-    assert anchor == "top" and -0.36 < y < -0.32
-    y, anchor = status_pos(load_config("cvep_2"), labels=False)
-    assert anchor == "top" and -0.3 < y < -0.27
+def test_vep_configs_place_their_text_clear_of_every_square():
+    from brainsync.stimulus.display import text_boxes, text_overlaps
+    for name in ("cvep_2", "cvep_3", "cvep_4", "tvep_4"):
+        for aspect in (1.5, 1.6, 16 / 9):
+            assert text_overlaps(load_config(name), aspect) == [], name
+    slots, centre = text_boxes(load_config("cvep_4"))
+    assert [b.side for b in slots] == ["right", "above", "below", "left"]
+    assert centre.pos == (0.0, 0.0)
+    # a 2 x 2 grid: each label on its outer side, the one-line centre between the rows
+    slots, centre = text_boxes(load_config("tvep_4"))
+    assert [b.side for b in slots] == ["left", "right", "left", "right"]
+    assert centre.side == "centre" and centre.height < 3 * 0.035 * 1.25
 
 
 def test_cvep_3_is_a_white_row_of_three_with_the_widest_lags():
-    from brainsync.stimulus.display import status_pos
+    from brainsync.stimulus.display import text_boxes
     from brainsync.vep.codes import min_lag_distance
     cfg = load_config("cvep_3")
     assert cfg.labels == ("YES", "NO", "HELP") and cfg.fill == (1.0, 1.0, 1.0)
@@ -891,5 +909,6 @@ def test_cvep_3_is_a_white_row_of_three_with_the_widest_lags():
     assert cfg.code.lag_frames == 21
     assert min_lag_distance(3, 21, cfg.code.cycle_frames) == 21
     assert 0.55 + cfg.reach <= cfg.display.aspect / 2
-    y, anchor = status_pos(cfg, labels=True)
-    assert anchor == "top" and -0.3 < y < -0.24
+    slots, centre = text_boxes(cfg)
+    assert all(b.side == "below" for b in slots)
+    assert centre.side == "bottom"   # a square sits on the centre

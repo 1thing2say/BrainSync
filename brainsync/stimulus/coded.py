@@ -11,13 +11,14 @@ time, which the c-VEP and t-VEP decoders need.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 
 import numpy as np
 
 from ..vep.codes import bit_luminance, lagged_codes, m_sequence, time_schedule
 from .config import StimulusConfig, Trial
-from .display import END_PROMPT, Frame, polled_labels, still_luminances
+from .display import END_PROMPT, Frame, free_frames, still_luminances
+from .feedback import Control
 from .flicker import n_frames
 
 __all__ = ["CodeSequence", "TimeSequence", "coded_cued_frames", "coded_free_frames",
@@ -158,25 +159,9 @@ def coded_free_frames(cfg: StimulusConfig, seq: Sequence, seconds: float | None 
                       cue: Callable[[], int] | None = None,
                       stop: Callable[[], bool] | None = None,
                       hold: Callable[[], bool] | None = None,
-                      status: Callable[[], str] | None = None,
-                      labels: Callable[[], Sequence[str] | None] | None = None) -> Iterator[Frame]:
-    """The sequence running continuously from its frame 0; ``cue`` is polled once per
-    frame, ``stop`` ends the run, and while ``hold()`` is true the targets stand still
-    (``seconds`` counts sequence frames only). ``status()`` and ``labels()`` are polled on
-    every frame for the text under the targets and their labels, as in
-    ``display.free_frames``."""
-    total = None if seconds is None else n_frames(seconds, cfg.refresh)
-    holding = hold is not None
-    i = 0
-    while total is None or i < total:
-        if stop is not None and stop():
-            return
-        text = status() if status is not None else ""
-        names = polled_labels(labels)
-        if holding and hold():
-            yield Frame(seq.still, text=text, labels=names)
-            continue
-        holding = False
-        k = cue() if cue is not None else -1
-        yield Frame(seq.luminance(i), cue=k, events=seq.events(i), text=text, labels=names)
-        i += 1
+                      control: Callable[[], Control] | None = None) -> Iterator[Frame]:
+    """The sequence running continuously from its frame 0: ``display.free_frames`` with
+    ``seq`` in place of the frequency flicker, so the cue box, ``hold`` and the JSON
+    ``control`` lines (labels, centre text, active targets, flicker on / off) work as
+    there; ``seconds`` counts sequence frames only."""
+    return free_frames(cfg, seconds, cue=cue, stop=stop, hold=hold, control=control, seq=seq)

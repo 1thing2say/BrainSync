@@ -34,8 +34,13 @@ def test_fixture_on_disk_matches_brainsync_flicker():
     make_fixture = _load_make_fixture()
     built = make_fixture.build()
     on_disk = json.loads((TEST_DIR / "flicker_fixture.json").read_text())
-    assert on_disk == built, "stale fixture: run .venv/bin/python extension/test/make_fixture.py"
-    assert (TEST_DIR / "flicker_fixture.json").read_text() == make_fixture.dumps(built)
+    # Within make_fixture.TOLERANCE: libm rounds the last bit differently on macOS and Linux.
+    assert make_fixture.same(on_disk, built), \
+        "stale fixture: run .venv/bin/python extension/test/make_fixture.py"
+    assert not make_fixture.same(on_disk, {**built, "frames": built["frames"] + 1})
+    bumped = json.loads(json.dumps(built))
+    bumped["cases"][0]["values"][5] += 1e-9   # a real change still fails
+    assert not make_fixture.same(on_disk, bumped)
     assert {(c["waveform"], c["freq"], c["depth"]) for c in built["cases"]} == {
         (w, f, d) for w in ("sine", "square") for f in (12.0, 15.0, 17.0) for d in (1.0, 0.5)}
     assert len(built["cases"]) == 24

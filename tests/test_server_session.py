@@ -1121,3 +1121,90 @@ def test_ignore_refresh_accepts_an_off_rate_display_and_says_frequencies_stay(ca
     rig2 = Rig()
     rig2.connect(1, hello(refresh_hz=75.0))
     assert [e["code"] for e in rig2.tr.to(1, "error")] == ["refresh"]
+
+
+# -- streaming gate (v3.1) ------------------------------------------------------------------
+
+def stall(rig: Rig, seconds: float) -> None:
+    """The board delivers nothing for ``seconds``, then all of it in one read."""
+    rig.board.advance(seconds)
+    rig.session.step()
+
+
+def test_a_pick_after_a_board_stall_is_dropped_logged_and_rearmed(capsys):
+    rig = Rig()
+    rig.run_slots()
+    onset_and_hold(rig, "yes")
+    rig.advance(1.0)
+    stall(rig, 3.0)                                   # the commit falls inside the backlog
+    assert rig.selections() == []
+    dropped = [f for k, f in rig.records if k == "selection_dropped"]
+    assert dropped and dropped[0]["slot"] == "yes"
+    assert "no samples for 3.0 s" in dropped[0]["why"]
+    assert "dropped a pick of 'yes'" in capsys.readouterr().err
+    rig.until(lambda: rig.selections(), limit=5.0)   # the held gaze commits again
+    assert rig.selections()[0]["slot"] == "yes"
+
+
+def test_no_click_while_the_board_is_not_streaming():
+    mode = StubMode(start=lambda now: [point_layout()],
+                    on_selection=lambda slot, now: [P.click(1, 0.2, 0.2, {"id": 0, "label": slot}),
+                                                    P.phase("pause", False)])
+    rig = Rig(point_factory=lambda: mode)
+    rig.connect(1, hello(mode="point", slots=None))
+    rig.until(lambda: rig.session.phase == "run")
+    rig.message({"type": "gaze", "slot": "b1"})
+    rig.advance(0.5)
+    stall(rig, 4.0)
+    assert rig.tr.of("click") == [] and rig.selections() == []
+    assert ("on_selection", "b1") not in mode.calls
+    assert any(k == "selection_dropped" for k, _ in rig.records)
+    rig.until(lambda: rig.tr.of("click"), limit=6.0)
+    assert rig.tr.of("click")[0]["element"]["label"] == "b1"
+
+
+def test_steady_streaming_never_drops_a_pick():
+    rig = Rig()
+    rig.run_slots()
+    onset_and_hold(rig, "no")
+    rig.until(lambda: rig.selections(), limit=5.0)
+    assert not any(k == "selection_dropped" for k, _ in rig.records)
+
+
+# -- rescan and resume in point mode (v3.1) -------------------------------------------------
+
+def test_rescan_reaches_the_point_mode_and_slots_mode_refuses_it():
+    mode = StubMode(start=lambda now: [point_layout()],
+                    on_message=lambda msg, now: [])
+    rig = Rig(point_factory=lambda: mode)
+    rig.connect(1, hello(mode="point", slots=None))
+    rig.until(lambda: rig.session.phase == "run")
+    rig.message({"type": "rescan"})
+    assert ("on_message", "rescan") in mode.calls
+    slots = Rig()
+    slots.run_slots()
+    slots.message({"type": "rescan"})
+    assert [m["code"] for m in slots.tr.to(1, "error")] == ["not_allowed"]
+
+
+def test_resume_in_point_mode_asks_the_mode_for_a_fresh_scan():
+    mode = StubMode(start=lambda now: [point_layout()],
+                    on_message=lambda msg, now: [P.scan_request(9, 300)]
+                    if msg["type"] == "resume" else [])
+    rig = Rig(point_factory=lambda: mode)
+    rig.connect(1, hello(mode="point", slots=None))
+    rig.until(lambda: rig.session.phase == "run")
+    rig.message({"type": "resume"})                   # not paused: nothing to resume
+    assert rig.tr.to(1, "scan_request") == []
+    rig.message({"type": "pause"})
+    rig.message({"type": "resume"})
+    assert rig.session.phase == "run"
+    assert [m["scan_id"] for m in rig.tr.to(1, "scan_request")] == [9]
+
+
+def test_resume_in_slots_mode_does_not_reach_the_mode():
+    rig = Rig()
+    rig.run_slots()
+    rig.message({"type": "pause"})
+    rig.message({"type": "resume"})
+    assert rig.session.phase == "run" and rig.tr.to(1, "error") == []
