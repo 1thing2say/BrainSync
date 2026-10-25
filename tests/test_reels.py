@@ -20,7 +20,9 @@ from brainsync import reels
 from brainsync.board import FakeBoard
 from brainsync.bridge import Bridge
 
-HEADLESS = ["--fake", "--fast", "--no-browser", "--no-voice"]
+# the f-VEP pair (--paradigm freq); the c-VEP default is tested in tests/test_reels_cvep.py
+HEADLESS = ["--fake", "--fast", "--no-browser", "--no-voice", "--paradigm", "freq"]
+FREQ = ["--paradigm", "freq"]
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -283,15 +285,17 @@ def test_bad_config_channel_or_log_returns_2(capsys, tmp_path: Path):
     assert reels.main([*HEADLESS, "--channels", "Oz"]) == 2
     assert reels.main([*HEADLESS, "--log", str(tmp_path / "no" / "dir" / "x.jsonl")]) == 2
     err = capsys.readouterr().err
-    assert "up or down" in err and "nope.toml" in err and "Oz" in err and "--log" in err
+    assert "up, down or pause" in err and "nope.toml" in err and "Oz" in err and "--log" in err
 
 
 def test_defaults():
-    args = reels.build_parser().parse_args([])
+    args = reels.build_parser().parse_args(FREQ)
+    reels._resolve(args)
     assert args.config == "reels" and args.ws_port == 8765 and args.host == "127.0.0.1"
     assert args.calibrate == 30.0 and args.calibrate_on == "watch"
     assert args.cooldown == 1.5 and args.seconds == 600.0 and args.wait_browser == 120.0
     assert args.threshold == 0.5 and args.margin == 0.5 and args.votes == 4
+    assert args.pad == 2.0
 
 
 def test_sigterm_and_sighup_raise_keyboard_interrupt_until_restored():
@@ -472,7 +476,7 @@ def phases(got: list[dict]) -> list[tuple[str, bool]]:
 def test_browser_run_config_phases_scrolls_and_bye(capsys, tmp_path):
     port = free_port()
     log = tmp_path / "run.jsonl"
-    th, result = start_main(["--fake", "--fast", "--no-voice", "--seconds", "600",
+    th, result = start_main([*FREQ, "--fake", "--fast", "--no-voice", "--seconds", "600",
                              "--ws-port", str(port), "--wait-browser", "20", "--log", str(log)])
     got = asyncio.run(extension(port))
     th.join(60)
@@ -502,7 +506,7 @@ def test_browser_run_config_phases_scrolls_and_bye(capsys, tmp_path):
 @needs_ws
 def test_a_tab_out_of_view_gets_no_scrolls(capsys):
     port = free_port()
-    th, result = start_main(["--fake", "--fast", "--no-voice", "--seconds", "30",
+    th, result = start_main([*FREQ, "--fake", "--fast", "--no-voice", "--seconds", "30",
                              "--ws-port", str(port), "--wait-browser", "20"])
     got = asyncio.run(extension(port, showing=False))
     th.join(60)
@@ -517,7 +521,7 @@ def test_a_tab_out_of_view_gets_no_scrolls(capsys):
 @needs_ws
 def test_refresh_mismatch_stops_the_overlay_and_exits_1(capsys):
     port = free_port()
-    th, result = start_main(["--fake", "--fast", "--no-voice", "--ws-port", str(port),
+    th, result = start_main([*FREQ, "--fake", "--fast", "--no-voice", "--ws-port", str(port),
                              "--wait-browser", "20"])
     got = asyncio.run(extension(port, refresh_hz=120.0))
     th.join(30)
@@ -534,7 +538,7 @@ def test_refresh_mismatch_stops_the_overlay_and_exits_1(capsys):
 @needs_ws
 def test_ignore_refresh_proceeds_and_calibrates_still(capsys):
     port = free_port()
-    th, result = start_main(["--fake", "--fast", "--no-voice", "--ws-port", str(port),
+    th, result = start_main([*FREQ, "--fake", "--fast", "--no-voice", "--ws-port", str(port),
                              "--wait-browser", "20", "--ignore-refresh",
                              "--calibrate-on", "still"])
     got = asyncio.run(extension(port, refresh_hz=120.0, bye_after=1))
@@ -567,7 +571,7 @@ def test_port_taken_exits_1(capsys):
 def test_manual_mode_reads_stdin(monkeypatch, capsys):
     port = free_port()
     monkeypatch.setattr(sys, "stdin", io.StringIO("u\n\nd\nsideways\nUP\nq\nd\n"))
-    th, result = start_main(["--manual", "--no-voice", "--ws-port", str(port),
+    th, result = start_main([*FREQ, "--manual", "--no-voice", "--ws-port", str(port),
                              "--wait-browser", "20"])
     got = asyncio.run(extension(port, bye_after=None))
     th.join(30)
@@ -587,7 +591,7 @@ def test_manual_mode_reads_stdin(monkeypatch, capsys):
 def test_manual_mode_ends_at_end_of_input(monkeypatch, capsys):
     port = free_port()
     monkeypatch.setattr(sys, "stdin", io.StringIO("d\n"))
-    th, result = start_main(["--manual", "--no-voice", "--ws-port", str(port),
+    th, result = start_main([*FREQ, "--manual", "--no-voice", "--ws-port", str(port),
                              "--wait-browser", "20"])
     got = asyncio.run(extension(port, bye_after=None))
     th.join(30)
@@ -681,7 +685,7 @@ def test_sigterm_or_sighup_still_tells_the_overlay_to_stop(signame):
 def test_no_device_says_so_and_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(reels, "detect_serial_port", lambda: "")
     monkeypatch.setattr(reels, "DEVICE_POLL_S", 0.01)
-    assert reels.main(["--no-browser", "--no-voice", "--wait-device", "0.1"]) == 1
+    assert reels.main([*FREQ, "--no-browser", "--no-voice", "--wait-device", "0.1"]) == 1
     err = capsys.readouterr().err
     assert "no EEG device connected: plug in the Cerelog X8 USB receiver" in err
     assert reels.serial_search_note() in err   # /dev/cu.usbserial-* ..., or COM ports on Windows

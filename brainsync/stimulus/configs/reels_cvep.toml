@@ -1,0 +1,45 @@
+# BrainScroll Reels in c-VEP (docs/CVEP-STANDARD.md): the standard's three white squares,
+# one 63-bit m-sequence with every square delayed by k * 21 frames, stacked in the right
+# margin beside the 9:16 video so the video's centre stays clear. Target 0 (top) is "up",
+# the previous reel and the training target; target 1 (middle) is "pause", pause or play
+# the reel showing; target 2 (bottom) is "down", the next reel. Under each square the
+# extension writes its label, a confidence bar and the decoder's score.
+# brainsync.reels sends this layout to the Chrome extension under extension/ (it is the
+# default of python -m brainsync.reels, --paradigm code). The squares are smaller than
+# cvep_3's 0.26 so three of them, their cue boxes and their label lines fit one screen
+# height; untested on EEG at this size.
+name = "reels_cvep"
+
+[targets]
+labels = ["up", "pause", "down"]   # top, middle, bottom: previous reel, pause/play, next
+
+[code]
+length = 63
+lag_frames = 21
+frames_per_bit = 1
+
+[layout]
+rows = 3
+cols = 1
+size = 0.2       # side, screen heights
+spacing = 0.3    # centre to centre: y = +0.3, 0, -0.3; 0.1 between squares for the labels
+x_offset = 0.58  # right of the video; a 9:16 video one screen high spans x = +/-0.28
+
+[stimulus]
+hold_cue = true
+cue_scale = 1.1
+fill = [1.0, 1.0, 1.0]   # white
+
+[display]
+refresh_hz = 60.0   # ProMotion off
+refresh_tolerance_hz = 1.0
+screen = 0
+background = 0.0
+aspect = 1.5   # narrowest width/height the layout must fit (MacBooks are ~1.54)
+
+[session]
+blocks = 6
+cue_s = 1.0
+stim_s = 5.25   # 5 cycles of 63 frames
+rest_s = 2.0
+shuffle = true
